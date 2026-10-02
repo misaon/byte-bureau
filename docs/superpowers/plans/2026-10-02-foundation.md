@@ -162,7 +162,7 @@ bytebureau-diag-*.zip
     "format:check": "oxfmt --check",
     "knip": "knip",
     "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
-    "spell": "cspell --no-progress --gitignore --dot \",
+    "spell": "cspell --no-progress --gitignore --dot \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
@@ -1397,34 +1397,18 @@ bun add -D --exact @cspell/dict-cs-cz || echo "no Czech dictionary package; fall
 import type { KnipConfig } from 'knip'
 
 const config: KnipConfig = {
-  ignore: ['packages/i18n/src/paraglide/**', 'docs/**', 'tools/**'],
   ignoreDependencies: [
-    '@tsconfig/strictest',
-    'oxlint-tsgolint',
-    '@types/bun',
-    '@cspell/dict-cs-cz',
     // Loaded by dependency-cruiser as its TypeScript parser (parser: 'swc' in its config)
     '@swc/core',
   ],
   // The root "release" script calls changelogen before it is installed
   // Remove this entry once changelogen is a devDependency
+  // Then list changelog.config.ts in the root workspace entry as well
   ignoreBinaries: ['changelogen'],
   workspaces: {
-    '.': {
-      entry: [
-        'scripts/*.ts',
-        'vitest.config.ts',
-        'commitlint.config.ts',
-        'changelog.config.ts',
-        'knip.ts',
-      ],
-      project: ['scripts/**/*.ts'],
-    },
-    'apps/bytebureau': { entry: ['src/main.ts'], project: ['src/**/*.ts'] },
-    'packages/i18n': {
-      entry: ['src/index.ts', 'scripts/compile.ts'],
-      project: ['src/**/*.ts', 'scripts/**/*.ts'],
-    },
+    '.': { entry: ['scripts/*.ts'], project: ['scripts/**/*.ts'] },
+    'apps/bytebureau': { project: ['src/**/*.ts'] },
+    'packages/i18n': { project: ['src/**/*.ts', 'scripts/**/*.ts'] },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }
@@ -1481,15 +1465,23 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: ['node_modules'] },
-    // Excluded modules vanish from the graph, so node_modules must stay out of this list
-    // Otherwise a rule that targets a third-party package (effect-only-in-core) could never match
-    exclude: { path: ['dist', 'coverage', 'src/paraglide', String.raw`\.astro`] },
-    // The TypeScript API of dependency-cruiser stops at typescript 6 and this repo uses 7
-    // So swc parses the sources, and the "missing-typescript-transpiler" notice is expected
-    // Once TypeScript 7 is supported, drop swc and this option; tsPreCompilationDeps takes over
+    // Excluded modules vanish from the graph, so these patterns must only match first-party paths
+    // An unanchored "dist" once dropped third-party entry files such as citty, @clack/prompts and
+    // Effect (node_modules/.bun/<name>@<version>/node_modules/<name>/dist/...)
+    // With them went the edges that effect-only-in-core has to see
+    // It also skipped first-party files whose names merely contain dist or coverage
+    exclude: {
+      path: [
+        String.raw`^(apps|packages|plugins|scripts)/[^/]+/(dist|coverage)/`,
+        'src/paraglide',
+        String.raw`\.astro`,
+      ],
+    },
+    // The TypeScript support of dependency-cruiser stops at typescript 6 and this repo uses 7
+    // So swc parses the sources
+    // Leave tsConfig and tsPreCompilationDeps unset: they only trigger a missing-typescript notice
+    // Once TypeScript 7 is supported, drop swc and use parser: 'tsc' together with tsConfig
     parser: 'swc',
-    tsPreCompilationDeps: true,
-    tsConfig: { fileName: 'tsconfig.json' },
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'require', 'node', 'default', 'types'],
@@ -1559,18 +1551,26 @@ ignores:
   - 'LICENSE.md'
   - 'CODE_OF_CONDUCT.md'
 ```
-`.ls-lint.yml` (if the installed ls-lint rejects `point.case`, replace every `point.case` with `regex:^[a-z0-9]+([.-][a-z0-9]+)*$`, which accepts dotted names such as `vitest.config` and `README.cs`):
+`.ls-lint.yml` (ls-lint 2.x checks a dotted name only when its full dotted extension is listed, so every dotted extension in use gets its own key; directories keep a regex so names like `project.inlang` pass):
 ```yaml
 ls:
-  .ts: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  # A multi-dot name is checked only when its exact extension has a key, so each one in use is listed
+  .ts: kebab-case
+  .test.ts: kebab-case
+  .config.ts: kebab-case
+  .d.ts: kebab-case
   .tsx: kebab-case | PascalCase
-  .mjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
-  .cjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
-  .json: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
-  .md: kebab-case | SCREAMING_SNAKE_CASE | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .mjs: kebab-case
+  .config.mjs: kebab-case
+  .cjs: kebab-case
+  .config.cjs: kebab-case
+  .json: kebab-case
+  .md: kebab-case | SCREAMING_SNAKE_CASE
+  .cs.md: kebab-case | SCREAMING_SNAKE_CASE
   .mdx: kebab-case
-  .yml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
-  .yaml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .yml: kebab-case
+  .yaml: kebab-case
+  # The regex lets dotted directory names through, which kebab-case alone rejects (foo.bar, v1.2)
   .dir: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
 
 ignore:
