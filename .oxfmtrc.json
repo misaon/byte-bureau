@@ -8,6 +8,7 @@
     "**/dist/**",
     "**/coverage/**",
     "packages/i18n/src/paraglide/**",
+    "packages/protocol/schemas/**",
     "docs/research/**",
     "**/*.md",
     "**/*.mdx"

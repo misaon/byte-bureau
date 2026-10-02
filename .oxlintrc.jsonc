@@ -32,6 +32,8 @@
     // Tuned to the project's style: the rule stays on, only its options change
     // "m" is the Paraglide message namespace; the rule keeps rejecting other one-letter names
     "id-length": ["error", { "exceptions": ["m"] }],
+    // Effect and Schema factories are capitalised namespace members (Schema.Struct, Context.Service); a bare Foo() call is still reported
+    "new-cap": ["error", { "properties": false }],
     // Named functions are declarations; arrow functions stay allowed as values and callbacks
     "func-style": ["error", "declaration", { "allowArrowFunctions": true }],
     // One binding per declaration (the default combines them: const a = 1, b = 2)
@@ -135,6 +137,16 @@
     {
       "files": ["**/*.test.ts"],
       "rules": { "no-console": "off", "vitest/require-hook": "error" },
+    },
+    {
+      // Effect schema idiom: a value and its derived type share one name (const Ask, type Ask); tsc still rejects real redeclarations
+      "files": ["packages/protocol/src/**", "packages/kernel/src/**", "packages/api/src/**"],
+      "rules": { "no-redeclare": "off" },
+    },
+    {
+      // Package and plugin entry points re-export their public surface by design
+      "files": ["packages/*/src/index.ts", "plugins/*/src/plugin.ts"],
+      "rules": { "oxc/no-barrel-file": "off" },
     },
   ],
 }
