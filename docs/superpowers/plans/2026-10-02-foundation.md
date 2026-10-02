@@ -2443,9 +2443,10 @@ import { describe, expect, it } from 'vitest'
 
 const root = new URL('..', import.meta.url).pathname
 const read = (path: string): string => readFileSync(`${root}/${path}`, 'utf8')
-const headings = (markdown: string): number => markdown.split('\n').filter((line) => line.startsWith('## ')).length
+const headings = (markdown: string): number =>
+  markdown.split('\n').filter((line) => line.startsWith('## ')).length
 
-describe('README', () => {
+describe('the README', () => {
   it('stays under 300 lines', () => {
     expect(read('README.md').split('\n').length).toBeLessThanOrEqual(300)
   })
@@ -2598,7 +2599,7 @@ Made with ❤️ in Czechia.
 
 - [ ] **Step 4: Write `README.cs.md`**
 
-Translate the English file section by section, keeping the same ten `##` headings in the same order (`Co je ByteBureau?`, `Stav`, `Rychlý start`, `Funkce`, `Jak to funguje`, `Bezpečnost a soukromí`, `Přispívání`, `Komunita`, `Historie hvězdiček`, `Licence` — ten headings, matching the ten in `README.md`), the same badges, the language switcher `Čeština · [English](README.md)`, the same Mermaid diagram and the same code blocks. The licence paragraph in Czech: "ByteBureau je Fair Source pod licencí Functional Source License (FSL-1.1-MIT): můžete ho zdarma používat, číst, upravovat a přispívat; jediným omezením je nabízet ho jako konkurenční komerční produkt. Každé vydání se dva roky po zveřejnění stává MIT. SDK balíčky jsou MIT." Never use the phrase "open source" / "otevřený software" as a description of the project.
+Translate the English file section by section (idiomatic Czech; the product metaphor is an office, so write `kancelář kódovacích agentů`, never `oddělení`), keeping the same ten `##` headings in the same order (`Co je ByteBureau?`, `Stav`, `Rychlý start`, `Funkce`, `Jak to funguje`, `Bezpečnost a soukromí`, `Přispívání`, `Komunita`, `Historie hvězdiček`, `Licence` — ten headings, matching the ten in `README.md`), the same badges, the language switcher `Čeština · <a href="README.md">English</a>` (an HTML link, because Markdown links are not parsed inside the centred HTML block), the same Mermaid diagram and the same code blocks. The licence paragraph in Czech: "ByteBureau je Fair Source pod licencí Functional Source License (FSL-1.1-MIT): můžete ho zdarma používat, číst, upravovat a přispívat; jediným omezením je nabízet ho jako konkurenční komerční produkt. Každé vydání se dva roky po zveřejnění stává MIT. SDK balíčky jsou MIT." Never use the phrase "open source" / "otevřený software" as a description of the project.
 
 - [ ] **Step 5: Seed `CHANGELOG.md`**
 
