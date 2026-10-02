@@ -429,6 +429,9 @@ export default config
 pre-commit:
   parallel: false
   commands:
+    generate:
+      priority: 0
+      run: test -d packages/i18n/src/paraglide || bun run build:i18n
     lint:
       priority: 1
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
