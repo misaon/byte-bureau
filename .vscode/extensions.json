@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "oxc.oxc-vscode",
+    "inlang.vs-code-extension",
+    "EditorConfig.EditorConfig",
+    "astro-build.astro-vscode",
+    "unifiedjs.vscode-mdx"
+  ]
+}

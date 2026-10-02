@@ -11,6 +11,7 @@ commitlint
 changelogen
 paraglide
 inlang
+unifiedjs
 citty
 clack
 picocolors

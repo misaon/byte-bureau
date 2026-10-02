@@ -23,7 +23,7 @@ bun run check
 
 | Command | What it does |
 | --- | --- |
-| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage) |
+| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage, ESLint long tail) |
 | `bun run lint` / `bun run format` | oxlint (type-aware) / oxfmt |
 | `bun run test` | Vitest across all packages |
 | `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
