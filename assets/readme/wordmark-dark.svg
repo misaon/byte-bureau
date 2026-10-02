@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="96" viewBox="0 0 480 96" role="img" aria-label="ByteBureau">
+  <rect width="480" height="96" rx="8" fill="#0f172a"/>
+  <text x="24" y="60" font-family="'Courier New', Courier, monospace" font-size="44" font-weight="700" fill="#f8fafc" letter-spacing="2">ByteBureau</text>
+  <rect x="24" y="72" width="432" height="4" fill="#22c55e"/>
+</svg>
