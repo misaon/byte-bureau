@@ -1657,15 +1657,21 @@ Run:
 ```bash
 cd tools/eslint-long-tail
 bun add -D --exact eslint typescript-eslint eslint-plugin-sonarjs eslint-plugin-security eslint-plugin-jsdoc jiti
-bun add -D --exact "typescript@npm:@typescript/typescript6@6.0.3"
+bun add -D --exact "typescript@npm:@typescript/typescript6@6.0.2"   # newest 6.0.x alias package; it wraps typescript 6.0.3
 cd ../..
 ```
-Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_modules/typescript/package.json').version)"` prints `6.0.3` while `bunx tsc --version` at the root still prints 7.0.x.
+Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_modules/typescript/package.json').version)"` prints `6.0.x` while `bunx tsc --version` at the root still prints 7.0.x. Add `"tools/**"` to `ignorePatterns` in `.oxlintrc.jsonc` (the tool's dependencies are not installed in a fresh clone, so oxlint must not type-check that directory; oxfmt, ESLint and the tool's own `tsc` still cover it).
 
 `tools/eslint-long-tail/tsconfig.json` (so the config file itself type-checks under the tool's TypeScript):
 ```json
 {
-  "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "types": ["node"] },
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
   "include": ["eslint.config.ts"]
 }
 ```
@@ -1673,14 +1679,15 @@ Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_m
 - [ ] **Step 2: Create `tools/eslint-long-tail/eslint.config.ts`**
 
 ```ts
-import jsdoc from 'eslint-plugin-jsdoc'
+import { defineConfig } from 'eslint/config'
+import jsdocPlugin from 'eslint-plugin-jsdoc'
 import security from 'eslint-plugin-security'
 import sonarjs from 'eslint-plugin-sonarjs'
 import tseslint from 'typescript-eslint'
 
 const repoRoot = new URL('../..', import.meta.url).pathname
 
-export default tseslint.config(
+export default defineConfig(
   { ignores: ['**/dist/**', '**/coverage/**', '**/paraglide/**', '**/.astro/**', '**/*.config.*'] },
   {
     files: ['**/*.ts'],
@@ -1703,12 +1710,19 @@ export default tseslint.config(
     rules: { 'security/detect-child-process': 'off' },
   },
   {
-    files: ['packages/plugin-api/src/**/*.ts', 'packages/protocol/src/**/*.ts', 'packages/client/src/**/*.ts'],
-    plugins: { jsdoc },
+    files: [
+      'packages/plugin-api/src/**/*.ts',
+      'packages/protocol/src/**/*.ts',
+      'packages/client/src/**/*.ts',
+    ],
+    plugins: { jsdoc: jsdocPlugin },
     rules: {
       'jsdoc/require-jsdoc': [
         'error',
-        { publicOnly: true, require: { FunctionDeclaration: true, ClassDeclaration: true, MethodDefinition: true } },
+        {
+          publicOnly: true,
+          require: { FunctionDeclaration: true, ClassDeclaration: true, MethodDefinition: true },
+        },
       ],
     },
   },
