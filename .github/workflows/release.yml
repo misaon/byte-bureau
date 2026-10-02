@@ -21,6 +21,7 @@ jobs:
   binaries:
     name: binaries
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write # sign blobs and request attestations through Sigstore OIDC
@@ -73,6 +74,7 @@ jobs:
     needs: binaries
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write # create the GitHub release and attach its assets
     env:
@@ -81,6 +83,14 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
+      - name: check the tag
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "v${VERSION}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version v${VERSION} in package.json"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -92,11 +102,27 @@ jobs:
           name: release-assets
           path: dist
       - run: bun run scripts/release-notes.ts "$VERSION" dist/RELEASE_NOTES.md
+      - name: remove a stale draft
+        run: |
+          set -euo pipefail
+          releases="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          if jq -e --arg tag "v${VERSION}" 'any(.[]; .tag_name == $tag and .draft == false)' <<<"$releases" >/dev/null; then
+            echo "::error::release v${VERSION} is already published; release a new version instead of re-running"
+            exit 1
+          fi
+          jq -r --arg tag "v${VERSION}" '.[] | select(.tag_name == $tag and .draft) | .id' <<<"$releases" |
+            while read -r id; do
+              echo "deleting the stale draft ${id} for v${VERSION}"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+            done
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: create the draft release
         run: |
           set -euo pipefail
           gh release create "v${VERSION}" \
             --draft \
+            --verify-tag \
             --title "v${VERSION}" \
             --notes-file dist/RELEASE_NOTES.md \
             dist/bytebureau-* \
