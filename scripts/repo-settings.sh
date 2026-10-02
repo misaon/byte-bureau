@@ -2,11 +2,19 @@
 # Owner-run: configures the GitHub repository (features, security, labels, rulesets).
 # Usage: scripts/repo-settings.sh <owner>/<repo> [--dry-run]
 set -euo pipefail
+unset CDPATH
 cd "$(dirname "$0")/.."
 
-REPO="${1:?usage: repo-settings.sh <owner>/<repo> [--dry-run]}"
+usage() {
+  echo "usage: repo-settings.sh <owner>/<repo> [--dry-run]" >&2
+  exit 2
+}
+
+REPO="${1:-}"
 MODE="${2:-}"
-case "$MODE" in '' | --dry-run) ;; *) echo "usage: repo-settings.sh <owner>/<repo> [--dry-run]" >&2; exit 2 ;; esac
+# The first character is alphanumeric, so a flag can never pass as the repository
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$ ]] || usage
+case "$MODE" in '' | --dry-run) ;; *) usage ;; esac
 
 run() {
   if [ "$MODE" = "--dry-run" ]; then
@@ -18,7 +26,7 @@ run() {
 
 run gh repo edit "$REPO" \
   --description "The AI office: orchestrate coding agents in a pixel-art bureau" \
-  --homepage "https://misaon.github.io/byte-bureau/" \
+  --homepage "https://${REPO%%/*}.github.io/${REPO##*/}/" \
   --enable-wiki=false --enable-projects=false --enable-discussions \
   --enable-merge-commit=false --enable-rebase-merge=false --enable-squash-merge \
   --delete-branch-on-merge --allow-update-branch --enable-auto-merge \

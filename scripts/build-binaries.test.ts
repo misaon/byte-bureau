@@ -1,6 +1,42 @@
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { assert, constantFrom, oneof, property, stringMatching } from 'fast-check'
-import { describe, expect, it } from 'vitest'
-import { TARGETS, artifactName, hostTarget, parseArgs } from './build-binaries.js'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import {
+  TARGETS,
+  artifactName,
+  compileWithFallback,
+  hostTarget,
+  parseArgs,
+  withoutStrayRuntimes,
+  type Compile,
+  type CompileJob,
+} from './build-binaries.js'
+
+const job: CompileJob = {
+  target: 'bun-linux-x64',
+  outfile: 'dist/bytebureau',
+  version: '1.2.3',
+  bytecode: true,
+}
+const plainJob: CompileJob = { ...job, bytecode: false }
+
+function compileExiting(...codes: number[]): ReturnType<typeof vi.fn<Compile>> {
+  const compile = vi.fn<Compile>()
+  for (const code of codes) {
+    compile.mockReturnValueOnce(code)
+  }
+  return compile
+}
+
+function tempDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'bytebureau-build-'))
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
 
 describe(artifactName, () => {
   it('maps every target to the documented file name', () => {
@@ -67,5 +103,80 @@ describe(parseArgs, () => {
     expect(() => parseArgs(['--targets', 'bun-plan9-x64'], { version: '1.2.3' })).toThrow(
       'unknown target',
     )
+  })
+
+  it('builds only the host target with --host', () => {
+    expect(parseArgs(['--host'], { version: '1.2.3' }).targets).toStrictEqual([hostTarget()])
+  })
+
+  it('rejects unknown arguments', () => {
+    expect(() => parseArgs(['--fast'], { version: '1.2.3' })).toThrow('unknown argument: --fast')
+  })
+})
+
+describe(compileWithFallback, () => {
+  it('reports bytecode when the first compile succeeds', () => {
+    const compile = compileExiting(0)
+    expect(compileWithFallback(job, compile, {})).toBe('bytecode')
+    expect(compile.mock.calls).toStrictEqual([[job]])
+  })
+
+  it('retries exactly once without bytecode after a local bytecode failure', () => {
+    vi.spyOn(console, 'warn').mockReturnValue()
+    const compile = compileExiting(1, 0)
+    expect(compileWithFallback(job, compile, {})).toBe('no bytecode')
+    expect(compile.mock.calls).toStrictEqual([[job], [plainJob]])
+  })
+
+  it('never retries a build that already has bytecode off', () => {
+    const compile = compileExiting(1)
+    expect(() => compileWithFallback(plainJob, compile, {})).toThrow(
+      'build failed for bun-linux-x64',
+    )
+    expect(compile.mock.calls).toStrictEqual([[plainJob]])
+    expect(compileWithFallback(plainJob, compileExiting(0), {})).toBe('no bytecode')
+  })
+
+  it('throws when the retry fails as well', () => {
+    vi.spyOn(console, 'warn').mockReturnValue()
+    const compile = compileExiting(1, 1)
+    expect(() => compileWithFallback(job, compile, {})).toThrow('build failed for bun-linux-x64')
+    expect(compile.mock.calls).toStrictEqual([[job], [plainJob]])
+  })
+
+  it('aborts instead of retrying when CI is set', () => {
+    const compile = compileExiting(1)
+    expect(() => compileWithFallback(job, compile, { CI: 'true' })).toThrow(
+      'bytecode compilation failed for bun-linux-x64',
+    )
+    expect(compile.mock.calls).toStrictEqual([[job]])
+  })
+})
+
+describe(withoutStrayRuntimes, () => {
+  it('removes only the .bun-build files created during the action', () => {
+    const dir = tempDir()
+    writeFileSync(path.join(dir, '.0a1b2c3d4e5f6a7b-00000000.bun-build'), '')
+    const result = withoutStrayRuntimes(dir, () => {
+      writeFileSync(path.join(dir, '.f7e6d5c4b3a29180-00000000.bun-build'), '')
+      writeFileSync(path.join(dir, 'unrelated.txt'), '')
+      return 'compiled'
+    })
+    expect(result).toBe('compiled')
+    expect(readdirSync(dir).toSorted()).toStrictEqual([
+      '.0a1b2c3d4e5f6a7b-00000000.bun-build',
+      'unrelated.txt',
+    ])
+  })
+
+  it('cleans up when the action throws', () => {
+    const dir = tempDir()
+    expect(() =>
+      withoutStrayRuntimes(dir, () => {
+        writeFileSync(path.join(dir, '.f7e6d5c4b3a29180-00000000.bun-build'), '')
+        throw new Error('compile crashed')
+      }),
+    ).toThrow('compile crashed')
+    expect(readdirSync(dir)).toStrictEqual([])
   })
 })
