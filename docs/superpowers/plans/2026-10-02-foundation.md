@@ -3038,10 +3038,21 @@ jobs:
             ci
             chore
             revert
+          scopes: |
+            bytebureau
+            docs
+            i18n
+            tsconfig
+            cli
+            deps
+            release
+            repo
+            ci
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: The subject "{subject}" must start with a lowercase letter.
 ```
+(The `types` list equals commitlint's `type-enum`; the `scopes` list mirrors commitlint's `scope-enum` — workspace directory names plus `cli`, `deps`, `release`, `repo`, `ci`. Extend both when a workspace package is added.)
 `.github/workflows/labeler.yml`:
 ```yaml
 name: labeler
