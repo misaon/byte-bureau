@@ -524,26 +524,6 @@ Then run `cd packages/i18n && bun add -D --exact @inlang/paraglide-js && cd ../.
   "include": ["src", "scripts"]
 }
 ```
-`packages/i18n/tsconfig.paraglide.json` (used by the compile script to emit `.d.ts` next to the generated JavaScript so that consumers without `allowJs` get types):
-```json
-{
-  "compilerOptions": {
-    "allowJs": true,
-    "checkJs": false,
-    "declaration": true,
-    "emitDeclarationOnly": true,
-    "skipLibCheck": true,
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "target": "ES2024",
-    "rootDir": "src/paraglide",
-    "outDir": "src/paraglide",
-    "types": []
-  },
-  "include": ["src/paraglide/**/*.js"],
-  "exclude": []
-}
-```
 `packages/i18n/vitest.config.ts`:
 ```ts
 import { defineProject } from 'vitest/config'
@@ -558,7 +538,7 @@ export default defineProject({
   "$schema": "https://inlang.com/schema/project-settings",
   "baseLocale": "en",
   "locales": ["en", "cs"],
-  "modules": ["https://cdn.jsdelivr.net/npm/@inlang/plugin-message-format@latest/dist/index.js"],
+  "modules": ["https://cdn.jsdelivr.net/npm/@inlang/plugin-message-format@4/dist/index.js"],
   "plugin.inlang.messageFormat": { "pathPattern": "./messages/{locale}.json" }
 }
 ```
@@ -678,9 +658,8 @@ Expected: FAIL — `./index.js` does not exist.
 
 - [ ] **Step 6: Implement the compile script and the package entry**
 
-`packages/i18n/scripts/compile.ts` (compiles the messages, then emits declaration files for the generated JavaScript; if the installed Paraglide exposes a compiler option that emits TypeScript declarations itself — check its `CompilerOptions` type in `node_modules/@inlang/paraglide-js` — enable that option and drop the `tsc` step, noting it in the report):
+`packages/i18n/scripts/compile.ts` (Paraglide's `emitTsDeclarations` option emits `.d.ts` files next to the generated JavaScript so consumers without `allowJs` get types):
 ```ts
-import { spawnSync } from 'node:child_process'
 import { compile } from '@inlang/paraglide-js'
 
 await compile({
@@ -689,16 +668,11 @@ await compile({
   strategy: ['globalVariable', 'baseLocale'],
   emitGitIgnore: false,
   emitPrettierIgnore: false,
+  emitTsDeclarations: true,
 })
-
-const declarations = spawnSync('bunx', ['tsc', '-p', 'tsconfig.paraglide.json'], { stdio: 'inherit' })
-if (declarations.status !== 0) {
-  throw new Error(`declaration emit for src/paraglide failed with status ${String(declarations.status)}`)
-}
 ```
-`packages/i18n/src/index.ts`:
+`packages/i18n/src/index.ts` (lint-compliant form; `export * as m` is equivalent to importing the namespace and re-exporting it):
 ```ts
-import * as m from './paraglide/messages.js'
 import { baseLocale, locales, overwriteGetLocale, type Locale } from './paraglide/runtime.js'
 
 let activeLocale: Locale = baseLocale
@@ -713,7 +687,8 @@ export function isLocale(value: string): value is Locale {
   return (locales as readonly string[]).includes(value)
 }
 
-export { m, locales, baseLocale, type Locale }
+export * as m from './paraglide/messages.js'
+export { baseLocale, locales, type Locale } from './paraglide/runtime.js'
 ```
 Run: `cd packages/i18n && bun run build && cd ../..`
 Expected: `src/paraglide/messages.js`, `src/paraglide/runtime.js` and their `.d.ts` siblings generated. If `compile()` rejects an option name, run `bunx paraglide-js compile --help` and use the documented option names for the same intent (project path, output dir, strategy `globalVariable` + `baseLocale`, no `.gitignore`/`.prettierignore` emission).
@@ -1553,6 +1528,7 @@ ignore:
   - coverage
   - docs/research
   - packages/i18n/src/paraglide
+  - packages/i18n/project.inlang
   - CODEOWNERS
   - .all-contributorsrc
   - .bun-version
