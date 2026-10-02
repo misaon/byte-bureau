@@ -1,0 +1,4 @@
+rules:
+  # actionlint 1.7.12 rejects GitHub's `uses: $/...` form (rhysd/actionlint#732); re-enable once it ships
+  self-repository:
+    disable: true

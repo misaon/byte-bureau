@@ -20,6 +20,7 @@ knip
 depcruise
 zizmor
 actionlint
+rhysd
 cosign
 sigstore
 SBOM
