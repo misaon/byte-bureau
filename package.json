@@ -31,7 +31,7 @@
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
-    "release": "changelogen --release --push"
+    "release": "changelogen --release --push --no-github"
   },
   "devDependencies": {
     "@bytebureau/tsconfig": "workspace:*",
