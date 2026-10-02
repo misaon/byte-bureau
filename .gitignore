@@ -11,5 +11,6 @@ bytebureau-diag-*.zip
 .env
 .env.*
 .DS_Store
+*.bun-build
 .idea/
 .superpowers/

@@ -99,7 +99,8 @@ export function parseArgs(argv: readonly string[], defaults: { version: string }
 }
 
 function compile(job: CompileJob): number {
-  const args = ['build', '--compile', '--minify', '--sourcemap']
+  // ESM output: Bun's bytecode default is CommonJS, which rejects the top-level await in main.ts
+  const args = ['build', '--compile', '--minify', '--sourcemap', '--format=esm']
   if (job.bytecode) {
     args.push('--bytecode')
   }
