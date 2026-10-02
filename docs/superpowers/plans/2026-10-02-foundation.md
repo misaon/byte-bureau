@@ -1339,7 +1339,11 @@ Run: `bun add -D --exact turbo`
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
     "bytebureau#build": {
       "dependsOn": ["^build"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/build-binaries.ts", "$TURBO_ROOT$/package.json"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/build-binaries.ts",
+        "$TURBO_ROOT$/package.json"
+      ],
       "outputs": ["dist/**"]
     },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
