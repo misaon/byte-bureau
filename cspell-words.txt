@@ -68,3 +68,4 @@ OTLP
 OpenTelemetry
 bunx
 libc
+wordmark
