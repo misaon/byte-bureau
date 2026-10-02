@@ -70,3 +70,10 @@ bunx
 libc
 wordmark
 BDFL
+BOIP
+automerged
+bytebureauhq
+cooldowns
+getbytebureau
+lockfiles
+protectable
