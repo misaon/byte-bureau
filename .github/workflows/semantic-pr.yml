@@ -1,0 +1,49 @@
+name: semantic-pr
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no checkout, read-only token
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read # read the pull request title
+
+concurrency:
+  group: semantic-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  semantic-pr:
+    name: semantic-pr
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          scopes: |
+            bytebureau
+            docs
+            i18n
+            tsconfig
+            cli
+            deps
+            release
+            repo
+            ci
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: The subject "{subject}" must start with a lowercase letter.
