@@ -23,11 +23,14 @@ bun run check
 
 | Command | What it does |
 | --- | --- |
-| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage, ESLint long tail) |
+| `bun run check` | every CI gate except the Docker-based workflow linters (`bun run lint:actions`) |
+| `bun run lint:actions` | actionlint and zizmor (pedantic persona) in Docker |
 | `bun run lint` / `bun run format` | oxlint (type-aware) / oxfmt |
 | `bun run test` | Vitest across all packages |
 | `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
 | `bun run docs:build` | build the documentation site |
+
+Export `GH_TOKEN="$(gh auth token)"` before `bun run lint:actions` to let zizmor run its online audits too (`impostor-commit`, `known-vulnerable-actions`, `stale-action-refs`).
 
 ## Commit messages
 

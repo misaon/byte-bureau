@@ -23,6 +23,7 @@ jobs:
   static:
     name: static
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
@@ -41,7 +42,7 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint:long-tail
       - name: actionlint
-        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
       - name: zizmor
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
@@ -55,6 +56,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
@@ -73,6 +75,7 @@ jobs:
   build-smoke:
     name: build-smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
@@ -85,9 +88,10 @@ jobs:
       - name: smoke (x64)
         run: |
           set -euo pipefail
-          BIN=$(ls dist/bytebureau-*-linux-x64)
-          "$BIN" --version
-          test "$("$BIN" hello Ondřej --lang cs)" = "Ahoj, Ondřej! ByteBureau je připraveno."
+          BIN=(dist/bytebureau-*-linux-x64)
+          [ "${#BIN[@]}" -eq 1 ]
+          "${BIN[0]}" --version
+          test "$("${BIN[0]}" hello Ondřej --lang cs)" = "Ahoj, Ondřej! ByteBureau je připraveno."
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries-linux
@@ -98,6 +102,7 @@ jobs:
     name: smoke-arm64
     needs: build-smoke
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
@@ -109,14 +114,16 @@ jobs:
       - name: smoke (arm64)
         run: |
           set -euo pipefail
-          BIN=$(ls dist/bytebureau-*-linux-arm64)
-          chmod +x "$BIN"
-          "$BIN" --version
-          test "$("$BIN" hello --lang en)" = "Hello! ByteBureau is ready."
+          BIN=(dist/bytebureau-*-linux-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          chmod +x "${BIN[0]}"
+          "${BIN[0]}" --version
+          test "$("${BIN[0]}" hello --lang en)" = "Hello! ByteBureau is ready."
 
   smoke-macos:
     name: smoke-macos
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
@@ -129,12 +136,14 @@ jobs:
       - name: smoke (macOS)
         run: |
           set -euo pipefail
-          BIN=$(ls dist/bytebureau-*-darwin-arm64)
-          "$BIN" --version
+          BIN=(dist/bytebureau-*-darwin-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          "${BIN[0]}" --version
 
   docs-build:
     name: docs-build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:

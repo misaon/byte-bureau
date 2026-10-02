@@ -17,6 +17,7 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: read # configure-pages reads the Pages site settings
@@ -38,6 +39,7 @@ jobs:
     name: deploy
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       pages: write # publish the site to GitHub Pages
       id-token: write # prove the deployment origin to Pages

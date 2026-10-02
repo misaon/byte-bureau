@@ -12,6 +12,17 @@
   "dependencyDashboard": true,
   "labels": ["dependencies"],
   "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Docker images of the workflow linters: actionlint in ci.yml, actionlint and zizmor in the lint:actions script",
+      "managerFilePatterns": [".github/workflows/ci.yml", "package.json"],
+      "matchStrings": [
+        "(?<depName>(?:[a-z0-9-]+\\.[a-z0-9.-]+/)?[a-z0-9._-]+/[a-z0-9._-]+):(?<currentValue>[0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "matchDatasources": ["npm"],
@@ -29,6 +40,12 @@
     {
       "matchPackageNames": ["bun", "oven-sh/setup-bun"],
       "groupName": "bun"
+    },
+    {
+      "description": "GHCR reports no release timestamps, so the release-age check would hold the zizmor image back forever",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/zizmorcore/zizmor"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ]
 }

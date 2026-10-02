@@ -21,6 +21,7 @@
     "test:coverage": "bun run build:i18n && vitest run --coverage",
     "lint": "bun run build:i18n && oxlint --type-aware",
     "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && tools/eslint-long-tail/node_modules/.bin/eslint --config tools/eslint-long-tail/eslint.config.ts --max-warnings 0 apps packages scripts",
+    "lint:actions": "docker run --rm -v \"${PWD}:/repo\" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color && docker run --rm -e GH_TOKEN -v \"${PWD}:/repo\" -w /repo ghcr.io/zizmorcore/zizmor:1.30.1@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101 --persona pedantic .github",
     "lint:md": "markdownlint-cli2",
     "lint:ls": "ls-lint",
     "format": "oxfmt",
