@@ -1,4 +1,4 @@
-# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI and in `bun run check`
+# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI and in the local check
 
 - Status: accepted
 - Date: 2026-10-02
