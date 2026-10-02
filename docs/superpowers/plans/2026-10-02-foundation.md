@@ -166,10 +166,12 @@ bytebureau-diag-*.zip
     "docs:build": "turbo run docs:build",
     "release": "changelogen --release --push"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  }
 }
 ```
-(`plugins/*` has no packages yet; Bun tolerates an empty glob. The `devDependencies` block is filled by `bun add -D --exact` in later tasks.)
+(`plugins/*` has no packages yet; Bun tolerates an empty glob. The workspace entry is required because the root `tsconfig.json` extends `@bytebureau/tsconfig/app.json` and Bun's isolated linker only links declared workspace packages; the remaining `devDependencies` are filled by `bun add -D --exact` in later tasks.)
 
 - [ ] **Step 3: Create `bunfig.toml`**
 
