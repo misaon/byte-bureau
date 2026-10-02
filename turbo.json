@@ -15,6 +15,11 @@
     },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
-    "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
+    "docs:build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/docs/decisions/**"],
+      "env": ["DOCS_SITE", "DOCS_BASE"],
+      "outputs": ["dist/**"]
+    }
   }
 }
