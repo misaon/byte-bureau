@@ -24,7 +24,7 @@
 - README ≤ 300 lines, markdownlint clean; `README.cs.md` mirrors section structure.
 - Coverage thresholds 80 % lines/branches on `packages/*` (apps excluded until SP1).
 
-**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push --no-github` alone (it bumps the root version, writes the changelog, commits and tags; the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6.
+**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push --no-github` alone (it bumps the root version, writes the changelog, commits and tags; the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6. (5) The admin repository role bypasses the main ruleset so the owner's release commit and tag can be pushed to `main` directly.
 
 ## Review Focus
 
@@ -2261,7 +2261,7 @@ Contributors can read why things are the way they are; reversing a decision requ
 1. Run a name-clearance search for "ByteBureau" (TMview, BOIP, ÚPV) before investing in branding; a Belgian GitHub organisation and a parked `bytebureau.com` exist.
 2. Create the GitHub organisation `getbytebureau` (fallbacks `bytebureauhq`, `bytebureau-dev`) and transfer the repository to enable the merge queue.
 3. Enable 2FA, SSH commit signing and vigilant mode on the owner account.
-4. Run `scripts/repo-settings.sh <owner>/<repo>` (repository features, security settings, labels, rulesets).
+4. Run `scripts/repo-settings.sh <owner>/<repo>` (repository features, security settings, GitHub Pages source, labels, rulesets); afterwards confirm that the `main` ruleset lists "Repository admin" as a bypass actor (the role id is undocumented in the REST reference).
 5. In the GitHub UI: CodeQL default setup (JavaScript/TypeScript and Actions, extended queries), immutable releases, social preview image (1280×640), Actions policy (allow owner, GitHub and verified-creator actions plus the explicit list; require approval for first-time contributors; read-only default token), artifact retention 30 days, Discussions categories (Announcements, Q&A, Ideas, Show and tell).
 6. Install the Renovate, DCO and all-contributors GitHub apps.
 7. Reserve the npm organisation `@bytebureau`, Docker Hub `bytebureau`, domains `bytebureau.dev`, `bytebureau.app`, `bytebureau.cz`; create the `homebrew-tap` repository and the `HOMEBREW_TAP_TOKEN` secret when ready.
@@ -3690,7 +3690,8 @@ git commit -m "ci: add release workflow with provenance, signatures and sbom"
 ### Task 17: Dependency automation and the owner-run repository settings script
 
 **Files:**
-- Create: `renovate.json`, `scripts/repo-settings.sh`
+- Create: `renovate.json`, `scripts/repo-settings.sh`, `scripts/repo-settings/{security-and-analysis.json,labels.txt,ruleset-main.json,ruleset-tags.json}`
+- Modify: `.github/workflows/stale.yml` (exempt labels aligned with `labels.txt`)
 
 **Interfaces:**
 - Produces: Renovate configuration picked up by the Mend app once installed; `scripts/repo-settings.sh <owner>/<repo> [--dry-run]` that configures features, security settings, labels and rulesets (required checks from Task 15).
@@ -3714,6 +3715,11 @@ git commit -m "ci: add release workflow with provenance, signatures and sbom"
   "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
   "packageRules": [
     {
+      "matchDatasources": ["npm"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["minor", "patch"],
       "minimumReleaseAge": "14 days",
@@ -3727,7 +3733,7 @@ git commit -m "ci: add release workflow with provenance, signatures and sbom"
   ]
 }
 ```
-Verify the file against the schema: `bunx --package renovate renovate-config-validator renovate.json` → prints `Config validated successfully`.
+Verify the file against the schema: `bunx --package renovate renovate-config-validator renovate.json` → prints `Config validated successfully`. `config:best-practices` brings a 3-day npm cooldown in as a package rule, so the first `packageRules` entry restores ADR-0009's 7 days for npm.
 
 - [ ] **Step 2: Create `scripts/repo-settings.sh`**
 
@@ -3742,7 +3748,7 @@ MODE="${2:-}"
 
 run() {
   if [ "$MODE" = "--dry-run" ]; then
-    printf '+ %q ' "$@"; printf '\n'
+    printf '+'; printf ' %q' "$@"; printf '\n'
   else
     "$@"
   fi
@@ -3766,16 +3772,25 @@ run gh api -X PUT "repos/${REPO}/automated-security-fixes"
 run gh api -X PUT "repos/${REPO}/private-vulnerability-reporting"
 run gh api -X PATCH "repos/${REPO}" --input scripts/repo-settings/security-and-analysis.json
 
+if gh api "repos/${REPO}/pages" >/dev/null 2>&1; then
+  run gh api -X PUT "repos/${REPO}/pages" -f build_type=workflow
+else
+  run gh api -X POST "repos/${REPO}/pages" -f build_type=workflow
+fi
+
 while IFS='|' read -r name color description; do
   [ -z "$name" ] && continue
   run gh label create "$name" --repo "$REPO" --color "$color" --description "$description" --force
 done < scripts/repo-settings/labels.txt
 
+# The admin role bypasses the main ruleset so release commits can land on main; tags stay immutable for everyone.
 run gh api -X POST "repos/${REPO}/rulesets" --input scripts/repo-settings/ruleset-main.json
 run gh api -X POST "repos/${REPO}/rulesets" --input scripts/repo-settings/ruleset-tags.json
 
 echo "Done. Remaining UI-only steps are listed in docs/decisions/0001-record-architecture-decisions.md (appendix)."
 ```
+The Pages step enables the GitHub Actions source (`build_type=workflow`) that `docs.yml` needs. `stale.yml`'s exempt labels are aligned with `labels.txt` (`kind: security` instead of `security`, no `roadmap`).
+
 `scripts/repo-settings/security-and-analysis.json`:
 ```json
 {
@@ -3824,13 +3839,13 @@ breaking|b60205|Breaking change
 dependencies|0366d6|Dependency updates
 release|0e8a16|Release engineering
 ```
-`scripts/repo-settings/ruleset-main.json` (approvals start at 0 because there is one maintainer; raise `required_approving_review_count` to 1 and `require_code_owner_review` to true when a second maintainer joins):
+`scripts/repo-settings/ruleset-main.json` (approvals start at 0 because there is one maintainer; raise `required_approving_review_count` to 1 and `require_code_owner_review` to true when a second maintainer joins; the admin repository role bypasses the ruleset so `changelogen --release --push` can land release commits and tags on `main`):
 ```json
 {
   "name": "main",
   "target": "branch",
   "enforcement": "active",
-  "bypass_actors": [],
+  "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }],
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "rules": [
     { "type": "deletion" },
@@ -3889,7 +3904,7 @@ Expected: syntax OK; the dry run prints every command without executing it. (App
 - [ ] **Step 4: Commit**
 
 ```bash
-git add renovate.json scripts/repo-settings.sh scripts/repo-settings
+git add renovate.json scripts/repo-settings.sh scripts/repo-settings .github/workflows/stale.yml
 git commit -m "chore(repo): add renovate config and owner-run repository settings script"
 ```
 
@@ -4006,7 +4021,7 @@ Checklist from docs/decisions/0001-record-architecture-decisions.md (appendix):
 - [ ] Name-clearance search for "ByteBureau" (TMview, BOIP, ÚPV)
 - [ ] Create organisation `getbytebureau` (fallbacks `bytebureauhq`, `bytebureau-dev`) and transfer the repository; then add `merge_queue` to the main ruleset
 - [ ] Enable 2FA, SSH commit signing and vigilant mode
-- [ ] Run `scripts/repo-settings.sh <owner>/<repo>`
+- [ ] Run `scripts/repo-settings.sh <owner>/<repo>` and confirm the `main` ruleset lists "Repository admin" as a bypass actor
 - [ ] UI: CodeQL default setup (JS/TS + Actions, extended), immutable releases, social preview, Actions policy, artifact retention 30 days, Discussions categories
 - [ ] Install Renovate, DCO and all-contributors apps
 - [ ] Reserve npm `@bytebureau`, Docker Hub `bytebureau`, domains `bytebureau.dev` / `.app` / `.cz`
