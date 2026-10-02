@@ -163,7 +163,7 @@ bytebureau-diag-*.zip
     "knip": "knip",
     "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
     "spell": "cspell --no-progress --gitignore --dot \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
-    "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
+    "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage && bun run lint:long-tail",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
     "release": "changelogen --release --push --no-github"
@@ -2121,7 +2121,7 @@ bun run check
 
 | Command | What it does |
 | --- | --- |
-| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage) |
+| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage, ESLint long tail) |
 | `bun run lint` / `bun run format` | oxlint (type-aware) / oxfmt |
 | `bun run test` | Vitest across all packages |
 | `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
