@@ -1334,15 +1334,21 @@ Run: `bun add -D --exact turbo`
 {
   "$schema": "https://turborepo.com/schema.json",
   "ui": "stream",
+  "agentGuidance": false,
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
+    "bytebureau#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/build-binaries.ts", "$TURBO_ROOT$/package.json"],
+      "outputs": ["dist/**"]
+    },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
     "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
   }
 }
 ```
-(The package-specific entry makes the i18n typecheck wait for its own build, because its generated `src/paraglide` output is git-ignored.) Change the root `build:i18n` script to `"turbo run build --filter=@bytebureau/i18n"` so the generated output is cached, and change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
+(`agentGuidance: false` stops Turborepo from writing an `AGENTS.md` into the tree; the `bytebureau#build` entry hashes the build script and the root version so a cached binary cannot go stale; the i18n entry makes its typecheck wait for its own build, because the generated `src/paraglide` output is git-ignored.) Change the root `build:i18n` script to `"turbo run build --filter=@bytebureau/i18n"` so the generated output is cached, and change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
 
 - [ ] **Step 2: Verify the graph**
 
