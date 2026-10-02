@@ -129,7 +129,7 @@ apps/bytebureau/src/kernel.ts                       in-process kernel bootstrap 
 
 **Files:**
 - Create: `packages/tsconfig/effect.json`, `packages/protocol/package.json`, `packages/protocol/tsconfig.json`, `packages/protocol/vitest.config.ts`, `packages/protocol/src/index.ts`, `packages/protocol/src/common.ts`, `packages/protocol/src/employee.ts`, `packages/protocol/src/ask.ts`, `packages/protocol/src/agent-event.ts`, `packages/protocol/src/events.ts`, `packages/protocol/src/config.ts`, `packages/protocol/src/json-schema.ts`, `packages/protocol/scripts/generate-json-schema.ts`, `packages/protocol/schemas/config.json`, `packages/protocol/schemas/events.json`, `packages/protocol/src/config.test.ts`, `packages/protocol/src/json-schema.test.ts`
-- Modify: `package.json` (root; `bunfig` note below), `vitest.config.ts`, `knip.ts`, `scripts/license.test.ts`, `turbo.json` (`@bytebureau/protocol#build` generates the schemas)
+- Modify: `vitest.config.ts`, `knip.ts`, `scripts/license.test.ts`, `turbo.json` (`@bytebureau/protocol#build` generates the schemas), `.oxlintrc.jsonc` + `.oxfmtrc.json` (Effect idioms; generated schemas ignored by the formatter — own `chore(repo)` commit), `.github/workflows/semantic-pr.yml` (`protocol` scope), `cspell-words.txt` (`xhigh`)
 
 **Interfaces:**
 - Produces: the schema constants and derived types named in the table (`typeof X.Type` for every schema), `KERNEL_EVENT_TYPES`, `EPHEMERAL_EVENT_TYPES`, `configJsonSchema()`, `eventsJsonSchema()`, `decodeProjectConfig(input): ProjectConfig` (throws a `ParseError` whose message lists every issue with its path).
@@ -159,11 +159,14 @@ Add `"./effect.json": "./effect.json"` to `packages/tsconfig/package.json` `expo
   "name": "@bytebureau/protocol",
   "version": "0.0.0",
   "private": true,
-  "license": "MIT",
   "description": "ByteBureau protocol: event, ask, employee and config schemas with generated JSON Schema",
+  "license": "MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./src/index.ts", "default": "./src/index.ts" },
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
     "./schemas/config.json": "./schemas/config.json",
     "./schemas/events.json": "./schemas/events.json"
   },
@@ -171,15 +174,19 @@ Add `"./effect.json": "./effect.json"` to `packages/tsconfig/package.json` `expo
     "build": "bun run scripts/generate-json-schema.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "dependencies": { "effect": "4.0.0" },
-  "devDependencies": { "@bytebureau/tsconfig": "workspace:*" }
+  "dependencies": {
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  }
 }
 ```
 `packages/protocol/tsconfig.json`:
 ```json
 {
   "extends": "@bytebureau/tsconfig/effect.json",
-  "compilerOptions": { "types": ["bun-types"] },
+  "compilerOptions": { "types": ["bun"] },
   "include": ["src/**/*.ts", "scripts/**/*.ts"]
 }
 ```
@@ -201,7 +208,7 @@ describe(decodeProjectConfig, () => {
   it('accepts the documented sample and fills nothing silently', () => {
     const config = decodeProjectConfig(defaultProjectConfig)
     expect(config.version).toBe(1)
-    expect(config.employees['developer']?.permissionMode).toBe('supervised')
+    expect(config.employees['developer']).toMatchObject({ permissionMode: 'supervised' })
   })
 
   it('reports every problem with its path and rejects unknown keys', () => {
@@ -220,20 +227,27 @@ import { describe, expect, it } from 'vitest'
 import { configJsonSchema, eventsJsonSchema } from './json-schema.js'
 
 const schemasDir = fileURLToPath(new URL('../schemas/', import.meta.url))
+const readSchema = (name: string): unknown =>
+  JSON.parse(readFileSync(path.join(schemasDir, name), 'utf8'))
 
 describe('generated JSON Schema files', () => {
   it('config.json is up to date and strict', () => {
     const generated = configJsonSchema()
-    expect(JSON.parse(readFileSync(path.join(schemasDir, 'config.json'), 'utf8'))).toEqual(generated)
+    expect(readSchema('config.json')).toStrictEqual(generated)
     expect(generated['$id']).toBe('https://bytebureau.dev/schema/v1/config.json')
     expect(generated['additionalProperties']).toBe(false)
   })
 
   it('events.json is up to date and lists every event type', () => {
     const generated = eventsJsonSchema()
-    expect(JSON.parse(readFileSync(path.join(schemasDir, 'events.json'), 'utf8'))).toEqual(generated)
-    expect(Object.keys(generated['$defs'] as object)).toContain('session.created')
-    expect(Object.keys(generated['$defs'] as object)).toContain('message.assistant.delta')
+    expect(readSchema('events.json')).toStrictEqual(generated)
+    expect(generated['$defs']).toHaveProperty(['session.created'])
+    expect(generated['$defs']).toHaveProperty(['message.assistant.delta'])
+  })
+
+  it('publishes numbers as number or integer, without Infinity or NaN alternatives', () => {
+    expect(JSON.stringify(configJsonSchema())).not.toMatch(/Infinity|NaN/u)
+    expect(JSON.stringify(eventsJsonSchema())).not.toMatch(/Infinity|NaN/u)
   })
 })
 ```
@@ -303,12 +317,15 @@ export const EmployeeSpec = Schema.Struct({
   tools: ToolPolicy,
   permissionMode: PermissionMode,
   skills: Schema.Array(Schema.String),
-  maxTurns: Schema.optionalKey(Schema.Number),
+  maxTurns: Schema.optionalKey(Schema.Int),
   askTimeout: Schema.optionalKey(Schema.String),
   appearance: Appearance,
 })
 
-export const Attachment = Schema.Struct({ path: Schema.String, mime: Schema.optionalKey(Schema.String) })
+export const Attachment = Schema.Struct({
+  path: Schema.String,
+  mime: Schema.optionalKey(Schema.String),
+})
 export const PromptInput = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optionalKey(Schema.Array(Attachment)),
@@ -317,6 +334,7 @@ export const PromptInput = Schema.Struct({
 export type Appearance = typeof Appearance.Type
 export type ToolPolicy = typeof ToolPolicy.Type
 export type EmployeeSpec = typeof EmployeeSpec.Type
+export type Attachment = typeof Attachment.Type
 export type PromptInput = typeof PromptInput.Type
 ```
 
@@ -397,22 +415,25 @@ export type AskRecord = typeof AskRecord.Type
 import { Schema } from 'effect'
 import { Ask } from './ask.js'
 
-const tagged = <const T extends string, F extends Schema.Struct.Fields>(type: T, fields: F) =>
+const tagged = <const Tag extends string, Fields extends Schema.Struct.Fields>(
+  type: Tag,
+  fields: Fields,
+): Schema.Struct<{ readonly type: Schema.Literal<Tag> } & Fields> =>
   Schema.Struct({ type: Schema.Literal(type), ...fields })
 
 export const Usage = Schema.Struct({
-  inputTokens: Schema.Number,
-  outputTokens: Schema.Number,
-  cacheReadTokens: Schema.optionalKey(Schema.Number),
-  cacheWriteTokens: Schema.optionalKey(Schema.Number),
-  costUsd: Schema.optionalKey(Schema.Number),
-  contextPct: Schema.optionalKey(Schema.Number),
+  inputTokens: Schema.Int,
+  outputTokens: Schema.Int,
+  cacheReadTokens: Schema.optionalKey(Schema.Int),
+  cacheWriteTokens: Schema.optionalKey(Schema.Int),
+  costUsd: Schema.optionalKey(Schema.Finite),
+  contextPct: Schema.optionalKey(Schema.Finite),
 })
 
 export const RateLimit = Schema.Struct({
-  fiveHourPct: Schema.optionalKey(Schema.Number),
+  fiveHourPct: Schema.optionalKey(Schema.Finite),
   fiveHourResetsAt: Schema.optionalKey(Schema.String),
-  sevenDayPct: Schema.optionalKey(Schema.Number),
+  sevenDayPct: Schema.optionalKey(Schema.Finite),
   sevenDayResetsAt: Schema.optionalKey(Schema.String),
 })
 
@@ -421,9 +442,22 @@ export const ToolKind = Schema.Literals(['builtin', 'mcp', 'bash', 'subagent', '
 export const AgentEvent = Schema.Union([
   tagged('turn.started', {}),
   tagged('message.delta', { kind: Schema.Literals(['text', 'thinking']), text: Schema.String }),
-  tagged('message.completed', { role: Schema.Literals(['assistant', 'user']), content: Schema.Array(Schema.Unknown), text: Schema.String }),
-  tagged('tool.started', { id: Schema.String, name: Schema.String, kind: ToolKind, input: Schema.Unknown }),
-  tagged('tool.completed', { id: Schema.String, outputSummary: Schema.String, bytes: Schema.Number }),
+  tagged('message.completed', {
+    role: Schema.Literals(['assistant', 'user']),
+    content: Schema.Array(Schema.Unknown),
+    text: Schema.String,
+  }),
+  tagged('tool.started', {
+    id: Schema.String,
+    name: Schema.String,
+    kind: ToolKind,
+    input: Schema.Unknown,
+  }),
+  tagged('tool.completed', {
+    id: Schema.String,
+    outputSummary: Schema.String,
+    bytes: Schema.Int,
+  }),
   tagged('tool.failed', { id: Schema.String, error: Schema.String }),
   tagged('subagent.started', { id: Schema.String, name: Schema.String }),
   tagged('subagent.stopped', { id: Schema.String, name: Schema.String }),
@@ -434,7 +468,11 @@ export const AgentEvent = Schema.Union([
   tagged('compaction.completed', {}),
   tagged('turn.completed', { stopReason: Schema.String, usage: Usage }),
   tagged('session.warning', { kind: Schema.String, message: Schema.String }),
-  tagged('session.error', { kind: Schema.Literals(['auth', 'ratelimit', 'crash', 'protocol']), message: Schema.String, retryable: Schema.Boolean }),
+  tagged('session.error', {
+    kind: Schema.Literals(['auth', 'ratelimit', 'crash', 'protocol']),
+    message: Schema.String,
+    retryable: Schema.Boolean,
+  }),
   tagged('session.closed', {}),
   tagged('raw', { providerEvent: Schema.Unknown }),
 ])
@@ -455,7 +493,7 @@ import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
 
 export const EventEnvelope = Schema.Struct({
-  seq: Schema.Number,
+  seq: Schema.Int,
   id: Id,
   ts: Timestamp,
   type: Schema.String,
@@ -468,9 +506,14 @@ export const EventEnvelope = Schema.Struct({
   payload: Schema.Unknown,
 })
 
-const project = Schema.Struct({ id: Id, name: Schema.String, path: Schema.String, defaultBranch: Schema.String })
+const project = Schema.Struct({
+  id: Id,
+  name: Schema.String,
+  path: Schema.String,
+  defaultBranch: Schema.String,
+})
 const sessionRef = Schema.Struct({ status: SessionStatus })
-const turnRef = Schema.Struct({ turnId: Id, index: Schema.Number, status: TurnStatus })
+const turnRef = Schema.Struct({ turnId: Id, index: Schema.Int, status: TurnStatus })
 
 // Payload schema per kernel event type; the key is the wire `type`
 export const KernelEventSchemas = {
@@ -480,24 +523,50 @@ export const KernelEventSchemas = {
   'profile.added': Schema.Struct({ profileId: Id, providerId: Schema.String }),
   'profile.removed': Schema.Struct({ profileId: Id }),
   'profile.status': Schema.Struct({ profileId: Id, state: Schema.String }),
-  'session.created': Schema.Struct({ ...sessionRef.fields, title: Schema.String, employeeId: Schema.String, providerId: Schema.String }),
+  'session.created': Schema.Struct({
+    ...sessionRef.fields,
+    title: Schema.String,
+    employeeId: Schema.String,
+    providerId: Schema.String,
+  }),
   'session.provisioning': sessionRef,
-  'session.ready': Schema.Struct({ ...sessionRef.fields, model: Schema.optionalKey(Schema.String) }),
+  'session.ready': Schema.Struct({
+    ...sessionRef.fields,
+    model: Schema.optionalKey(Schema.String),
+  }),
   'session.running': sessionRef,
   'session.waiting': Schema.Struct({ ...sessionRef.fields, askId: Id }),
   'session.paused': Schema.Struct({ ...sessionRef.fields, resetsAt: Schema.NullOr(Timestamp) }),
   'session.resumed': sessionRef,
   'session.stopped': sessionRef,
   'session.completed': sessionRef,
-  'session.errored': Schema.Struct({ ...sessionRef.fields, kind: Schema.String, message: Schema.String, retryable: Schema.Boolean }),
+  'session.errored': Schema.Struct({
+    ...sessionRef.fields,
+    kind: Schema.String,
+    message: Schema.String,
+    retryable: Schema.Boolean,
+  }),
   'session.warning': Schema.Struct({ kind: Schema.String, message: Schema.String }),
   'turn.started': turnRef,
   'turn.completed': Schema.Struct({ ...turnRef.fields, stopReason: Schema.String, usage: Usage }),
   'turn.interrupted': turnRef,
   'message.user': Schema.Struct({ text: Schema.String }),
-  'message.assistant.completed': Schema.Struct({ text: Schema.String, content: Schema.Array(Schema.Unknown) }),
-  'tool.started': Schema.Struct({ id: Schema.String, name: Schema.String, kind: Schema.String, input: Schema.Unknown }),
-  'tool.completed': Schema.Struct({ id: Schema.String, name: Schema.String, outputSummary: Schema.String, bytes: Schema.Number }),
+  'message.assistant.completed': Schema.Struct({
+    text: Schema.String,
+    content: Schema.Array(Schema.Unknown),
+  }),
+  'tool.started': Schema.Struct({
+    id: Schema.String,
+    name: Schema.String,
+    kind: Schema.String,
+    input: Schema.Unknown,
+  }),
+  'tool.completed': Schema.Struct({
+    id: Schema.String,
+    name: Schema.String,
+    outputSummary: Schema.String,
+    bytes: Schema.Int,
+  }),
   'tool.failed': Schema.Struct({ id: Schema.String, name: Schema.String, error: Schema.String }),
   'subagent.started': Schema.Struct({ id: Schema.String, name: Schema.String }),
   'subagent.stopped': Schema.Struct({ id: Schema.String, name: Schema.String }),
@@ -509,31 +578,52 @@ export const KernelEventSchemas = {
   'ratelimit.updated': Schema.Struct({ profileId: Schema.NullOr(Id), rateLimit: RateLimit }),
   'compaction.started': Schema.Struct({}),
   'compaction.completed': Schema.Struct({}),
-  'workspace.provisioned': Schema.Struct({ path: Schema.String, branch: Schema.String, baseRef: Schema.String, runtimeId: Schema.String }),
+  'workspace.provisioned': Schema.Struct({
+    path: Schema.String,
+    branch: Schema.String,
+    baseRef: Schema.String,
+    runtimeId: Schema.String,
+  }),
   'workspace.destroyed': Schema.Struct({ path: Schema.String }),
   'workspace.retained': Schema.Struct({ path: Schema.String, reason: Schema.String }),
-  'plugin.loaded': Schema.Struct({ name: Schema.String, version: Schema.String, ports: Schema.Array(Schema.String) }),
+  'plugin.loaded': Schema.Struct({
+    name: Schema.String,
+    version: Schema.String,
+    ports: Schema.Array(Schema.String),
+  }),
   'plugin.failed': Schema.Struct({ name: Schema.String, reason: Schema.String }),
-  'message.assistant.delta': Schema.Struct({ kind: Schema.Literals(['text', 'thinking']), text: Schema.String }),
+  'message.assistant.delta': Schema.Struct({
+    kind: Schema.Literals(['text', 'thinking']),
+    text: Schema.String,
+  }),
   'tool.progress': Schema.Struct({ id: Schema.String, text: Schema.String }),
   heartbeat: Schema.Struct({ at: Timestamp }),
 } as const
 
-export const EPHEMERAL_EVENT_TYPES = ['message.assistant.delta', 'tool.progress', 'heartbeat'] as const
-export const KERNEL_EVENT_TYPES = Object.keys(KernelEventSchemas) as readonly KernelEventType[]
+export const EPHEMERAL_EVENT_TYPES = [
+  'message.assistant.delta',
+  'tool.progress',
+  'heartbeat',
+] as const
+
+export const KERNEL_EVENT_TYPES: readonly KernelEventType[] = Object.keys(
+  KernelEventSchemas,
+).filter((key): key is KernelEventType => Object.hasOwn(KernelEventSchemas, key))
 
 export type KernelEventType = keyof typeof KernelEventSchemas
-export type KernelEventPayload<T extends KernelEventType> = (typeof KernelEventSchemas)[T]['Type']
+export type KernelEventPayload<EventType extends KernelEventType> =
+  (typeof KernelEventSchemas)[EventType]['Type']
 export type EventEnvelope = typeof EventEnvelope.Type
 
-export interface KernelEvent<T extends KernelEventType = KernelEventType> {
-  readonly type: T
-  readonly payload: KernelEventPayload<T>
+export interface KernelEvent<EventType extends KernelEventType = KernelEventType> {
+  readonly type: EventType
+  readonly payload: KernelEventPayload<EventType>
   readonly projectId?: string | undefined
   readonly sessionId?: string | undefined
   readonly turnId?: string | undefined
 }
 
+/** True for live-only event types: fanned out to subscribers, never persisted */
 export function isEphemeral(type: string): boolean {
   return (EPHEMERAL_EVENT_TYPES as readonly string[]).includes(type)
 }
@@ -559,7 +649,7 @@ export const EmployeeConfig = Schema.Struct({
   permissionMode: PermissionMode,
   tools: Schema.optionalKey(ToolPolicy),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
-  maxTurns: Schema.optionalKey(Schema.Number),
+  maxTurns: Schema.optionalKey(Schema.Int),
   askTimeout: Schema.optionalKey(Schema.String),
   appearance: Schema.optionalKey(Appearance),
 })
@@ -569,34 +659,57 @@ export const PluginRef = Schema.Union([
   Schema.Struct({ npm: Schema.String, version: Schema.optionalKey(Schema.String) }),
 ])
 
+const LoggingSection = Schema.Struct({ level: Schema.optionalKey(LogLevel) })
+
+const WorkspaceSection = Schema.Struct({
+  runtime: Schema.optionalKey(Schema.String),
+  copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
+  retainDays: Schema.optionalKey(Schema.Int),
+})
+const ProvidersSection = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))
+const ProjectDefaults = Schema.Struct({
+  employee: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+})
+
 export const ProjectConfig = Schema.Struct({
   $schema: Schema.optionalKey(Schema.String),
   version: Schema.Literal(1),
-  project: Schema.Struct({ name: Schema.NonEmptyString, defaultBranch: Schema.optionalKey(Schema.String) }),
-  workspace: Schema.optionalKey(
-    Schema.Struct({
-      runtime: Schema.optionalKey(Schema.String),
-      copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
-      retainDays: Schema.optionalKey(Schema.Number),
-    }),
-  ),
-  providers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))),
+  project: Schema.Struct({
+    name: Schema.NonEmptyString,
+    defaultBranch: Schema.optionalKey(Schema.String),
+  }),
+  workspace: Schema.optionalKey(WorkspaceSection),
+  providers: Schema.optionalKey(ProvidersSection),
   employees: Schema.Record(Schema.String, EmployeeConfig),
-  defaults: Schema.optionalKey(Schema.Struct({ employee: Schema.optionalKey(Schema.String), branch: Schema.optionalKey(Schema.String) })),
+  defaults: Schema.optionalKey(ProjectDefaults),
   plugins: Schema.optionalKey(Schema.Array(PluginRef)),
-  logging: Schema.optionalKey(Schema.Struct({ level: Schema.optionalKey(LogLevel) })),
+  logging: Schema.optionalKey(LoggingSection),
 }).annotate({ title: 'ByteBureau project configuration (v1)' })
 
+const ServerSection = Schema.Struct({
+  host: Schema.optionalKey(Schema.String),
+  port: Schema.optionalKey(Schema.Int),
+})
+const UserDefaults = Schema.Struct({
+  provider: Schema.optionalKey(Schema.String),
+  profile: Schema.optionalKey(Schema.String),
+})
+const TelemetrySection = Schema.Struct({
+  content: Schema.optionalKey(Schema.Literals(['local', 'off'])),
+})
+
 export const UserConfig = Schema.Struct({
-  server: Schema.optionalKey(Schema.Struct({ host: Schema.optionalKey(Schema.String), port: Schema.optionalKey(Schema.Number) })),
-  defaults: Schema.optionalKey(Schema.Struct({ provider: Schema.optionalKey(Schema.String), profile: Schema.optionalKey(Schema.String) })),
+  server: Schema.optionalKey(ServerSection),
+  defaults: Schema.optionalKey(UserDefaults),
   locale: Schema.optionalKey(Schema.String),
-  logging: Schema.optionalKey(Schema.Struct({ level: Schema.optionalKey(LogLevel) })),
-  telemetry: Schema.optionalKey(Schema.Struct({ content: Schema.optionalKey(Schema.Literals(['local', 'off'])) })),
+  logging: Schema.optionalKey(LoggingSection),
+  telemetry: Schema.optionalKey(TelemetrySection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
 export type LogLevel = typeof LogLevel.Type
 export type EmployeeConfig = typeof EmployeeConfig.Type
+export type PluginRef = typeof PluginRef.Type
 export type ProjectConfig = typeof ProjectConfig.Type
 export type UserConfig = typeof UserConfig.Type
 
@@ -604,7 +717,8 @@ const STRICT = { onExcessProperty: 'error', errors: 'all' } as const
 
 export const decodeProjectConfig = (input: unknown): ProjectConfig =>
   Schema.decodeUnknownSync(ProjectConfig)(input, STRICT)
-export const decodeUserConfig = (input: unknown): UserConfig => Schema.decodeUnknownSync(UserConfig)(input, STRICT)
+export const decodeUserConfig = (input: unknown): UserConfig =>
+  Schema.decodeUnknownSync(UserConfig)(input, STRICT)
 
 export const defaultProjectConfig: ProjectConfig = {
   version: 1,
@@ -640,11 +754,18 @@ import { EventEnvelope, KernelEventSchemas } from './events.js'
 const CONFIG_ID = 'https://bytebureau.dev/schema/v1/config.json'
 const EVENTS_ID = 'https://bytebureau.dev/schema/v1/events.json'
 
+/** JSON Schema (draft 2020-12) of the project configuration file */
 export function configJsonSchema(): Record<string, unknown> {
   const document = Schema.toJsonSchemaDocument(ProjectConfig, { onExcessProperty: 'error' })
-  return { $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12, $id: CONFIG_ID, ...document.schema, $defs: document.definitions }
+  return {
+    $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12,
+    $id: CONFIG_ID,
+    ...document.schema,
+    $defs: document.definitions,
+  }
 }
 
+/** JSON Schema (draft 2020-12) of the event envelope and of each kernel event payload, keyed by wire type */
 export function eventsJsonSchema(): Record<string, unknown> {
   const envelope = Schema.toJsonSchemaDocument(EventEnvelope, { onExcessProperty: 'error' })
   const defs: Record<string, unknown> = { EventEnvelope: envelope.schema, ...envelope.definitions }
@@ -653,7 +774,12 @@ export function eventsJsonSchema(): Record<string, unknown> {
     defs[type] = document.schema
     Object.assign(defs, document.definitions)
   }
-  return { $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12, $id: EVENTS_ID, $ref: '#/$defs/EventEnvelope', $defs: defs }
+  return {
+    $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12,
+    $id: EVENTS_ID,
+    $ref: '#/$defs/EventEnvelope',
+    $defs: defs,
+  }
 }
 ```
 `packages/protocol/scripts/generate-json-schema.ts`:
@@ -665,19 +791,26 @@ import { configJsonSchema, eventsJsonSchema } from '../src/json-schema.js'
 
 const out = path.join(import.meta.dirname, '..', 'schemas')
 mkdirSync(out, { recursive: true })
-writeFileSync(path.join(out, 'config.json'), `${JSON.stringify(configJsonSchema(), null, 2)}\n`)
-writeFileSync(path.join(out, 'events.json'), `${JSON.stringify(eventsJsonSchema(), null, 2)}\n`)
-console.log('wrote schemas/config.json and schemas/events.json')
+writeFileSync(
+  path.join(out, 'config.json'),
+  `${JSON.stringify(configJsonSchema(), undefined, 2)}\n`,
+)
+writeFileSync(
+  path.join(out, 'events.json'),
+  `${JSON.stringify(eventsJsonSchema(), undefined, 2)}\n`,
+)
 ```
 `packages/protocol/src/index.ts` re-exports everything from `common.js`, `employee.js`, `ask.js`, `agent-event.js`, `events.js`, `config.js`, `json-schema.js` (`export * from './common.js'` …; oxlint's `import/no-namespace`-style rules do not apply to re-exports, but `import/group-exports` is off by ruling).
 
 - [ ] **Step 6: Generate, test, wire the gates, commit**
 
 Run `bun install` (after adding `effect` 4.0.0), then `bun run --cwd packages/protocol build` (writes the two schema files; commit them), then `bunx vitest run --project protocol` → PASS (4 tests).
-Wiring: `vitest.config.ts` projects gain `'packages/protocol'`; `knip.ts` gains `'packages/protocol': { entry: ['scripts/*.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] }`; `turbo.json` gains `"@bytebureau/protocol#build": { "outputs": ["schemas/**"] }` so `bun run build` regenerates the schemas; `scripts/license.test.ts` learns the MIT manifest set (Task 2 extends it); `.oxlintrc.jsonc` needs no change (the `tagged` helper's `const` generic is allowed). Run `bun run check` → green.
+Wiring: `vitest.config.ts` projects gain `'packages/protocol'`; `knip.ts` gains `'packages/protocol': { entry: ['scripts/*.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] }`; `turbo.json` gains `"@bytebureau/protocol#build": { "outputs": ["schemas/**"] }` so `bun run build` regenerates the schemas; `scripts/license.test.ts` learns the MIT manifest set (Task 2 extends it); `.oxlintrc.jsonc` tunes `new-cap` (`properties: false`) and turns `no-redeclare` off under the three Effect packages and `no-barrel-file` off for package entry points (Effect idioms), `.oxfmtrc.json` ignores `packages/protocol/schemas/**`, `semantic-pr.yml` gains the `protocol` scope. Numbers are `Schema.Int` (counts, `seq`, tokens, bytes, ports, `retainDays`, `maxTurns`) or `Schema.Finite` (percentages, costs): `Schema.Number` would publish `"NaN"`/`"Infinity"` as valid. Run `bun run check` → green.
 
 ```bash
-git add packages/tsconfig packages/protocol vitest.config.ts knip.ts turbo.json scripts/license.test.ts bun.lock bunfig.toml
+git add .oxlintrc.jsonc .oxfmtrc.json
+git commit -m "chore(repo): allow effect idioms in oxlint and ignore generated schemas in oxfmt"
+git add packages/tsconfig packages/protocol vitest.config.ts knip.ts turbo.json scripts/license.test.ts bun.lock cspell-words.txt .github/workflows/semantic-pr.yml
 git commit -m "feat(protocol): add event, ask, employee and config schemas with generated json schema"
 ```
 
