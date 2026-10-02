@@ -1,0 +1,10 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
+    "typecheck": { "dependsOn": ["^build"], "outputs": [] },
+    "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
+    "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
+  }
+}
