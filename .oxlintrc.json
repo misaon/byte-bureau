@@ -21,7 +21,83 @@
   "rules": {
     "import/no-default-export": "error",
     "no-console": "error",
-    "unicorn/no-process-exit": "error"
+    "unicorn/no-process-exit": "error",
+
+    // Enabled on purpose: a nursery rule (categories.nursery is off) that must stay on; it catches impossible conditions
+    "typescript/no-unnecessary-condition": "error",
+
+    // Tuned to the project's style: the rule stays on, only its options change
+    // "m" is the Paraglide message namespace; the rule keeps rejecting other one-letter names
+    "id-length": ["error", { "exceptions": ["m"] }],
+    // Named functions are declarations; arrow functions stay allowed as values and callbacks
+    "func-style": ["error", "declaration", { "allowArrowFunctions": true }],
+    // One binding per declaration (the default combines them: const a = 1, b = 2)
+    "one-var": ["error", "never"],
+    // Property tests assert through fast-check
+    "vitest/expect-expect": ["error", { "assertFunctionNames": ["expect", "fc.assert"] }],
+    // Only where an assertion can be skipped silently (async tests, loops, callbacks), not in every test
+    "vitest/prefer-expect-assertions": [
+      "error",
+      {
+        "onlyFunctionsWithAsyncKeyword": true,
+        "onlyFunctionsWithExpectInLoop": true,
+        "onlyFunctionsWithExpectInCallback": true
+      }
+    ],
+    // Vitest accepts expect(value, message); the Jest default of one argument is wrong here
+    "vitest/valid-expect": ["error", { "maxArgs": 2 }],
+    // describe(fn) titles are what vitest/prefer-describe-function-title asks for, so valid-title must accept them
+    "vitest/valid-title": ["error", { "ignoreTypeOfDescribeName": true }],
+
+    // Off, (a): contradicts another rule that stays enabled
+    // (a) Unsatisfiable next to no-duplicate-imports and typescript/no-import-type-side-effects (both kept)
+    "import/consistent-type-specifier-style": "off",
+    // (a) Every module with exports would fail: import/no-default-export (kept) forbids the alternative
+    "import/no-named-export": "off",
+    // (a) Demands the default export that import/no-default-export (kept) forbids
+    "import/prefer-default-export": "off",
+    // (a) Contradicts unicorn/prefer-top-level-await (kept); top-level await is mandated
+    "node/no-top-level-await": "off",
+    // (a) Contradicts typescript/promise-function-async (kept), which requires async on promise-returning functions
+    "oxc/no-async-await": "off",
+    // (a) Contradicts prefer-object-spread (kept); Object.assign({}, a) is flagged instead
+    "oxc/no-rest-spread-properties": "off",
+    // (a) Contradicts vitest/prefer-strict-boolean-matchers (kept): toBe(false) is the strict form
+    "vitest/prefer-to-be-falsy": "off",
+    // (a) Contradicts vitest/prefer-strict-boolean-matchers (kept): toBe(true) is the strict form
+    "vitest/prefer-to-be-truthy": "off",
+
+    // Off, (b): forbids a construct the project mandates
+    // (b) Forbids several inline "export function/const/interface" declarations, the project's export style
+    "import/group-exports": "off",
+    // (b) Forbids node:* imports; the CLI, scripts, config files and tests are Node/Bun programs
+    "import/no-nodejs-modules": "off",
+    // (b) Forbids "../" imports; src/commands/* and tests beside messages/ need them
+    "import/no-relative-parent-imports": "off",
+    // (b) Forbids reading process.env, which the CLI context does by design
+    "node/no-process-env": "off",
+    // (b) The project imports describe/it/expect from "vitest" explicitly (no globals, no vitest/globals types)
+    "vitest/no-importing-vitest-globals": "off",
+    // (b) The plugin is global, so this fires on ordinary top-level module code outside tests; re-enabled for *.test.ts below
+    "vitest/require-hook": "off",
+
+    // Off, (c): would force pervasive non-idiomatic code
+    // (c) Flags exit codes, severities and test statuses; a named constant for each is noise
+    "no-magic-numbers": "off",
+    // (c) Bans every ternary, although unicorn/prefer-ternary (kept) asks for them in simple if/else
+    "no-ternary": "off",
+    // (c) Bans the undefined keyword, but exactOptionalPropertyTypes code compares against undefined throughout
+    "no-undefined": "off",
+    // (c) Forbids sync fs and child_process calls; config files, scripts and CLI tests are synchronous by nature
+    "node/no-sync": "off",
+    // (c) Forces alphabetical object keys; citty commands and config objects are ordered by meaning
+    "sort-keys": "off",
+    // (c) Orders imports by member count and first name, which clashes with the types-last import style
+    "sort-imports": "off",
+    // (c) Demands deep readonly on every parameter, including types that come from Node and Bun
+    "typescript/prefer-readonly-parameter-types": "off",
+    // (c) Wants a timeout argument on every test; timeouts belong in the Vitest config (testTimeout)
+    "vitest/require-test-timeout": "off"
   },
   "overrides": [
     {
@@ -46,7 +122,7 @@
     },
     {
       "files": ["**/*.test.ts"],
-      "rules": { "no-console": "off" }
+      "rules": { "no-console": "off", "vitest/require-hook": "error" }
     }
   ]
 }
