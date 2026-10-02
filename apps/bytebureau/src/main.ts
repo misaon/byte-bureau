@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { defineCommand, runMain } from 'citty'
+import { defineCommand } from 'citty'
 import { helloCommand } from './commands/hello.js'
+import { run } from './run.js'
 import { version } from './version.js'
 
 process.on('uncaughtException', (error: unknown) => {
@@ -21,4 +22,4 @@ const main = defineCommand({
   subCommands: { hello: helloCommand },
 })
 
-await runMain(main)
+process.exit(await run(main, process.argv.slice(2)))
