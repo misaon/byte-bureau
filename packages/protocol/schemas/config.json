@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bytebureau.dev/schema/v1/config.json",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "number",
+      "enum": [
+        1
+      ]
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defaultBranch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "runtime": {
+          "type": "string"
+        },
+        "copyIgnored": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retainDays": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "Infinity",
+                "-Infinity",
+                "NaN"
+              ]
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "employees": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "permissionMode": {
+            "type": "string",
+            "enum": [
+              "supervised",
+              "autonomous",
+              "yolo"
+            ]
+          },
+          "tools": {
+            "type": "object",
+            "properties": {
+              "allow": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "deny": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "allow",
+              "deny"
+            ],
+            "additionalProperties": false
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "maxTurns": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "Infinity",
+                  "-Infinity",
+                  "NaN"
+                ]
+              }
+            ]
+          },
+          "askTimeout": {
+            "type": "string"
+          },
+          "appearance": {
+            "type": "object",
+            "properties": {
+              "gender": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "hair": {
+                "type": "string"
+              },
+              "outfit": {
+                "type": "string"
+              },
+              "palette": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "model",
+          "permissionMode"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "employee": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "npm": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "npm"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "project",
+    "employees"
+  ],
+  "additionalProperties": false,
+  "title": "ByteBureau project configuration (v1)",
+  "$defs": {}
+}

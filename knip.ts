@@ -17,6 +17,7 @@ const config: KnipConfig = {
       // Loaded by the inlang SDK from project.inlang/settings.json (modules), never imported
       ignoreDependencies: ['@inlang/plugin-message-format'],
     },
+    'packages/protocol': { entry: ['scripts/*.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }

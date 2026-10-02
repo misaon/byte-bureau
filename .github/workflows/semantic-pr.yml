@@ -39,6 +39,7 @@ jobs:
             bytebureau
             docs
             i18n
+            protocol
             tsconfig
             cli
             deps
