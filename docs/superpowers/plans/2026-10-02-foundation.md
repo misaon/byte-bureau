@@ -130,6 +130,7 @@ bytebureau-diag-*.zip
 .env.*
 .DS_Store
 .idea/
+.superpowers/
 ```
 
 - [ ] **Step 2: Create the root `package.json`**
@@ -688,9 +689,9 @@ Expected: `src/paraglide/messages.js` and `src/paraglide/runtime.js` generated. 
 
 - [ ] **Step 7: Run the tests and typecheck**
 
-Run:
+Run (Turborepo arrives in Task 7, so call Vitest directly here):
 ```bash
-bun run test
+bunx vitest run
 bunx tsc --noEmit -p packages/i18n/tsconfig.json
 ```
 Expected: 5 tests pass; typecheck clean.
@@ -1176,7 +1177,7 @@ Expected: FAIL — module not found.
 ```ts
 #!/usr/bin/env bun
 import { mkdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 export const TARGETS = [
   'bun-darwin-arm64',
@@ -1263,7 +1264,7 @@ function compile(target: Target, outfile: string, version: string, bytecode: boo
 }
 
 export async function buildAll(options: BuildOptions): Promise<string[]> {
-  const outdir = join(ROOT, options.outdir)
+  const outdir = resolve(options.outdir) // relative to the caller's cwd: dist/ at the root, apps/bytebureau/dist for the app's build script
   await mkdir(outdir, { recursive: true })
   const built: string[] = []
   for (const target of options.targets) {
