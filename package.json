@@ -1,0 +1,38 @@
+{
+  "name": "byte-bureau",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "workspaces": {
+    "packages": ["apps/*", "packages/*", "plugins/*"],
+    "catalog": {}
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run build --filter=@bytebureau/i18n && vitest run",
+    "test:coverage": "turbo run build --filter=@bytebureau/i18n && vitest run --coverage",
+    "lint": "oxlint --type-aware",
+    "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && bun --cwd tools/eslint-long-tail run lint",
+    "lint:md": "markdownlint-cli2",
+    "lint:ls": "ls-lint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "knip": "knip",
+    "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
+    "spell": "cspell --no-progress --gitignore \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
+    "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
+    "build:binaries": "bun run scripts/build-binaries.ts",
+    "docs:build": "turbo run docs:build",
+    "release": "changelogen --release --push"
+  },
+  "devDependencies": {
+    "@tsconfig/strictest": "2.0.8",
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}

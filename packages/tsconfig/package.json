@@ -1,0 +1,7 @@
+{
+  "name": "@bytebureau/tsconfig",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-MIT",
+  "files": ["*.json"]
+}

@@ -1,0 +1,4 @@
+[install]
+exact = true
+# Lifecycle scripts stay blocked (Bun default); add trusted packages explicitly here if ever needed.
+# trustedDependencies = []
