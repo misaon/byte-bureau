@@ -891,8 +891,8 @@ git commit -m "feat(protocol): add event, ask, employee and config schemas with 
   "name": "@bytebureau/plugin-api",
   "version": "0.0.0",
   "private": true,
-  "license": "MIT",
   "description": "Ports and plugin contract for ByteBureau plugins (plain TypeScript, no Effect)",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": {
@@ -936,19 +936,23 @@ export default defineProject({
 import { describe, expect, it } from 'vitest'
 import { definePlugin, type Plugin, type PluginManifest } from './plugin.js'
 
-const manifest: PluginManifest = {
-  name: 'example',
-  version: '1.0.0',
-  hostApi: '^0',
-  kind: 'in-process',
-  contributes: { agentProviders: ['example'] },
-}
-
 describe(definePlugin, () => {
   it('returns the plugin object unchanged so the host can read its manifest', () => {
-    const plugin: Plugin = { manifest, setup: () => ({}) }
-    expect(definePlugin(plugin)).toBe(plugin)
-    expect(definePlugin(plugin).manifest.contributes?.agentProviders).toEqual(['example'])
+    const testManifest: PluginManifest & {
+      readonly contributes: Partial<
+        Readonly<Record<'agentProviders' | 'workspaceRuntimes' | 'secretStores', readonly string[]>>
+      >
+    } = {
+      name: 'example',
+      version: '1.0.0',
+      hostApi: '^0',
+      kind: 'in-process',
+      contributes: { agentProviders: ['example'] },
+    }
+    const plugin: Plugin = { manifest: testManifest, setup: () => ({}) }
+    const result = definePlugin(plugin)
+    expect(result).toBe(plugin)
+    expect(testManifest.contributes.agentProviders).toStrictEqual(['example'])
   })
 })
 ```
@@ -963,23 +967,17 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export interface Logger {
   readonly category: readonly string[]
-  debug(message: string, properties?: Readonly<Record<string, unknown>>): void
-  info(message: string, properties?: Readonly<Record<string, unknown>>): void
-  warn(message: string, properties?: Readonly<Record<string, unknown>>): void
-  error(message: string, properties?: Readonly<Record<string, unknown>>): void
-  child(name: string): Logger
+  readonly debug: (message: string, properties?: Readonly<Record<string, unknown>>) => void
+  readonly info: (message: string, properties?: Readonly<Record<string, unknown>>) => void
+  readonly warn: (message: string, properties?: Readonly<Record<string, unknown>>) => void
+  readonly error: (message: string, properties?: Readonly<Record<string, unknown>>) => void
+  readonly child: (name: string) => Logger
 }
 ```
 
 `packages/plugin-api/src/ports.ts`:
 ```ts
-import type {
-  AgentEvent,
-  AskAnswer,
-  Effort,
-  EmployeeSpec,
-  PromptInput,
-} from '@bytebureau/protocol'
+import type { AgentEvent, AskAnswer, Effort, EmployeeSpec, PromptInput } from '@bytebureau/protocol'
 import type { Logger } from './logger.js'
 
 export interface ProfileRef {
@@ -1036,22 +1034,22 @@ export interface CreateSessionRequest {
 
 export interface AgentSession {
   readonly externalRef: ExternalSessionRef | null
-  prompt(input: PromptInput): Promise<void>
-  interrupt(): Promise<void>
-  answer(askId: string, answer: AskAnswer): Promise<void>
-  setModel?(model: string): Promise<void>
-  setEffort?(effort: Effort): Promise<void>
-  events(): AsyncIterable<AgentEvent>
-  close(): Promise<void>
+  readonly prompt: (input: PromptInput) => Promise<void>
+  readonly interrupt: () => Promise<void>
+  readonly answer: (askId: string, answer: AskAnswer) => Promise<void>
+  readonly setModel?: ((model: string) => Promise<void>) | undefined
+  readonly setEffort?: ((effort: Effort) => Promise<void>) | undefined
+  readonly events: () => AsyncIterable<AgentEvent>
+  readonly close: () => Promise<void>
 }
 
 export interface AgentProvider {
   readonly id: string
   readonly displayName: string
   readonly capabilities: AgentCapabilities
-  authStatus(profile: ProfileRef): Promise<AuthStatus>
-  listModels?(profile: ProfileRef): Promise<ModelInfo[]>
-  createSession(request: CreateSessionRequest): Promise<AgentSession>
+  readonly authStatus: (profile: ProfileRef) => Promise<AuthStatus>
+  readonly listModels?: ((profile: ProfileRef) => Promise<ModelInfo[]>) | undefined
+  readonly createSession: (request: CreateSessionRequest) => Promise<AgentSession>
 }
 
 export type WorkspaceIsolation = 'none' | 'process' | 'container' | 'vm'
@@ -1094,22 +1092,25 @@ export interface ExecHandle {
   readonly stdout: AsyncIterable<string>
   readonly stderr: AsyncIterable<string>
   readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
-  kill(signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL'): void
+  readonly kill: (signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL') => void
 }
 
 export interface WorkspaceRuntime {
   readonly id: string
   readonly isolation: WorkspaceIsolation
-  provision(spec: WorkspaceSpec): Promise<WorkspaceHandle>
-  exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle>
-  status(handle: WorkspaceHandle): Promise<WorkspaceStatus>
-  destroy(handle: WorkspaceHandle, options?: { readonly force?: boolean }): Promise<void>
+  readonly provision: (spec: WorkspaceSpec) => Promise<WorkspaceHandle>
+  readonly exec: (handle: WorkspaceHandle, spec: ExecSpec) => Promise<ExecHandle>
+  readonly status: (handle: WorkspaceHandle) => Promise<WorkspaceStatus>
+  readonly destroy: (
+    handle: WorkspaceHandle,
+    options?: { readonly force?: boolean },
+  ) => Promise<void>
 }
 
 export interface SecretStore {
-  get(key: string): Promise<string | undefined>
-  set(key: string, value: string): Promise<void>
-  delete(key: string): Promise<void>
+  readonly get: (key: string) => Promise<string | undefined>
+  readonly set: (key: string, value: string) => Promise<void>
+  readonly delete: (key: string) => Promise<void>
 }
 ```
 
@@ -1118,15 +1119,9 @@ export interface SecretStore {
 `packages/plugin-api/src/plugin.ts`:
 ```ts
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { Ask, KernelEvent, PromptInput } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, KernelEvent, PromptInput } from '@bytebureau/protocol'
 import type { Logger } from './logger.js'
-import type {
-  AgentProvider,
-  ExecHandle,
-  ExecSpec,
-  SecretStore,
-  WorkspaceRuntime,
-} from './ports.js'
+import type { AgentProvider, ExecHandle, ExecSpec, SecretStore, WorkspaceRuntime } from './ports.js'
 
 export type PluginKind = 'in-process' | 'subprocess' | 'mcp' | 'acp' | 'wasm'
 export type PluginCapability = 'fs:read' | 'fs:write' | 'net' | 'process' | 'secrets' | 'ui'
@@ -1142,7 +1137,9 @@ export interface PluginManifest {
   readonly entry?: string | undefined
   readonly capabilities?: readonly PluginCapability[] | undefined
   readonly config?: StandardSchemaV1 | undefined
-  readonly secrets?: Readonly<Record<string, { readonly title: string; readonly description?: string }>> | undefined
+  readonly secrets?:
+    | Readonly<Record<string, { readonly title: string; readonly description?: string }>>
+    | undefined
   readonly contributes?: Partial<Readonly<Record<PortId, readonly string[]>>> | undefined
 }
 
@@ -1154,18 +1151,21 @@ export interface ProjectInfo {
 }
 
 export interface PluginEvents {
-  publish(event: KernelEvent): Promise<void>
-  subscribe(filter: { readonly types?: readonly string[]; readonly sessionId?: string }): AsyncIterable<KernelEvent>
+  readonly publish: (event: KernelEvent) => Promise<void>
+  readonly subscribe: (filter: {
+    readonly types?: readonly string[]
+    readonly sessionId?: string
+  }) => AsyncIterable<KernelEvent>
 }
 
 export interface PluginKv {
-  get<T = unknown>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown): Promise<void>
-  delete(key: string): Promise<void>
+  readonly get: <Type = unknown>(key: string) => Promise<Type | undefined>
+  readonly set: (key: string, value: unknown) => Promise<void>
+  readonly delete: (key: string) => Promise<void>
 }
 
 export interface ProcessSpawner {
-  spawn(spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle>
+  readonly spawn: (spec: ExecSpec & { readonly cwd: string }) => Promise<ExecHandle>
 }
 
 export interface PluginContext<Config = unknown> {
@@ -1202,7 +1202,7 @@ export type AgentSpawnResult = AgentSpawnInput | { readonly deny: string }
 export interface AskOpenInput {
   readonly ask: Ask
 }
-export type AskOpenResult = { readonly ask: Ask } | { readonly answer: import('@bytebureau/protocol').AskAnswer }
+export type AskOpenResult = { readonly ask: Ask } | { readonly answer: AskAnswer }
 export interface PromptSendInput {
   readonly sessionId: string
   readonly input: PromptInput
@@ -1221,14 +1221,17 @@ export interface PluginRegistration {
   readonly workspaceRuntimes?: readonly WorkspaceRuntime[] | undefined
   readonly secretStores?: readonly SecretStore[] | undefined
   readonly hooks?: Partial<Hooks> | undefined
-  dispose?(): Promise<void>
+  readonly dispose?: (() => Promise<void>) | undefined
 }
 
 export interface Plugin<Config = unknown> {
   readonly manifest: PluginManifest
-  setup(context: PluginContext<Config>): Promise<PluginRegistration> | PluginRegistration
+  readonly setup: (
+    context: PluginContext<Config>,
+  ) => Promise<PluginRegistration> | PluginRegistration
 }
 
+/** Returns the plugin object unchanged so the host can read its manifest. */
 export function definePlugin<Config>(plugin: Plugin<Config>): Plugin<Config> {
   return plugin
 }
@@ -1291,7 +1294,6 @@ export type {
   PromptInput,
 } from '@bytebureau/protocol'
 ```
-Replace the inline `import('@bytebureau/protocol').AskAnswer` in `AskOpenResult` with a named type import (`AskAnswer`) added to the `@bytebureau/protocol` import line at the top of `plugin.ts`; oxlint's `consistent-type-imports` rejects inline `import()` types.
 
 - [ ] **Step 5: Run the test, wire the gates**
 
