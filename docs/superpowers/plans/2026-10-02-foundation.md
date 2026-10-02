@@ -1359,7 +1359,7 @@ Run: `bun add -D --exact turbo`
   }
 }
 ```
-Change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`.
+Change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
 
 - [ ] **Step 2: Verify the graph**
 
