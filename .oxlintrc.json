@@ -68,8 +68,10 @@
     "vitest/prefer-to-be-truthy": "off",
 
     // Off, (b): forbids a construct the project mandates
-    // (b) Forbids several inline "export function/const/interface" declarations, the project's export style
+    // (c) project convention: inline named exports in declaration order; a trailing export block is not idiomatic here
     "import/group-exports": "off",
+    // (c) project convention: inline named exports in declaration order; a trailing export block is not idiomatic here
+    "import/exports-last": "off",
     // (b) Forbids node:* imports; the CLI, scripts, config files and tests are Node/Bun programs
     "import/no-nodejs-modules": "off",
     // (b) Forbids "../" imports; src/commands/* and tests beside messages/ need them
