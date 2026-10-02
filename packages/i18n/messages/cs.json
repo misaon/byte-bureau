@@ -1,0 +1,8 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "hello_greeting": "Ahoj, {name}! ByteBureau je připraveno.",
+  "hello_anonymous": "Ahoj! ByteBureau je připraveno.",
+  "hello_intro": "ByteBureau",
+  "hello_outro": "Spusť bytebureau --help a podívej se, co je k dispozici.",
+  "cli_unknown_locale": "Nepodporovaný jazyk „{locale}“, používám angličtinu."
+}
