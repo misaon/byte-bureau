@@ -6,6 +6,7 @@
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
     "bytebureau#build": {
       "dependsOn": ["^build"],
+      "cache": false,
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/scripts/build-binaries.ts",

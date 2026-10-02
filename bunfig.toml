@@ -1,4 +1,6 @@
 [install]
 exact = true
+# Three days, in seconds: new resolutions skip younger versions; bun.lock entries are unaffected
+minimumReleaseAge = 259200
 # Lifecycle scripts stay blocked (Bun default); add trusted packages explicitly here if ever needed.
 # trustedDependencies = []
