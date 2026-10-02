@@ -5,6 +5,7 @@
     "": {
       "name": "byte-bureau",
       "devDependencies": {
+        "@bytebureau/tsconfig": "workspace:*",
         "@tsconfig/strictest": "2.0.8",
         "@types/bun": "1.4.2",
         "typescript": "7.0.2",
