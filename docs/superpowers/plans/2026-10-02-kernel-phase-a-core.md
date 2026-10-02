@@ -954,6 +954,28 @@ describe(definePlugin, () => {
     expect(result).toBe(plugin)
     expect(testManifest.contributes.agentProviders).toStrictEqual(['example'])
   })
+
+  it('typed plugins are assignable to the plugin registry', () => {
+    interface MyConfig {
+      readonly flag: boolean
+    }
+    const manifest: PluginManifest = {
+      name: 'typed',
+      version: '1.0.0',
+      hostApi: '^0',
+      kind: 'in-process',
+    }
+    const typedPlugin = definePlugin<MyConfig>({
+      manifest,
+      setup: (context): { readonly dispose: () => Promise<void> } => ({
+        dispose: async (): Promise<void> => {
+          await Promise.resolve(context.config.flag)
+        },
+      }),
+    })
+    const registry: readonly Plugin[] = [typedPlugin]
+    expect(registry).toHaveLength(1)
+  })
 })
 ```
 Run: `bunx vitest run --project plugin-api`
@@ -967,11 +989,11 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export interface Logger {
   readonly category: readonly string[]
-  readonly debug: (message: string, properties?: Readonly<Record<string, unknown>>) => void
-  readonly info: (message: string, properties?: Readonly<Record<string, unknown>>) => void
-  readonly warn: (message: string, properties?: Readonly<Record<string, unknown>>) => void
-  readonly error: (message: string, properties?: Readonly<Record<string, unknown>>) => void
-  readonly child: (name: string) => Logger
+  debug(message: string, properties?: Readonly<Record<string, unknown>>): void
+  info(message: string, properties?: Readonly<Record<string, unknown>>): void
+  warn(message: string, properties?: Readonly<Record<string, unknown>>): void
+  error(message: string, properties?: Readonly<Record<string, unknown>>): void
+  child(name: string): Logger
 }
 ```
 
@@ -1034,22 +1056,22 @@ export interface CreateSessionRequest {
 
 export interface AgentSession {
   readonly externalRef: ExternalSessionRef | null
-  readonly prompt: (input: PromptInput) => Promise<void>
-  readonly interrupt: () => Promise<void>
-  readonly answer: (askId: string, answer: AskAnswer) => Promise<void>
-  readonly setModel?: ((model: string) => Promise<void>) | undefined
-  readonly setEffort?: ((effort: Effort) => Promise<void>) | undefined
-  readonly events: () => AsyncIterable<AgentEvent>
-  readonly close: () => Promise<void>
+  prompt(input: PromptInput): Promise<void>
+  interrupt(): Promise<void>
+  answer(askId: string, answer: AskAnswer): Promise<void>
+  setModel?(model: string): Promise<void>
+  setEffort?(effort: Effort): Promise<void>
+  events(): AsyncIterable<AgentEvent>
+  close(): Promise<void>
 }
 
 export interface AgentProvider {
   readonly id: string
   readonly displayName: string
   readonly capabilities: AgentCapabilities
-  readonly authStatus: (profile: ProfileRef) => Promise<AuthStatus>
-  readonly listModels?: ((profile: ProfileRef) => Promise<ModelInfo[]>) | undefined
-  readonly createSession: (request: CreateSessionRequest) => Promise<AgentSession>
+  authStatus(profile: ProfileRef): Promise<AuthStatus>
+  listModels?(profile: ProfileRef): Promise<ModelInfo[]>
+  createSession(request: CreateSessionRequest): Promise<AgentSession>
 }
 
 export type WorkspaceIsolation = 'none' | 'process' | 'container' | 'vm'
@@ -1092,25 +1114,22 @@ export interface ExecHandle {
   readonly stdout: AsyncIterable<string>
   readonly stderr: AsyncIterable<string>
   readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
-  readonly kill: (signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL') => void
+  kill(signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL'): void
 }
 
 export interface WorkspaceRuntime {
   readonly id: string
   readonly isolation: WorkspaceIsolation
-  readonly provision: (spec: WorkspaceSpec) => Promise<WorkspaceHandle>
-  readonly exec: (handle: WorkspaceHandle, spec: ExecSpec) => Promise<ExecHandle>
-  readonly status: (handle: WorkspaceHandle) => Promise<WorkspaceStatus>
-  readonly destroy: (
-    handle: WorkspaceHandle,
-    options?: { readonly force?: boolean },
-  ) => Promise<void>
+  provision(spec: WorkspaceSpec): Promise<WorkspaceHandle>
+  exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle>
+  status(handle: WorkspaceHandle): Promise<WorkspaceStatus>
+  destroy(handle: WorkspaceHandle, options?: { readonly force?: boolean }): Promise<void>
 }
 
 export interface SecretStore {
-  readonly get: (key: string) => Promise<string | undefined>
-  readonly set: (key: string, value: string) => Promise<void>
-  readonly delete: (key: string) => Promise<void>
+  get(key: string): Promise<string | undefined>
+  set(key: string, value: string): Promise<void>
+  delete(key: string): Promise<void>
 }
 ```
 
@@ -1151,21 +1170,21 @@ export interface ProjectInfo {
 }
 
 export interface PluginEvents {
-  readonly publish: (event: KernelEvent) => Promise<void>
-  readonly subscribe: (filter: {
+  publish(event: KernelEvent): Promise<void>
+  subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
-  }) => AsyncIterable<KernelEvent>
+  }): AsyncIterable<KernelEvent>
 }
 
 export interface PluginKv {
-  readonly get: <Type = unknown>(key: string) => Promise<Type | undefined>
-  readonly set: (key: string, value: unknown) => Promise<void>
-  readonly delete: (key: string) => Promise<void>
+  get<Type = unknown>(key: string): Promise<Type | undefined>
+  set(key: string, value: unknown): Promise<void>
+  delete(key: string): Promise<void>
 }
 
 export interface ProcessSpawner {
-  readonly spawn: (spec: ExecSpec & { readonly cwd: string }) => Promise<ExecHandle>
+  spawn(spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle>
 }
 
 export interface PluginContext<Config = unknown> {
@@ -1221,14 +1240,12 @@ export interface PluginRegistration {
   readonly workspaceRuntimes?: readonly WorkspaceRuntime[] | undefined
   readonly secretStores?: readonly SecretStore[] | undefined
   readonly hooks?: Partial<Hooks> | undefined
-  readonly dispose?: (() => Promise<void>) | undefined
+  dispose?(): Promise<void>
 }
 
 export interface Plugin<Config = unknown> {
   readonly manifest: PluginManifest
-  readonly setup: (
-    context: PluginContext<Config>,
-  ) => Promise<PluginRegistration> | PluginRegistration
+  setup(context: PluginContext<Config>): Promise<PluginRegistration> | PluginRegistration
 }
 
 /** Returns the plugin object unchanged so the host can read its manifest. */
