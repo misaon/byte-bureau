@@ -44,15 +44,23 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: ['node_modules'] },
-    // Excluded modules vanish from the graph, so node_modules must stay out of this list
-    // Otherwise a rule that targets a third-party package (effect-only-in-core) could never match
-    exclude: { path: ['dist', 'coverage', 'src/paraglide', String.raw`\.astro`] },
-    // The TypeScript API of dependency-cruiser stops at typescript 6 and this repo uses 7
-    // So swc parses the sources, and the "missing-typescript-transpiler" notice is expected
-    // Once TypeScript 7 is supported, drop swc and this option; tsPreCompilationDeps takes over
+    // Excluded modules vanish from the graph, so these patterns must only match first-party paths
+    // An unanchored "dist" once dropped third-party entry files such as citty, @clack/prompts and
+    // Effect (node_modules/.bun/<name>@<version>/node_modules/<name>/dist/...)
+    // With them went the edges that effect-only-in-core has to see
+    // It also skipped first-party files whose names merely contain dist or coverage
+    exclude: {
+      path: [
+        String.raw`^(apps|packages|plugins|scripts)/[^/]+/(dist|coverage)/`,
+        'src/paraglide',
+        String.raw`\.astro`,
+      ],
+    },
+    // The TypeScript support of dependency-cruiser stops at typescript 6 and this repo uses 7
+    // So swc parses the sources
+    // Leave tsConfig and tsPreCompilationDeps unset: they only trigger a missing-typescript notice
+    // Once TypeScript 7 is supported, drop swc and use parser: 'tsc' together with tsConfig
     parser: 'swc',
-    tsPreCompilationDeps: true,
-    tsConfig: { fileName: 'tsconfig.json' },
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'require', 'node', 'default', 'types'],
