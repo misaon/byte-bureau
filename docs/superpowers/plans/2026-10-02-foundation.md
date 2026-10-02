@@ -6,7 +6,7 @@
 
 **Architecture:** Bun workspaces + Turborepo monorepo with a strict TypeScript 7 configuration, oxlint/oxfmt as the primary lint/format stack (ESLint long tail isolated in `tools/eslint-long-tail`), repo-wide gates (knip, dependency-cruiser, cspell, markdownlint, ls-lint), GitHub Actions workflows with SHA-pinned actions, and a tag-triggered release that cross-compiles eight binaries, attests them, signs them and publishes an immutable release. The only product code is `apps/bytebureau` (citty CLI) using `packages/i18n` (Paraglide JS 2).
 
-**Tech Stack:** Bun 1.4.x, Node 26 (dev only), TypeScript 7.0.x (+ `@typescript/typescript6` inside the ESLint tool dir), oxlint + oxlint-tsgolint, oxfmt, Turborepo 2.x, Vitest 5, fast-check, lefthook 2, commitlint 21, changelogen, Renovate, Paraglide JS 2, citty, @clack/prompts, picocolors, Astro Starlight, GitHub Actions (checkout v7, setup-node v7, setup-bun v2, cache v6, harden-runner v2, attest-build-provenance v4, cosign-installer v4, action-gh-release v3, labeler v7, stale v11, scorecard v2, zizmor-action).
+**Tech Stack:** Bun 1.4.x, Node 26 (dev only), TypeScript 7.0.x (+ `@typescript/typescript6` inside the ESLint tool dir), oxlint + oxlint-tsgolint, oxfmt, Turborepo 2.x, Vitest 5, fast-check, lefthook 2, commitlint 21, changelogen, Renovate, Paraglide JS 2, citty, @clack/prompts, picocolors, Astro Starlight, GitHub Actions (checkout v7, setup-node v7, setup-bun v2, cache v6, harden-runner v2, attest-build-provenance v4, attest v4, cosign-installer v4, sbom-action v0, `gh release`, labeler v7, stale v11, scorecard v2, zizmor-action).
 
 **Spec:** `docs/superpowers/specs/2026-10-02-foundation-design.md`
 
@@ -24,7 +24,7 @@
 - README ≤ 300 lines, markdownlint clean; `README.cs.md` mirrors section structure.
 - Coverage thresholds 80 % lines/branches on `packages/*` (apps excluded until SP1).
 
-**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push` alone (it bumps the root version, writes the changelog, commits and tags); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action).
+**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push --no-github` alone (it bumps the root version, writes the changelog, commits and tags; the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6.
 
 ## Review Focus
 
@@ -166,7 +166,7 @@ bytebureau-diag-*.zip
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
-    "release": "changelogen --release --push"
+    "release": "changelogen --release --push --no-github"
   },
   "devDependencies": {
     "@bytebureau/tsconfig": "workspace:*"
@@ -2394,7 +2394,7 @@ Releases must be reproducible, verifiable and friendly to read, for binaries on 
 
 ## Decision
 
-`changelogen --release --push` bumps the root version from Conventional Commits, writes `CHANGELOG.md` with emoji sections, commits and tags `vX.Y.Z`. The tag triggers `release.yml`: eight binaries are cross-compiled on one Linux runner, checksummed, attested with GitHub build provenance, signed with cosign (Sigstore bundles), accompanied by a CycloneDX SBOM, uploaded to a draft release and then published; the owner enables immutable releases so published assets cannot change. npm packages (from sub-project 1) publish through trusted publishing with provenance.
+`changelogen --release --push --no-github` bumps the root version from Conventional Commits, writes `CHANGELOG.md` with emoji sections, commits and tags `vX.Y.Z`; the GitHub release itself is created by the workflow. The tag triggers `release.yml`: eight binaries are cross-compiled on one Linux runner, checksummed, attested with GitHub build provenance, accompanied by a CycloneDX SBOM with its own attestation, signed with cosign (Sigstore bundles), uploaded to a draft release with `gh release create` and then published; the owner enables immutable releases so published assets cannot change. npm packages (from sub-project 1) publish through trusted publishing with provenance.
 
 ## Consequences
 
@@ -3438,7 +3438,7 @@ git commit -m "ci: add hardened ci, security, docs and housekeeping workflows"
 
 **Files:**
 - Create: `scripts/release-notes.ts`, `scripts/release-notes.test.ts`, `changelog.config.ts`, `.github/workflows/release.yml`
-- Modify: `package.json` (devDependency `changelogen`; `release` script already present)
+- Modify: `package.json` (devDependency `changelogen`; `release` script gains `--no-github`), `knip.ts` (drop the temporary `ignoreBinaries` entry)
 
 **Interfaces:**
 - Produces: `extractReleaseNotes(changelog: string, version: string): string` (throws when the section is missing or empty); `bun run scripts/release-notes.ts <version> <outfile>`; tag `v*` → eight attested, signed binaries + `SHA256SUMS` + `sbom.cdx.json` in an immutable release.
@@ -3467,7 +3467,7 @@ const changelog = `# Changelog
 - **repo:** bootstrap
 `
 
-describe('extractReleaseNotes', () => {
+describe(extractReleaseNotes, () => {
   it('returns the body of the requested version only', () => {
     expect(extractReleaseNotes(changelog, '0.2.0')).toBe(
       '[compare changes](https://github.com/misaon/byte-bureau/compare/v0.1.0...v0.2.0)\n\n### 🚀 Enhancements\n\n- **cli:** add doctor command',
@@ -3483,7 +3483,9 @@ describe('extractReleaseNotes', () => {
   })
 
   it('throws when the section is empty', () => {
-    expect(() => extractReleaseNotes('# Changelog\n\n## v0.3.0\n\n## v0.2.0\n\ntext\n', '0.3.0')).toThrow('empty')
+    expect(() =>
+      extractReleaseNotes('# Changelog\n\n## v0.3.0\n\n## v0.2.0\n\ntext\n', '0.3.0'),
+    ).toThrow('empty')
   })
 })
 ```
@@ -3495,22 +3497,31 @@ Run: `bunx vitest run --project scripts` → FAIL.
 ```ts
 #!/usr/bin/env bun
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import path from 'node:path'
 
-const ROOT = join(import.meta.dirname, '..')
+const ROOT = path.join(import.meta.dirname, '..')
+
+function headingOf(version: string): RegExp {
+  const escaped = version.replaceAll('.', String.raw`\.`)
+  return new RegExp(`^## v?${escaped}(?:\\s|$)`, 'mu')
+}
+
+function bodyOf(section: string): string {
+  const afterHeading = section.slice(section.indexOf('\n') + 1)
+  const nextHeading = afterHeading.search(/^## /mu)
+  return nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading)
+}
 
 export function extractReleaseNotes(changelog: string, version: string): string {
-  const escaped = version.replaceAll('.', '\\.')
-  const heading = new RegExp(`^## v?${escaped}(?:\\s|$)`, 'mu')
-  const start = changelog.search(heading)
-  if (start === -1) throw new Error(`CHANGELOG.md has no section for version ${version}`)
-  const section = changelog.slice(start)
-  const bodyStart = section.indexOf('\n') + 1
-  const nextHeading = section.slice(bodyStart).search(/^## /mu)
-  const body = nextHeading === -1 ? section.slice(bodyStart) : section.slice(bodyStart, bodyStart + nextHeading)
-  const trimmed = body.trim()
-  if (trimmed === '') throw new Error(`CHANGELOG.md section for version ${version} is empty`)
-  return trimmed
+  const start = changelog.search(headingOf(version))
+  if (start === -1) {
+    throw new Error(`CHANGELOG.md has no section for version ${version}`)
+  }
+  const body = bodyOf(changelog.slice(start)).trim()
+  if (body === '') {
+    throw new Error(`CHANGELOG.md section for version ${version} is empty`)
+  }
+  return body
 }
 
 if (import.meta.main) {
@@ -3519,7 +3530,7 @@ if (import.meta.main) {
     console.error('usage: release-notes.ts <version> <outfile>')
     process.exit(1)
   }
-  const changelog = await readFile(join(ROOT, 'CHANGELOG.md'), 'utf8')
+  const changelog = await readFile(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
   await writeFile(outfile, `${extractReleaseNotes(changelog, version)}\n`)
 }
 ```
@@ -3542,6 +3553,8 @@ const config: Partial<ChangelogConfig> = {
 export default config
 ```
 Verify: `bunx changelogen --dry` prints a preview grouped by emoji sections for the commits since the beginning (no files written). If `repo` must be a string in the installed version, use `repo: 'misaon/byte-bureau'`.
+
+knip's changelogen plugin recognises `changelog.config.ts`: remove the temporary `ignoreBinaries: ['changelogen']` entry (and its comment) from `knip.ts`. Change the root `release` script to `changelogen --release --push --no-github` so changelogen does not create a GitHub release of its own (the workflow creates the draft).
 
 - [ ] **Step 4: `release.yml`**
 
@@ -3567,18 +3580,19 @@ concurrency:
 
 jobs:
   binaries:
+    name: binaries
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      id-token: write # sign blobs and request attestations through Sigstore OIDC
+      attestations: write # store the build provenance and SBOM attestations
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3588,102 +3602,76 @@ jobs:
         run: echo "version=$(bun --print 'JSON.parse(require("node:fs").readFileSync("package.json","utf8")).version')" >> "$GITHUB_OUTPUT"
       - run: bun run build:binaries
       - run: cd dist && sha256sum bytebureau-* > SHA256SUMS
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/bytebureau-*
-      - uses: sigstore/cosign-installer@v4
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/sbom.cdx.json
+          upload-artifact: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/bytebureau-*
+          predicate-type: https://cyclonedx.org/bom
+          predicate-path: dist/sbom.cdx.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: sign artifacts
         run: |
           set -euo pipefail
           for file in dist/bytebureau-* dist/SHA256SUMS; do
             cosign sign-blob --yes --bundle "${file}.sigstore.json" "${file}"
           done
-      - uses: anchore/sbom-action@v0
-        with:
-          path: .
-          format: cyclonedx-json
-          output-file: dist/sbom.cdx.json
-          upload-artifact: false
-      - uses: actions/attest-sbom@v3
-        with:
-          subject-path: dist/bytebureau-*
-          sbom-path: dist/sbom.cdx.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets
           path: dist/
           retention-days: 7
 
   release:
+    name: release
     needs: binaries
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: write # create the GitHub release and attach its assets
     env:
       VERSION: ${{ needs.binaries.outputs.version }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           cache: 'false'
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-assets
           path: dist
       - run: bun run scripts/release-notes.ts "$VERSION" dist/RELEASE_NOTES.md
-      - uses: softprops/action-gh-release@v3
-        with:
-          draft: true
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
-          body_path: dist/RELEASE_NOTES.md
-          fail_on_unmatched_files: true
-          files: |
-            dist/bytebureau-*
-            dist/SHA256SUMS
-            dist/SHA256SUMS.sigstore.json
+      - name: create the draft release
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --draft \
+            --title "v${VERSION}" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/bytebureau-* \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sigstore.json \
             dist/sbom.cdx.json
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: publish the draft
         run: gh release edit "v${VERSION}" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
-
-  homebrew:
-    needs: [binaries, release]
-    runs-on: ubuntu-24.04
-    env:
-      HAS_TAP: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
-      VERSION: ${{ needs.binaries.outputs.version }}
-    steps:
-      - uses: step-security/harden-runner@v2
-        with:
-          egress-policy: audit
-      - if: env.HAS_TAP != 'true'
-        run: echo "HOMEBREW_TAP_TOKEN not configured; skipping tap update"
-      - if: env.HAS_TAP == 'true'
-        uses: Justintime50/homebrew-releaser@v4
-        with:
-          homebrew_owner: misaon
-          homebrew_tap: homebrew-tap
-          formula_folder: Formula
-          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          commit_owner: bytebureau-release-bot
-          commit_email: release-bot@users.noreply.github.com
-          install: 'bin.install Dir["bytebureau-*"].first => "bytebureau"'
-          test: 'assert_match "bytebureau", shell_output("#{bin}/bytebureau --help")'
-          target_darwin_amd64: true
-          target_darwin_arm64: true
-          target_linux_amd64: true
-          target_linux_arm64: true
-          update_readme_table: false
 ```
-Then run `./scripts/pin-actions.sh` again so the new actions are SHA-pinned (`attest-build-provenance`, `cosign-installer`, `sbom-action`, `attest-sbom`, `download-artifact`, `action-gh-release`, `homebrew-releaser`).
+Stage the file (`git add .github/workflows/release.yml`) and run `./scripts/pin-actions.sh` again so the new actions are SHA-pinned (`attest-build-provenance`, `cosign-installer`, `sbom-action`, `attest`, `download-artifact`). `softprops/action-gh-release` is replaced by `gh release create` (zizmor's `superfluous-actions` audit), the deprecated `attest-sbom` by `actions/attest` with the CycloneDX predicate, and no Homebrew job ships (homebrew-releaser's archive naming cannot be met by raw binaries; installers are sub-project 6).
 
 - [ ] **Step 5: Validate and commit**
 
@@ -3693,7 +3681,7 @@ bunx vitest run --project scripts
 docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color   # skip if Docker is absent
 ```
 ```bash
-git add scripts/release-notes.ts scripts/release-notes.test.ts changelog.config.ts .github/workflows/release.yml package.json bun.lock
+git add scripts/release-notes.ts scripts/release-notes.test.ts changelog.config.ts .github/workflows/release.yml package.json bun.lock knip.ts
 git commit -m "ci: add release workflow with provenance, signatures and sbom"
 ```
 
@@ -4022,7 +4010,6 @@ Checklist from docs/decisions/0001-record-architecture-decisions.md (appendix):
 - [ ] UI: CodeQL default setup (JS/TS + Actions, extended), immutable releases, social preview, Actions policy, artifact retention 30 days, Discussions categories
 - [ ] Install Renovate, DCO and all-contributors apps
 - [ ] Reserve npm `@bytebureau`, Docker Hub `bytebureau`, domains `bytebureau.dev` / `.app` / `.cz`
-- [ ] Create `homebrew-tap` repository and `HOMEBREW_TAP_TOKEN` secret (optional)
 - [ ] Link Vercel for Turborepo remote cache: `TURBO_TOKEN` secret + `TURBO_TEAM` variable (optional)
 - [ ] GitHub Sponsors (optional)
 BODY
@@ -4035,22 +4022,22 @@ After the owner approves: `gh pr merge --squash --delete-branch`. Then trigger t
 gh workflow run release.yml -f dry_run=true
 gh run watch
 ```
-Expected: the `binaries` job uploads `release-assets` containing eight binaries, `SHA256SUMS`, `.sigstore.json` bundles and `sbom.cdx.json`; the `release` job is skipped.
+Expected: the `binaries` job uploads `release-assets` containing eight binaries with their `.map` sourcemaps, `SHA256SUMS`, `.sigstore.json` bundles and `sbom.cdx.json`; the `release` job is skipped.
 
 - [ ] **Step 5: First release (owner-run, outward-facing; not performed by the executing agent)**
 
 On `main` with a clean tree:
 ```bash
 git pull
-bun run release
+bunx changelogen --release --push --no-github -r 0.1.0
 ```
-`changelogen --release --push` bumps `package.json` to `0.1.0` (minor, because the history contains `feat` commits), writes `CHANGELOG.md`, commits `chore(release): v0.1.0`, tags `v0.1.0` and pushes. `release.yml` then publishes the release. Verify:
+`changelogen --release -r 0.1.0` bumps `package.json` to `0.1.0` (passed explicitly: changelogen would compute `0.0.1` from `0.0.0`), writes `CHANGELOG.md`, commits `chore(release): v0.1.0`, tags `v0.1.0` and pushes; `--no-github` leaves the GitHub release to `release.yml`, which then publishes it. Verify:
 ```bash
 gh release view v0.1.0
 gh release download v0.1.0 --pattern 'bytebureau-0.1.0-linux-x64*' --dir /tmp/bb
 gh attestation verify /tmp/bb/bytebureau-0.1.0-linux-x64 --owner misaon
 ```
-Expected: ten assets (eight binaries, `SHA256SUMS`, `sbom.cdx.json`) plus Sigstore bundles, emoji-sectioned notes, and a successful attestation verification.
+Expected: the eight binaries with their `.map` sourcemaps, `SHA256SUMS`, `sbom.cdx.json` and a Sigstore bundle for each binary, map and checksum file, emoji-sectioned notes, and a successful attestation verification.
 
 ---
 
