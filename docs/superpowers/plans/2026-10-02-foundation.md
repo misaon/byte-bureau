@@ -129,6 +129,7 @@ bytebureau-diag-*.zip
 .env
 .env.*
 .DS_Store
+.idea/
 ```
 
 - [ ] **Step 2: Create the root `package.json`**
