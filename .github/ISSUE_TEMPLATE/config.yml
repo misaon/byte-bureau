@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and help
+    url: https://github.com/misaon/byte-bureau/discussions/categories/q-a
+    about: Ask in Discussions; issues are for confirmed bugs and features.
+  - name: Report a security vulnerability
+    url: https://github.com/misaon/byte-bureau/security/advisories/new
+    about: Use private vulnerability reporting; never open a public issue for security problems.

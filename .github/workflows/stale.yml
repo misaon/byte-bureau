@@ -1,0 +1,39 @@
+name: stale
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    name: stale
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      issues: write # label and close stale issues
+      pull-requests: write # label and close stale pull requests
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11
+        with:
+          days-before-stale: 90
+          days-before-close: 14
+          exempt-issue-labels: 'pinned,kind: security,good first issue,help wanted'
+          exempt-pr-labels: 'pinned,kind: security,wip'
+          exempt-all-assignees: true
+          stale-issue-message: >-
+            This issue has been quiet for 90 days. Is it still relevant? Comment to keep it open;
+            otherwise it closes in 14 days. Thank you for helping keep the tracker tidy.
+          stale-pr-message: >-
+            This pull request has been quiet for 90 days. Comment or push to keep it open; otherwise it closes in 14 days.
+          stale-issue-label: 'status: stale'
+          stale-pr-label: 'status: stale'

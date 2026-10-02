@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "oxc.oxc-vscode",
+    "TypeScriptTeam.native-preview",
+    "inlang.vs-code-extension",
+    "EditorConfig.EditorConfig",
+    "streetsidesoftware.code-spell-checker",
+    "astro-build.astro-vscode",
+    "unifiedjs.vscode-mdx"
+  ]
+}

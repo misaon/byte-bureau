@@ -1,0 +1,16 @@
+{
+  "name": "@bytebureau/eslint-long-tail",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "eslint": "10.11.0",
+    "eslint-plugin-jsdoc": "65.0.1",
+    "eslint-plugin-security": "4.2.0",
+    "eslint-plugin-sonarjs": "4.2.2",
+    "jiti": "2.7.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-eslint": "8.71.0"
+  }
+}

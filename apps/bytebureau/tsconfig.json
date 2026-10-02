@@ -1,0 +1,4 @@
+{
+  "extends": "@bytebureau/tsconfig/app.json",
+  "include": ["src"]
+}

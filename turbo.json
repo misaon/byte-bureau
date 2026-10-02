@@ -1,0 +1,26 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "agentGuidance": false,
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
+    "bytebureau#build": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/build-binaries.ts",
+        "$TURBO_ROOT$/package.json"
+      ],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": { "dependsOn": ["^build"], "outputs": [] },
+    "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
+    "docs:build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/docs/decisions/**"],
+      "env": ["DOCS_SITE", "DOCS_BASE"],
+      "outputs": ["dist/**"]
+    }
+  }
+}

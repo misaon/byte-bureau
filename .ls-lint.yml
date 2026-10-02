@@ -1,0 +1,46 @@
+ls:
+  # A multi-dot name is checked only when its exact extension has a key, so each one in use is listed
+  .ts: kebab-case
+  .test.ts: kebab-case
+  .config.ts: kebab-case
+  .d.ts: kebab-case
+  .tsx: kebab-case | PascalCase
+  .mjs: kebab-case
+  .config.mjs: kebab-case
+  .cjs: kebab-case
+  .config.cjs: kebab-case
+  .json: kebab-case
+  .md: kebab-case | SCREAMING_SNAKE_CASE
+  .cs.md: kebab-case | SCREAMING_SNAKE_CASE
+  .mdx: kebab-case
+  .yml: kebab-case
+  .yaml: kebab-case
+  # The regex lets dotted directory names through, which kebab-case alone rejects (foo.bar, v1.2)
+  .dir: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+
+ignore:
+  - '**/node_modules'
+  - .git
+  - .github
+  - .vscode
+  - .idea
+  - .superpowers
+  - '**/.astro'
+  - '**/.turbo'
+  - '**/dist'
+  - '**/coverage'
+  - docs/research
+  - packages/i18n/src/paraglide
+  - packages/i18n/project.inlang
+  - CODEOWNERS
+  - .all-contributorsrc
+  - .bun-version
+  - .node-version
+  - .editorconfig
+  - .gitattributes
+  - .gitignore
+  - .oxlintrc.json
+  - .oxfmtrc.json
+  - .markdownlint-cli2.yaml
+  - .ls-lint.yml
+  - .dependency-cruiser.cjs

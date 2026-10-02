@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+*.tsbuildinfo
+.astro/
+packages/i18n/src/paraglide/
+apps/docs/src/content/docs/decisions/
+apps/docs/src/content/docs/cs/decisions/
+bytebureau-diag-*.zip
+.env
+.env.*
+.DS_Store
+*.bun-build
+.idea/
+.superpowers/

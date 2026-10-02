@@ -29,7 +29,7 @@ byte-bureau/
 ├── .github/                   workflows, issue forms, PR template, CODEOWNERS, labeler, FUNDING, dependabot (alerts only)
 ├── package.json               Bun workspaces ["apps/*","packages/*","plugins/*"] + catalog of shared dependency versions
 ├── bun.lock · bunfig.toml · .bun-version · mise.toml (bun + node versions for contributors)
-├── turbo.json · tsconfig.json (solution) · .oxlintrc.json · .oxfmtrc.json · eslint.config.ts (CI-only long tail)
+├── turbo.json · tsconfig.json (solution) · .oxlintrc.jsonc · .oxfmtrc.json · eslint.config.ts (CI-only long tail)
 ├── knip.ts · .dependency-cruiser.cjs · cspell.json · .markdownlint-cli2.yaml · lefthook.yml · commitlint.config.ts
 ├── renovate.json · .editorconfig · .gitattributes · .gitignore · .vscode/{extensions,settings}.json
 ├── LICENSE.md (FSL-1.1-MIT) · TRADEMARK.md · README.md · README.cs.md · CHANGELOG.md

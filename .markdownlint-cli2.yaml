@@ -1,0 +1,18 @@
+config:
+  default: true
+  MD013: false
+  MD024:
+    siblings_only: true
+  MD033: false
+  MD041: false
+gitignore: true
+globs:
+  - '**/*.md'
+ignores:
+  - 'node_modules/**'
+  - '**/node_modules/**'
+  - 'docs/research/**'
+  - 'docs/superpowers/**'
+  - 'CHANGELOG.md'
+  - 'LICENSE.md'
+  - 'CODE_OF_CONDUCT.md'

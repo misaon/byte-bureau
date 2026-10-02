@@ -1,0 +1,32 @@
+name: Plugin proposal
+description: Propose a new integration or plugin
+labels: ['kind: feature', 'area: integrations', 'status: needs-triage']
+body:
+  - type: input
+    id: system
+    attributes:
+      label: System to integrate
+      placeholder: GitLab, Linear, Discord, Kubernetes
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Plugin kind
+      options:
+        - Agent provider
+        - Workspace runtime
+        - Git host
+        - Ticket system
+        - Chat
+        - Notifier
+        - Skills source
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What the plugin should do
+    validations:
+      required: true

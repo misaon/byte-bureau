@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "ADR-0009: grouped weekly updates behind release-age cooldowns; config:best-practices pins the GitHub Action and Docker digests",
+  "extends": ["config:best-practices", ":semanticCommits", "group:allNonMajor", "schedule:weekly"],
+  "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Docker images of the workflow linters: actionlint in ci.yml, actionlint and zizmor in the lint:actions script",
+      "managerFilePatterns": [".github/workflows/ci.yml", "package.json"],
+      "matchStrings": [
+        "(?<depName>(?:[a-z0-9-]+\\.[a-z0-9.-]+/)?[a-z0-9._-]+/[a-z0-9._-]+):(?<currentValue>[0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "ADR-0009 floor: npm major, minor and patch updates wait 7 days instead of the 3 days of security:minimumReleaseAgeNpm (config:best-practices); other npm update types keep that preset's handling",
+      "matchDatasources": ["npm"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "devDependency minors and patches wait 14 days and automerge in their own group: Renovate merges a branch by itself only when every update in it may automerge, so they cannot share the group:allNonMajor branch with runtime updates",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies",
+      "minimumReleaseAge": "14 days",
+      "automerge": true,
+      "platformAutomerge": true
+    },
+    {
+      "description": "Bun and the action that installs it in CI update together",
+      "matchPackageNames": ["bun", "oven-sh/setup-bun"],
+      "groupName": "bun"
+    },
+    {
+      "description": "GHCR reports no release timestamps, so the release-age check would hold the zizmor image back forever",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/zizmorcore/zizmor"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    }
+  ]
+}

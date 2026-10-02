@@ -1,0 +1,41 @@
+'area: foundation':
+  - changed-files:
+      - any-glob-to-any-file:
+          [
+            'package.json',
+            'bunfig.toml',
+            'turbo.json',
+            'tsconfig.json',
+            'packages/tsconfig/**',
+            'scripts/**',
+            '.oxlintrc.jsonc',
+            '.oxfmtrc.json',
+            'knip.ts',
+            '.dependency-cruiser.cjs',
+            'lefthook.yml',
+            'commitlint.config.ts',
+            'vitest.config.ts',
+            'renovate.json',
+            'cspell.json',
+            'cspell-words.txt',
+            '.ls-lint.yml',
+            '.markdownlint-cli2.yaml',
+            'mise.toml',
+            '.bun-version',
+            '.node-version',
+            'tools/**',
+            '.vscode/**',
+            '.editorconfig',
+          ]
+'area: ci':
+  - changed-files:
+      - any-glob-to-any-file: ['.github/**']
+'area: cli':
+  - changed-files:
+      - any-glob-to-any-file: ['apps/bytebureau/**']
+'area: docs':
+  - changed-files:
+      - any-glob-to-any-file: ['docs/**', 'apps/docs/**', 'README.md', 'README.cs.md']
+'area: i18n':
+  - changed-files:
+      - any-glob-to-any-file: ['packages/i18n/**']

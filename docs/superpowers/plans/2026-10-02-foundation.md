@@ -6,7 +6,7 @@
 
 **Architecture:** Bun workspaces + Turborepo monorepo with a strict TypeScript 7 configuration, oxlint/oxfmt as the primary lint/format stack (ESLint long tail isolated in `tools/eslint-long-tail`), repo-wide gates (knip, dependency-cruiser, cspell, markdownlint, ls-lint), GitHub Actions workflows with SHA-pinned actions, and a tag-triggered release that cross-compiles eight binaries, attests them, signs them and publishes an immutable release. The only product code is `apps/bytebureau` (citty CLI) using `packages/i18n` (Paraglide JS 2).
 
-**Tech Stack:** Bun 1.4.x, Node 26 (dev only), TypeScript 7.0.x (+ `@typescript/typescript6` inside the ESLint tool dir), oxlint + oxlint-tsgolint, oxfmt, Turborepo 2.x, Vitest 5, fast-check, lefthook 2, commitlint 21, changelogen, Renovate, Paraglide JS 2, citty, @clack/prompts, picocolors, Astro Starlight, GitHub Actions (checkout v7, setup-node v7, setup-bun v2, cache v6, harden-runner v2, attest-build-provenance v4, cosign-installer v4, action-gh-release v3, labeler v7, stale v11, scorecard v2, zizmor-action).
+**Tech Stack:** Bun 1.4.x, Node 26 (dev only), TypeScript 7.0.x (+ `@typescript/typescript6` inside the ESLint tool dir), oxlint + oxlint-tsgolint, oxfmt, Turborepo 2.x, Vitest 5, fast-check, lefthook 2, commitlint 21, changelogen, Renovate, Paraglide JS 2, citty, @clack/prompts, picocolors, Astro Starlight, GitHub Actions (checkout v7, setup-node v7, setup-bun v2, cache v6, harden-runner v2, attest-build-provenance v4, attest v4, cosign-installer v4, sbom-action v0, `gh release`, labeler v7, stale v11, scorecard v2, zizmor-action).
 
 **Spec:** `docs/superpowers/specs/2026-10-02-foundation-design.md`
 
@@ -15,16 +15,16 @@
 - Runtime: Bun pinned in `.bun-version` (`1.4.2`) and `mise.toml`; `engines.bun >= 1.4.0`; Node 26 is dev-only (Vitest, ESLint long tail, Astro) and never required at runtime.
 - TypeScript: `typescript` 7.0.x at the root; `@tsconfig/strictest` base plus `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`, `noImplicitOverride`, `noUncheckedSideEffectImports`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `isolatedDeclarations` (libraries), `module`/`moduleResolution` = `nodenext`, explicit `types`.
 - Lint: oxlint with every category (`correctness`, `suspicious`, `pedantic`, `perf`, `restriction`, `style`) at `error`, type-aware mode on; oxfmt `--check` is a CI gate; ESLint long tail runs in CI only.
-- Commits: Conventional Commits validated by commitlint with `scope-enum` = workspace directory names + `cli`, `deps`, `release`, `repo`, `ci`, `docs`; PR titles validated; squash-only merges.
+- Commits: Conventional Commits validated by commitlint with `type-enum` = `feat fix perf refactor docs test build ci chore revert` and `scope-enum` = workspace directory names + `cli`, `deps`, `release`, `repo`, `ci`, `docs`; PR titles validated with the same types and scopes; squash-only merges; subject starts lowercase (config-conventional's default `subject-case`, proper nouns inside the subject allowed).
 - Licence strings: root and app packages `"license": "FSL-1.1-MIT"`; the project is described as "fair source" / "source-available", never as "open source".
 - Package naming: workspace packages are `@bytebureau/<name>`; `apps/bytebureau` is the `bytebureau` binary package (private).
 - Dependency rules (dependency-cruiser): only `packages/kernel`, `packages/api`, `packages/protocol` may import `effect`; `plugins/*` may import only `@bytebureau/plugin-api`, `@bytebureau/protocol` and third-party packages; nothing imports from `apps/*`; no circular dependencies.
 - Binary targets (exactly eight): `bun-darwin-arm64`, `bun-darwin-x64`, `bun-linux-x64`, `bun-linux-arm64`, `bun-linux-x64-musl`, `bun-linux-arm64-musl`, `bun-windows-x64`, `bun-windows-arm64`; artifact names `bytebureau-<version>-<os>-<arch>[-musl][.exe]`.
 - CI targets: PR pipeline ≤ 6 minutes, release ≤ 20 minutes; every `uses:` pinned to a commit SHA; `permissions: contents: read` at workflow top level; `persist-credentials: false` on checkout; harden-runner first step.
 - README ≤ 300 lines, markdownlint clean; `README.cs.md` mirrors section structure.
-- Coverage thresholds 80 % lines/branches on `packages/*` (apps excluded until SP1).
+- Coverage thresholds 80 % lines/branches on `packages/*`, `scripts/**`, `apps/docs/scripts/**` and the pure CLI modules (`locale.ts`, `output.ts`, `run.ts`); the CLI entry and commands are excluded until SP1.
 
-**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push` alone (it bumps the root version, writes the changelog, commits and tags); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action).
+**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --no-push --no-tag --no-github` alone (it bumps the root version, writes the changelog and commits; the owner tags the squash-merged release commit and the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6. (5) Releases go through a release pull request (ADR-0008): the main ruleset has no bypass actor; the owner tags the merge commit and pushes the tag. (6) The dependency catalog is deferred until Renovate reads Bun's `workspaces.catalog`; versions stay in the manifests. (7) `required_approving_review_count` starts at 0 and `require_code_owner_review` is false while there is one maintainer. (8) `smoke-macos` runs on every pull request instead of only when `apps/bytebureau/**` changes (free on a public repository, simpler).
 
 ## Review Focus
 
@@ -43,7 +43,7 @@
 package.json bunfig.toml bun.lock                     workspace root, catalog, scripts, install policy
 tsconfig.json                                         root config for scripts and config files
 packages/tsconfig/{package.json,base.json,library.json,app.json}
-.oxlintrc.json .oxfmtrc.json                          lint/format
+.oxlintrc.jsonc .oxfmtrc.json                          lint/format
 lefthook.yml commitlint.config.ts                     hooks and commit rules
 vitest.config.ts                                      root test runner config (projects + coverage)
 packages/i18n/{package.json,tsconfig.json,vitest.config.ts,project.inlang/settings.json,messages/{en,cs}.json,scripts/compile.ts,src/index.ts,src/parity.test.ts}
@@ -129,7 +129,9 @@ bytebureau-diag-*.zip
 .env
 .env.*
 .DS_Store
+*.bun-build
 .idea/
+.superpowers/
 ```
 
 - [ ] **Step 2: Create the root `package.json`**
@@ -140,41 +142,78 @@ bytebureau-diag-*.zip
   "version": "0.0.0",
   "private": true,
   "license": "FSL-1.1-MIT",
-  "type": "module",
-  "engines": { "bun": ">=1.4.0" },
   "workspaces": {
-    "packages": ["apps/*", "packages/*", "plugins/*"],
+    "packages": [
+      "apps/*",
+      "packages/*",
+      "plugins/*"
+    ],
     "catalog": {}
   },
+  "type": "module",
   "scripts": {
+    "prepare": "lefthook install",
     "build": "turbo run build",
-    "typecheck": "turbo run typecheck",
-    "test": "turbo run build --filter=@bytebureau/i18n && vitest run",
-    "test:coverage": "turbo run build --filter=@bytebureau/i18n && vitest run --coverage",
-    "lint": "oxlint --type-aware",
-    "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && bun --cwd tools/eslint-long-tail run lint",
+    "build:i18n": "turbo run build --filter=@bytebureau/i18n",
+    "typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json",
+    "test": "bun run build:i18n && vitest run",
+    "test:coverage": "bun run build:i18n && vitest run --coverage",
+    "lint": "bun run build:i18n && oxlint --type-aware",
+    "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && tools/eslint-long-tail/node_modules/.bin/eslint --config tools/eslint-long-tail/eslint.config.ts --max-warnings 0 apps packages scripts",
+    "lint:actions": "docker run --rm -v \"${PWD}:/repo\" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color && docker run --rm -e GH_TOKEN -v \"${PWD}:/repo\" -w /repo ghcr.io/zizmorcore/zizmor:1.30.1@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101 --persona pedantic .github",
     "lint:md": "markdownlint-cli2",
     "lint:ls": "ls-lint",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "knip": "knip",
     "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
-    "spell": "cspell --no-progress --gitignore \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
-    "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
-    "build:binaries": "bun run scripts/build-binaries.ts",
+    "spell": "cspell --no-progress --gitignore --dot \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
+    "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage && bun run lint:long-tail",
+    "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
-    "release": "changelogen --release --push"
+    "release": "changelogen --release --no-push --no-tag --no-github"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*",
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@commitlint/types": "21.2.3",
+    "@cspell/dict-cs-cz": "3.0.8",
+    "@ls-lint/ls-lint": "2.3.1",
+    "@swc/core": "1.16.13",
+    "@tsconfig/strictest": "2.0.8",
+    "@types/bun": "1.4.2",
+    "@vitest/coverage-v8": "5.0.3",
+    "changelogen": "0.6.2",
+    "cspell": "10.3.6",
+    "dependency-cruiser": "18.5.0",
+    "fast-check": "4.10.2",
+    "knip": "6.39.0",
+    "lefthook": "2.1.16",
+    "markdownlint-cli2": "0.23.3",
+    "oxfmt": "0.71.0",
+    "oxlint": "1.86.0",
+    "oxlint-tsgolint": "7.0.2003",
+    "turbo": "2.11.6",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3",
+    "yaml": "2.9.1"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "packageManager": "bun@1.4.2"
 }
 ```
-(`plugins/*` has no packages yet; Bun tolerates an empty glob. The `devDependencies` block is filled by `bun add -D --exact` in later tasks.)
+(`plugins/*` has no packages yet; Bun tolerates an empty glob. The workspace entry is required because the root `tsconfig.json` extends `@bytebureau/tsconfig/app.json` and Bun's isolated linker only links declared workspace packages; the remaining `devDependencies` are filled by `bun add -D --exact` in later tasks.)
 
 - [ ] **Step 3: Create `bunfig.toml`**
 
 ```toml
 [install]
 exact = true
+# Three days, in seconds: new resolutions skip younger versions; bun.lock entries are unaffected
+minimumReleaseAge = 259200
 # Lifecycle scripts stay blocked (Bun default); add trusted packages explicitly here if ever needed.
 # trustedDependencies = []
 ```
@@ -271,7 +310,7 @@ git commit -m "chore(repo): bootstrap bun workspace with shared tsconfig bases"
 ### Task 2: Formatter and linter (oxfmt + type-aware oxlint)
 
 **Files:**
-- Create: `.oxfmtrc.json`, `.oxlintrc.json`
+- Create: `.oxfmtrc.json`, `.oxlintrc.jsonc`
 - Modify: `package.json` (devDependencies)
 
 **Interfaces:**
@@ -300,9 +339,9 @@ Expected: version lines (oxlint 1.x, oxfmt 0.7x).
 ```
 If `bunx oxfmt --check` reports an unknown key, open `node_modules/oxfmt/configuration_schema.json`, rename the key to the schema's spelling, and keep the same intent (width 100, no semicolons, single quotes, trailing commas, ignore generated output).
 
-- [ ] **Step 3: Create `.oxlintrc.json`**
+- [ ] **Step 3: Create `.oxlintrc.jsonc`** (JSONC: oxlint discovers `.oxlintrc.jsonc` and the curated exceptions carry one-line justification comments)
 
-```json
+```jsonc
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node", "vitest"],
@@ -313,29 +352,135 @@ If `bunx oxfmt --check` reports an unknown key, open `node_modules/oxfmt/configu
     "perf": "error",
     "restriction": "error",
     "style": "error",
-    "nursery": "off"
+    "nursery": "off",
   },
   "env": { "builtin": true, "es2024": true },
-  "ignorePatterns": ["**/dist/**", "**/coverage/**", "packages/i18n/src/paraglide/**", "apps/docs/.astro/**", "docs/research/**"],
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/coverage/**",
+    "packages/i18n/src/paraglide/**",
+    "apps/docs/.astro/**",
+    "docs/research/**",
+    // Isolated tool packages install their own dependencies, which the root install does not provide
+    // Their imports stay unresolved on a fresh clone, so type-aware rules fail there
+    "tools/**",
+  ],
   "rules": {
     "import/no-default-export": "error",
     "no-console": "error",
-    "unicorn/no-process-exit": "error"
+    "unicorn/no-process-exit": "error",
+
+    // Enabled on purpose: a nursery rule (categories.nursery is off) that must stay on; it catches impossible conditions
+    "typescript/no-unnecessary-condition": "error",
+
+    // Tuned to the project's style: the rule stays on, only its options change
+    // "m" is the Paraglide message namespace; the rule keeps rejecting other one-letter names
+    "id-length": ["error", { "exceptions": ["m"] }],
+    // Named functions are declarations; arrow functions stay allowed as values and callbacks
+    "func-style": ["error", "declaration", { "allowArrowFunctions": true }],
+    // One binding per declaration (the default combines them: const a = 1, b = 2)
+    "one-var": ["error", "never"],
+    // The v8 coverage hints around the import.meta.main entry blocks are lowercase by definition
+    "capitalized-comments": ["error", "always", { "ignorePattern": "v8 ignore (?:start|stop)\\b" }],
+    // Property tests assert through fast-check
+    "vitest/expect-expect": ["error", { "assertFunctionNames": ["expect", "fc.assert"] }],
+    // Only where an assertion can be skipped silently (async tests, loops, callbacks), not in every test
+    "vitest/prefer-expect-assertions": [
+      "error",
+      {
+        "onlyFunctionsWithAsyncKeyword": true,
+        "onlyFunctionsWithExpectInLoop": true,
+        "onlyFunctionsWithExpectInCallback": true,
+      },
+    ],
+    // Vitest accepts expect(value, message); the Jest default of one argument is wrong here
+    "vitest/valid-expect": ["error", { "maxArgs": 2 }],
+    // describe(fn) titles are what vitest/prefer-describe-function-title asks for, so valid-title must accept them
+    "vitest/valid-title": ["error", { "ignoreTypeOfDescribeName": true }],
+
+    // Off, (a): contradicts another rule that stays enabled
+    // (a) Unsatisfiable next to no-duplicate-imports and typescript/no-import-type-side-effects (both kept)
+    "import/consistent-type-specifier-style": "off",
+    // (a) Every module with exports would fail: import/no-default-export (kept) forbids the alternative
+    "import/no-named-export": "off",
+    // (a) Demands the default export that import/no-default-export (kept) forbids
+    "import/prefer-default-export": "off",
+    // (a) Contradicts unicorn/prefer-top-level-await (kept); top-level await is mandated
+    "node/no-top-level-await": "off",
+    // (a) Contradicts typescript/promise-function-async (kept), which requires async on promise-returning functions
+    "oxc/no-async-await": "off",
+    // (a) Contradicts prefer-object-spread (kept); Object.assign({}, a) is flagged instead
+    "oxc/no-rest-spread-properties": "off",
+    // (a) Contradicts vitest/prefer-strict-boolean-matchers (kept): toBe(false) is the strict form
+    "vitest/prefer-to-be-falsy": "off",
+    // (a) Contradicts vitest/prefer-strict-boolean-matchers (kept): toBe(true) is the strict form
+    "vitest/prefer-to-be-truthy": "off",
+
+    // Off, (b): forbids a construct the project mandates
+    // (c) project convention: inline named exports in declaration order; a trailing export block is not idiomatic here
+    "import/group-exports": "off",
+    // (c) project convention: inline named exports in declaration order; a trailing export block is not idiomatic here
+    "import/exports-last": "off",
+    // (b) Forbids node:* imports; the CLI, scripts, config files and tests are Node/Bun programs
+    "import/no-nodejs-modules": "off",
+    // (b) Forbids "../" imports; src/commands/* and tests beside messages/ need them
+    "import/no-relative-parent-imports": "off",
+    // (b) Forbids reading process.env, which the CLI context does by design
+    "node/no-process-env": "off",
+    // (b) The project imports describe/it/expect from "vitest" explicitly (no globals, no vitest/globals types)
+    "vitest/no-importing-vitest-globals": "off",
+    // (b) The plugin is global, so this fires on ordinary top-level module code outside tests; re-enabled for *.test.ts below
+    "vitest/require-hook": "off",
+
+    // Off, (c): would force pervasive non-idiomatic code
+    // (c) Flags exit codes, severities and test statuses; a named constant for each is noise
+    "no-magic-numbers": "off",
+    // (c) Bans every ternary, although unicorn/prefer-ternary (kept) asks for them in simple if/else
+    "no-ternary": "off",
+    // (c) Bans the undefined keyword, but exactOptionalPropertyTypes code compares against undefined throughout
+    "no-undefined": "off",
+    // (c) Forbids sync fs and child_process calls; config files, scripts and CLI tests are synchronous by nature
+    "node/no-sync": "off",
+    // (c) Forces alphabetical object keys; citty commands and config objects are ordered by meaning
+    "sort-keys": "off",
+    // (c) Orders imports by member count and first name, which clashes with the types-last import style
+    "sort-imports": "off",
+    // (c) Demands deep readonly on every parameter, including types that come from Node and Bun
+    "typescript/prefer-readonly-parameter-types": "off",
+    // (c) Wants a timeout argument on every test; timeouts belong in the Vitest config (testTimeout)
+    "vitest/require-test-timeout": "off",
   },
   "overrides": [
     {
-      "files": ["**/*.config.ts", "**/*.config.mjs", "knip.ts", "commitlint.config.ts", "changelog.config.ts", "apps/docs/src/**"],
-      "rules": { "import/no-default-export": "off" }
+      "files": [
+        "**/*.config.ts",
+        "**/*.config.mjs",
+        "knip.ts",
+        "commitlint.config.ts",
+        "changelog.config.ts",
+        "apps/docs/src/**",
+      ],
+      "rules": { "import/no-default-export": "off" },
     },
     {
-      "files": ["apps/bytebureau/src/**", "scripts/**", "packages/i18n/scripts/**", "apps/docs/scripts/**"],
-      "rules": { "no-console": "off", "unicorn/no-process-exit": "off" }
+      // dependency-cruiser loads its config with require(), so this file has to stay CommonJS
+      "files": [".dependency-cruiser.cjs"],
+      "rules": { "import/no-commonjs": "off", "import/unambiguous": "off" },
+    },
+    {
+      "files": [
+        "apps/bytebureau/src/**",
+        "scripts/**",
+        "packages/i18n/scripts/**",
+        "apps/docs/scripts/**",
+      ],
+      "rules": { "no-console": "off", "unicorn/no-process-exit": "off" },
     },
     {
       "files": ["**/*.test.ts"],
-      "rules": { "no-console": "off" }
-    }
-  ]
+      "rules": { "no-console": "off", "vitest/require-hook": "error" },
+    },
+  ],
 }
 ```
 
@@ -365,7 +510,7 @@ Expected: `format:check` exits 0.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add .oxfmtrc.json .oxlintrc.json package.json bun.lock
+git add .oxfmtrc.json .oxlintrc.jsonc package.json bun.lock
 git commit -m "chore(repo): add oxfmt and type-aware oxlint gates"
 ```
 
@@ -405,13 +550,13 @@ function directoriesIn(parent: string): string[] {
   }
 }
 
-const scopes = [...new Set([...workspaceDirs.flatMap(directoriesIn), 'cli', 'deps', 'release', 'repo', 'ci', 'docs'])]
+const scopes = [...new Set([...workspaceDirs.flatMap((directory) => directoriesIn(directory)), 'cli', 'deps', 'release', 'repo', 'ci', 'docs'])]
 
 const config: UserConfig = {
   extends: ['@commitlint/config-conventional'],
   rules: {
+    'type-enum': [2, 'always', ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'revert']],
     'scope-enum': [2, 'always', scopes],
-    'subject-case': [2, 'always', 'lower-case'],
     'body-max-line-length': [0, 'always', 0],
   },
 }
@@ -423,19 +568,21 @@ export default config
 
 ```yaml
 pre-commit:
-  parallel: true
+  parallel: false
   commands:
-    format:
-      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
-      run: bunx oxfmt {staged_files}
-      stage_fixed: true
+    generate:
+      priority: 1
+      run: test -d packages/i18n/src/paraglide || bun run build:i18n
     lint:
+      priority: 2
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
-      run: bunx oxlint --type-aware --fix {staged_files}
+      run: bunx oxlint --type-aware --fix --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
-    spell:
-      glob: '*.{ts,tsx,md,mdx,json,yml,yaml}'
-      run: bunx cspell --no-progress {staged_files}
+    format:
+      priority: 3
+      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,yml,yaml}'
+      run: bunx oxfmt --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
 
 commit-msg:
   commands:
@@ -497,24 +644,29 @@ mkdir -p packages/i18n/messages packages/i18n/project.inlang packages/i18n/scrip
   "license": "FSL-1.1-MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./src/index.ts", "default": "./src/index.ts" }
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
   },
   "scripts": {
     "build": "bun run scripts/compile.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
-    "@bytebureau/tsconfig": "workspace:*"
+    "@bytebureau/tsconfig": "workspace:*",
+    "@inlang/paraglide-js": "2.25.4",
+    "@inlang/plugin-message-format": "4.4.4"
   }
 }
 ```
 Then run `cd packages/i18n && bun add -D --exact @inlang/paraglide-js && cd ../..`.
 
-`packages/i18n/tsconfig.json`:
+`packages/i18n/tsconfig.json` (extends `base.json`, not `library.json`: TypeScript rejects `allowJs` together with `isolatedDeclarations`, and this private package emits no declarations of its own):
 ```json
 {
-  "extends": "@bytebureau/tsconfig/library.json",
-  "compilerOptions": { "allowJs": true, "checkJs": false },
+  "extends": "@bytebureau/tsconfig/base.json",
+  "compilerOptions": { "allowJs": true, "checkJs": false, "noEmit": true },
   "include": ["src", "scripts"]
 }
 ```
@@ -532,7 +684,7 @@ export default defineProject({
   "$schema": "https://inlang.com/schema/project-settings",
   "baseLocale": "en",
   "locales": ["en", "cs"],
-  "modules": ["https://cdn.jsdelivr.net/npm/@inlang/plugin-message-format@latest/dist/index.js"],
+  "modules": ["./node_modules/@inlang/plugin-message-format/dist/index.js"],
   "plugin.inlang.messageFormat": { "pathPattern": "./messages/{locale}.json" }
 }
 ```
@@ -557,7 +709,7 @@ export default defineProject({
   "hello_greeting": "Ahoj, {name}! ByteBureau je připraveno.",
   "hello_anonymous": "Ahoj! ByteBureau je připraveno.",
   "hello_intro": "ByteBureau",
-  "hello_outro": "Spusť bytebureau --help a podívej se, co je k dispozici.",
+  "hello_outro": "Spusťte bytebureau --help a podívejte se, co je k dispozici.",
   "cli_unknown_locale": "Nepodporovaný jazyk „{locale}“, používám angličtinu."
 }
 ```
@@ -609,10 +761,17 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    projects: ['packages/i18n'],
+    projects: ['packages/i18n', 'apps/bytebureau', 'apps/docs', 'scripts'],
     coverage: {
       provider: 'v8',
-      include: ['packages/*/src/**/*.ts'],
+      include: [
+        'packages/*/src/**/*.ts',
+        'scripts/**/*.ts',
+        'apps/docs/scripts/**/*.ts',
+        'apps/bytebureau/src/locale.ts',
+        'apps/bytebureau/src/output.ts',
+        'apps/bytebureau/src/run.ts',
+      ],
       exclude: ['packages/i18n/src/paraglide/**', '**/*.test.ts'],
       thresholds: { lines: 80, branches: 80 },
       reporter: ['text', 'lcov'],
@@ -632,7 +791,7 @@ import { baseLocale, isLocale, locales, m, setLocale } from './index.js'
 
 describe('@bytebureau/i18n', () => {
   it('exposes en and cs with en as base', () => {
-    expect([...locales].sort()).toEqual(['cs', 'en'])
+    expect([...locales].toSorted()).toStrictEqual(['cs', 'en'])
     expect(baseLocale).toBe('en')
     expect(isLocale('cs')).toBe(true)
     expect(isLocale('de')).toBe(false)
@@ -644,6 +803,7 @@ describe('@bytebureau/i18n', () => {
     setLocale('cs')
     expect(m.hello_greeting({ name: 'Ondřej' })).toBe('Ahoj, Ondřej! ByteBureau je připraveno.')
     expect(m.hello_anonymous()).toBe('Ahoj! ByteBureau je připraveno.')
+    expect(m.hello_outro()).toBe('Spusťte bytebureau --help a podívejte se, co je k dispozici.')
   })
 })
 ```
@@ -652,7 +812,7 @@ Expected: FAIL — `./index.js` does not exist.
 
 - [ ] **Step 6: Implement the compile script and the package entry**
 
-`packages/i18n/scripts/compile.ts`:
+`packages/i18n/scripts/compile.ts` (Paraglide's `emitTsDeclarations` option emits `.d.ts` files next to the generated JavaScript so consumers without `allowJs` get types):
 ```ts
 import { compile } from '@inlang/paraglide-js'
 
@@ -662,11 +822,11 @@ await compile({
   strategy: ['globalVariable', 'baseLocale'],
   emitGitIgnore: false,
   emitPrettierIgnore: false,
+  emitTsDeclarations: true,
 })
 ```
-`packages/i18n/src/index.ts`:
+`packages/i18n/src/index.ts` (lint-compliant form; `export * as m` is equivalent to importing the namespace and re-exporting it):
 ```ts
-import * as m from './paraglide/messages.js'
 import { baseLocale, locales, overwriteGetLocale, type Locale } from './paraglide/runtime.js'
 
 let activeLocale: Locale = baseLocale
@@ -681,16 +841,17 @@ export function isLocale(value: string): value is Locale {
   return (locales as readonly string[]).includes(value)
 }
 
-export { m, locales, baseLocale, type Locale }
+export * as m from './paraglide/messages.js'
+export { baseLocale, locales, type Locale } from './paraglide/runtime.js'
 ```
 Run: `cd packages/i18n && bun run build && cd ../..`
-Expected: `src/paraglide/messages.js` and `src/paraglide/runtime.js` generated. If `compile()` rejects an option name, run `bunx paraglide-js compile --help` and use the documented option names for the same intent (project path, output dir, strategy `globalVariable` + `baseLocale`, no `.gitignore`/`.prettierignore` emission).
+Expected: `src/paraglide/messages.js`, `src/paraglide/runtime.js` and their `.d.ts` siblings generated. If `compile()` rejects an option name, run `bunx paraglide-js compile --help` and use the documented option names for the same intent (project path, output dir, strategy `globalVariable` + `baseLocale`, no `.gitignore`/`.prettierignore` emission).
 
 - [ ] **Step 7: Run the tests and typecheck**
 
-Run:
+Run (Turborepo arrives in Task 7, so call Vitest directly here):
 ```bash
-bun run test
+bunx vitest run
 bunx tsc --noEmit -p packages/i18n/tsconfig.json
 ```
 Expected: 5 tests pass; typecheck clean.
@@ -701,13 +862,14 @@ Expected: 5 tests pass; typecheck clean.
 git add vitest.config.ts packages/i18n package.json bun.lock
 git commit -m "feat(i18n): add paraglide message catalogues for en and cs with parity tests"
 ```
+(`packages/i18n/src/paraglide/` is git-ignored; only sources, configs and tests are committed.)
 
 ---
 
 ### Task 5: The proof CLI (`apps/bytebureau`)
 
 **Files:**
-- Create: `apps/bytebureau/package.json`, `apps/bytebureau/tsconfig.json`, `apps/bytebureau/vitest.config.ts`, `apps/bytebureau/src/version.ts`, `apps/bytebureau/src/locale.ts`, `apps/bytebureau/src/locale.test.ts`, `apps/bytebureau/src/output.ts`, `apps/bytebureau/src/context.ts`, `apps/bytebureau/src/commands/hello.ts`, `apps/bytebureau/src/main.ts`, `apps/bytebureau/src/cli.test.ts`
+- Create: `apps/bytebureau/package.json`, `apps/bytebureau/tsconfig.json`, `apps/bytebureau/vitest.config.ts`, `apps/bytebureau/src/version.ts`, `apps/bytebureau/src/locale.ts`, `apps/bytebureau/src/locale.test.ts`, `apps/bytebureau/src/output.ts`, `apps/bytebureau/src/context.ts`, `apps/bytebureau/src/commands/hello.ts`, `apps/bytebureau/src/main.ts`, `apps/bytebureau/src/cli.test.ts`, `apps/bytebureau/src/run.ts`, `apps/bytebureau/src/run.test.ts`, `apps/bytebureau/src/output.test.ts`
 - Modify: `vitest.config.ts` (add project)
 
 **Interfaces:**
@@ -752,7 +914,12 @@ Run: `cd apps/bytebureau && bun add --exact citty @clack/prompts picocolors && c
 import { defineProject } from 'vitest/config'
 
 export default defineProject({
-  test: { name: 'bytebureau', include: ['src/**/*.test.ts'], testTimeout: 20_000 },
+  test: {
+    name: 'bytebureau',
+    include: ['src/**/*.test.ts'],
+    testTimeout: 20_000,
+    restoreMocks: true,
+  },
 })
 ```
 Add `'apps/bytebureau'` to `projects` in the root `vitest.config.ts`.
@@ -887,6 +1054,61 @@ export function createOutput({ json, color }: OutputOptions): Output {
   }
 }
 ```
+`apps/bytebureau/src/output.test.ts`:
+```ts
+import { describe, expect, it, vi } from 'vitest'
+import { colorEnabled, createOutput } from './output.js'
+
+describe(colorEnabled, () => {
+  it('turns colour off for --no-color whatever the environment and the terminal say', () => {
+    expect(colorEnabled({ FORCE_COLOR: '1' }, true, true)).toBe(false)
+  })
+
+  it('turns colour off for NO_COLOR, even with FORCE_COLOR on a TTY', () => {
+    expect(colorEnabled({ NO_COLOR: '1', FORCE_COLOR: '1' }, false, true)).toBe(false)
+  })
+
+  it('forces colour off a TTY with FORCE_COLOR unless it is 0', () => {
+    expect(colorEnabled({ FORCE_COLOR: '1' }, false, false)).toBe(true)
+    expect(colorEnabled({ FORCE_COLOR: '0' }, false, false)).toBe(false)
+  })
+
+  it('follows the TTY otherwise, as with the default --color', () => {
+    expect(colorEnabled({}, false, true)).toBe(true)
+    expect(colorEnabled({}, false, false)).toBe(false)
+  })
+})
+
+describe(createOutput, () => {
+  it('prints text and drops records in text mode', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const output = createOutput({ json: false, color: false })
+    output.print('hello')
+    output.emit({ command: 'hello' })
+    expect(log.mock.calls).toStrictEqual([['hello']])
+  })
+
+  it('emits records as JSON and drops text in JSON mode', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const output = createOutput({ json: true, color: true })
+    output.print('hello')
+    output.emit({ command: 'hello' })
+    expect(log.mock.calls).toStrictEqual([['{"command":"hello"}']])
+  })
+
+  it('writes warnings to stderr, as a JSON record in JSON mode', () => {
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    createOutput({ json: false, color: false }).warn('careful')
+    createOutput({ json: true, color: false }).warn('careful')
+    expect(error.mock.calls).toStrictEqual([['careful'], ['{"level":"warn","message":"careful"}']])
+  })
+
+  it('colours text only when colour is on', () => {
+    expect(createOutput({ json: false, color: true }).colors.bold('x')).not.toBe('x')
+    expect(createOutput({ json: false, color: false }).colors.bold('x')).toBe('x')
+  })
+})
+```
 `apps/bytebureau/src/context.ts`:
 ```ts
 import { m, setLocale } from '@bytebureau/i18n'
@@ -934,16 +1156,17 @@ export const version: string =
 ```
 `apps/bytebureau/src/commands/hello.ts`:
 ```ts
+import { isatty } from 'node:tty'
 import { m } from '@bytebureau/i18n'
 import { intro, log, outro } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { createContext, globalArgs, type Context } from '../context.js'
 
-export function greeting(name: string | undefined): string {
+function greeting(name: string | undefined): string {
   return name === undefined || name.trim() === '' ? m.hello_anonymous() : m.hello_greeting({ name })
 }
 
-export function runHello({ output, interactive }: Context, name: string | undefined): void {
+function runHello({ output, interactive }: Context, name: string | undefined): void {
   const message = greeting(name)
   if (output.json) {
     output.emit({ command: 'hello', message })
@@ -968,7 +1191,7 @@ export const helloCommand = defineCommand({
     const context = createContext(
       { lang: args.lang, json: args.json, color: args.color },
       process.env,
-      process.stdout.isTTY === true,
+      isatty(process.stdout.fd),
     )
     runHello(context, args.name)
   },
@@ -977,8 +1200,9 @@ export const helloCommand = defineCommand({
 `apps/bytebureau/src/main.ts`:
 ```ts
 #!/usr/bin/env bun
-import { defineCommand, runMain } from 'citty'
+import { defineCommand } from 'citty'
 import { helloCommand } from './commands/hello.js'
+import { run } from './run.js'
 import { version } from './version.js'
 
 process.on('uncaughtException', (error: unknown) => {
@@ -999,22 +1223,199 @@ const main = defineCommand({
   subCommands: { hello: helloCommand },
 })
 
-await runMain(main)
+process.exit(await run(main, process.argv.slice(2)))
 ```
 Exit codes: 0 success, 1 usage error (citty reports unknown commands and invalid arguments), 2 unexpected error.
 
 - [ ] **Step 6: Write the failing CLI behaviour tests**
 
+`apps/bytebureau/src/run.ts`:
+```ts
+import { runCommand, showUsage, type CommandDef, type Resolvable } from 'citty'
+
+const HELP_FLAGS: ReadonlySet<string> = new Set(['--help', '-h'])
+const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-v'])
+
+async function resolved<Value extends object>(value: Resolvable<Value>): Promise<Value> {
+  const settled = await (typeof value === 'function' ? value() : value)
+  return settled
+}
+
+// Usage mistakes throw citty's CLIError, a class citty does not export
+function isUsageError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'CLIError'
+}
+
+// Usage of the deepest subcommand named in argv, as citty's runMain prints it
+async function printUsage(
+  command: CommandDef,
+  argv: readonly string[],
+  parent?: CommandDef,
+): Promise<void> {
+  const subCommands = command.subCommands === undefined ? {} : await resolved(command.subCommands)
+  const index = argv.findIndex((arg) => !arg.startsWith('-'))
+  const subCommand = index === -1 ? undefined : subCommands[argv[index] ?? '']
+  if (subCommand === undefined) {
+    await showUsage(command, parent)
+    return
+  }
+  await printUsage(await resolved(subCommand), argv.slice(index + 1), command)
+}
+
+async function printVersion(command: CommandDef): Promise<void> {
+  const meta = command.meta === undefined ? {} : await resolved(command.meta)
+  if (meta.version === undefined) {
+    throw Object.assign(new Error('No version specified'), { name: 'CLIError' })
+  }
+  console.log(meta.version)
+}
+
+async function execute(command: CommandDef, argv: readonly string[]): Promise<void> {
+  if (argv.some((arg) => HELP_FLAGS.has(arg))) {
+    await printUsage(command, argv)
+  } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
+    await printVersion(command)
+  } else {
+    await runCommand(command, { rawArgs: [...argv] })
+  }
+}
+
+// Exit codes: 0 success, 1 usage error (citty's CLIError), 2 anything else
+export async function run(command: CommandDef, argv: readonly string[]): Promise<number> {
+  try {
+    await execute(command, argv)
+    return 0
+  } catch (error) {
+    if (isUsageError(error)) {
+      await printUsage(command, argv)
+      console.error(error.message)
+      return 1
+    }
+    console.error(error instanceof Error ? error.message : String(error))
+    return 2
+  }
+}
+```
+`apps/bytebureau/src/run.test.ts`:
+```ts
+import { defineCommand, type CommandDef } from 'citty'
+import { describe, expect, it, vi, type MockInstance } from 'vitest'
+import { run } from './run.js'
+
+interface Console {
+  readonly log: MockInstance<typeof console.log>
+  readonly error: MockInstance<typeof console.error>
+}
+
+function silenceConsole(): Console {
+  return {
+    log: vi.spyOn(console, 'log').mockReturnValue(),
+    error: vi.spyOn(console, 'error').mockReturnValue(),
+  }
+}
+
+function failingWith(error: unknown): CommandDef {
+  return defineCommand({
+    meta: { name: 'fake', description: 'Fake command' },
+    run: vi.fn<() => Promise<void>>().mockRejectedValue(error),
+  })
+}
+
+const parent = defineCommand({
+  meta: { name: 'parent', version: '1.2.3', description: 'Parent command' },
+  subCommands: {
+    child: defineCommand({
+      meta: { name: 'child', description: 'Child command' },
+      run: vi.fn<() => void>(),
+    }),
+  },
+})
+
+describe(run, () => {
+  it('returns 0 when the command succeeds', async () => {
+    expect.hasAssertions()
+    const succeed = vi.fn<() => void>()
+    await expect(run(defineCommand({ run: succeed }), [])).resolves.toBe(0)
+    expect(succeed).toHaveBeenCalledWith(expect.objectContaining({ rawArgs: [] }))
+  })
+
+  it('returns 1 and prints the usage for a CLIError', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const command = failingWith(Object.assign(new Error('bad flag'), { name: 'CLIError' }))
+    await expect(run(command, [])).resolves.toBe(1)
+    expect(output.log).toHaveBeenCalledWith(expect.stringContaining('Fake command'))
+    expect(output.error).toHaveBeenCalledWith('bad flag')
+  })
+
+  it('returns 1 for an unknown subcommand', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    await expect(run(parent, ['nope'])).resolves.toBe(1)
+    expect(output.error).toHaveBeenCalledWith(expect.stringContaining('Unknown command'))
+  })
+
+  it('returns 2 and prints only the message for any other error', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const command = failingWith(new Error('boom'))
+    await expect(run(command, [])).resolves.toBe(2)
+    expect(output.error).toHaveBeenCalledWith('boom')
+    expect(output.log).not.toHaveBeenCalled()
+  })
+
+  it('returns 2 when a non-Error value is thrown', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    await expect(run(failingWith('oops'), [])).resolves.toBe(2)
+    expect(output.error).toHaveBeenCalledWith('oops')
+  })
+})
+
+describe('run built-in flags', () => {
+  it('prints the usage of the named subcommand for --help', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    await expect(run(parent, ['child', '--help'])).resolves.toBe(0)
+    expect(output.log).toHaveBeenCalledWith(expect.stringContaining('Child command'))
+  })
+
+  it('prints the version for --version and -v', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    await expect(run(parent, ['--version'])).resolves.toBe(0)
+    await expect(run(parent, ['-v'])).resolves.toBe(0)
+    expect(output.log).toHaveBeenNthCalledWith(1, '1.2.3')
+    expect(output.log).toHaveBeenNthCalledWith(2, '1.2.3')
+  })
+
+  it('treats a missing version as a usage error', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const command = defineCommand({ run: vi.fn<() => void>() })
+    await expect(run(command, ['--version'])).resolves.toBe(1)
+    expect(output.error).toHaveBeenCalledWith('No version specified')
+  })
+})
+```
 `apps/bytebureau/src/cli.test.ts`:
 ```ts
 import { execFileSync, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const cwd = new URL('..', import.meta.url).pathname
-const baseEnv = { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '', LANG: 'en_US.UTF-8' }
-const ANSI = /\u001B\[[0-9;]*m/u
+const cwd = fileURLToPath(new URL('..', import.meta.url))
+const baseEnv = {
+  PATH: process.env['PATH'] ?? '',
+  HOME: process.env['HOME'] ?? '',
+  LANG: 'en_US.UTF-8',
+}
+const ESCAPE = '\u001B'
 
-function run(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; status: number } {
+function run(
+  args: string[],
+  env: Record<string, string> = {},
+): { stdout: string; stderr: string; status: number } {
   const result = spawnSync('bun', ['run', 'src/main.ts', ...args], {
     cwd,
     env: { ...baseEnv, ...env },
@@ -1025,8 +1426,12 @@ function run(args: string[], env: Record<string, string> = {}): { stdout: string
 
 describe('bytebureau CLI', () => {
   it('prints a semantic version', () => {
-    const stdout = execFileSync('bun', ['run', 'src/main.ts', '--version'], { cwd, env: baseEnv, encoding: 'utf8' })
-    expect(stdout).toMatch(/\d+\.\d+\.\d+(?:-[\w.]+)?/u)
+    const stdout = execFileSync('bun', ['run', 'src/main.ts', '--version'], {
+      cwd,
+      env: baseEnv,
+      encoding: 'utf8',
+    })
+    expect(stdout).toMatch(/\d+\.\d+\.\d+/u)
   })
 
   it('lists the hello command in help', () => {
@@ -1047,8 +1452,11 @@ describe('bytebureau CLI', () => {
 
   it('emits JSON without ANSI codes even when FORCE_COLOR is set', () => {
     const { stdout } = run(['hello', 'Ondřej', '--json'], { FORCE_COLOR: '1' })
-    expect(ANSI.test(stdout)).toBe(false)
-    expect(JSON.parse(stdout)).toEqual({ command: 'hello', message: 'Hello, Ondřej! ByteBureau is ready.' })
+    expect(stdout).not.toContain(ESCAPE)
+    expect(JSON.parse(stdout)).toStrictEqual({
+      command: 'hello',
+      message: 'Hello, Ondřej! ByteBureau is ready.',
+    })
   })
 
   it('falls back to English with a warning for an unsupported language', () => {
@@ -1073,7 +1481,7 @@ Run:
 bunx tsc --noEmit -p apps/bytebureau/tsconfig.json
 bun run lint && bun run format:check
 ```
-Expected: clean. Fix any `restriction`-category findings by changing code (not by disabling rules) unless the rule contradicts the CLI's purpose, in which case add the rule to the existing `apps/bytebureau/src/**` override in `.oxlintrc.json`.
+Expected: clean. Fix any `restriction`-category findings by changing code (not by disabling rules) unless the rule contradicts the CLI's purpose, in which case add the rule to the existing `apps/bytebureau/src/**` override in `.oxlintrc.jsonc`.
 
 - [ ] **Step 8: Commit**
 
@@ -1099,19 +1507,57 @@ git commit -m "feat(cli): add bytebureau entry point with localised hello comman
 ```ts
 import { defineProject } from 'vitest/config'
 
-export default defineProject({ test: { name: 'scripts', include: ['*.test.ts'] } })
+export default defineProject({
+  test: { name: 'scripts', include: ['*.test.ts'], restoreMocks: true },
+})
 ```
 Add `'scripts'` to the root `projects` array.
 
 `scripts/build-binaries.test.ts`:
 ```ts
-import fc from 'fast-check'
-import { describe, expect, it } from 'vitest'
-import { TARGETS, artifactName, hostTarget, parseArgs } from './build-binaries.js'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { assert, constantFrom, oneof, property, stringMatching } from 'fast-check'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import {
+  TARGETS,
+  artifactName,
+  compileWithFallback,
+  hostTarget,
+  parseArgs,
+  withoutStrayRuntimes,
+  type Compile,
+  type CompileJob,
+} from './build-binaries.js'
 
-describe('artifactName', () => {
+const job: CompileJob = {
+  target: 'bun-linux-x64',
+  outfile: 'dist/bytebureau',
+  version: '1.2.3',
+  bytecode: true,
+}
+const plainJob: CompileJob = { ...job, bytecode: false }
+
+function compileExiting(...codes: number[]): ReturnType<typeof vi.fn<Compile>> {
+  const compile = vi.fn<Compile>()
+  for (const code of codes) {
+    compile.mockReturnValueOnce(code)
+  }
+  return compile
+}
+
+function tempDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'bytebureau-build-'))
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+describe(artifactName, () => {
   it('maps every target to the documented file name', () => {
-    expect(TARGETS.map((target) => artifactName(target, '0.1.0'))).toEqual([
+    expect(TARGETS.map((target) => artifactName(target, '0.1.0'))).toStrictEqual([
       'bytebureau-0.1.0-darwin-arm64',
       'bytebureau-0.1.0-darwin-x64',
       'bytebureau-0.1.0-linux-x64',
@@ -1126,15 +1572,16 @@ describe('artifactName', () => {
 
 describe('artifactName properties', () => {
   it('embeds the version verbatim and never produces spaces or path separators', () => {
-    fc.assert(
-      fc.property(
-        fc.constantFrom(...TARGETS),
-        fc.stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:-[a-z0-9.]{1,10})?$/u),
-        (target, version) => {
-          const name = artifactName(target, version)
-          return name.includes(version) && !/[\s/\\]/u.test(name) && name.startsWith('bytebureau-')
-        },
-      ),
+    expect.hasAssertions()
+    const release = stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}$/u)
+    const prerelease = stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}-[a-z0-9.]{1,10}$/u)
+    assert(
+      property(constantFrom(...TARGETS), oneof(release, prerelease), (target, version) => {
+        const name = artifactName(target, version)
+        expect(name).toContain(version)
+        expect(name).not.toMatch(/[\s/\\]/u)
+        expect(name).toMatch(/^bytebureau-/u)
+      }),
     )
   })
 
@@ -1143,9 +1590,9 @@ describe('artifactName properties', () => {
   })
 })
 
-describe('parseArgs', () => {
+describe(parseArgs, () => {
   it('defaults to all targets, dist/ and bytecode on', () => {
-    expect(parseArgs([], { version: '1.2.3' })).toEqual({
+    expect(parseArgs([], { version: '1.2.3' })).toStrictEqual({
       targets: [...TARGETS],
       outdir: 'dist',
       version: '1.2.3',
@@ -1154,7 +1601,14 @@ describe('parseArgs', () => {
   })
 
   it('accepts a target list, outdir and --no-bytecode', () => {
-    expect(parseArgs(['--targets', 'bun-linux-x64,bun-linux-arm64', '--outdir', 'out', '--no-bytecode'], { version: '1.2.3' })).toEqual({
+    expect(
+      parseArgs(
+        ['--targets', 'bun-linux-x64,bun-linux-arm64', '--outdir', 'out', '--no-bytecode'],
+        {
+          version: '1.2.3',
+        },
+      ),
+    ).toStrictEqual({
       targets: ['bun-linux-x64', 'bun-linux-arm64'],
       outdir: 'out',
       version: '1.2.3',
@@ -1163,7 +1617,84 @@ describe('parseArgs', () => {
   })
 
   it('rejects unknown targets', () => {
-    expect(() => parseArgs(['--targets', 'bun-plan9-x64'], { version: '1.2.3' })).toThrow('unknown target')
+    expect(() => parseArgs(['--targets', 'bun-plan9-x64'], { version: '1.2.3' })).toThrow(
+      'unknown target',
+    )
+  })
+
+  it('builds only the host target with --host', () => {
+    expect(parseArgs(['--host'], { version: '1.2.3' }).targets).toStrictEqual([hostTarget()])
+  })
+
+  it('rejects unknown arguments', () => {
+    expect(() => parseArgs(['--fast'], { version: '1.2.3' })).toThrow('unknown argument: --fast')
+  })
+})
+
+describe(compileWithFallback, () => {
+  it('reports bytecode when the first compile succeeds', () => {
+    const compile = compileExiting(0)
+    expect(compileWithFallback(job, compile, {})).toBe('bytecode')
+    expect(compile.mock.calls).toStrictEqual([[job]])
+  })
+
+  it('retries exactly once without bytecode after a local bytecode failure', () => {
+    vi.spyOn(console, 'warn').mockReturnValue()
+    const compile = compileExiting(1, 0)
+    expect(compileWithFallback(job, compile, {})).toBe('no bytecode')
+    expect(compile.mock.calls).toStrictEqual([[job], [plainJob]])
+  })
+
+  it('never retries a build that already has bytecode off', () => {
+    const compile = compileExiting(1)
+    expect(() => compileWithFallback(plainJob, compile, {})).toThrow(
+      'build failed for bun-linux-x64',
+    )
+    expect(compile.mock.calls).toStrictEqual([[plainJob]])
+    expect(compileWithFallback(plainJob, compileExiting(0), {})).toBe('no bytecode')
+  })
+
+  it('throws when the retry fails as well', () => {
+    vi.spyOn(console, 'warn').mockReturnValue()
+    const compile = compileExiting(1, 1)
+    expect(() => compileWithFallback(job, compile, {})).toThrow('build failed for bun-linux-x64')
+    expect(compile.mock.calls).toStrictEqual([[job], [plainJob]])
+  })
+
+  it('aborts instead of retrying when CI is set', () => {
+    const compile = compileExiting(1)
+    expect(() => compileWithFallback(job, compile, { CI: 'true' })).toThrow(
+      'bytecode compilation failed for bun-linux-x64',
+    )
+    expect(compile.mock.calls).toStrictEqual([[job]])
+  })
+})
+
+describe(withoutStrayRuntimes, () => {
+  it('removes only the .bun-build files created during the action', () => {
+    const dir = tempDir()
+    writeFileSync(path.join(dir, '.0a1b2c3d4e5f6a7b-00000000.bun-build'), '')
+    const result = withoutStrayRuntimes(dir, () => {
+      writeFileSync(path.join(dir, '.f7e6d5c4b3a29180-00000000.bun-build'), '')
+      writeFileSync(path.join(dir, 'unrelated.txt'), '')
+      return 'compiled'
+    })
+    expect(result).toBe('compiled')
+    expect(readdirSync(dir).toSorted()).toStrictEqual([
+      '.0a1b2c3d4e5f6a7b-00000000.bun-build',
+      'unrelated.txt',
+    ])
+  })
+
+  it('cleans up when the action throws', () => {
+    const dir = tempDir()
+    expect(() =>
+      withoutStrayRuntimes(dir, () => {
+        writeFileSync(path.join(dir, '.f7e6d5c4b3a29180-00000000.bun-build'), '')
+        throw new Error('compile crashed')
+      }),
+    ).toThrow('compile crashed')
+    expect(readdirSync(dir)).toStrictEqual([])
   })
 })
 ```
@@ -1175,8 +1706,10 @@ Expected: FAIL — module not found.
 `scripts/build-binaries.ts`:
 ```ts
 #!/usr/bin/env bun
-import { mkdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
+import path from 'node:path'
+import rootPackage from '../package.json' with { type: 'json' }
 
 export const TARGETS = [
   'bun-darwin-arm64',
@@ -1198,8 +1731,23 @@ export interface BuildOptions {
   readonly bytecode: boolean
 }
 
-const ROOT = join(import.meta.dirname, '..')
+type Flags = Omit<BuildOptions, 'version'>
+
+export interface CompileJob {
+  readonly target: Target
+  readonly outfile: string
+  readonly version: string
+  readonly bytecode: boolean
+}
+
+export type Compile = (job: CompileJob) => number
+export type Outcome = 'bytecode' | 'no bytecode'
+type Env = Readonly<Record<string, string | undefined>>
+
+const ROOT = path.join(import.meta.dirname, '..')
 const ENTRY = 'apps/bytebureau/src/main.ts'
+const STRAY_RUNTIME_SUFFIX = '.bun-build'
+const OS_BY_PLATFORM: Readonly<Record<string, string>> = { darwin: 'darwin', win32: 'windows' }
 
 export function artifactName(target: Target, version: string): string {
   const [, os, arch, libc] = target.split('-')
@@ -1213,78 +1761,137 @@ function isTarget(value: string): value is Target {
 }
 
 export function hostTarget(): Target {
-  const os = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux'
+  const os = OS_BY_PLATFORM[process.platform] ?? 'linux'
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   const candidate = `bun-${os}-${arch}`
-  if (!isTarget(candidate)) throw new Error(`unsupported host platform: ${candidate}`)
+  if (!isTarget(candidate)) {
+    throw new Error(`unsupported host platform: ${candidate}`)
+  }
   return candidate
 }
 
-export function parseArgs(argv: readonly string[], defaults: { version: string }): BuildOptions {
-  let targets: Target[] = [...TARGETS]
-  let outdir = 'dist'
-  let bytecode = true
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]
-    switch (arg) {
-      case '--host':
-        targets = [hostTarget()]
-        break
-      case '--targets': {
-        const list = argv[index + 1] ?? ''
-        index += 1
-        targets = list.split(',').map((value) => {
-          const trimmed = value.trim()
-          if (!isTarget(trimmed)) throw new Error(`unknown target: ${trimmed}`)
-          return trimmed
-        })
-        break
-      }
-      case '--outdir':
-        outdir = argv[index + 1] ?? outdir
-        index += 1
-        break
-      case '--no-bytecode':
-        bytecode = false
-        break
-      default:
-        throw new Error(`unknown argument: ${arg}`)
+function parseTargets(list: string): Target[] {
+  return list.split(',').map((value) => {
+    const trimmed = value.trim()
+    if (!isTarget(trimmed)) {
+      throw new Error(`unknown target: ${trimmed}`)
     }
-  }
-  return { targets, outdir, version: defaults.version, bytecode }
+    return trimmed
+  })
 }
 
-function compile(target: Target, outfile: string, version: string, bytecode: boolean): number {
-  const args = ['build', '--compile', '--minify', '--sourcemap']
-  if (bytecode) args.push('--bytecode')
-  args.push(`--target=${target}`, '--define', `BYTEBUREAU_VERSION=${JSON.stringify(version)}`, ENTRY, '--outfile', outfile)
-  const result = Bun.spawnSync(['bun', ...args], { cwd: ROOT, stdout: 'inherit', stderr: 'inherit' })
+// A flag that takes a value consumes it from the arguments that follow it
+function applyFlag(flags: Flags, arg: string, rest: string[]): Flags {
+  switch (arg) {
+    case '--host': {
+      return { ...flags, targets: [hostTarget()] }
+    }
+    case '--targets': {
+      return { ...flags, targets: parseTargets(rest.shift() ?? '') }
+    }
+    case '--outdir': {
+      return { ...flags, outdir: rest.shift() ?? flags.outdir }
+    }
+    case '--no-bytecode': {
+      return { ...flags, bytecode: false }
+    }
+    default: {
+      throw new Error(`unknown argument: ${arg}`)
+    }
+  }
+}
+
+export function parseArgs(argv: readonly string[], defaults: { version: string }): BuildOptions {
+  let flags: Flags = { targets: [...TARGETS], outdir: 'dist', bytecode: true }
+  const rest = [...argv]
+  for (let arg = rest.shift(); arg !== undefined; arg = rest.shift()) {
+    flags = applyFlag(flags, arg, rest)
+  }
+  return { ...flags, version: defaults.version }
+}
+
+function compile(job: CompileJob): number {
+  // ESM output: Bun's bytecode default is CommonJS, which rejects the top-level await in main.ts
+  const args = ['build', '--compile', '--minify', '--sourcemap', '--format=esm']
+  if (job.bytecode) {
+    args.push('--bytecode')
+  }
+  args.push(
+    `--target=${job.target}`,
+    '--define',
+    `BYTEBUREAU_VERSION=${JSON.stringify(job.version)}`,
+    ENTRY,
+    '--outfile',
+    job.outfile,
+  )
+  const result = Bun.spawnSync(['bun', ...args], {
+    cwd: ROOT,
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
   return result.exitCode
 }
 
-export async function buildAll(options: BuildOptions): Promise<string[]> {
-  const outdir = join(ROOT, options.outdir)
-  await mkdir(outdir, { recursive: true })
-  const built: string[] = []
-  for (const target of options.targets) {
-    const outfile = join(outdir, artifactName(target, options.version))
-    let exitCode = compile(target, outfile, options.version, options.bytecode)
-    if (exitCode !== 0 && options.bytecode) {
-      console.warn(`bytecode compilation failed for ${target}; retrying without --bytecode`)
-      exitCode = compile(target, outfile, options.version, false)
-    }
-    if (exitCode !== 0) throw new Error(`build failed for ${target}`)
-    const { size } = await stat(outfile)
-    console.log(`${artifactName(target, options.version)}\t${(size / 1_048_576).toFixed(1)} MB`)
-    built.push(outfile)
+// Under CI a bytecode failure aborts: a release must not mix bytecode and plain binaries
+export function compileWithFallback(job: CompileJob, compileJob: Compile, env: Env): Outcome {
+  if (compileJob(job) === 0) {
+    return job.bytecode ? 'bytecode' : 'no bytecode'
   }
-  return built
+  if (!job.bytecode) {
+    throw new Error(`build failed for ${job.target}`)
+  }
+  if (env['CI'] !== undefined) {
+    throw new Error(
+      `bytecode compilation failed for ${job.target}; CI builds never drop --bytecode`,
+    )
+  }
+  console.warn(`bytecode compilation failed for ${job.target}; retrying without --bytecode`)
+  if (compileJob({ ...job, bytecode: false }) !== 0) {
+    throw new Error(`build failed for ${job.target}`)
+  }
+  return 'no bytecode'
 }
 
+function strayRuntimes(dir: string): string[] {
+  return readdirSync(dir).filter((name) => name.endsWith(STRAY_RUNTIME_SUFFIX))
+}
+
+// Every compile leaves a runtime copy (.<hash>-00000000.bun-build) in its cwd
+export function withoutStrayRuntimes<Result>(dir: string, action: () => Result): Result {
+  const before = new Set(strayRuntimes(dir))
+  try {
+    return action()
+  } finally {
+    for (const name of strayRuntimes(dir)) {
+      if (!before.has(name)) {
+        rmSync(path.join(dir, name), { force: true })
+      }
+    }
+  }
+}
+
+function buildTarget(target: Target, outdir: string, options: BuildOptions): string {
+  const name = artifactName(target, options.version)
+  const outfile = path.join(outdir, name)
+  const job = { target, outfile, version: options.version, bytecode: options.bytecode }
+  const outcome = withoutStrayRuntimes(ROOT, () => compileWithFallback(job, compile, process.env))
+  const { size } = statSync(outfile)
+  console.log(`${name}\t${(size / 1_048_576).toFixed(1)} MB\t${outcome}`)
+  return outfile
+}
+
+export async function buildAll(options: BuildOptions): Promise<string[]> {
+  // Relative to the caller's cwd: dist/ at the root, apps/bytebureau/dist for the app's build script
+  const outdir = path.resolve(options.outdir)
+  await mkdir(outdir, { recursive: true })
+  return options.targets.map((target) => buildTarget(target, outdir, options))
+}
+
+/* v8 ignore start */
 if (import.meta.main) {
-  const rootPackage = (await Bun.file(join(ROOT, 'package.json')).json()) as { version: string }
   await buildAll(parseArgs(Bun.argv.slice(2), { version: rootPackage.version }))
 }
+/* v8 ignore stop */
 ```
 Run: `bunx vitest run --project scripts` → PASS (6 tests).
 
@@ -1325,14 +1932,31 @@ Run: `bun add -D --exact turbo`
 {
   "$schema": "https://turborepo.com/schema.json",
   "ui": "stream",
+  "agentGuidance": false,
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
+    "bytebureau#build": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/build-binaries.ts",
+        "$TURBO_ROOT$/package.json"
+      ],
+      "outputs": ["dist/**"]
+    },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
-    "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
+    "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
+    "docs:build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/docs/decisions/**"],
+      "env": ["DOCS_SITE", "DOCS_BASE"],
+      "outputs": ["dist/**"]
+    }
   }
 }
 ```
-Change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`.
+(`agentGuidance: false` stops Turborepo from writing an `AGENTS.md` into the tree; the `bytebureau#build` entry hashes the build script and the root version so a cached binary cannot go stale; the i18n entry makes its typecheck wait for its own build, because the generated `src/paraglide` output is git-ignored.) Change the root `build:i18n` script to `"turbo run build --filter=@bytebureau/i18n"` so the generated output is cached, and change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
 
 - [ ] **Step 2: Verify the graph**
 
@@ -1376,15 +2000,22 @@ bun add -D --exact @cspell/dict-cs-cz || echo "no Czech dictionary package; fall
 import type { KnipConfig } from 'knip'
 
 const config: KnipConfig = {
-  ignore: ['packages/i18n/src/paraglide/**', 'docs/**', 'tools/**'],
-  ignoreDependencies: ['@tsconfig/strictest', 'oxlint-tsgolint', '@types/bun', '@cspell/dict-cs-cz'],
+  ignoreDependencies: [
+    // Loaded by dependency-cruiser as its TypeScript parser (parser: 'swc' in its config)
+    '@swc/core',
+  ],
   workspaces: {
-    '.': {
-      entry: ['scripts/*.ts', 'vitest.config.ts', 'commitlint.config.ts', 'changelog.config.ts', 'knip.ts'],
-      project: ['scripts/**/*.ts'],
+    '.': { entry: ['scripts/*.ts'], project: ['scripts/**/*.ts'] },
+    'apps/bytebureau': { project: ['src/**/*.ts'] },
+    'apps/docs': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
     },
-    'apps/bytebureau': { entry: ['src/main.ts'], project: ['src/**/*.ts'] },
-    'packages/i18n': { entry: ['src/index.ts', 'scripts/compile.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/i18n': {
+      project: ['src/**/*.ts', 'scripts/**/*.ts'],
+      // Loaded by the inlang SDK from project.inlang/settings.json (modules), never imported
+      ignoreDependencies: ['@inlang/plugin-message-format'],
+    },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }
@@ -1402,7 +2033,17 @@ module.exports = {
     {
       name: 'no-orphans',
       severity: 'warn',
-      from: { orphan: true, pathNot: ['\\.d\\.ts$', '\\.test\\.ts$', '\\.config\\.(ts|mjs|cjs)$', '(^|/)\\.[^/]+\\.(js|cjs|mjs|ts)$'] },
+      from: {
+        orphan: true,
+        pathNot: [
+          String.raw`\.d\.ts$`,
+          String.raw`\.test\.ts$`,
+          String.raw`\.config\.(ts|mjs|cjs)$`,
+          String.raw`(^|/)\.[^/]+\.(js|cjs|mjs|ts)$`,
+          // Entry-point scripts (run from package.json scripts or CI) are never imported by design
+          String.raw`(^|/)scripts/`,
+        ],
+      },
       to: {},
     },
     {
@@ -1410,12 +2051,15 @@ module.exports = {
       severity: 'error',
       comment: 'Only packages/kernel, packages/api and packages/protocol may depend on Effect.',
       from: { path: '^(packages/(?!(kernel|api|protocol)/)|plugins/)' },
-      to: { path: '^node_modules/(effect|@effect)/' },
+      // Bun's isolated linker resolves packages to node_modules/.bun/<name>@<version>/node_modules/
+      // The pattern is therefore not anchored to the first node_modules segment
+      to: { path: '(^|/)node_modules/(effect|@effect)/' },
     },
     {
       name: 'plugins-depend-only-on-contracts',
       severity: 'error',
-      comment: 'Plugins may import only @bytebureau/plugin-api and @bytebureau/protocol from the workspace.',
+      comment:
+        'Plugins may import only @bytebureau/plugin-api and @bytebureau/protocol from the workspace.',
       from: { path: '^plugins/' },
       to: { path: '^packages/', pathNot: '^packages/(plugin-api|protocol)/' },
     },
@@ -1428,9 +2072,23 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: ['node_modules'] },
-    exclude: { path: ['node_modules', 'dist', 'coverage', 'src/paraglide', '\\.astro'] },
-    tsPreCompilationDeps: true,
-    tsConfig: { fileName: 'tsconfig.json' },
+    // Excluded modules vanish from the graph, so these patterns must only match first-party paths
+    // An unanchored "dist" once dropped third-party entry files such as citty, @clack/prompts and
+    // Effect (node_modules/.bun/<name>@<version>/node_modules/<name>/dist/...)
+    // With them went the edges that effect-only-in-core has to see
+    // It also skipped first-party files whose names merely contain dist or coverage
+    exclude: {
+      path: [
+        String.raw`^(apps|packages|plugins|scripts)/[^/]+/(dist|coverage)/`,
+        'src/paraglide',
+        String.raw`\.astro`,
+      ],
+    },
+    // The TypeScript support of dependency-cruiser stops at typescript 6 and this repo uses 7
+    // So swc parses the sources
+    // Leave tsConfig and tsPreCompilationDeps unset: they only trigger a missing-typescript notice
+    // Once TypeScript 7 is supported, drop swc and use parser: 'tsc' together with tsConfig
+    parser: 'swc',
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'require', 'node', 'default', 'types'],
@@ -1448,8 +2106,11 @@ module.exports = {
 {
   "version": "0.2",
   "language": "en",
-  "dictionaries": ["typescript", "node", "npm", "softwareTerms", "bytebureau"],
-  "dictionaryDefinitions": [{ "name": "bytebureau", "path": "./cspell-words.txt", "addWords": true }],
+  "import": ["@cspell/dict-cs-cz/cspell-ext.json"],
+  "dictionaries": ["typescript", "node", "npm", "softwareTerms", "en-gb", "bytebureau"],
+  "dictionaryDefinitions": [
+    { "name": "bytebureau", "path": "./cspell-words.txt", "addWords": true }
+  ],
   "ignorePaths": [
     "node_modules",
     "dist",
@@ -1457,6 +2118,7 @@ module.exports = {
     "bun.lock",
     "**/paraglide/**",
     "docs/research/**",
+    "docs/superpowers/**",
     "CHANGELOG.md",
     "LICENSE.md",
     "CODE_OF_CONDUCT.md",
@@ -1465,6 +2127,7 @@ module.exports = {
   "ignoreRegExpList": ["/\\b[0-9a-f]{40}\\b/g", "/sha256-[A-Za-z0-9+/=]+/g"],
   "overrides": [
     { "filename": "**/messages/cs.json", "language": "en,cs" },
+    { "filename": "**/*.test.ts", "language": "en,cs" },
     { "filename": "README.cs.md", "language": "en,cs" },
     { "filename": "apps/docs/src/content/docs/cs/**", "language": "en,cs" }
   ]
@@ -1474,7 +2137,7 @@ If `@cspell/dict-cs-cz` installed, add `"import": ["@cspell/dict-cs-cz/cspell-ex
 
 `cspell-words.txt` (one word per line): `bytebureau`, `ByteBureau`, `Ondřej`, `Misák`, `misaon`, `oxlint`, `oxfmt`, `tsgolint`, `lefthook`, `commitlint`, `changelogen`, `paraglide`, `inlang`, `citty`, `clack`, `picocolors`, `turborepo`, `turbo`, `knip`, `depcruise`, `zizmor`, `actionlint`, `cosign`, `sigstore`, `SBOM`, `cyclonedx`, `syft`, `musl`, `Codex`, `OpenCode`, `Anthropic`, `Starlight`, `Astro`, `pagefind`, `MADR`, `worktree`, `worktrees`, `Paseo`, `monorepo`, `devcontainer`, `bunfig`, `tsconfig`, `tsbuildinfo`, `renovatebot`, `Renovate`, `Dependabot`, `Scorecard`, `OpenSSF`, `Jira`, `Tauri`, `Pixi`, `PixiJS`, `Effect`, `JSONC`, `NDJSON`, `WebCrypto`, `gitignore`, `gitattributes`, `editorconfig`, `Homebrew`, `Scoop`, `winget`, `attestations`, `provenance`, `kebab`, `Zod`, `OTLP`, `OpenTelemetry`.
 
-`.markdownlint-cli2.yaml`:
+`.markdownlint-cli2.yaml` (`gitignore: true` keeps generated, git-ignored files such as Paraglide's output out of the lint):
 ```yaml
 config:
   default: true
@@ -1483,41 +2146,54 @@ config:
     siblings_only: true
   MD033: false
   MD041: false
+gitignore: true
 globs:
   - '**/*.md'
 ignores:
   - 'node_modules/**'
   - '**/node_modules/**'
   - 'docs/research/**'
+  - 'docs/superpowers/**'
   - 'CHANGELOG.md'
   - 'LICENSE.md'
   - 'CODE_OF_CONDUCT.md'
 ```
-`.ls-lint.yml`:
+`.ls-lint.yml` (ls-lint 2.x checks a dotted name only when its full dotted extension is listed, so every dotted extension in use gets its own key; directories keep a regex so names like `project.inlang` pass):
 ```yaml
 ls:
-  .ts: kebab-case | point.case
+  # A multi-dot name is checked only when its exact extension has a key, so each one in use is listed
+  .ts: kebab-case
+  .test.ts: kebab-case
+  .config.ts: kebab-case
+  .d.ts: kebab-case
   .tsx: kebab-case | PascalCase
-  .mjs: kebab-case | point.case
-  .cjs: kebab-case | point.case
-  .json: kebab-case | point.case
-  .md: kebab-case | SCREAMING_SNAKE_CASE | point.case
+  .mjs: kebab-case
+  .config.mjs: kebab-case
+  .cjs: kebab-case
+  .config.cjs: kebab-case
+  .json: kebab-case
+  .md: kebab-case | SCREAMING_SNAKE_CASE
+  .cs.md: kebab-case | SCREAMING_SNAKE_CASE
   .mdx: kebab-case
-  .yml: kebab-case | point.case
-  .yaml: kebab-case | point.case
-  .dir: kebab-case | point.case
+  .yml: kebab-case
+  .yaml: kebab-case
+  # The regex lets dotted directory names through, which kebab-case alone rejects (foo.bar, v1.2)
+  .dir: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
 
 ignore:
-  - node_modules
+  - '**/node_modules'
   - .git
   - .github
   - .vscode
-  - .astro
-  - .turbo
-  - dist
-  - coverage
+  - .idea
+  - .superpowers
+  - '**/.astro'
+  - '**/.turbo'
+  - '**/dist'
+  - '**/coverage'
   - docs/research
   - packages/i18n/src/paraglide
+  - packages/i18n/project.inlang
   - CODEOWNERS
   - .all-contributorsrc
   - .bun-version
@@ -1532,7 +2208,17 @@ ignore:
   - .dependency-cruiser.cjs
 ```
 
-- [ ] **Step 5: Run every gate and fix findings**
+- [ ] **Step 5: Add the spelling hook now that cspell is installed**
+
+Append to the `pre-commit.commands` block of `lefthook.yml` (Task 3 created the file without it because cspell did not exist yet):
+```yaml
+    spell:
+      priority: 4
+      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}'
+      run: bunx cspell --no-progress --no-must-find-files {staged_files}
+```
+
+- [ ] **Step 6: Run every gate and fix findings**
 
 Run:
 ```bash
@@ -1544,10 +2230,10 @@ bun run lint:ls
 ```
 Expected: all exit 0. For knip findings: remove genuinely unused exports/dependencies; add an `ignoreDependencies` entry only for packages referenced solely from config files (document why in the commit body). For cspell findings: add real project words to `cspell-words.txt`, fix typos otherwise.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add knip.ts .dependency-cruiser.cjs cspell.json cspell-words.txt .markdownlint-cli2.yaml .ls-lint.yml package.json bun.lock
+git add knip.ts .dependency-cruiser.cjs cspell.json cspell-words.txt .markdownlint-cli2.yaml .ls-lint.yml lefthook.yml package.json bun.lock
 git commit -m "chore(repo): add knip, dependency-cruiser, cspell, markdownlint and ls-lint gates"
 ```
 
@@ -1571,22 +2257,37 @@ git commit -m "chore(repo): add knip, dependency-cruiser, cspell, markdownlint a
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "eslint": "10.11.0",
+    "eslint-plugin-jsdoc": "65.0.1",
+    "eslint-plugin-security": "4.2.0",
+    "eslint-plugin-sonarjs": "4.2.2",
+    "jiti": "2.7.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-eslint": "8.71.0"
+  }
 }
 ```
 Run:
 ```bash
 cd tools/eslint-long-tail
 bun add -D --exact eslint typescript-eslint eslint-plugin-sonarjs eslint-plugin-security eslint-plugin-jsdoc jiti
-bun add -D --exact "typescript@npm:@typescript/typescript6@6.0.3"
+bun add -D --exact "typescript@npm:@typescript/typescript6@6.0.2"   # newest 6.0.x alias package; it wraps typescript 6.0.3
 cd ../..
 ```
-Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_modules/typescript/package.json').version)"` prints `6.0.3` while `bunx tsc --version` at the root still prints 7.0.x.
+Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_modules/typescript/package.json').version)"` prints `6.0.x` while `bunx tsc --version` at the root still prints 7.0.x. Add `"tools/**"` to `ignorePatterns` in `.oxlintrc.jsonc` (the tool's dependencies are not installed in a fresh clone, so oxlint must not type-check that directory; oxfmt, ESLint and the tool's own `tsc` still cover it).
 
 `tools/eslint-long-tail/tsconfig.json` (so the config file itself type-checks under the tool's TypeScript):
 ```json
 {
-  "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "types": ["node"] },
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
   "include": ["eslint.config.ts"]
 }
 ```
@@ -1594,14 +2295,16 @@ Verify the alias: `node -e "console.log(require('./tools/eslint-long-tail/node_m
 - [ ] **Step 2: Create `tools/eslint-long-tail/eslint.config.ts`**
 
 ```ts
-import jsdoc from 'eslint-plugin-jsdoc'
+import { fileURLToPath } from 'node:url'
+import { defineConfig } from 'eslint/config'
+import jsdocPlugin from 'eslint-plugin-jsdoc'
 import security from 'eslint-plugin-security'
 import sonarjs from 'eslint-plugin-sonarjs'
 import tseslint from 'typescript-eslint'
 
-const repoRoot = new URL('../..', import.meta.url).pathname
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
-export default tseslint.config(
+export default defineConfig(
   { ignores: ['**/dist/**', '**/coverage/**', '**/paraglide/**', '**/.astro/**', '**/*.config.*'] },
   {
     files: ['**/*.ts'],
@@ -1624,12 +2327,19 @@ export default tseslint.config(
     rules: { 'security/detect-child-process': 'off' },
   },
   {
-    files: ['packages/plugin-api/src/**/*.ts', 'packages/protocol/src/**/*.ts', 'packages/client/src/**/*.ts'],
-    plugins: { jsdoc },
+    files: [
+      'packages/plugin-api/src/**/*.ts',
+      'packages/protocol/src/**/*.ts',
+      'packages/client/src/**/*.ts',
+    ],
+    plugins: { jsdoc: jsdocPlugin },
     rules: {
       'jsdoc/require-jsdoc': [
         'error',
-        { publicOnly: true, require: { FunctionDeclaration: true, ClassDeclaration: true, MethodDefinition: true } },
+        {
+          publicOnly: true,
+          require: { FunctionDeclaration: true, ClassDeclaration: true, MethodDefinition: true },
+        },
       ],
     },
   },
@@ -1667,11 +2377,23 @@ git commit -m "chore(repo): add isolated eslint long tail with typescript 6 api"
 
 `scripts/license.test.ts`:
 ```ts
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
-const read = (path: string): string => readFileSync(`${root}/${path}`, 'utf8')
+const root = fileURLToPath(new URL('..', import.meta.url))
+const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
+
+// The root manifest plus apps/*/package.json and packages/*/package.json
+const manifests = [
+  'package.json',
+  ...['apps', 'packages'].flatMap((parent) =>
+    readdirSync(path.join(root, parent))
+      .map((name) => path.join(parent, name, 'package.json'))
+      .filter((manifest) => existsSync(path.join(root, manifest))),
+  ),
+]
 
 describe('licence layer', () => {
   it('ships the FSL-1.1-MIT text with the licensor filled in', () => {
@@ -1681,9 +2403,11 @@ describe('licence layer', () => {
     expect(licence).not.toMatch(/\{[A-Za-z ]+\}/u)
   })
 
-  it('declares FSL-1.1-MIT in every private package manifest', () => {
-    for (const manifest of ['package.json', 'apps/bytebureau/package.json', 'packages/i18n/package.json', 'packages/tsconfig/package.json']) {
-      expect(JSON.parse(read(manifest)).license, manifest).toBe('FSL-1.1-MIT')
+  it('declares FSL-1.1-MIT in the root, app and package manifests', () => {
+    expect.hasAssertions()
+    expect(manifests).toContain('apps/docs/package.json')
+    for (const manifest of manifests) {
+      expect(JSON.parse(read(manifest)), manifest).toHaveProperty('license', 'FSL-1.1-MIT')
     }
   })
 
@@ -1756,39 +2480,93 @@ git commit -m "docs(repo): add fsl-1.1-mit licence and trademark policy"
 Run `bun add -D --exact yaml`, then `scripts/github-yaml.test.ts`:
 ```ts
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
+const root = fileURLToPath(new URL('..', import.meta.url))
+const USES = /^\s*-?\s*uses:\s*(?<ref>\S+)(?<rest>.*)$/u
+const PINNED = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/u
+const TAG_COMMENT = /^\s+#\s*\S+/u
+
+interface UsesLine {
+  readonly where: string
+  readonly ref: string
+  readonly rest: string
+}
+
+function usesLines(file: string): UsesLine[] {
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .flatMap((line, index) => {
+      const { groups } = USES.exec(line) ?? {}
+      return groups === undefined
+        ? []
+        : [
+            {
+              where: `${file.replace(root, '')}:${index + 1}`,
+              ref: groups['ref'] ?? '',
+              rest: groups['rest'] ?? '',
+            },
+          ]
+    })
+}
 
 function yamlFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name)
-    if (statSync(path).isDirectory()) return yamlFiles(path)
-    return name.endsWith('.yml') || name.endsWith('.yaml') ? [path] : []
+    const entry = path.join(dir, name)
+    if (statSync(entry).isDirectory()) {
+      return yamlFiles(entry)
+    }
+    return name.endsWith('.yml') || name.endsWith('.yaml') ? [entry] : []
   })
 }
 
 describe('.github YAML', () => {
-  const files = yamlFiles(join(root, '.github'))
+  const files = yamlFiles(path.join(root, '.github'))
 
   it('contains the issue forms, labeler and funding files', () => {
+    expect.hasAssertions()
     const names = files.map((file) => file.replace(root, ''))
-    for (const expected of ['.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/feature.yml', '.github/ISSUE_TEMPLATE/plugin.yml', '.github/ISSUE_TEMPLATE/config.yml', '.github/labeler.yml', '.github/FUNDING.yml']) {
+    for (const expected of [
+      '.github/ISSUE_TEMPLATE/bug.yml',
+      '.github/ISSUE_TEMPLATE/feature.yml',
+      '.github/ISSUE_TEMPLATE/plugin.yml',
+      '.github/ISSUE_TEMPLATE/config.yml',
+      '.github/labeler.yml',
+      '.github/FUNDING.yml',
+    ]) {
       expect(names).toContain(expected)
     }
   })
 
   it('parses every YAML file', () => {
+    expect.hasAssertions()
     for (const file of files) {
-      expect(() => parse(readFileSync(file, 'utf8')), file).not.toThrow()
+      expect(() => {
+        parse(readFileSync(file, 'utf8'))
+      }, file).not.toThrow()
+    }
+  })
+
+  it('pins every non-local action to a commit SHA with its tag in a comment', () => {
+    expect.hasAssertions()
+    const uses = files.flatMap((file) => usesLines(file))
+    const external = uses.filter(({ ref }) => !ref.startsWith('./'))
+    expect(external.length).toBeGreaterThan(0)
+    expect(uses.length).toBeGreaterThan(external.length)
+    for (const { where, ref, rest } of external) {
+      expect(ref, where).toMatch(PINNED)
+      expect(rest, where).toMatch(TAG_COMMENT)
     }
   })
 
   it('disables blank issues', () => {
-    const config = parse(readFileSync(join(root, '.github/ISSUE_TEMPLATE/config.yml'), 'utf8')) as { blank_issues_enabled: boolean }
-    expect(config.blank_issues_enabled).toBe(false)
+    const config: unknown = parse(
+      readFileSync(path.join(root, '.github/ISSUE_TEMPLATE/config.yml'), 'utf8'),
+    )
+    expect(config).toHaveProperty('blank_issues_enabled', false)
   })
 })
 ```
@@ -1943,7 +2721,33 @@ body:
 ```yaml
 'area: foundation':
   - changed-files:
-      - any-glob-to-any-file: ['package.json', 'bunfig.toml', 'turbo.json', 'tsconfig.json', 'packages/tsconfig/**', 'scripts/**', '.oxlintrc.json', '.oxfmtrc.json', 'knip.ts', '.dependency-cruiser.cjs']
+      - any-glob-to-any-file:
+          [
+            'package.json',
+            'bunfig.toml',
+            'turbo.json',
+            'tsconfig.json',
+            'packages/tsconfig/**',
+            'scripts/**',
+            '.oxlintrc.jsonc',
+            '.oxfmtrc.json',
+            'knip.ts',
+            '.dependency-cruiser.cjs',
+            'lefthook.yml',
+            'commitlint.config.ts',
+            'vitest.config.ts',
+            'renovate.json',
+            'cspell.json',
+            'cspell-words.txt',
+            '.ls-lint.yml',
+            '.markdownlint-cli2.yaml',
+            'mise.toml',
+            '.bun-version',
+            '.node-version',
+            'tools/**',
+            '.vscode/**',
+            '.editorconfig',
+          ]
 'area: ci':
   - changed-files:
       - any-glob-to-any-file: ['.github/**']
@@ -1976,7 +2780,7 @@ body:
 - [ ] **Step 3: Create the health files**
 
 `CONTRIBUTING.md`:
-```markdown
+````markdown
 # Contributing to ByteBureau
 
 Thank you for helping build the AI office. This guide covers the setup, the rules the CI enforces, and how to get a change merged.
@@ -2002,7 +2806,64 @@ bun run check
 
 | Command | What it does |
 | --- | --- |
-| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage) |
+| `bun run check` | every CI gate except the Docker-based workflow linters (`bun run lint:actions`) |
+| `bun run lint:actions` | actionlint and zizmor (pedantic persona) in Docker |
+| `bun run lint` / `bun run format` | oxlint (type-aware) / oxfmt |
+| `bun run test` | Vitest across all packages |
+| `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
+| `bun run docs:build` | build the documentation site |
+
+Export `GH_TOKEN="$(gh auth token)"` before `bun run lint:actions` to let zizmor run its online audits too (`impostor-commit`, `known-vulnerable-actions`, `stale-action-refs`).
+
+## Commit messages
+
+We use [Conventional Commits](https://www.conventionalcommits.org): `type(scope): subject`.
+
+- **Type**: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore` or `revert`.
+- **Scope** (optional): a workspace directory name (`bytebureau`, `i18n`, `tsconfig`, `docs`) or `cli`, `deps`, `release`, `repo`, `ci`.
+- **Subject**: imperative, starting with a lower-case letter.
+- **Sign-off**: a Developer Certificate of Origin sign-off on every commit (`git commit -s`); by signing off you certify the [DCO](https://developercertificate.org).
+
+commitlint checks the type, the scope, the subject case and the header length (at most 100 characters) of every commit. The PR title is checked for the same types, scopes and lower-case subject, because we squash-merge using the PR title.
+
+Contributions are licensed under the licence of the package they touch (FSL-1.1-MIT for the application, MIT for the SDK packages).
+
+## Pull requests
+
+1. Open an issue or discussion first for anything larger than a bug fix.
+2. Branch from `main`, keep the PR focused, add tests.
+3. Fill in the PR template; keep `bun run check` green.
+4. A maintainer reviews within a week. Address comments with new commits; we squash on merge.
+
+## Code style
+
+- TypeScript only, strictest settings; no `any`, no enums, no namespaces (erasable syntax only).
+- Files are kebab-case; one responsibility per file; no barrel files except a package entry point.
+- Comments only where the code cannot say it; keep them short.
+- Translations live in `packages/i18n/messages/*.json`; add the key to both `en` and `cs` (tests enforce parity).
+
+## Architecture
+
+Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `docs/superpowers/specs/` and the ADRs in `docs/decisions/`. New decisions get a new ADR (MADR format).
+
+## Editors
+
+VS Code: accept the recommended extensions (`.vscode/extensions.json`). WebStorm: the lefthook hooks keep formatting and linting consistent; run `bun run format` before committing if your IDE formatter differs.
+```bash
+git clone https://github.com/misaon/byte-bureau.git
+cd byte-bureau
+mise install
+bun install --frozen-lockfile
+bun run check
+```
+
+`bun install` runs `lefthook install`, so the commit hooks are active immediately.
+
+## Day-to-day commands
+
+| Command | What it does |
+| --- | --- |
+| `bun run check` | every gate the CI runs (lint, format, spelling, markdown, file names, dead code, boundaries, typecheck, tests with coverage, ESLint long tail) |
 | `bun run lint` / `bun run format` | oxlint (type-aware) / oxfmt |
 | `bun run test` | Vitest across all packages |
 | `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
@@ -2038,7 +2899,7 @@ Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `doc
 ## Editors
 
 VS Code: accept the recommended extensions (`.vscode/extensions.json`). WebStorm: the lefthook hooks keep formatting and linting consistent; run `bun run format` before committing if your IDE formatter differs.
-```
+````
 `SECURITY.md`:
 ```markdown
 # Security policy
@@ -2052,6 +2913,8 @@ Only the latest minor release line receives security fixes.
 Use GitHub's private vulnerability reporting: <https://github.com/misaon/byte-bureau/security/advisories/new>. Do not open public issues for security problems.
 
 You will receive an acknowledgement within 5 working days. We aim to publish a fix and advisory within 90 days of the report (coordinated disclosure); we will tell you if we need longer and why.
+
+There is no bug bounty programme yet; reports are handled on a best-effort basis.
 
 ## Scope
 
@@ -2090,7 +2953,7 @@ ByteBureau is maintained by its founder, Ondřej Misák (BDFL), until the projec
 ```bash
 curl -fsSL https://www.contributor-covenant.org/version/3/0/code_of_conduct/code_of_conduct.md -o CODE_OF_CONDUCT.md
 ```
-then replace the contact placeholder the text contains (search for `INSERT`) with `the maintainer via GitHub private vulnerability reporting or a private message to @misaon`. If the 3.0 URL is unavailable, use version 2.1 at <https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md>.
+then replace the reporting placeholder (`**[NOTE: describe your means of reporting here.]**` in version 3.0) with `contact the maintainer via GitHub private vulnerability reporting or a private message to @misaon.` and delete the adopter note about a community-specific enforcement process (ByteBureau uses the upstream enforcement ladder). If the 3.0 URL is unavailable, use version 2.1 at <https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md>.
 
 - [ ] **Step 4: Run tests and markdown lint, then commit**
 
@@ -2140,9 +3003,9 @@ Contributors can read why things are the way they are; reversing a decision requ
 ## Appendix: owner actions after the foundation lands
 
 1. Run a name-clearance search for "ByteBureau" (TMview, BOIP, ÚPV) before investing in branding; a Belgian GitHub organisation and a parked `bytebureau.com` exist.
-2. Create the GitHub organisation `getbytebureau` (fallbacks `bytebureauhq`, `bytebureau-dev`) and transfer the repository to enable the merge queue.
+2. Create the GitHub organisation `getbytebureau` (fallbacks `bytebureauhq`, `bytebureau-dev`) and transfer the repository to enable the merge queue. GitHub Pages URLs do not redirect after a transfer, so update every file that hard-codes `misaon/byte-bureau` or `misaon.github.io` (`git grep -n misaon` lists them): `apps/docs/astro.config.mjs`, `apps/docs/scripts/sync-decisions.ts` and its test, `changelog.config.ts`, `README.md`, `README.cs.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `.github/ISSUE_TEMPLATE/config.yml`, `.all-contributorsrc`, the pages under `apps/docs/src/content/docs/`, and the `gh attestation verify --owner` examples.
 3. Enable 2FA, SSH commit signing and vigilant mode on the owner account.
-4. Run `scripts/repo-settings.sh <owner>/<repo>` (repository features, security settings, labels, rulesets).
+4. Run `scripts/repo-settings.sh <owner>/<repo>` (repository features, security settings, GitHub Pages source, labels, rulesets).
 5. In the GitHub UI: CodeQL default setup (JavaScript/TypeScript and Actions, extended queries), immutable releases, social preview image (1280×640), Actions policy (allow owner, GitHub and verified-creator actions plus the explicit list; require approval for first-time contributors; read-only default token), artifact retention 30 days, Discussions categories (Announcements, Q&A, Ideas, Show and tell).
 6. Install the Renovate, DCO and all-contributors GitHub apps.
 7. Reserve the npm organisation `@bytebureau`, Docker Hub `bytebureau`, domains `bytebureau.dev`, `bytebureau.app`, `bytebureau.cz`; create the `homebrew-tap` repository and the `HOMEBREW_TAP_TOKEN` secret when ready.
@@ -2165,7 +3028,7 @@ The application runs on Bun 1.4.x, pinned exactly in `.bun-version`, and ships a
 
 ## Consequences
 
-Cross-compiled binaries of roughly 60–80 MB per target; built-in SQLite, WebSocket server and process APIs without extra dependencies; exposure to regressions in Bun's recent Rust rewrite, mitigated by exact pinning, Renovate cooldowns and a nightly canary job.
+Cross-compiled binaries of roughly 60–80 MB per target; built-in SQLite, WebSocket server and process APIs without extra dependencies; exposure to regressions in Bun's recent Rust rewrite, mitigated by exact pinning, Renovate cooldowns and a planned nightly canary job (sub-project 1).
 ```
 `docs/decisions/0003-effect-in-the-kernel-only.md`:
 ```markdown
@@ -2222,7 +3085,7 @@ The application is licensed under the Functional Source License 1.1 with MIT fut
 
 ## Consequences
 
-ByteBureau is "fair source", not OSI open source: no OpenSSF Best Practices badge, no GitHub Accelerator eligibility, and some contributors may decline; forks and users are never stranded thanks to the MIT conversion.
+ByteBureau is "fair source" under a licence the OSI has not approved: no OpenSSF Best Practices badge, no GitHub Accelerator eligibility, and some contributors may decline; forks and users are never stranded thanks to the MIT conversion.
 ```
 `docs/decisions/0006-agent-authentication-policy.md`:
 ```markdown
@@ -2233,11 +3096,11 @@ ByteBureau is "fair source", not OSI open source: no OpenSSF Best Practices badg
 
 ## Context and problem statement
 
-Anthropic's legal terms (verified 2026-10-02) allow an end user to sign in to the unmodified Claude Code binary with their own subscription, including where a platform hosts it, but forbid third parties from offering claude.ai login, routing requests through subscription credentials for their users, or collecting, storing or intermediating credentials and session tokens. Consumer terms forbid account sharing and automated multi-account use. OpenAI admits open-source tools to ChatGPT plans through "Sign in with ChatGPT".
+Anthropic's legal terms (verified 2026-10-02) allow an end user to sign in to the unmodified Claude Code binary with their own subscription, including where a platform hosts it, but forbid third parties from offering claude.ai login, routing requests through subscription credentials for their users, or collecting, storing or intermediating credentials and session tokens. Consumer terms forbid account sharing and automated multi-account use. OpenAI's "Sign in with ChatGPT" programme lets an application use a user's ChatGPT plan: applications under an OSI-approved licence qualify outright, commercial applications are approved case by case.
 
 ## Decision
 
-ByteBureau orchestrates the user's own, user-installed, unmodified agent CLIs under logins the user performs themselves; it never reads, copies, stores or proxies OAuth credentials; API-key mode is first class for every provider that supports it; multiple accounts are modelled as named profiles the user logs into individually, with manual switching and usage pacing, never automatic rotation; `--bare` mode is not used with subscription logins. The project applies for an OpenAI "Sign in with ChatGPT" client ID as an open-source tool.
+ByteBureau orchestrates the user's own, user-installed, unmodified agent CLIs under logins the user performs themselves; it never reads, copies, stores or proxies OAuth credentials; API-key mode is first class for every provider that supports it; multiple accounts are modelled as named profiles the user logs into individually, with manual switching and usage pacing, never automatic rotation; `--bare` mode is not used with subscription logins. The project applies for an OpenAI "Sign in with ChatGPT" client ID once it is eligible: outright admission requires an OSI-approved licence, which FSL-1.1-MIT is not, so eligibility under FSL-1.1-MIT (or through the MIT-licensed SDK packages) must be confirmed with OpenAI before applying.
 
 ## Consequences
 
@@ -2245,7 +3108,7 @@ The zero-cost path works today and complies with the published terms; the policy
 ```
 `docs/decisions/0007-lint-and-format-stack.md`:
 ```markdown
-# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI only
+# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI and in the local check
 
 - Status: accepted
 - Date: 2026-10-02
@@ -2256,7 +3119,7 @@ The project wants the strictest practical linting with fast feedback, on a TypeS
 
 ## Decision
 
-oxlint with every category at `error` and type-aware rules enabled is the primary linter; oxfmt (Prettier-compatible) is the formatter; both run in the pre-commit hook and in CI. Rules oxlint lacks (sonarjs cognitive complexity, security, jsdoc for published packages) run through ESLint in CI only, inside `tools/eslint-long-tail`, which installs TypeScript 6 under the `typescript` name so typescript-eslint keeps working until it supports TypeScript 7.
+oxlint with every category at `error` and type-aware rules enabled is the primary linter; oxfmt (Prettier-compatible) is the formatter; both run in the pre-commit hook and in CI. Rules oxlint lacks (sonarjs cognitive complexity, security, jsdoc for published packages) run through ESLint in CI and in `bun run check`, inside `tools/eslint-long-tail`, which installs TypeScript 6 under the `typescript` name so typescript-eslint keeps working until it supports TypeScript 7.
 
 ## Consequences
 
@@ -2275,7 +3138,7 @@ Releases must be reproducible, verifiable and friendly to read, for binaries on 
 
 ## Decision
 
-`changelogen --release --push` bumps the root version from Conventional Commits, writes `CHANGELOG.md` with emoji sections, commits and tags `vX.Y.Z`. The tag triggers `release.yml`: eight binaries are cross-compiled on one Linux runner, checksummed, attested with GitHub build provenance, signed with cosign (Sigstore bundles), accompanied by a CycloneDX SBOM, uploaded to a draft release and then published; the owner enables immutable releases so published assets cannot change. npm packages (from sub-project 1) publish through trusted publishing with provenance.
+A release is a pull request, because the `main` ruleset has no bypass actor. On a branch `release/vX.Y.Z` the owner runs `bun run release -r X.Y.Z`, that is `changelogen --release --no-push --no-tag --no-github -r X.Y.Z`, which sets the root version, writes `CHANGELOG.md` with emoji sections and commits `chore(release): vX.Y.Z` without creating a tag or pushing. The rest is done by hand: sign the commit off for the DCO check (`git commit --amend --signoff --no-edit`), push the branch, open a pull request titled `chore(release): vX.Y.Z`, squash-merge it once CI is green, then tag the merge commit (`git tag vX.Y.Z <merge commit>`) and push the tag (`git push origin vX.Y.Z`). The tag ruleset only blocks updating and deleting `v*` tags, so creating one needs no bypass, and the release commit is verified by CI before it is tagged; the GitHub release itself is created by the workflow. The tag triggers `release.yml`: eight binaries are cross-compiled on one Linux runner, checksummed, attested with GitHub build provenance, accompanied by a CycloneDX SBOM with its own attestation, signed with cosign (Sigstore bundles), uploaded to a draft release with `gh release create` and then published; the owner enables immutable releases so published assets cannot change. npm packages (from sub-project 1) publish through trusted publishing with provenance.
 
 ## Consequences
 
@@ -2294,7 +3157,7 @@ The 2025 npm supply-chain worms spread through freshly published versions and in
 
 ## Decision
 
-Renovate (`config:best-practices`) opens grouped weekly updates with a 7-day minimum release age (14 days for automerged devDependency minors and patches), pins GitHub Action digests and maintains lockfiles; Dependabot provides alerts and security updates only. Bun keeps lifecycle scripts blocked by default and CI installs with a frozen lockfile.
+Renovate (`config:best-practices`) opens grouped weekly updates with a 7-day minimum release age (14 days for automerged devDependency minors and patches), pins GitHub Action digests and maintains lockfiles; Dependabot provides alerts and security updates only. Every module a build loads is pinned exactly too: the inlang message-format plugin is an exact devDependency read from `node_modules`, never fetched from a CDN at build time. `bunfig.toml` sets `minimumReleaseAge` to three days, so `bun install` and `bun add` never resolve a version younger than that; versions already in `bun.lock` are unaffected. Bun keeps lifecycle scripts blocked by default and CI installs with a frozen lockfile.
 
 ## Consequences
 
@@ -2324,21 +3187,62 @@ git commit -m "docs: add architecture decision records 0001-0009"
 
 `scripts/readme.test.ts`:
 ```ts
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
-const read = (path: string): string => readFileSync(`${root}/${path}`, 'utf8')
-const headings = (markdown: string): number => markdown.split('\n').filter((line) => line.startsWith('## ')).length
+const root = fileURLToPath(new URL('..', import.meta.url))
+const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
+const headings = (markdown: string): number =>
+  markdown.split('\n').filter((line) => line.startsWith('## ')).length
 
-describe('README', () => {
-  it('stays under 300 lines', () => {
-    expect(read('README.md').split('\n').length).toBeLessThanOrEqual(300)
+// The decisions/ folders are generated from docs/decisions, which is checked directly
+function handWrittenPages(dir: string): string[] {
+  return readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) => {
+    const file = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      return entry.name === 'decisions' ? [] : handWrittenPages(file)
+    }
+    return /\.mdx?$/u.test(entry.name) ? [file] : []
+  })
+}
+
+const publishedTexts = [
+  'README.md',
+  'README.cs.md',
+  ...readdirSync(path.join(root, 'docs/decisions'))
+    .filter((name) => name.endsWith('.md'))
+    .map((name) => path.join('docs/decisions', name)),
+  ...handWrittenPages('apps/docs/src/content/docs'),
+]
+
+describe('published texts', () => {
+  it('never call the project open source', () => {
+    expect.hasAssertions()
+    for (const file of publishedTexts) {
+      expect(read(file), file).not.toMatch(/open[\s-]source/iu)
+    }
   })
 
-  it('never calls the project open source', () => {
-    expect(read('README.md').toLowerCase()).not.toContain('open source')
-    expect(read('README.md').toLowerCase()).not.toContain('open-source')
+  it('cover both READMEs, every ADR and the hand-written docs pages only', () => {
+    expect(publishedTexts).toStrictEqual(
+      expect.arrayContaining([
+        'README.cs.md',
+        'docs/decisions/0006-agent-authentication-policy.md',
+        'apps/docs/src/content/docs/install.md',
+        'apps/docs/src/content/docs/cs/index.mdx',
+      ]),
+    )
+    expect(
+      publishedTexts.filter((file) => file.startsWith('apps/docs/src/content/docs/decisions/')),
+    ).toStrictEqual([])
+  })
+})
+
+describe('the README', () => {
+  it('stays under 300 lines', () => {
+    expect(read('README.md').split('\n').length).toBeLessThanOrEqual(300)
   })
 
   it('has a Czech mirror with the same section structure', () => {
@@ -2484,7 +3388,7 @@ Made with ❤️ in Czechia.
 
 - [ ] **Step 4: Write `README.cs.md`**
 
-Translate the English file section by section, keeping the same ten `##` headings in the same order (`Co je ByteBureau?`, `Stav`, `Rychlý start`, `Funkce`, `Jak to funguje`, `Bezpečnost a soukromí`, `Přispívání`, `Komunita`, `Historie hvězdiček`, `Licence` — ten headings, matching the ten in `README.md`), the same badges, the language switcher `Čeština · [English](README.md)`, the same Mermaid diagram and the same code blocks. The licence paragraph in Czech: "ByteBureau je Fair Source pod licencí Functional Source License (FSL-1.1-MIT): můžete ho zdarma používat, číst, upravovat a přispívat; jediným omezením je nabízet ho jako konkurenční komerční produkt. Každé vydání se dva roky po zveřejnění stává MIT. SDK balíčky jsou MIT." Never use the phrase "open source" / "otevřený software" as a description of the project.
+Translate the English file section by section (idiomatic Czech; the product metaphor is an office, so write `kancelář kódovacích agentů`, never `oddělení`), keeping the same ten `##` headings in the same order (`Co je ByteBureau?`, `Stav`, `Rychlý start`, `Funkce`, `Jak to funguje`, `Bezpečnost a soukromí`, `Přispívání`, `Komunita`, `Historie hvězdiček`, `Licence` — ten headings, matching the ten in `README.md`), the same badges, the language switcher `Čeština · <a href="README.md">English</a>` (an HTML link, because Markdown links are not parsed inside the centred HTML block), the same Mermaid diagram and the same code blocks. The licence paragraph in Czech: "ByteBureau je Fair Source pod licencí Functional Source License (FSL-1.1-MIT): můžete ho zdarma používat, číst, upravovat a přispívat; jediným omezením je nabízet ho jako konkurenční komerční produkt. Každé vydání se dva roky po zveřejnění stává MIT. SDK balíčky jsou MIT." Never use the phrase "open source" / "otevřený software" as a description of the project.
 
 - [ ] **Step 5: Seed `CHANGELOG.md`**
 
@@ -2499,8 +3403,91 @@ All notable changes to ByteBureau are listed here. Sections are generated from C
 Run: `bunx vitest run --project scripts && bun run lint:md && bun run spell`
 Expected: pass (add Czech words that cspell flags to `cspell-words.txt` only if they are proper nouns; fix typos otherwise).
 ```bash
-git add README.md README.cs.md CHANGELOG.md assets scripts/readme.test.ts cspell-words.txt
-git commit -m "docs: add readme in english and czech, changelog seed and wordmark"
+bytebureau
+ByteBureau
+Ondřej
+Misák
+misaon
+oxlint
+oxfmt
+tsgolint
+lefthook
+commitlint
+changelogen
+paraglide
+inlang
+unifiedjs
+citty
+clack
+picocolors
+turborepo
+turbo
+knip
+depcruise
+zizmor
+zizmorcore
+actionlint
+rhysd
+cosign
+sigstore
+SBOM
+cyclonedx
+syft
+musl
+Codex
+OpenCode
+Anthropic
+Starlight
+Astro
+pagefind
+MADR
+worktree
+worktrees
+Paseo
+monorepo
+devcontainer
+bunfig
+tsconfig
+tsbuildinfo
+renovatebot
+Renovate
+Dependabot
+Scorecard
+OpenSSF
+Jira
+Tauri
+Pixi
+PixiJS
+Effect
+JSONC
+NDJSON
+WebCrypto
+gitignore
+gitattributes
+editorconfig
+Homebrew
+Scoop
+winget
+attestations
+provenance
+kebab
+Zod
+OTLP
+OpenTelemetry
+bunx
+libc
+wordmark
+BDFL
+BOIP
+automerged
+bytebureauhq
+cooldowns
+getbytebureau
+lockfiles
+protectable
+Čeština
+pluginy
+auditovatelný
 ```
 
 ---
@@ -2529,8 +3516,10 @@ git commit -m "docs: add readme in english and czech, changelog seed and wordmar
     "docs:build": "bun run scripts/sync-decisions.ts && astro build",
     "typecheck": "astro sync && tsc --noEmit -p tsconfig.json"
   },
-  "devDependencies": {
-    "@bytebureau/tsconfig": "workspace:*"
+  "dependencies": {
+    "@astrojs/starlight": "0.42.5",
+    "astro": "7.3.5",
+    "sharp": "0.35.5"
   }
 }
 ```
@@ -2541,7 +3530,7 @@ Run: `cd apps/docs && bun add --exact astro @astrojs/starlight sharp && cd ../..
 {
   "extends": "astro/tsconfigs/strictest",
   "compilerOptions": {
-    "types": ["bun"],
+    "types": ["bun", "astro/client"],
     "noEmit": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
@@ -2558,36 +3547,83 @@ export default defineProject({ test: { name: 'docs', include: ['scripts/**/*.tes
 ```
 Add `'apps/docs'` to the root `projects` and this workspace to `knip.ts`:
 ```ts
-'apps/docs': {
-  entry: ['astro.config.mjs', 'src/content.config.ts', 'scripts/*.ts'],
-  project: ['src/**/*.{ts,mjs}', 'scripts/**/*.ts'],
-  ignoreDependencies: ['sharp'],
-},
+  'apps/docs': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
+    },
+    'packages/i18n': { project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/tsconfig': { entry: [], project: [] },
+  },
 ```
 
 - [ ] **Step 2: Write the failing sync-script test**
 
 `apps/docs/scripts/sync-decisions.test.ts`:
 ```ts
-import { describe, expect, it } from 'vitest'
-import { withFrontmatter } from './sync-decisions.js'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { syncDecisions, withFrontmatter } from './sync-decisions.js'
 
-describe('withFrontmatter', () => {
+async function tempDir(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'bytebureau-decisions-'))
+  onTestFinished(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+async function seed(dir: string, files: Readonly<Record<string, string>>): Promise<void> {
+  await Promise.all(
+    Object.entries(files).map(async ([name, content]) => {
+      await writeFile(path.join(dir, name), content)
+    }),
+  )
+}
+
+describe(withFrontmatter, () => {
   it('moves the first heading into Starlight frontmatter and keeps the body', () => {
     const input = '# Bun as runtime\n\n- Status: accepted\n\n## Context\n\nText.\n'
     expect(withFrontmatter(input, '0002-bun-runtime.md')).toBe(
-      '---\ntitle: "Bun as runtime"\nsidebar:\n  label: "0002 Bun as runtime"\n---\n\n- Status: accepted\n\n## Context\n\nText.\n',
+      '---\ntitle: "Bun as runtime"\nsidebar:\n  label: "0002 Bun as runtime"\neditUrl: https://github.com/misaon/byte-bureau/edit/main/docs/decisions/0002-bun-runtime.md\n---\n\n- Status: accepted\n\n## Context\n\nText.\n',
     )
   })
 
   it('falls back to the file name when there is no heading', () => {
     expect(withFrontmatter('Just text\n', '0042-no-heading.md')).toBe(
-      '---\ntitle: "0042 no heading"\nsidebar:\n  label: "0042 no heading"\n---\n\nJust text\n',
+      '---\ntitle: "0042 no heading"\nsidebar:\n  label: "0042 no heading"\neditUrl: https://github.com/misaon/byte-bureau/edit/main/docs/decisions/0042-no-heading.md\n---\n\nJust text\n',
     )
   })
 
   it('escapes double quotes in titles', () => {
-    expect(withFrontmatter('# Say "hi"\n', '0001-x.md')).toContain('title: "Say \\"hi\\""')
+    expect(withFrontmatter('# Say "hi"\n', '0001-x.md')).toContain(String.raw`title: "Say \"hi\""`)
+  })
+
+  it('escapes backslashes in titles', () => {
+    expect(withFrontmatter('# Back\\slash\n', '0001-x.md')).toContain(
+      String.raw`title: "Back\\slash"`,
+    )
+  })
+})
+
+describe(syncDecisions, () => {
+  it('clears the target and writes one page per Markdown record, ignoring other files', async () => {
+    expect.hasAssertions()
+    const source = await tempDir()
+    const target = await tempDir()
+    await seed(target, { '0099-stale.md': '# Stale\n' })
+    await seed(source, {
+      '0002-b.md': '# Bee\n',
+      '0001-a.md': '# Ay\n',
+      'notes.txt': 'not a record',
+    })
+    await expect(syncDecisions(source, target)).resolves.toStrictEqual(['0001-a.md', '0002-b.md'])
+    const written = await readdir(target)
+    expect(written.toSorted()).toStrictEqual(['0001-a.md', '0002-b.md'])
+    await expect(readFile(path.join(target, '0002-b.md'), 'utf8')).resolves.toContain(
+      'title: "Bee"',
+    )
   })
 })
 ```
@@ -2598,13 +3634,15 @@ Run: `bunx vitest run --project docs` → FAIL.
 `apps/docs/scripts/sync-decisions.ts`:
 ```ts
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import path from 'node:path'
 
-const SOURCE = join(import.meta.dirname, '../../../docs/decisions')
-const TARGET = join(import.meta.dirname, '../src/content/docs/decisions')
+const SOURCE = path.join(import.meta.dirname, '../../../docs/decisions')
+const TARGET = path.join(import.meta.dirname, '../src/content/docs/decisions')
+// Synced copies are not tracked, so the site-wide edit link would point at a missing file
+const EDIT_URL_BASE = 'https://github.com/misaon/byte-bureau/edit/main/docs/decisions/'
 
 function quote(value: string): string {
-  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+  return `"${value.replaceAll('\\', String.raw`\\`).replaceAll('"', String.raw`\"`)}"`
 }
 
 function labelFor(fileName: string, title: string): string {
@@ -2615,30 +3653,39 @@ function labelFor(fileName: string, title: string): string {
 export function withFrontmatter(markdown: string, fileName: string): string {
   const lines = markdown.split('\n')
   const headingIndex = lines.findIndex((line) => line.startsWith('# '))
-  const fallback = fileName.replace(/\.md$/u, '').replace(/^\d{4}-/u, '').replaceAll('-', ' ')
+  const fallback = fileName
+    .replace(/\.md$/u, '')
+    .replace(/^\d{4}-/u, '')
+    .replaceAll('-', ' ')
   const headingTitle = headingIndex === -1 ? undefined : (lines[headingIndex] ?? '').slice(2).trim()
   const title = headingTitle ?? labelFor(fileName, fallback)
   const label = headingTitle === undefined ? title : labelFor(fileName, headingTitle)
-  const body = headingIndex === -1 ? lines : lines.filter((_, index) => index !== headingIndex)
+  const body = headingIndex === -1 ? lines : lines.filter((_line, index) => index !== headingIndex)
   const bodyText = body.join('\n').replace(/^\n+/u, '')
-  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\n---\n\n${bodyText}`
+  // The editUrl stays unquoted: .ls-lint.yml limits .md names to kebab-case or SCREAMING_SNAKE_CASE
+  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\neditUrl: ${EDIT_URL_BASE}${fileName}\n---\n\n${bodyText}`
 }
 
-export async function syncDecisions(): Promise<string[]> {
-  await rm(TARGET, { recursive: true, force: true })
-  await mkdir(TARGET, { recursive: true })
-  const files = (await readdir(SOURCE)).filter((name) => name.endsWith('.md')).sort()
-  for (const name of files) {
-    const markdown = await readFile(join(SOURCE, name), 'utf8')
-    await writeFile(join(TARGET, name), withFrontmatter(markdown, name))
-  }
+export async function syncDecisions(source = SOURCE, target = TARGET): Promise<string[]> {
+  await rm(target, { recursive: true, force: true })
+  await mkdir(target, { recursive: true })
+  const entries = await readdir(source)
+  const files = entries.filter((name) => name.endsWith('.md')).toSorted()
+  await Promise.all(
+    files.map(async (name) => {
+      const markdown = await readFile(path.join(source, name), 'utf8')
+      await writeFile(path.join(target, name), withFrontmatter(markdown, name))
+    }),
+  )
   return files
 }
 
+/* v8 ignore start */
 if (import.meta.main) {
   const files = await syncDecisions()
   console.log(`synced ${files.length} decision records`)
 }
+/* v8 ignore stop */
 ```
 Run: `bunx vitest run --project docs` → PASS (3 tests).
 
@@ -2677,7 +3724,11 @@ export default defineConfig({
             'contributing',
           ],
         },
-        { label: 'Decisions', translations: { cs: 'Rozhodnutí' }, autogenerate: { directory: 'decisions' } },
+        {
+          label: 'Decisions',
+          translations: { cs: 'Rozhodnutí' },
+          items: [{ autogenerate: { directory: 'decisions' } }],
+        },
       ],
     }),
   ],
@@ -2767,9 +3818,10 @@ hero:
 import { CardGrid, LinkCard } from '@astrojs/starlight/components'
 
 <CardGrid>
-  <LinkCard title="Instalace" description="Stáhněte binárku pro svou platformu." href="../install/" />
-  <LinkCard title="Architektura" description="Jak do sebe zapadají daemon, jádro a pluginy." href="../architecture/" />
-  <LinkCard title="Přispívání" description="Nastavení, pravidla commitů a proces review." href="../contributing/" />
+  <LinkCard title="Instalace" description="Stáhněte binární soubor pro svou platformu." href="install/" />
+  <LinkCard title="Architektura" description="Jak do sebe zapadají daemon, jádro a pluginy." href="architecture/" />
+  <LinkCard title="Přispívání" description="Nastavení, pravidla Conventional Commits a proces review." href="contributing/" />
+  <LinkCard title="Rozhodnutí" description="Záznamy architektonických rozhodnutí." href="decisions/0001-record-architecture-decisions/" />
 </CardGrid>
 ```
 
@@ -2791,7 +3843,7 @@ git commit -m "docs: add starlight documentation site skeleton with czech locale
 ### Task 15: CI workflows (composite setup, ci, semantic-pr, labeler, stale, security, docs) and action pinning
 
 **Files:**
-- Create: `.github/actions/setup/action.yml`, `.github/workflows/ci.yml`, `.github/workflows/semantic-pr.yml`, `.github/workflows/labeler.yml`, `.github/workflows/stale.yml`, `.github/workflows/security.yml`, `.github/workflows/docs.yml`, `scripts/pin-actions.sh`
+- Create: `.github/actions/setup/action.yml`, `.github/workflows/ci.yml`, `.github/workflows/semantic-pr.yml`, `.github/workflows/labeler.yml`, `.github/workflows/stale.yml`, `.github/workflows/security.yml`, `.github/workflows/docs.yml`, `scripts/pin-actions.sh`, `.github/zizmor.yml`
 
 **Interfaces:**
 - Produces: required check names `static`, `unit (ubuntu-24.04)`, `unit (ubuntu-24.04-arm)`, `build-smoke`, `semantic-pr` consumed by `scripts/repo-settings.sh` (Task 17); the composite action reused by `release.yml` (Task 16).
@@ -2809,14 +3861,14 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: oven-sh/setup-bun@v2
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       with:
         bun-version-file: .bun-version
-    - uses: actions/setup-node@v7
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
       with:
         node-version-file: .node-version
     - if: inputs.cache == 'true'
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ~/.bun/install/cache
         key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/bun.lock') }}
@@ -2852,12 +3904,14 @@ env:
 
 jobs:
   static:
+    name: static
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -2871,41 +3925,45 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint:long-tail
       - name: actionlint
-        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
       - name: zizmor
-        uses: zizmorcore/zizmor-action@v0
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           persona: pedantic
           advanced-security: false
 
   unit:
+    name: unit (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run test:coverage
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-${{ matrix.os }}
           path: coverage/
           retention-days: 7
 
   build-smoke:
+    name: build-smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -2913,54 +3971,67 @@ jobs:
       - name: smoke (x64)
         run: |
           set -euo pipefail
-          BIN=$(ls dist/bytebureau-*-linux-x64)
-          "$BIN" --version
-          test "$("$BIN" hello Ondřej --lang cs)" = "Ahoj, Ondřej! ByteBureau je připraveno."
-      - uses: actions/upload-artifact@v7
+          BIN=(dist/bytebureau-*-linux-x64)
+          [ "${#BIN[@]}" -eq 1 ]
+          "${BIN[0]}" --version
+          test "$("${BIN[0]}" hello Ondřej --lang cs)" = "Ahoj, Ondřej! ByteBureau je připraveno."
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries-linux
           path: dist/
           retention-days: 3
 
   smoke-arm64:
+    name: smoke-arm64
     needs: build-smoke
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: binaries-linux
           path: dist
       - name: smoke (arm64)
         run: |
           set -euo pipefail
-          BIN=$(ls dist/bytebureau-*-linux-arm64)
-          chmod +x "$BIN"
-          "$BIN" --version
-          test "$("$BIN" hello --lang en)" = "Hello! ByteBureau is ready."
+          BIN=(dist/bytebureau-*-linux-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          chmod +x "${BIN[0]}"
+          "${BIN[0]}" --version
+          test "$("${BIN[0]}" hello --lang en)" = "Hello! ByteBureau is ready."
 
   smoke-macos:
+    name: smoke-macos
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run build:binaries --host
-      - run: ./dist/bytebureau-*-darwin-arm64 --version
+      - name: smoke (macOS)
+        run: |
+          set -euo pipefail
+          BIN=(dist/bytebureau-*-darwin-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          "${BIN[0]}" --version
 
   docs-build:
+    name: docs-build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -2978,16 +4049,22 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  pull-requests: read # read the pull request title
+
+concurrency:
+  group: semantic-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   semantic-pr:
+    name: semantic-pr
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: amannn/action-semantic-pull-request@v6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -3002,10 +4079,21 @@ jobs:
             ci
             chore
             revert
+          scopes: |
+            bytebureau
+            docs
+            i18n
+            tsconfig
+            cli
+            deps
+            release
+            repo
+            ci
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: The subject "{subject}" must start with a lowercase letter.
 ```
+(The `types` list equals commitlint's `type-enum`; the `scopes` list mirrors commitlint's `scope-enum` — workspace directory names plus `cli`, `deps`, `release`, `repo`, `ci`. Extend both when a workspace package is added.)
 `.github/workflows/labeler.yml`:
 ```yaml
 name: labeler
@@ -3014,18 +4102,25 @@ on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] no checkout, labels only
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
+
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   label:
+    name: label
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write # apply and sync the area labels
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/labeler@v7
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7
         with:
           sync-labels: true
 ```
@@ -3038,23 +4133,30 @@ on:
     - cron: '17 4 * * 1'
   workflow_dispatch:
 
-permissions:
-  issues: write
-  pull-requests: write
+permissions: {}
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
 
 jobs:
   stale:
+    name: stale
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      issues: write # label and close stale issues
+      pull-requests: write # label and close stale pull requests
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/stale@v11
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11
         with:
           days-before-stale: 90
           days-before-close: 14
-          exempt-issue-labels: pinned,security,roadmap,good first issue,help wanted
-          exempt-pr-labels: pinned,security,wip
+          exempt-issue-labels: 'pinned,kind: security,good first issue,help wanted'
+          exempt-pr-labels: 'pinned,kind: security,wip'
           exempt-all-assignees: true
           stale-issue-message: >-
             This issue has been quiet for 90 days. Is it still relevant? Comment to keep it open;
@@ -3081,59 +4183,71 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scorecard:
+    name: scorecard
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write
-      id-token: write
-      actions: read
+      security-events: write # upload the SARIF results to code scanning
+      id-token: write # publish the results to the OpenSSF API
+      actions: read # let Scorecard read workflow runs (private repositories)
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@v2
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
         with:
           results_file: scorecard.sarif
           results_format: sarif
           publish_results: true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         continue-on-error: true # until the owner enables code scanning (ADR-0001 appendix)
         with:
           sarif_file: scorecard.sarif
 
   zizmor:
+    name: zizmor
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write
+      security-events: write # upload the SARIF findings to code scanning
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@v0
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           persona: pedantic
 
   audit:
+    name: audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun audit
-        continue-on-error: true
+      - name: audit
+        run: |
+          set -euo pipefail
+          bun audit --audit-level=high | tee -a "$GITHUB_STEP_SUMMARY"
 ```
 `.github/workflows/docs.yml`:
 ```yaml
@@ -3154,36 +4268,43 @@ concurrency:
 
 jobs:
   build:
+    name: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read # configure-pages reads the Pages site settings
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - run: bun run docs:build
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apps/docs/dist
 
   deploy:
+    name: deploy
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
-      pages: write
-      id-token: write
+      pages: write # publish the site to GitHub Pages
+      id-token: write # prove the deployment origin to Pages
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
 ```
 
 - [ ] **Step 5: Pin every action to a commit SHA**
@@ -3195,7 +4316,7 @@ jobs:
 set -euo pipefail
 
 files=$(git ls-files '.github/workflows/*.yml' '.github/actions/*/action.yml')
-refs=$(grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@v?[0-9][A-Za-z0-9_.-]*' $files | sed 's/^uses: //' | sort -u)
+refs=$(grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@v?[0-9][A-Za-z0-9_.-]*' $files | sed 's/^uses: //' | grep -vE '@[0-9a-f]{40}$' | sort -u || true)
 
 for ref in $refs; do
   repo_path="${ref%@*}"
@@ -3222,7 +4343,15 @@ chmod +x scripts/pin-actions.sh
 ./scripts/pin-actions.sh
 grep -rn 'uses: ' .github | grep -v '@[0-9a-f]\{40\}' | grep -v 'uses: ./' || echo "all pinned"
 ```
-Expected: every third-party `uses:` now has a 40-character SHA followed by `# vN` and the final grep prints `all pinned`. (Requires `gh auth login`; the `docker` image for actionlint and `zizmorcore/zizmor-action` are pinned too.)
+Expected: every third-party `uses:` now has a 40-character SHA followed by its tag comment (`# vN`, or `# vX.Y.Z` for the two actions without a floating major tag) and the final grep prints `all pinned`. (Requires `gh auth login`; the `docker` image for actionlint and `zizmorcore/zizmor-action` are pinned too.)
+
+zizmor's pedantic persona asks for GitHub's `$/` form of same-repository actions, which actionlint 1.7.12 still rejects; `.github/zizmor.yml` disables that audit until actionlint supports the form:
+```yaml
+rules:
+  # actionlint 1.7.12 rejects GitHub's `uses: $/...` form (rhysd/actionlint#732); re-enable once it ships
+  self-repository:
+    disable: true
+```
 
 - [ ] **Step 6: Lint the workflows locally when Docker is available, then commit**
 
@@ -3244,7 +4373,7 @@ git commit -m "ci: add hardened ci, security, docs and housekeeping workflows"
 
 **Files:**
 - Create: `scripts/release-notes.ts`, `scripts/release-notes.test.ts`, `changelog.config.ts`, `.github/workflows/release.yml`
-- Modify: `package.json` (devDependency `changelogen`; `release` script already present)
+- Modify: `package.json` (devDependency `changelogen`; `release` script gains `--no-github`), `knip.ts` (drop the temporary `ignoreBinaries` entry)
 
 **Interfaces:**
 - Produces: `extractReleaseNotes(changelog: string, version: string): string` (throws when the section is missing or empty); `bun run scripts/release-notes.ts <version> <outfile>`; tag `v*` → eight attested, signed binaries + `SHA256SUMS` + `sbom.cdx.json` in an immutable release.
@@ -3273,7 +4402,7 @@ const changelog = `# Changelog
 - **repo:** bootstrap
 `
 
-describe('extractReleaseNotes', () => {
+describe(extractReleaseNotes, () => {
   it('returns the body of the requested version only', () => {
     expect(extractReleaseNotes(changelog, '0.2.0')).toBe(
       '[compare changes](https://github.com/misaon/byte-bureau/compare/v0.1.0...v0.2.0)\n\n### 🚀 Enhancements\n\n- **cli:** add doctor command',
@@ -3284,12 +4413,20 @@ describe('extractReleaseNotes', () => {
     expect(extractReleaseNotes(changelog, '0.1.0')).toBe('### 🏡 Chore\n\n- **repo:** bootstrap')
   })
 
+  it('matches the exact version heading, not a prerelease or a longer version', () => {
+    const boundaries =
+      '# Changelog\n\n## v10.1.0\n\nten\n\n## v0.1.0-rc\n\nrelease candidate\n\n## v0.1.0\n\nfinal\n\n## v0.1.0-beta\n\nbeta\n'
+    expect(extractReleaseNotes(boundaries, '0.1.0')).toBe('final')
+  })
+
   it('throws when the version is missing', () => {
     expect(() => extractReleaseNotes(changelog, '9.9.9')).toThrow('no section for version 9.9.9')
   })
 
   it('throws when the section is empty', () => {
-    expect(() => extractReleaseNotes('# Changelog\n\n## v0.3.0\n\n## v0.2.0\n\ntext\n', '0.3.0')).toThrow('empty')
+    expect(() =>
+      extractReleaseNotes('# Changelog\n\n## v0.3.0\n\n## v0.2.0\n\ntext\n', '0.3.0'),
+    ).toThrow('empty')
   })
 })
 ```
@@ -3301,33 +4438,44 @@ Run: `bunx vitest run --project scripts` → FAIL.
 ```ts
 #!/usr/bin/env bun
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import path from 'node:path'
 
-const ROOT = join(import.meta.dirname, '..')
+const ROOT = path.join(import.meta.dirname, '..')
 
-export function extractReleaseNotes(changelog: string, version: string): string {
-  const escaped = version.replaceAll('.', '\\.')
-  const heading = new RegExp(`^## v?${escaped}(?:\\s|$)`, 'mu')
-  const start = changelog.search(heading)
-  if (start === -1) throw new Error(`CHANGELOG.md has no section for version ${version}`)
-  const section = changelog.slice(start)
-  const bodyStart = section.indexOf('\n') + 1
-  const nextHeading = section.slice(bodyStart).search(/^## /mu)
-  const body = nextHeading === -1 ? section.slice(bodyStart) : section.slice(bodyStart, bodyStart + nextHeading)
-  const trimmed = body.trim()
-  if (trimmed === '') throw new Error(`CHANGELOG.md section for version ${version} is empty`)
-  return trimmed
+function headingPattern(version: string): RegExp {
+  const escaped = version.replaceAll('.', String.raw`\.`)
+  return new RegExp(`^## v?${escaped}(?:\\s|$)`, 'mu')
 }
 
+function bodyAfterHeading(section: string): string {
+  const afterHeading = section.slice(section.indexOf('\n') + 1)
+  const nextHeading = afterHeading.search(/^## /mu)
+  return nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading)
+}
+
+export function extractReleaseNotes(changelog: string, version: string): string {
+  const start = changelog.search(headingPattern(version))
+  if (start === -1) {
+    throw new Error(`CHANGELOG.md has no section for version ${version}`)
+  }
+  const body = bodyAfterHeading(changelog.slice(start)).trim()
+  if (body === '') {
+    throw new Error(`CHANGELOG.md section for version ${version} is empty`)
+  }
+  return body
+}
+
+/* v8 ignore start */
 if (import.meta.main) {
   const [version, outfile] = Bun.argv.slice(2)
   if (version === undefined || outfile === undefined) {
     console.error('usage: release-notes.ts <version> <outfile>')
     process.exit(1)
   }
-  const changelog = await readFile(join(ROOT, 'CHANGELOG.md'), 'utf8')
+  const changelog = await readFile(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
   await writeFile(outfile, `${extractReleaseNotes(changelog, version)}\n`)
 }
+/* v8 ignore stop */
 ```
 Run: `bunx vitest run --project scripts` → PASS (4 tests).
 
@@ -3348,6 +4496,8 @@ const config: Partial<ChangelogConfig> = {
 export default config
 ```
 Verify: `bunx changelogen --dry` prints a preview grouped by emoji sections for the commits since the beginning (no files written). If `repo` must be a string in the installed version, use `repo: 'misaon/byte-bureau'`.
+
+knip's changelogen plugin recognises `changelog.config.ts`: remove the temporary `ignoreBinaries: ['changelogen']` entry (and its comment) from `knip.ts`. Change the root `release` script to `changelogen --release --no-push --no-tag --no-github`: it bumps, writes the changelog and commits on a release branch; the owner opens the release pull request, tags the merge commit and pushes the tag (ADR-0008), and the workflow creates the draft release.
 
 - [ ] **Step 4: `release.yml`**
 
@@ -3373,18 +4523,20 @@ concurrency:
 
 jobs:
   binaries:
+    name: binaries
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      id-token: write # sign blobs and request attestations through Sigstore OIDC
+      attestations: write # store the build provenance and SBOM attestations
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3394,102 +4546,101 @@ jobs:
         run: echo "version=$(bun --print 'JSON.parse(require("node:fs").readFileSync("package.json","utf8")).version')" >> "$GITHUB_OUTPUT"
       - run: bun run build:binaries
       - run: cd dist && sha256sum bytebureau-* > SHA256SUMS
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/bytebureau-*
-      - uses: sigstore/cosign-installer@v4
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/sbom.cdx.json
+          upload-artifact: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/bytebureau-*
+          predicate-type: https://cyclonedx.org/bom
+          predicate-path: dist/sbom.cdx.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: sign artifacts
         run: |
           set -euo pipefail
           for file in dist/bytebureau-* dist/SHA256SUMS; do
             cosign sign-blob --yes --bundle "${file}.sigstore.json" "${file}"
           done
-      - uses: anchore/sbom-action@v0
-        with:
-          path: .
-          format: cyclonedx-json
-          output-file: dist/sbom.cdx.json
-          upload-artifact: false
-      - uses: actions/attest-sbom@v3
-        with:
-          subject-path: dist/bytebureau-*
-          sbom-path: dist/sbom.cdx.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets
           path: dist/
           retention-days: 7
 
   release:
+    name: release
     needs: binaries
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
-      contents: write
+      contents: write # create the GitHub release and attach its assets
     env:
       VERSION: ${{ needs.binaries.outputs.version }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - name: check the tag
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "v${VERSION}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version v${VERSION} in package.json"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           cache: 'false'
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-assets
           path: dist
       - run: bun run scripts/release-notes.ts "$VERSION" dist/RELEASE_NOTES.md
-      - uses: softprops/action-gh-release@v3
-        with:
-          draft: true
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
-          body_path: dist/RELEASE_NOTES.md
-          fail_on_unmatched_files: true
-          files: |
-            dist/bytebureau-*
-            dist/SHA256SUMS
-            dist/SHA256SUMS.sigstore.json
+      - name: remove a stale draft
+        run: |
+          set -euo pipefail
+          releases="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          if jq -e --arg tag "v${VERSION}" 'any(.[]; .tag_name == $tag and .draft == false)' <<<"$releases" >/dev/null; then
+            echo "::error::release v${VERSION} is already published; release a new version instead of re-running"
+            exit 1
+          fi
+          jq -r --arg tag "v${VERSION}" '.[] | select(.tag_name == $tag and .draft) | .id' <<<"$releases" |
+            while read -r id; do
+              echo "deleting the stale draft ${id} for v${VERSION}"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+            done
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: create the draft release
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --draft \
+            --verify-tag \
+            --title "v${VERSION}" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/bytebureau-* \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sigstore.json \
             dist/sbom.cdx.json
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: publish the draft
         run: gh release edit "v${VERSION}" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
-
-  homebrew:
-    needs: [binaries, release]
-    runs-on: ubuntu-24.04
-    env:
-      HAS_TAP: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
-      VERSION: ${{ needs.binaries.outputs.version }}
-    steps:
-      - uses: step-security/harden-runner@v2
-        with:
-          egress-policy: audit
-      - if: env.HAS_TAP != 'true'
-        run: echo "HOMEBREW_TAP_TOKEN not configured; skipping tap update"
-      - if: env.HAS_TAP == 'true'
-        uses: Justintime50/homebrew-releaser@v4
-        with:
-          homebrew_owner: misaon
-          homebrew_tap: homebrew-tap
-          formula_folder: Formula
-          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          commit_owner: bytebureau-release-bot
-          commit_email: release-bot@users.noreply.github.com
-          install: 'bin.install Dir["bytebureau-*"].first => "bytebureau"'
-          test: 'assert_match "bytebureau", shell_output("#{bin}/bytebureau --help")'
-          target_darwin_amd64: true
-          target_darwin_arm64: true
-          target_linux_amd64: true
-          target_linux_arm64: true
-          update_readme_table: false
 ```
-Then run `./scripts/pin-actions.sh` again so the new actions are SHA-pinned (`attest-build-provenance`, `cosign-installer`, `sbom-action`, `attest-sbom`, `download-artifact`, `action-gh-release`, `homebrew-releaser`).
+Stage the file (`git add .github/workflows/release.yml`) and run `./scripts/pin-actions.sh` again so the new actions are SHA-pinned (`attest-build-provenance`, `cosign-installer`, `sbom-action`, `attest`, `download-artifact`). `softprops/action-gh-release` is replaced by `gh release create` (zizmor's `superfluous-actions` audit), the deprecated `attest-sbom` by `actions/attest` with the CycloneDX predicate, and no Homebrew job ships (homebrew-releaser's archive naming cannot be met by raw binaries; installers are sub-project 6).
 
 - [ ] **Step 5: Validate and commit**
 
@@ -3499,7 +4650,7 @@ bunx vitest run --project scripts
 docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color   # skip if Docker is absent
 ```
 ```bash
-git add scripts/release-notes.ts scripts/release-notes.test.ts changelog.config.ts .github/workflows/release.yml package.json bun.lock
+git add scripts/release-notes.ts scripts/release-notes.test.ts changelog.config.ts .github/workflows/release.yml package.json bun.lock knip.ts
 git commit -m "ci: add release workflow with provenance, signatures and sbom"
 ```
 
@@ -3508,7 +4659,8 @@ git commit -m "ci: add release workflow with provenance, signatures and sbom"
 ### Task 17: Dependency automation and the owner-run repository settings script
 
 **Files:**
-- Create: `renovate.json`, `scripts/repo-settings.sh`
+- Create: `renovate.json`, `scripts/repo-settings.sh`, `scripts/repo-settings/{security-and-analysis.json,labels.txt,ruleset-main.json,ruleset-tags.json}`, `scripts/github-settings.test.ts`
+- Modify: `.github/workflows/stale.yml` (exempt labels aligned with `labels.txt`)
 
 **Interfaces:**
 - Produces: Renovate configuration picked up by the Mend app once installed; `scripts/repo-settings.sh <owner>/<repo> [--dry-run]` that configures features, security settings, labels and rulesets (required checks from Task 15).
@@ -3518,34 +4670,55 @@ git commit -m "ci: add release workflow with provenance, signatures and sbom"
 ```json
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:best-practices",
-    ":semanticCommits",
-    "group:allNonMajor",
-    "schedule:weekly",
-    "helpers:pinGitHubActionDigests"
-  ],
+  "description": "ADR-0009: grouped weekly updates behind release-age cooldowns; config:best-practices pins the GitHub Action and Docker digests",
+  "extends": ["config:best-practices", ":semanticCommits", "group:allNonMajor", "schedule:weekly"],
   "minimumReleaseAge": "7 days",
   "osvVulnerabilityAlerts": true,
   "dependencyDashboard": true,
   "labels": ["dependencies"],
   "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Docker images of the workflow linters: actionlint in ci.yml, actionlint and zizmor in the lint:actions script",
+      "managerFilePatterns": [".github/workflows/ci.yml", "package.json"],
+      "matchStrings": [
+        "(?<depName>(?:[a-z0-9-]+\\.[a-z0-9.-]+/)?[a-z0-9._-]+/[a-z0-9._-]+):(?<currentValue>[0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
+      "description": "ADR-0009 floor: npm major, minor and patch updates wait 7 days instead of the 3 days of security:minimumReleaseAgeNpm (config:best-practices); other npm update types keep that preset's handling",
+      "matchDatasources": ["npm"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "devDependency minors and patches wait 14 days and automerge in their own group: Renovate merges a branch by itself only when every update in it may automerge, so they cannot share the group:allNonMajor branch with runtime updates",
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies",
       "minimumReleaseAge": "14 days",
       "automerge": true,
       "platformAutomerge": true
     },
     {
+      "description": "Bun and the action that installs it in CI update together",
       "matchPackageNames": ["bun", "oven-sh/setup-bun"],
       "groupName": "bun"
+    },
+    {
+      "description": "GHCR reports no release timestamps, so the release-age check would hold the zizmor image back forever",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/zizmorcore/zizmor"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ]
 }
 ```
-Verify the file against the schema: `bunx --package renovate renovate-config-validator renovate.json` → prints `Config validated successfully`.
+Verify the file against the schema: `bunx --package renovate renovate-config-validator renovate.json` → prints `Config validated successfully`. `config:best-practices` brings a 3-day npm cooldown in as a package rule, so the first `packageRules` entry restores ADR-0009's 7 days for npm.
 
 - [ ] **Step 2: Create `scripts/repo-settings.sh`**
 
@@ -3554,13 +4727,23 @@ Verify the file against the schema: `bunx --package renovate renovate-config-val
 # Owner-run: configures the GitHub repository (features, security, labels, rulesets).
 # Usage: scripts/repo-settings.sh <owner>/<repo> [--dry-run]
 set -euo pipefail
+unset CDPATH
+cd "$(dirname "$0")/.."
 
-REPO="${1:?usage: repo-settings.sh <owner>/<repo> [--dry-run]}"
+usage() {
+  echo "usage: repo-settings.sh <owner>/<repo> [--dry-run]" >&2
+  exit 2
+}
+
+REPO="${1:-}"
 MODE="${2:-}"
+# The first character is alphanumeric, so a flag can never pass as the repository
+[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$ ]] || usage
+case "$MODE" in '' | --dry-run) ;; *) usage ;; esac
 
 run() {
   if [ "$MODE" = "--dry-run" ]; then
-    printf '+ %q ' "$@"; printf '\n'
+    printf '+'; printf ' %q' "$@"; printf '\n'
   else
     "$@"
   fi
@@ -3568,7 +4751,7 @@ run() {
 
 run gh repo edit "$REPO" \
   --description "The AI office: orchestrate coding agents in a pixel-art bureau" \
-  --homepage "https://misaon.github.io/byte-bureau/" \
+  --homepage "https://${REPO%%/*}.github.io/${REPO##*/}/" \
   --enable-wiki=false --enable-projects=false --enable-discussions \
   --enable-merge-commit=false --enable-rebase-merge=false --enable-squash-merge \
   --delete-branch-on-merge --allow-update-branch --enable-auto-merge \
@@ -3584,6 +4767,12 @@ run gh api -X PUT "repos/${REPO}/automated-security-fixes"
 run gh api -X PUT "repos/${REPO}/private-vulnerability-reporting"
 run gh api -X PATCH "repos/${REPO}" --input scripts/repo-settings/security-and-analysis.json
 
+if gh api "repos/${REPO}/pages" >/dev/null 2>&1; then
+  run gh api -X PUT "repos/${REPO}/pages" -f build_type=workflow
+else
+  run gh api -X POST "repos/${REPO}/pages" -f build_type=workflow
+fi
+
 while IFS='|' read -r name color description; do
   [ -z "$name" ] && continue
   run gh label create "$name" --repo "$REPO" --color "$color" --description "$description" --force
@@ -3594,6 +4783,8 @@ run gh api -X POST "repos/${REPO}/rulesets" --input scripts/repo-settings/rulese
 
 echo "Done. Remaining UI-only steps are listed in docs/decisions/0001-record-architecture-decisions.md (appendix)."
 ```
+The Pages step enables the GitHub Actions source (`build_type=workflow`) that `docs.yml` needs. `stale.yml`'s exempt labels are aligned with `labels.txt` (`kind: security` instead of `security`, no `roadmap`).
+
 `scripts/repo-settings/security-and-analysis.json`:
 ```json
 {
@@ -3642,7 +4833,7 @@ breaking|b60205|Breaking change
 dependencies|0366d6|Dependency updates
 release|0e8a16|Release engineering
 ```
-`scripts/repo-settings/ruleset-main.json` (approvals start at 0 because there is one maintainer; raise `required_approving_review_count` to 1 and `require_code_owner_review` to true when a second maintainer joins):
+`scripts/repo-settings/ruleset-main.json` (approvals start at 0 because there is one maintainer; raise `required_approving_review_count` to 1 and `require_code_owner_review` to true when a second maintainer joins; no bypass actor — releases go through a pull request, see ADR-0008):
 ```json
 {
   "name": "main",
@@ -3694,6 +4885,146 @@ release|0e8a16|Release engineering
 }
 ```
 
+`scripts/github-settings.test.ts` keeps the labels, the required check contexts and the pull-request title scopes in sync with the workflows and commitlint:
+`scripts/github-settings.test.ts`:
+```ts
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parse } from 'yaml'
+import { describe, expect, it } from 'vitest'
+import commitlint from '../commitlint.config.js'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
+const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
+const yamlAt = (file: string): unknown => parse(read(file))
+const jsonAt = (file: string): unknown => JSON.parse(read(file))
+const MATRIX_NAME = /\$\{\{\s*matrix\.(?<axis>\w+)\s*\}\}/u
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function at(value: unknown, ...keys: readonly string[]): unknown {
+  let current = value
+  for (const key of keys) {
+    current = isRecord(current) ? current[key] : undefined
+  }
+  return current
+}
+
+function list(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function strings(value: unknown): string[] {
+  return list(value).filter((item) => typeof item === 'string')
+}
+
+// Block scalars (scopes: |) and comma lists (exempt-issue-labels) both become one entry per item
+function items(value: unknown, separator: string): string[] {
+  return typeof value === 'string'
+    ? value
+        .split(separator)
+        .map((item) => item.trim())
+        .filter((item) => item !== '')
+    : []
+}
+
+function stepUsing(workflow: string, job: string, action: string): unknown {
+  return list(at(yamlAt(workflow), 'jobs', job, 'steps')).find((step) => {
+    const uses = at(step, 'uses')
+    return typeof uses === 'string' && uses.includes(action)
+  })
+}
+
+// A matrix job reports one check per value, e.g. unit (${{ matrix.os }}) -> unit (ubuntu-24.04)
+function checkNames(workflow: string): string[] {
+  const jobs = at(yamlAt(workflow), 'jobs')
+  return Object.entries(isRecord(jobs) ? jobs : {}).flatMap(([id, job]) => {
+    const name = at(job, 'name')
+    const label = typeof name === 'string' ? name : id
+    const match = MATRIX_NAME.exec(label)
+    const axis = at(match === null ? undefined : match.groups, 'axis')
+    return match === null || typeof axis !== 'string'
+      ? [label]
+      : strings(at(job, 'strategy', 'matrix', axis)).map((value) => label.replace(match[0], value))
+  })
+}
+
+// The scope list is computed by commitlint.config.ts itself, so new workspace directories count too
+function commitlintRule(name: string): string[] {
+  return strings(list(at(commitlint.rules, name))[2])
+}
+
+const definedLabels: ReadonlySet<string> = new Set(
+  read('scripts/repo-settings/labels.txt')
+    .split('\n')
+    .filter((line) => line !== '')
+    .map((line) => line.split('|')[0] ?? ''),
+)
+
+function referencedLabels(): string[] {
+  const stale = at(stepUsing('.github/workflows/stale.yml', 'stale', 'actions/stale@'), 'with')
+  const labeler = yamlAt('.github/labeler.yml')
+  const issueForms = readdirSync(path.join(root, '.github/ISSUE_TEMPLATE')).filter(
+    (name) => name.endsWith('.yml') && name !== 'config.yml',
+  )
+  return [
+    ...Object.keys(isRecord(labeler) ? labeler : {}),
+    ...issueForms.flatMap((name) =>
+      strings(at(yamlAt(`.github/ISSUE_TEMPLATE/${name}`), 'labels')),
+    ),
+    ...['exempt-issue-labels', 'exempt-pr-labels', 'stale-issue-label', 'stale-pr-label'].flatMap(
+      (input) => items(at(stale, input), ','),
+    ),
+    ...strings(at(jsonAt('renovate.json'), 'labels')),
+  ]
+}
+
+function requiredContexts(): unknown[] {
+  const rule = list(at(jsonAt('scripts/repo-settings/ruleset-main.json'), 'rules')).find(
+    (candidate) => at(candidate, 'type') === 'required_status_checks',
+  )
+  return list(at(rule, 'parameters', 'required_status_checks')).map((check) => at(check, 'context'))
+}
+
+describe('repository settings parity', () => {
+  it('defines every label that .github and renovate.json refer to', () => {
+    const referenced = referencedLabels()
+    expect(referenced).toContain('status: stale')
+    expect(referenced.filter((label) => !definedLabels.has(label))).toStrictEqual([])
+  })
+
+  it('requires only status checks that ci.yml and semantic-pr.yml report', () => {
+    const contexts = requiredContexts()
+    const checks = [
+      ...checkNames('.github/workflows/ci.yml'),
+      ...checkNames('.github/workflows/semantic-pr.yml'),
+    ]
+    expect(contexts).toContain('unit (ubuntu-24.04-arm)')
+    expect(checks).toStrictEqual(expect.arrayContaining(contexts))
+  })
+
+  it('accepts the same scopes and types in pull request titles as commitlint does', () => {
+    const semanticPr = at(
+      stepUsing(
+        '.github/workflows/semantic-pr.yml',
+        'semantic-pr',
+        '/action-semantic-pull-request@',
+      ),
+      'with',
+    )
+    const scopes = commitlintRule('scope-enum')
+    expect(scopes).toContain('bytebureau')
+    expect(items(at(semanticPr, 'scopes'), '\n').toSorted()).toStrictEqual(scopes.toSorted())
+    expect(items(at(semanticPr, 'types'), '\n').toSorted()).toStrictEqual(
+      commitlintRule('type-enum').toSorted(),
+    )
+  })
+})
+```
+
 - [ ] **Step 3: Validate the script without applying it**
 
 Run:
@@ -3707,20 +5038,20 @@ Expected: syntax OK; the dry run prints every command without executing it. (App
 - [ ] **Step 4: Commit**
 
 ```bash
-git add renovate.json scripts/repo-settings.sh scripts/repo-settings
+git add renovate.json scripts/repo-settings.sh scripts/repo-settings .github/workflows/stale.yml
 git commit -m "chore(repo): add renovate config and owner-run repository settings script"
 ```
 
 ---
 
-### Task 18: Editor configuration, dependency catalog, full gate run
+### Task 18: Editor configuration, complete local gate, full gate run
 
 **Files:**
 - Create: `.vscode/extensions.json`, `.vscode/settings.json`
-- Modify: `package.json` (catalog), `apps/bytebureau/package.json`, `packages/i18n/package.json`, `apps/docs/package.json` (switch to `catalog:`)
+- Modify: `package.json` (`check` script gains `lint:long-tail`)
 
 **Interfaces:**
-- Produces: a green `bun run check` on a clean clone; the catalog convention every later package follows.
+- Produces: a green `bun run check` on a clean clone, with the ESLint long tail included in `check` so the local gate equals CI's `static` job.
 
 - [ ] **Step 1: Editor files**
 
@@ -3729,8 +5060,10 @@ git commit -m "chore(repo): add renovate config and owner-run repository setting
 {
   "recommendations": [
     "oxc.oxc-vscode",
+    "TypeScriptTeam.native-preview",
     "inlang.vs-code-extension",
     "EditorConfig.EditorConfig",
+    "streetsidesoftware.code-spell-checker",
     "astro-build.astro-vscode",
     "unifiedjs.vscode-mdx"
   ]
@@ -3743,40 +5076,32 @@ git commit -m "chore(repo): add renovate config and owner-run repository setting
   "editor.defaultFormatter": "oxc.oxc-vscode",
   "[markdown]": { "editor.formatOnSave": false },
   "oxc.fmt.experimental": true,
-  "typescript.tsdk": "node_modules/typescript/lib",
+  "js/ts.experimental.useTsgo": true,
   "cSpell.language": "en,cs",
   "files.eol": "\n"
 }
 ```
 
-- [ ] **Step 2: Move workspace dependency versions into the catalog**
+- [ ] **Step 2: Include the ESLint long tail in `check`**
 
-List every third-party dependency the workspace manifests pin:
+In the root `package.json`, append `&& bun run lint:long-tail` to the `check` script so the local gate runs every CI gate (CONTRIBUTING promises that). The dependency catalog is deferred: Renovate does not read Bun's `workspaces.catalog` yet (renovatebot/renovate#42909), so versions stay in the manifests and `workspaces.catalog` stays `{}` until it does.
+
+- [ ] **Step 3: Run the full gate in a fresh clone and fix what fails**
+
+Never run `git clean -xdf` in the working tree: it deletes git-ignored IDE settings and scratch directories. Clone instead (Bun and Node come from `.bun-version`/`.node-version`; `mise install` only when mise is installed):
 ```bash
-for manifest in apps/bytebureau/package.json packages/i18n/package.json apps/docs/package.json; do
-  jq -r --arg m "$manifest" '(.dependencies // {}) + (.devDependencies // {}) | to_entries[] | select(.value | startswith("workspace:") | not) | "\($m) \(.key) \(.value)"' "$manifest"
-done
-```
-Expected output lists `citty`, `@clack/prompts`, `picocolors` (apps/bytebureau), `@inlang/paraglide-js` (packages/i18n), `astro`, `@astrojs/starlight`, `sharp` (apps/docs) with their pinned versions. Copy each `name` and `version` pair verbatim into `workspaces.catalog` in the root `package.json` (one entry per name; the version string is the exact value printed), then replace each of those entries in the three manifests with `"catalog:"` and run `bun install`. Expected: `bun.lock` records the same resolved versions as before (`git diff bun.lock` shows only catalog bookkeeping, no version changes), and `bun run check` still passes.
-
-- [ ] **Step 3: Run the full gate on a clean tree and fix what fails**
-
-Run:
-```bash
-git clean -xdn   # review; then:
-git clean -xdf
-mise install
+rm -rf /tmp/bytebureau-clean && git clone --quiet . /tmp/bytebureau-clean && cd /tmp/bytebureau-clean
 bun install --frozen-lockfile
 bun run check
 bun run build:binaries --host
 ```
-Expected: `bun run check` exits 0; the host binary is produced. Typical fixes: add legitimate words to `cspell-words.txt`, extract helper functions for cognitive-complexity findings, tighten `knip.ts` entries.
+Expected: `bun run check` exits 0 (lint, format, spell, markdown, ls-lint, knip, dependency-cruiser, typecheck, coverage, ESLint long tail); the host binary is produced. Typical fixes: add legitimate words to `cspell-words.txt`, extract helper functions for cognitive-complexity findings, tighten `knip.ts` entries. Apply fixes in the working tree, not in the clone.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add .vscode package.json apps/bytebureau/package.json packages/i18n/package.json apps/docs/package.json bun.lock
-git commit -m "chore(repo): add editor settings and dependency catalog"
+git add .vscode package.json
+git commit -m "chore(repo): add editor settings and run the eslint long tail in check"
 ```
 
 ---
@@ -3826,9 +5151,9 @@ Checklist from docs/decisions/0001-record-architecture-decisions.md (appendix):
 - [ ] Enable 2FA, SSH commit signing and vigilant mode
 - [ ] Run `scripts/repo-settings.sh <owner>/<repo>`
 - [ ] UI: CodeQL default setup (JS/TS + Actions, extended), immutable releases, social preview, Actions policy, artifact retention 30 days, Discussions categories
+- [ ] Before enabling immutable releases, run `release.yml` with `dry_run: false` against a throwaway tag in a fork (a published immutable release cannot be repaired)
 - [ ] Install Renovate, DCO and all-contributors apps
 - [ ] Reserve npm `@bytebureau`, Docker Hub `bytebureau`, domains `bytebureau.dev` / `.app` / `.cz`
-- [ ] Create `homebrew-tap` repository and `HOMEBREW_TAP_TOKEN` secret (optional)
 - [ ] Link Vercel for Turborepo remote cache: `TURBO_TOKEN` secret + `TURBO_TEAM` variable (optional)
 - [ ] GitHub Sponsors (optional)
 BODY
@@ -3841,22 +5166,28 @@ After the owner approves: `gh pr merge --squash --delete-branch`. Then trigger t
 gh workflow run release.yml -f dry_run=true
 gh run watch
 ```
-Expected: the `binaries` job uploads `release-assets` containing eight binaries, `SHA256SUMS`, `.sigstore.json` bundles and `sbom.cdx.json`; the `release` job is skipped.
+Expected: the `binaries` job uploads `release-assets` containing eight binaries with their `.map` sourcemaps, `SHA256SUMS`, `.sigstore.json` bundles and `sbom.cdx.json`; the `release` job is skipped.
 
 - [ ] **Step 5: First release (owner-run, outward-facing; not performed by the executing agent)**
 
-On `main` with a clean tree:
+From an up-to-date `main` (ADR-0008):
 ```bash
-git pull
-bun run release
+git switch -c release/v0.1.0 main
+bun run release -r 0.1.0
+git commit --amend --signoff --no-edit
+git push -u origin release/v0.1.0
+gh pr create --title "chore(release): v0.1.0" --body "Release v0.1.0 (see CHANGELOG.md)"
+# after CI is green and the pull request is squash-merged:
+git switch main && git pull
+git tag v0.1.0 && git push origin v0.1.0
 ```
-`changelogen --release --push` bumps `package.json` to `0.1.0` (minor, because the history contains `feat` commits), writes `CHANGELOG.md`, commits `chore(release): v0.1.0`, tags `v0.1.0` and pushes. `release.yml` then publishes the release. Verify:
+`bun run release -r 0.1.0` bumps `package.json` to `0.1.0` (passed explicitly: changelogen would compute `0.0.1` from `0.0.0`), writes `CHANGELOG.md` and commits `chore(release): v0.1.0` without tagging or pushing; the squash-merged release commit is tagged by hand, and the tag triggers `release.yml`, which creates and publishes the release. Verify:
 ```bash
 gh release view v0.1.0
 gh release download v0.1.0 --pattern 'bytebureau-0.1.0-linux-x64*' --dir /tmp/bb
 gh attestation verify /tmp/bb/bytebureau-0.1.0-linux-x64 --owner misaon
 ```
-Expected: ten assets (eight binaries, `SHA256SUMS`, `sbom.cdx.json`) plus Sigstore bundles, emoji-sectioned notes, and a successful attestation verification.
+Expected: the eight binaries with their `.map` sourcemaps, `SHA256SUMS`, `sbom.cdx.json` and a Sigstore bundle for each binary, map and checksum file, emoji-sectioned notes, and a successful attestation verification.
 
 ---
 
