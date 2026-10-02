@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { RateLimit, Usage } from './agent-event.js'
+import { RateLimit, ToolKind, Usage } from './agent-event.js'
 import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
 
@@ -25,6 +25,8 @@ const project = Schema.Struct({
 })
 const sessionRef = Schema.Struct({ status: SessionStatus })
 const turnRef = Schema.Struct({ turnId: Id, index: Schema.Int, status: TurnStatus })
+// Closed empty object: only {} decodes (Schema.Struct({}) would accept any non-null value)
+const emptyPayload = Schema.Record(Schema.String, Schema.Never)
 
 // Payload schema per kernel event type; the key is the wire `type`
 export const KernelEventSchemas = {
@@ -53,7 +55,7 @@ export const KernelEventSchemas = {
   'session.completed': sessionRef,
   'session.errored': Schema.Struct({
     ...sessionRef.fields,
-    kind: Schema.String,
+    kind: Schema.Literals(['auth', 'ratelimit', 'crash', 'protocol']),
     message: Schema.String,
     retryable: Schema.Boolean,
   }),
@@ -69,7 +71,7 @@ export const KernelEventSchemas = {
   'tool.started': Schema.Struct({
     id: Schema.String,
     name: Schema.String,
-    kind: Schema.String,
+    kind: ToolKind,
     input: Schema.Unknown,
   }),
   'tool.completed': Schema.Struct({
@@ -87,8 +89,8 @@ export const KernelEventSchemas = {
   'ask.cancelled': Schema.Struct({ askId: Id }),
   'usage.updated': Schema.Struct({ usage: Usage }),
   'ratelimit.updated': Schema.Struct({ profileId: Schema.NullOr(Id), rateLimit: RateLimit }),
-  'compaction.started': Schema.Struct({}),
-  'compaction.completed': Schema.Struct({}),
+  'compaction.started': emptyPayload,
+  'compaction.completed': emptyPayload,
   'workspace.provisioned': Schema.Struct({
     path: Schema.String,
     branch: Schema.String,

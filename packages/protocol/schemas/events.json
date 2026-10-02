@@ -434,7 +434,13 @@
           ]
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "auth",
+            "ratelimit",
+            "crash",
+            "protocol"
+          ]
         },
         "message": {
           "type": "string"
@@ -622,7 +628,14 @@
           "type": "string"
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "builtin",
+            "mcp",
+            "bash",
+            "subagent",
+            "skill"
+          ]
         },
         "input": {}
       },
@@ -1097,14 +1110,12 @@
       "additionalProperties": false
     },
     "compaction.started": {
-      "not": {
-        "type": "null"
-      }
+      "type": "object",
+      "additionalProperties": false
     },
     "compaction.completed": {
-      "not": {
-        "type": "null"
-      }
+      "type": "object",
+      "additionalProperties": false
     },
     "workspace.provisioned": {
       "type": "object",

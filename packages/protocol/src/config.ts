@@ -60,16 +60,27 @@ const UserDefaults = Schema.Struct({
   provider: Schema.optionalKey(Schema.String),
   profile: Schema.optionalKey(Schema.String),
 })
+const UserProfile = Schema.Struct({
+  providerId: Schema.String,
+  name: Schema.String,
+  kind: Schema.Literals(['login', 'api_key']),
+  configDir: Schema.optionalKey(Schema.String),
+})
+const ProfilesSection = Schema.Record(Schema.String, UserProfile)
 const TelemetrySection = Schema.Struct({
   content: Schema.optionalKey(Schema.Literals(['local', 'off'])),
+  otlpEndpoint: Schema.optionalKey(Schema.String),
 })
+const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
+  profiles: Schema.optionalKey(ProfilesSection),
   defaults: Schema.optionalKey(UserDefaults),
   locale: Schema.optionalKey(Schema.String),
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
+  ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
 export type LogLevel = typeof LogLevel.Type
