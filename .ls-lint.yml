@@ -1,0 +1,38 @@
+ls:
+  .ts: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .tsx: kebab-case | PascalCase
+  .mjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .cjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .json: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .md: kebab-case | SCREAMING_SNAKE_CASE | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .mdx: kebab-case
+  .yml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .yaml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .dir: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+
+ignore:
+  - '**/node_modules'
+  - .git
+  - .github
+  - .vscode
+  - .idea
+  - .superpowers
+  - '**/.astro'
+  - '**/.turbo'
+  - '**/dist'
+  - '**/coverage'
+  - docs/research
+  - packages/i18n/src/paraglide
+  - packages/i18n/project.inlang
+  - CODEOWNERS
+  - .all-contributorsrc
+  - .bun-version
+  - .node-version
+  - .editorconfig
+  - .gitattributes
+  - .gitignore
+  - .oxlintrc.json
+  - .oxfmtrc.json
+  - .markdownlint-cli2.yaml
+  - .ls-lint.yml
+  - .dependency-cruiser.cjs

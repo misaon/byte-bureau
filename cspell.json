@@ -1,0 +1,29 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "import": ["@cspell/dict-cs-cz/cspell-ext.json"],
+  "dictionaries": ["typescript", "node", "npm", "softwareTerms", "en-gb", "bytebureau"],
+  "dictionaryDefinitions": [
+    { "name": "bytebureau", "path": "./cspell-words.txt", "addWords": true }
+  ],
+  "ignorePaths": [
+    "node_modules",
+    "dist",
+    "coverage",
+    "bun.lock",
+    "**/paraglide/**",
+    "docs/research/**",
+    "docs/superpowers/**",
+    "CHANGELOG.md",
+    "LICENSE.md",
+    "CODE_OF_CONDUCT.md",
+    ".github/workflows/*.yml"
+  ],
+  "ignoreRegExpList": ["/\\b[0-9a-f]{40}\\b/g", "/sha256-[A-Za-z0-9+/=]+/g"],
+  "overrides": [
+    { "filename": "**/messages/cs.json", "language": "en,cs" },
+    { "filename": "**/*.test.ts", "language": "en,cs" },
+    { "filename": "README.cs.md", "language": "en,cs" },
+    { "filename": "apps/docs/src/content/docs/cs/**", "language": "en,cs" }
+  ]
+}

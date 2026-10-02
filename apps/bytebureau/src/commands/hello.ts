@@ -4,11 +4,11 @@ import { intro, log, outro } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { createContext, globalArgs, type Context } from '../context.js'
 
-export function greeting(name: string | undefined): string {
+function greeting(name: string | undefined): string {
   return name === undefined || name.trim() === '' ? m.hello_anonymous() : m.hello_greeting({ name })
 }
 
-export function runHello({ output, interactive }: Context, name: string | undefined): void {
+function runHello({ output, interactive }: Context, name: string | undefined): void {
   const message = greeting(name)
   if (output.json) {
     output.emit({ command: 'hello', message })

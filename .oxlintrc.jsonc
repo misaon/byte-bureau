@@ -114,6 +114,11 @@
       "rules": { "import/no-default-export": "off" },
     },
     {
+      // dependency-cruiser loads its config with require(), so this file has to stay CommonJS
+      "files": [".dependency-cruiser.cjs"],
+      "rules": { "import/no-commonjs": "off", "import/unambiguous": "off" },
+    },
+    {
       "files": [
         "apps/bytebureau/src/**",
         "scripts/**",
