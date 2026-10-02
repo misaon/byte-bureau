@@ -1,0 +1,36 @@
+kind: bug|d73a4a|Something is broken
+kind: feature|a2eeef|New capability
+kind: docs|0075ca|Documentation
+kind: chore|ededed|Maintenance
+kind: security|b60205|Security relevant
+area: foundation|c5def5|Toolchain, repository, CI
+area: kernel|c5def5|Kernel services
+area: agents|c5def5|Agent providers
+area: workspace|c5def5|Workspace runtimes
+area: api|c5def5|HTTP and WebSocket API
+area: cli|c5def5|Command line
+area: ui|c5def5|Web and desktop UI
+area: sim|c5def5|Office simulation
+area: workflow|c5def5|Workflow engine
+area: integrations|c5def5|Git hosts, tickets, chat
+area: remote|c5def5|Relay and phone
+area: telemetry|c5def5|Telemetry and diagnostics
+area: docs|c5def5|Docs site and ADRs
+area: ci|c5def5|Workflows
+area: i18n|c5def5|Translations
+priority: p0|b60205|Drop everything
+priority: p1|d93f0b|Next up
+priority: p2|fbca04|Planned
+priority: p3|c2e0c6|Someday
+status: needs-triage|ededed|Awaiting triage
+status: needs-repro|ededed|Needs a reproduction
+status: blocked|ededed|Blocked on something else
+status: ready|ededed|Ready to work on
+status: stale|ededed|No recent activity
+good first issue|7057ff|Good for newcomers
+help wanted|008672|Extra attention is needed
+pinned|ededed|Never marked stale
+wip|ededed|Work in progress
+breaking|b60205|Breaking change
+dependencies|0366d6|Dependency updates
+release|0e8a16|Release engineering

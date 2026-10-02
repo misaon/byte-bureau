@@ -26,8 +26,8 @@ jobs:
         with:
           days-before-stale: 90
           days-before-close: 14
-          exempt-issue-labels: pinned,security,roadmap,good first issue,help wanted
-          exempt-pr-labels: pinned,security,wip
+          exempt-issue-labels: 'pinned,kind: security,good first issue,help wanted'
+          exempt-pr-labels: 'pinned,kind: security,wip'
           exempt-all-assignees: true
           stale-issue-message: >-
             This issue has been quiet for 90 days. Is it still relevant? Comment to keep it open;
