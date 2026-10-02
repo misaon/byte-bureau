@@ -720,11 +720,11 @@ git commit -m "feat(protocol): add event, ask, employee and config schemas with 
   }
 }
 ```
-`packages/plugin-api/tsconfig.json`:
+`packages/plugin-api/tsconfig.json` (extends `effect.json`: TypeScript checks the symlinked protocol sources as program files, and Effect-derived types fail under `isolatedDeclarations`):
 ```json
 {
-  "extends": "@bytebureau/tsconfig/library.json",
-  "compilerOptions": { "types": ["bun-types"] },
+  "extends": "@bytebureau/tsconfig/effect.json",
+  "compilerOptions": { "types": ["bun"] },
   "include": ["src/**/*.ts"]
 }
 ```
@@ -1107,6 +1107,7 @@ Run: `bunx vitest run --project plugin-api` → PASS (1 test).
 
 `vitest.config.ts` (root): add `'packages/plugin-api'` to `projects` after `'packages/protocol'`.
 `knip.ts`: add `'packages/plugin-api': { project: ['src/**/*.ts'] }` to `workspaces`.
+`.github/workflows/semantic-pr.yml`: add `plugin-api` to the `scopes` list (the settings parity test compares it with commitlint's computed scope set).
 `scripts/license.test.ts`: the "every manifest" test currently expects `FSL-1.1-MIT` for every manifest; change it to expect `MIT` for `packages/plugin-api/package.json` and `packages/protocol/package.json` (a `MIT_MANIFESTS` set) and `FSL-1.1-MIT` for all others, and extend the enumeration with `plugins/*/package.json`.
 
 Run: `bun install && bun run check`
@@ -1161,8 +1162,7 @@ Why Effect SQL and not Drizzle at runtime (ADR-0010, written in Task 16): Drizzl
   "devDependencies": {
     "@bytebureau/tsconfig": "workspace:*",
     "@effect/sql-sqlite-node": "4.0.0",
-    "@effect/vitest": "4.0.0",
-    "@types/node": "26.6.4"
+    "@effect/vitest": "4.0.0"
   }
 }
 ```
@@ -1172,10 +1172,11 @@ Why Effect SQL and not Drizzle at runtime (ADR-0010, written in Task 16): Drizzl
 ```json
 {
   "extends": "@bytebureau/tsconfig/effect.json",
-  "compilerOptions": { "types": ["bun-types", "node"] },
+  "compilerOptions": { "types": ["bun"] },
   "include": ["src/**/*.ts"]
 }
 ```
+(`bun` types cover the `node:` modules the kernel imports; add `@types/node` only if `tsc` reports a missing Node-only type.)
 `packages/kernel/vitest.config.ts`:
 ```ts
 import { defineProject } from 'vitest/config'
@@ -1450,7 +1451,7 @@ export const StoreTest: Layer.Layer<SqlClient.SqlClient> = Layer.effectDiscard(
 
 - [ ] **Step 4: Run, wire, commit**
 
-Run: `bunx vitest run --project kernel` → PASS (2 tests). `vitest.config.ts`: add `'packages/kernel'`; `knip.ts`: `'packages/kernel': { entry: ['src/index.ts', 'src/bun.ts'], project: ['src/**/*.ts'] }` (the `bun` entry keeps `store-live.ts` from being reported unused). Run `bun run check` → green; dependency-cruiser must report no `effect` import outside the three core packages (it also confirms `packages/kernel → plugins/workspace-local` is allowed).
+Run: `bunx vitest run --project kernel` → PASS (2 tests). `vitest.config.ts`: add `'packages/kernel'`; `knip.ts`: `'packages/kernel': { entry: ['src/index.ts', 'src/bun.ts'], project: ['src/**/*.ts'] }` (the `bun` entry keeps `store-live.ts` from being reported unused); `.github/workflows/semantic-pr.yml`: add `kernel` to `scopes`. Run `bun run check` → green; dependency-cruiser must report no `effect` import outside the three core packages (it also confirms `packages/kernel → plugins/workspace-local` is allowed).
 
 ```bash
 git add packages/kernel vitest.config.ts knip.ts bun.lock
@@ -2897,14 +2898,14 @@ git commit -m "feat(kernel): supervise child processes with an env allowlist, li
   },
   "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
   "dependencies": { "@bytebureau/plugin-api": "workspace:*" },
-  "devDependencies": { "@bytebureau/tsconfig": "workspace:*", "@types/node": "26.6.4" }
+  "devDependencies": { "@bytebureau/tsconfig": "workspace:*" }
 }
 ```
-`plugins/workspace-local/tsconfig.json`:
+`plugins/workspace-local/tsconfig.json` (extends `effect.json` for the same reason as plugin-api: it imports plugin-api sources):
 ```json
 {
-  "extends": "@bytebureau/tsconfig/library.json",
-  "compilerOptions": { "types": ["node"] },
+  "extends": "@bytebureau/tsconfig/effect.json",
+  "compilerOptions": { "types": ["bun"] },
   "include": ["src/**/*.ts"]
 }
 ```
@@ -3457,7 +3458,7 @@ export const localWorkspacePlugin: Plugin = definePlugin({
 
 - [ ] **Step 8: Run the tests and the gates, then commit**
 
-Run: `bunx vitest run --project workspace-local` → PASS (10 tests). `vitest.config.ts`: add `'plugins/workspace-local'` to `projects`; `knip.ts`: add `'plugins/workspace-local': { entry: ['src/plugin.ts'], project: ['src/**/*.ts'] }`; the coverage `include` gains `'plugins/*/src/**/*.ts'` (exclude `**/testing/**`). Run `bun install && bun run check` → green (dependency-cruiser confirms the plugin imports only `@bytebureau/plugin-api` and Node built-ins).
+Run: `bunx vitest run --project workspace-local` → PASS (10 tests). `vitest.config.ts`: add `'plugins/workspace-local'` to `projects`; `knip.ts`: add `'plugins/workspace-local': { entry: ['src/plugin.ts'], project: ['src/**/*.ts'] }`; `.github/workflows/semantic-pr.yml`: add `workspace-local` to `scopes`; the coverage `include` gains `'plugins/*/src/**/*.ts'` (exclude `**/testing/**`). Run `bun install && bun run check` → green (dependency-cruiser confirms the plugin imports only `@bytebureau/plugin-api` and Node built-ins).
 
 ```bash
 git add plugins/workspace-local vitest.config.ts knip.ts bun.lock
