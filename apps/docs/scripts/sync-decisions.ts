@@ -3,6 +3,8 @@ import path from 'node:path'
 
 const SOURCE = path.join(import.meta.dirname, '../../../docs/decisions')
 const TARGET = path.join(import.meta.dirname, '../src/content/docs/decisions')
+// Synced copies are not tracked, so the site-wide edit link would point at a missing file
+const EDIT_URL_BASE = 'https://github.com/misaon/byte-bureau/edit/main/docs/decisions/'
 
 function quote(value: string): string {
   return `"${value.replaceAll('\\', String.raw`\\`).replaceAll('"', String.raw`\"`)}"`
@@ -25,7 +27,7 @@ export function withFrontmatter(markdown: string, fileName: string): string {
   const label = headingTitle === undefined ? title : labelFor(fileName, headingTitle)
   const body = headingIndex === -1 ? lines : lines.filter((_line, index) => index !== headingIndex)
   const bodyText = body.join('\n').replace(/^\n+/u, '')
-  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\n---\n\n${bodyText}`
+  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\neditUrl: ${EDIT_URL_BASE}${fileName}\n---\n\n${bodyText}`
 }
 
 export async function syncDecisions(): Promise<string[]> {
