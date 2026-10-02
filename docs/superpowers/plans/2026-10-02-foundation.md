@@ -436,9 +436,6 @@ pre-commit:
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
       run: bunx oxlint --type-aware --fix {staged_files}
       stage_fixed: true
-    spell:
-      glob: '*.{ts,tsx,md,mdx,json,yml,yaml}'
-      run: bunx cspell --no-progress {staged_files}
 
 commit-msg:
   commands:
@@ -1562,7 +1559,16 @@ ignore:
   - .dependency-cruiser.cjs
 ```
 
-- [ ] **Step 5: Run every gate and fix findings**
+- [ ] **Step 5: Add the spelling hook now that cspell is installed**
+
+Append to the `pre-commit.commands` block of `lefthook.yml` (Task 3 created the file without it because cspell did not exist yet):
+```yaml
+    spell:
+      glob: '*.{ts,tsx,md,mdx,json,yml,yaml}'
+      run: bunx cspell --no-progress {staged_files}
+```
+
+- [ ] **Step 6: Run every gate and fix findings**
 
 Run:
 ```bash
@@ -1574,10 +1580,10 @@ bun run lint:ls
 ```
 Expected: all exit 0. For knip findings: remove genuinely unused exports/dependencies; add an `ignoreDependencies` entry only for packages referenced solely from config files (document why in the commit body). For cspell findings: add real project words to `cspell-words.txt`, fix typos otherwise.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add knip.ts .dependency-cruiser.cjs cspell.json cspell-words.txt .markdownlint-cli2.yaml .ls-lint.yml package.json bun.lock
+git add knip.ts .dependency-cruiser.cjs cspell.json cspell-words.txt .markdownlint-cli2.yaml .ls-lint.yml lefthook.yml package.json bun.lock
 git commit -m "chore(repo): add knip, dependency-cruiser, cspell, markdownlint and ls-lint gates"
 ```
 
