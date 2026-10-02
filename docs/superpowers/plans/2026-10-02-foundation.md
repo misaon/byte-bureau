@@ -430,15 +430,15 @@ pre-commit:
   parallel: false
   commands:
     generate:
-      priority: 0
+      priority: 1
       run: test -d packages/i18n/src/paraglide || bun run build:i18n
     lint:
-      priority: 1
+      priority: 2
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
       run: bunx oxlint --type-aware --fix --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
     format:
-      priority: 2
+      priority: 3
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,yml,yaml}'
       run: bunx oxfmt --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
