@@ -1775,8 +1775,14 @@ describe('licence layer', () => {
   })
 
   it('declares FSL-1.1-MIT in every private package manifest', () => {
-    for (const manifest of ['package.json', 'apps/bytebureau/package.json', 'packages/i18n/package.json', 'packages/tsconfig/package.json']) {
-      expect(JSON.parse(read(manifest)).license, manifest).toBe('FSL-1.1-MIT')
+    expect.hasAssertions()
+    for (const manifest of [
+      'package.json',
+      'apps/bytebureau/package.json',
+      'packages/i18n/package.json',
+      'packages/tsconfig/package.json',
+    ]) {
+      expect(JSON.parse(read(manifest)), manifest).toHaveProperty('license', 'FSL-1.1-MIT')
     }
   })
 
