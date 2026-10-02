@@ -8,7 +8,7 @@
             'tsconfig.json',
             'packages/tsconfig/**',
             'scripts/**',
-            '.oxlintrc.json',
+            '.oxlintrc.jsonc',
             '.oxfmtrc.json',
             'knip.ts',
             '.dependency-cruiser.cjs',
