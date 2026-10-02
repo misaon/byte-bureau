@@ -17,6 +17,9 @@
     "packages/i18n/src/paraglide/**",
     "apps/docs/.astro/**",
     "docs/research/**",
+    // Isolated tool packages install their own dependencies, which the root install does not provide
+    // Their imports stay unresolved on a fresh clone, so type-aware rules fail there
+    "tools/**",
   ],
   "rules": {
     "import/no-default-export": "error",

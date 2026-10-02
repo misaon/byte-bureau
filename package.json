@@ -20,7 +20,7 @@
     "test": "bun run build:i18n && vitest run",
     "test:coverage": "bun run build:i18n && vitest run --coverage",
     "lint": "bun run build:i18n && oxlint --type-aware",
-    "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && bun --cwd tools/eslint-long-tail run lint",
+    "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && tools/eslint-long-tail/node_modules/.bin/eslint --config tools/eslint-long-tail/eslint.config.ts --max-warnings 0 apps packages scripts",
     "lint:md": "markdownlint-cli2",
     "lint:ls": "ls-lint",
     "format": "oxfmt",

@@ -28,7 +28,7 @@ describe('bytebureau CLI', () => {
       env: baseEnv,
       encoding: 'utf8',
     })
-    expect(stdout).toMatch(/\d+\.\d+\.\d+(?:-[\w.]+)?/u)
+    expect(stdout).toMatch(/\d+\.\d+\.\d+/u)
   })
 
   it('lists the hello command in help', () => {

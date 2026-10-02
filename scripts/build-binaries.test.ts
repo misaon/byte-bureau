@@ -1,4 +1,4 @@
-import { assert, constantFrom, property, stringMatching } from 'fast-check'
+import { assert, constantFrom, oneof, property, stringMatching } from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import { TARGETS, artifactName, hostTarget, parseArgs } from './build-binaries.js'
 
@@ -20,17 +20,15 @@ describe(artifactName, () => {
 describe('artifactName properties', () => {
   it('embeds the version verbatim and never produces spaces or path separators', () => {
     expect.hasAssertions()
+    const release = stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}$/u)
+    const prerelease = stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}-[a-z0-9.]{1,10}$/u)
     assert(
-      property(
-        constantFrom(...TARGETS),
-        stringMatching(/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:-[a-z0-9.]{1,10})?$/u),
-        (target, version) => {
-          const name = artifactName(target, version)
-          expect(name).toContain(version)
-          expect(name).not.toMatch(/[\s/\\]/u)
-          expect(name).toMatch(/^bytebureau-/u)
-        },
-      ),
+      property(constantFrom(...TARGETS), oneof(release, prerelease), (target, version) => {
+        const name = artifactName(target, version)
+        expect(name).toContain(version)
+        expect(name).not.toMatch(/[\s/\\]/u)
+        expect(name).toMatch(/^bytebureau-/u)
+      }),
     )
   })
 
