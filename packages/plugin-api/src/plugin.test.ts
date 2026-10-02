@@ -19,4 +19,26 @@ describe(definePlugin, () => {
     expect(result).toBe(plugin)
     expect(testManifest.contributes.agentProviders).toStrictEqual(['example'])
   })
+
+  it('typed plugins are assignable to the plugin registry', () => {
+    interface MyConfig {
+      readonly flag: boolean
+    }
+    const manifest: PluginManifest = {
+      name: 'typed',
+      version: '1.0.0',
+      hostApi: '^0',
+      kind: 'in-process',
+    }
+    const typedPlugin = definePlugin<MyConfig>({
+      manifest,
+      setup: (context): { readonly dispose: () => Promise<void> } => ({
+        dispose: async (): Promise<void> => {
+          await Promise.resolve(context.config.flag)
+        },
+      }),
+    })
+    const registry: readonly Plugin[] = [typedPlugin]
+    expect(registry).toHaveLength(1)
+  })
 })

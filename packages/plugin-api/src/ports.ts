@@ -55,22 +55,22 @@ export interface CreateSessionRequest {
 
 export interface AgentSession {
   readonly externalRef: ExternalSessionRef | null
-  readonly prompt: (input: PromptInput) => Promise<void>
-  readonly interrupt: () => Promise<void>
-  readonly answer: (askId: string, answer: AskAnswer) => Promise<void>
-  readonly setModel?: ((model: string) => Promise<void>) | undefined
-  readonly setEffort?: ((effort: Effort) => Promise<void>) | undefined
-  readonly events: () => AsyncIterable<AgentEvent>
-  readonly close: () => Promise<void>
+  prompt(input: PromptInput): Promise<void>
+  interrupt(): Promise<void>
+  answer(askId: string, answer: AskAnswer): Promise<void>
+  setModel?(model: string): Promise<void>
+  setEffort?(effort: Effort): Promise<void>
+  events(): AsyncIterable<AgentEvent>
+  close(): Promise<void>
 }
 
 export interface AgentProvider {
   readonly id: string
   readonly displayName: string
   readonly capabilities: AgentCapabilities
-  readonly authStatus: (profile: ProfileRef) => Promise<AuthStatus>
-  readonly listModels?: ((profile: ProfileRef) => Promise<ModelInfo[]>) | undefined
-  readonly createSession: (request: CreateSessionRequest) => Promise<AgentSession>
+  authStatus(profile: ProfileRef): Promise<AuthStatus>
+  listModels?(profile: ProfileRef): Promise<ModelInfo[]>
+  createSession(request: CreateSessionRequest): Promise<AgentSession>
 }
 
 export type WorkspaceIsolation = 'none' | 'process' | 'container' | 'vm'
@@ -113,23 +113,20 @@ export interface ExecHandle {
   readonly stdout: AsyncIterable<string>
   readonly stderr: AsyncIterable<string>
   readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
-  readonly kill: (signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL') => void
+  kill(signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL'): void
 }
 
 export interface WorkspaceRuntime {
   readonly id: string
   readonly isolation: WorkspaceIsolation
-  readonly provision: (spec: WorkspaceSpec) => Promise<WorkspaceHandle>
-  readonly exec: (handle: WorkspaceHandle, spec: ExecSpec) => Promise<ExecHandle>
-  readonly status: (handle: WorkspaceHandle) => Promise<WorkspaceStatus>
-  readonly destroy: (
-    handle: WorkspaceHandle,
-    options?: { readonly force?: boolean },
-  ) => Promise<void>
+  provision(spec: WorkspaceSpec): Promise<WorkspaceHandle>
+  exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle>
+  status(handle: WorkspaceHandle): Promise<WorkspaceStatus>
+  destroy(handle: WorkspaceHandle, options?: { readonly force?: boolean }): Promise<void>
 }
 
 export interface SecretStore {
-  readonly get: (key: string) => Promise<string | undefined>
-  readonly set: (key: string, value: string) => Promise<void>
-  readonly delete: (key: string) => Promise<void>
+  get(key: string): Promise<string | undefined>
+  set(key: string, value: string): Promise<void>
+  delete(key: string): Promise<void>
 }

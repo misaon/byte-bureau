@@ -31,21 +31,21 @@ export interface ProjectInfo {
 }
 
 export interface PluginEvents {
-  readonly publish: (event: KernelEvent) => Promise<void>
-  readonly subscribe: (filter: {
+  publish(event: KernelEvent): Promise<void>
+  subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
-  }) => AsyncIterable<KernelEvent>
+  }): AsyncIterable<KernelEvent>
 }
 
 export interface PluginKv {
-  readonly get: <Type = unknown>(key: string) => Promise<Type | undefined>
-  readonly set: (key: string, value: unknown) => Promise<void>
-  readonly delete: (key: string) => Promise<void>
+  get<Type = unknown>(key: string): Promise<Type | undefined>
+  set(key: string, value: unknown): Promise<void>
+  delete(key: string): Promise<void>
 }
 
 export interface ProcessSpawner {
-  readonly spawn: (spec: ExecSpec & { readonly cwd: string }) => Promise<ExecHandle>
+  spawn(spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle>
 }
 
 export interface PluginContext<Config = unknown> {
@@ -101,14 +101,12 @@ export interface PluginRegistration {
   readonly workspaceRuntimes?: readonly WorkspaceRuntime[] | undefined
   readonly secretStores?: readonly SecretStore[] | undefined
   readonly hooks?: Partial<Hooks> | undefined
-  readonly dispose?: (() => Promise<void>) | undefined
+  dispose?(): Promise<void>
 }
 
 export interface Plugin<Config = unknown> {
   readonly manifest: PluginManifest
-  readonly setup: (
-    context: PluginContext<Config>,
-  ) => Promise<PluginRegistration> | PluginRegistration
+  setup(context: PluginContext<Config>): Promise<PluginRegistration> | PluginRegistration
 }
 
 /** Returns the plugin object unchanged so the host can read its manifest. */
