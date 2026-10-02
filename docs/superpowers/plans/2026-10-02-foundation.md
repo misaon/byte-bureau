@@ -2927,7 +2927,7 @@ git commit -m "docs: add starlight documentation site skeleton with czech locale
 ### Task 15: CI workflows (composite setup, ci, semantic-pr, labeler, stale, security, docs) and action pinning
 
 **Files:**
-- Create: `.github/actions/setup/action.yml`, `.github/workflows/ci.yml`, `.github/workflows/semantic-pr.yml`, `.github/workflows/labeler.yml`, `.github/workflows/stale.yml`, `.github/workflows/security.yml`, `.github/workflows/docs.yml`, `scripts/pin-actions.sh`
+- Create: `.github/actions/setup/action.yml`, `.github/workflows/ci.yml`, `.github/workflows/semantic-pr.yml`, `.github/workflows/labeler.yml`, `.github/workflows/stale.yml`, `.github/workflows/security.yml`, `.github/workflows/docs.yml`, `scripts/pin-actions.sh`, `.github/zizmor.yml`
 
 **Interfaces:**
 - Produces: required check names `static`, `unit (ubuntu-24.04)`, `unit (ubuntu-24.04-arm)`, `build-smoke`, `semantic-pr` consumed by `scripts/repo-settings.sh` (Task 17); the composite action reused by `release.yml` (Task 16).
@@ -2945,14 +2945,14 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: oven-sh/setup-bun@v2
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       with:
         bun-version-file: .bun-version
-    - uses: actions/setup-node@v7
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
       with:
         node-version-file: .node-version
     - if: inputs.cache == 'true'
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ~/.bun/install/cache
         key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/bun.lock') }}
@@ -2988,12 +2988,13 @@ env:
 
 jobs:
   static:
+    name: static
     runs-on: ubuntu-24.04
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3009,39 +3010,41 @@ jobs:
       - name: actionlint
         run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color
       - name: zizmor
-        uses: zizmorcore/zizmor-action@v0
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           persona: pedantic
           advanced-security: false
 
   unit:
+    name: unit (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run test:coverage
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-${{ matrix.os }}
           path: coverage/
           retention-days: 7
 
   build-smoke:
+    name: build-smoke
     runs-on: ubuntu-24.04
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3052,20 +3055,21 @@ jobs:
           BIN=$(ls dist/bytebureau-*-linux-x64)
           "$BIN" --version
           test "$("$BIN" hello Ondřej --lang cs)" = "Ahoj, Ondřej! ByteBureau je připraveno."
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries-linux
           path: dist/
           retention-days: 3
 
   smoke-arm64:
+    name: smoke-arm64
     needs: build-smoke
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: binaries-linux
           path: dist
@@ -3078,25 +3082,31 @@ jobs:
           test "$("$BIN" hello --lang en)" = "Hello! ByteBureau is ready."
 
   smoke-macos:
+    name: smoke-macos
     runs-on: macos-26
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run build:binaries --host
-      - run: ./dist/bytebureau-*-darwin-arm64 --version
+      - name: smoke (macOS)
+        run: |
+          set -euo pipefail
+          BIN=$(ls dist/bytebureau-*-darwin-arm64)
+          "$BIN" --version
 
   docs-build:
+    name: docs-build
     runs-on: ubuntu-24.04
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3114,16 +3124,21 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  pull-requests: read # read the pull request title
+
+concurrency:
+  group: semantic-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   semantic-pr:
+    name: semantic-pr
     runs-on: ubuntu-24.04
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: amannn/action-semantic-pull-request@v6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -3161,18 +3176,24 @@ on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] no checkout, labels only
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
+
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   label:
+    name: label
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write # apply and sync the area labels
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/labeler@v7
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7
         with:
           sync-labels: true
 ```
@@ -3185,18 +3206,24 @@ on:
     - cron: '17 4 * * 1'
   workflow_dispatch:
 
-permissions:
-  issues: write
-  pull-requests: write
+permissions: {}
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
 
 jobs:
   stale:
+    name: stale
     runs-on: ubuntu-24.04
+    permissions:
+      issues: write # label and close stale issues
+      pull-requests: write # label and close stale pull requests
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/stale@v11
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11
         with:
           days-before-stale: 90
           days-before-close: 14
@@ -3228,54 +3255,61 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scorecard:
+    name: scorecard
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      security-events: write
-      id-token: write
-      actions: read
+      security-events: write # upload the SARIF results to code scanning
+      id-token: write # publish the results to the OpenSSF API
+      actions: read # let Scorecard read workflow runs (private repositories)
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@v2
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
         with:
           results_file: scorecard.sarif
           results_format: sarif
           publish_results: true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         continue-on-error: true # until the owner enables code scanning (ADR-0001 appendix)
         with:
           sarif_file: scorecard.sarif
 
   zizmor:
+    name: zizmor
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      security-events: write
+      security-events: write # upload the SARIF findings to code scanning
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@v0
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           persona: pedantic
 
   audit:
+    name: audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
@@ -3301,36 +3335,41 @@ concurrency:
 
 jobs:
   build:
+    name: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read # configure-pages reads the Pages site settings
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - run: bun run docs:build
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apps/docs/dist
 
   deploy:
+    name: deploy
     needs: build
     runs-on: ubuntu-24.04
     permissions:
-      pages: write
-      id-token: write
+      pages: write # publish the site to GitHub Pages
+      id-token: write # prove the deployment origin to Pages
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: step-security/harden-runner@v2
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
         with:
           egress-policy: audit
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
 ```
 
 - [ ] **Step 5: Pin every action to a commit SHA**
@@ -3342,7 +3381,7 @@ jobs:
 set -euo pipefail
 
 files=$(git ls-files '.github/workflows/*.yml' '.github/actions/*/action.yml')
-refs=$(grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@v?[0-9][A-Za-z0-9_.-]*' $files | sed 's/^uses: //' | sort -u)
+refs=$(grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@v?[0-9][A-Za-z0-9_.-]*' $files | sed 's/^uses: //' | grep -vE '@[0-9a-f]{40}$' | sort -u || true)
 
 for ref in $refs; do
   repo_path="${ref%@*}"
@@ -3369,7 +3408,15 @@ chmod +x scripts/pin-actions.sh
 ./scripts/pin-actions.sh
 grep -rn 'uses: ' .github | grep -v '@[0-9a-f]\{40\}' | grep -v 'uses: ./' || echo "all pinned"
 ```
-Expected: every third-party `uses:` now has a 40-character SHA followed by `# vN` and the final grep prints `all pinned`. (Requires `gh auth login`; the `docker` image for actionlint and `zizmorcore/zizmor-action` are pinned too.)
+Expected: every third-party `uses:` now has a 40-character SHA followed by its tag comment (`# vN`, or `# vX.Y.Z` for the two actions without a floating major tag) and the final grep prints `all pinned`. (Requires `gh auth login`; the `docker` image for actionlint and `zizmorcore/zizmor-action` are pinned too.)
+
+zizmor's pedantic persona asks for GitHub's `$/` form of same-repository actions, which actionlint 1.7.12 still rejects; `.github/zizmor.yml` disables that audit until actionlint supports the form:
+```yaml
+rules:
+  # actionlint 1.7.12 rejects GitHub's `uses: $/...` form (rhysd/actionlint#732); re-enable once it ships
+  self-repository:
+    disable: true
+```
 
 - [ ] **Step 6: Lint the workflows locally when Docker is available, then commit**
 
