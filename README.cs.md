@@ -4,7 +4,7 @@
     <img alt="ByteBureau" src="assets/readme/wordmark-light.svg" width="480">
   </picture>
 
-  <p><strong>Vaše AI kancelář: oddělení kódovacích agentů v izolovaných pracovních prostorech, řízené z jednoho pixel-art patra i z telefonu.</strong></p>
+  <p><strong>Vaše AI kancelář: kancelář kódovacích agentů v izolovaných pracovních prostorech, řízená z jednoho pixel-art patra i z telefonu.</strong></p>
 
   <p>
     <a href="https://github.com/misaon/byte-bureau/releases"><img alt="Vydání" src="https://img.shields.io/github/v/release/misaon/byte-bureau?include_prereleases"></a>
@@ -19,7 +19,7 @@
 
 ## Co je ByteBureau?
 
-**Problém.** Provozovat kódovací agenty ve větším měřítku znamená žonglovat s terminály, worktrees, vlákny code review a tickety, bez pravdivého přehledu o tom, co který agent právě dělá, a s nástroji výrobců, které umějí jen GitHub nebo jen jeden model.
+**Problém.** Provozovat kódovací agenty ve velkém znamená žonglovat s terminály, worktrees, diskusemi v code review a tickety, a přitom nemít skutečný přehled o tom, co který agent právě dělá. Nástroje jednotlivých výrobců navíc podporují jen GitHub nebo jen jeden model.
 
 **Metafora.** ByteBureau je kancelář. Každý agent je zaměstnanec se svým stolem, každý projekt je patro a každá relace běží ve vlastním izolovaném pracovním prostoru (dnes git worktree, příště zabezpečený kontejner). Když zaměstnanec předá práci kolegovi, uvidíte, jak obálka putuje. Když zaměstnanec čeká na vaše rozhodnutí, dostanete dialog s doporučenou odpovědí, na počítači i v telefonu.
 
@@ -65,10 +65,10 @@ Instalátory (`npx`, Homebrew, Scoop, winget, `curl | sh`) přibudou s dílčím
 - 🏢 **Pravdivá simulace kanceláře** · každá póza postavy odráží skutečnou událost agenta; nikdy „pracuje“, když je agent nečinný *(plánováno, dílčí projekt 3)*
 - 🐳 **Izolované pracovní prostory** · nyní jeden worktree na relaci, příště zabezpečené kontejnery přenositelné na Kubernetes a Raspberry Pi *(dílčí projekty 1 a 5)*
 - 🔌 **Pluginy pro všechno** · poskytovatelé agentů, běhová prostředí pracovních prostorů, git hosting, systémy pro tickety, chat, oznámení *(dílčí projekt 1)*
-- 🤖 **Váš vlastní agent** · Claude Code, Codex, OpenCode, Gemini CLI, Pi a libovolný agent s podporou ACP, s vašimi vlastními předplatnými nebo API klíči *(dílčí projekt 1)*
+- 🤖 **Váš vlastní agent** · Claude Code, Codex, OpenCode, Gemini CLI, Pi a libovolný agent s podporou ACP, s vlastními předplatnými nebo API klíči *(dílčí projekt 1)*
 - 💬 **Chat, který lze sledovat** · živé přepisy, ukazatel kontextu, dialogy s otázkou a doporučenou volbou *(dílčí projekt 2)*
 - 📱 **Ovládání z telefonu s end-to-end šifrováním** · slepý relay, který nemůže číst vaše přepisy *(dílčí projekt 7)*
-- 📊 **Telemetrie, která patří vám** · místní trajektorie, které lze exportovat pro analýzu a vylepšování promptů *(dílčí projekt 8)*
+- 📊 **Telemetrie, která patří vám** · lokálně uložené trajektorie, které lze exportovat pro analýzu a vylepšování promptů *(dílčí projekt 8)*
 - 🌍 **Čeština a angličtina** · už od prvního binárního souboru
 
 ## Jak to funguje
@@ -87,11 +87,11 @@ flowchart LR
 
 ## Bezpečnost a soukromí
 
-ByteBureau běží na vašem počítači, ve výchozím nastavení naslouchá jen na adrese localhost, nikdy neukládá přihlašovací údaje vašich agentů a dodává podepsaná vydání s atestací původu a se SBOM. Jak hlásit zranitelnosti a co spadá do rozsahu, najdete v [SECURITY.md](SECURITY.md).
+ByteBureau běží na vašem počítači, ve výchozím nastavení naslouchá jen na adrese localhost, nikdy neukládá přihlašovací údaje vašich agentů a dodává podepsaná vydání s ověřitelným původem a se SBOM. Jak hlásit zranitelnosti a co spadá do rozsahu, najdete v [SECURITY.md](SECURITY.md).
 
 ## Přispívání
 
-Přečtěte si [CONTRIBUTING.md](CONTRIBUTING.md): `mise install`, `bun install`, `bun run check`. Vyžadujeme Conventional Commits a podpis DCO (sign-off). Vhodné první úkoly jsou označené štítkem `good first issue`.
+Přečtěte si [CONTRIBUTING.md](CONTRIBUTING.md): `mise install`, `bun install`, `bun run check`. Vyžadujeme Conventional Commits a podpis DCO (sign-off). Úkoly vhodné pro první příspěvek mají štítek `good first issue`.
 
 ## Komunita
 
