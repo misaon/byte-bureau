@@ -3,14 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "license": "FSL-1.1-MIT",
-  "type": "module",
-  "engines": {
-    "bun": ">=1.4.0"
-  },
   "workspaces": {
-    "packages": ["apps/*", "packages/*", "plugins/*"],
+    "packages": [
+      "apps/*",
+      "packages/*",
+      "plugins/*"
+    ],
     "catalog": {}
   },
+  "type": "module",
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
@@ -34,6 +35,12 @@
     "@bytebureau/tsconfig": "workspace:*",
     "@tsconfig/strictest": "2.0.8",
     "@types/bun": "1.4.2",
+    "oxfmt": "0.71.0",
+    "oxlint": "1.86.0",
+    "oxlint-tsgolint": "7.0.2003",
     "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
   }
 }

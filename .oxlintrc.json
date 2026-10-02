@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node", "vitest"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "error",
+    "perf": "error",
+    "restriction": "error",
+    "style": "error",
+    "nursery": "off"
+  },
+  "env": { "builtin": true, "es2024": true },
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/coverage/**",
+    "packages/i18n/src/paraglide/**",
+    "apps/docs/.astro/**",
+    "docs/research/**"
+  ],
+  "rules": {
+    "import/no-default-export": "error",
+    "no-console": "error",
+    "unicorn/no-process-exit": "error"
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/*.config.ts",
+        "**/*.config.mjs",
+        "knip.ts",
+        "commitlint.config.ts",
+        "changelog.config.ts",
+        "apps/docs/src/**"
+      ],
+      "rules": { "import/no-default-export": "off" }
+    },
+    {
+      "files": [
+        "apps/bytebureau/src/**",
+        "scripts/**",
+        "packages/i18n/scripts/**",
+        "apps/docs/scripts/**"
+      ],
+      "rules": { "no-console": "off", "unicorn/no-process-exit": "off" }
+    },
+    {
+      "files": ["**/*.test.ts"],
+      "rules": { "no-console": "off" }
+    }
+  ]
+}
