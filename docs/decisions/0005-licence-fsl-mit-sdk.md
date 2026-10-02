@@ -13,4 +13,4 @@ The application is licensed under the Functional Source License 1.1 with MIT fut
 
 ## Consequences
 
-ByteBureau is "fair source", not OSI open source: no OpenSSF Best Practices badge, no GitHub Accelerator eligibility, and some contributors may decline; forks and users are never stranded thanks to the MIT conversion.
+ByteBureau is "fair source" under a licence the OSI has not approved: no OpenSSF Best Practices badge, no GitHub Accelerator eligibility, and some contributors may decline; forks and users are never stranded thanks to the MIT conversion.

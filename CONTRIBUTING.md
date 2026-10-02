@@ -35,11 +35,15 @@ Export `GH_TOKEN="$(gh auth token)"` before `bun run lint:actions` to let zizmor
 ## Commit messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org): `type(scope): subject`.
-Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`.
-Scopes: a workspace directory name (`bytebureau`, `i18n`, `tsconfig`, `docs`) or `cli`, `deps`, `release`, `repo`, `ci`.
-The subject is lower-case and imperative. commitlint rejects anything else, and the PR title is validated the same way because we squash-merge using the PR title.
 
-Every commit must carry a Developer Certificate of Origin sign-off (`git commit -s`). By signing off you certify the [DCO](https://developercertificate.org). Contributions are licensed under the licence of the package they touch (FSL-1.1-MIT for the application, MIT for the SDK packages).
+- **Type**: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore` or `revert`.
+- **Scope** (optional): a workspace directory name (`bytebureau`, `i18n`, `tsconfig`, `docs`) or `cli`, `deps`, `release`, `repo`, `ci`.
+- **Subject**: imperative, starting with a lower-case letter.
+- **Sign-off**: a Developer Certificate of Origin sign-off on every commit (`git commit -s`); by signing off you certify the [DCO](https://developercertificate.org).
+
+commitlint checks the type, the scope, the subject case and the header length (at most 100 characters) of every commit. The PR title is checked for the same types, scopes and lower-case subject, because we squash-merge using the PR title.
+
+Contributions are licensed under the licence of the package they touch (FSL-1.1-MIT for the application, MIT for the SDK packages).
 
 ## Pull requests
 

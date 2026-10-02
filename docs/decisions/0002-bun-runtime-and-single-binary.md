@@ -13,4 +13,4 @@ The application runs on Bun 1.4.x, pinned exactly in `.bun-version`, and ships a
 
 ## Consequences
 
-Cross-compiled binaries of roughly 60–80 MB per target; built-in SQLite, WebSocket server and process APIs without extra dependencies; exposure to regressions in Bun's recent Rust rewrite, mitigated by exact pinning, Renovate cooldowns and a nightly canary job.
+Cross-compiled binaries of roughly 60–80 MB per target; built-in SQLite, WebSocket server and process APIs without extra dependencies; exposure to regressions in Bun's recent Rust rewrite, mitigated by exact pinning, Renovate cooldowns and a planned nightly canary job (sub-project 1).

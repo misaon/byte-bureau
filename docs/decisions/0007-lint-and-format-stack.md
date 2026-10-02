@@ -1,4 +1,4 @@
-# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI only
+# Lint and format stack: oxlint (type-aware) and oxfmt, ESLint long tail in CI and in `bun run check`
 
 - Status: accepted
 - Date: 2026-10-02
@@ -9,7 +9,7 @@ The project wants the strictest practical linting with fast feedback, on a TypeS
 
 ## Decision
 
-oxlint with every category at `error` and type-aware rules enabled is the primary linter; oxfmt (Prettier-compatible) is the formatter; both run in the pre-commit hook and in CI. Rules oxlint lacks (sonarjs cognitive complexity, security, jsdoc for published packages) run through ESLint in CI only, inside `tools/eslint-long-tail`, which installs TypeScript 6 under the `typescript` name so typescript-eslint keeps working until it supports TypeScript 7.
+oxlint with every category at `error` and type-aware rules enabled is the primary linter; oxfmt (Prettier-compatible) is the formatter; both run in the pre-commit hook and in CI. Rules oxlint lacks (sonarjs cognitive complexity, security, jsdoc for published packages) run through ESLint in CI and in `bun run check`, inside `tools/eslint-long-tail`, which installs TypeScript 6 under the `typescript` name so typescript-eslint keeps working until it supports TypeScript 7.
 
 ## Consequences
 

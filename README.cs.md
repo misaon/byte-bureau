@@ -23,7 +23,7 @@
 
 **Metafora.** ByteBureau je kancelář. Každý agent je zaměstnanec se svým stolem, každý projekt je patro a každá relace běží ve vlastním izolovaném pracovním prostoru (dnes git worktree, příště zabezpečený kontejner). Když zaměstnanec předá práci kolegovi, uvidíte, jak obálka putuje. Když zaměstnanec čeká na vaše rozhodnutí, dostanete dialog s doporučenou odpovědí, na počítači i v telefonu.
 
-**Slib.** Pozorovatelný, kontrolovatelný, rozšiřitelný. Jakýkoli agent spouštěný z příkazové řádky (Claude Code, Codex, OpenCode, jakýkoli agent s podporou Agent Client Protocol), jakýkoli git hosting, jakýkoli systém pro tickety, jakýkoli chat, vše přes pluginy. Vaše předplatná, váš počítač, vaše data.
+**Slib.** Pozorovatelný, auditovatelný, rozšiřitelný. Jakýkoli agent spouštěný z příkazové řádky (Claude Code, Codex, OpenCode, jakýkoli agent s podporou Agent Client Protocol), jakýkoli git hosting, jakýkoli systém pro tickety, jakýkoli chat, vše přes pluginy. Vaše předplatná, váš počítač, vaše data.
 
 ## Stav
 
@@ -87,7 +87,7 @@ flowchart LR
 
 ## Bezpečnost a soukromí
 
-ByteBureau běží na vašem počítači, ve výchozím nastavení naslouchá jen na adrese localhost, nikdy neukládá přihlašovací údaje vašich agentů a dodává podepsaná vydání s ověřitelným původem a se SBOM. Jak hlásit zranitelnosti a co spadá do rozsahu, najdete v [SECURITY.md](SECURITY.md).
+ByteBureau běží na vašem počítači, ve výchozím nastavení naslouchá jen na adrese localhost, nikdy neukládá přihlašovací údaje vašich agentů a dodává podepsaná vydání s atestací původu a se SBOM. Jak hlásit zranitelnosti a co spadá do rozsahu, najdete v [SECURITY.md](SECURITY.md).
 
 ## Přispívání
 

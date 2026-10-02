@@ -82,3 +82,4 @@ lockfiles
 protectable
 Čeština
 pluginy
+auditovatelný

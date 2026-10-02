@@ -10,6 +10,8 @@ Use GitHub's private vulnerability reporting: <https://github.com/misaon/byte-bu
 
 You will receive an acknowledgement within 5 working days. We aim to publish a fix and advisory within 90 days of the report (coordinated disclosure); we will tell you if we need longer and why.
 
+There is no bug bounty programme yet; reports are handled on a best-effort basis.
+
 ## Scope
 
 - The `bytebureau` application, its CLI and the packages in this repository.
