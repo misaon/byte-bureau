@@ -1855,7 +1855,7 @@ git commit -m "docs(repo): add fsl-1.1-mit licence and trademark policy"
 Run `bun add -D --exact yaml`, then `scripts/github-yaml.test.ts`:
 ```ts
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import path from 'node:path'
 import { parse } from 'yaml'
 import { describe, expect, it } from 'vitest'
 
@@ -1863,31 +1863,46 @@ const root = new URL('..', import.meta.url).pathname
 
 function yamlFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name)
-    if (statSync(path).isDirectory()) return yamlFiles(path)
-    return name.endsWith('.yml') || name.endsWith('.yaml') ? [path] : []
+    const entry = path.join(dir, name)
+    if (statSync(entry).isDirectory()) {
+      return yamlFiles(entry)
+    }
+    return name.endsWith('.yml') || name.endsWith('.yaml') ? [entry] : []
   })
 }
 
 describe('.github YAML', () => {
-  const files = yamlFiles(join(root, '.github'))
+  const files = yamlFiles(path.join(root, '.github'))
 
   it('contains the issue forms, labeler and funding files', () => {
+    expect.hasAssertions()
     const names = files.map((file) => file.replace(root, ''))
-    for (const expected of ['.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/feature.yml', '.github/ISSUE_TEMPLATE/plugin.yml', '.github/ISSUE_TEMPLATE/config.yml', '.github/labeler.yml', '.github/FUNDING.yml']) {
+    for (const expected of [
+      '.github/ISSUE_TEMPLATE/bug.yml',
+      '.github/ISSUE_TEMPLATE/feature.yml',
+      '.github/ISSUE_TEMPLATE/plugin.yml',
+      '.github/ISSUE_TEMPLATE/config.yml',
+      '.github/labeler.yml',
+      '.github/FUNDING.yml',
+    ]) {
       expect(names).toContain(expected)
     }
   })
 
   it('parses every YAML file', () => {
+    expect.hasAssertions()
     for (const file of files) {
-      expect(() => parse(readFileSync(file, 'utf8')), file).not.toThrow()
+      expect(() => {
+        parse(readFileSync(file, 'utf8'))
+      }, file).not.toThrow()
     }
   })
 
   it('disables blank issues', () => {
-    const config = parse(readFileSync(join(root, '.github/ISSUE_TEMPLATE/config.yml'), 'utf8')) as { blank_issues_enabled: boolean }
-    expect(config.blank_issues_enabled).toBe(false)
+    const config: unknown = parse(
+      readFileSync(path.join(root, '.github/ISSUE_TEMPLATE/config.yml'), 'utf8'),
+    )
+    expect(config).toHaveProperty('blank_issues_enabled', false)
   })
 })
 ```
@@ -2189,7 +2204,7 @@ ByteBureau is maintained by its founder, Ondřej Misák (BDFL), until the projec
 ```bash
 curl -fsSL https://www.contributor-covenant.org/version/3/0/code_of_conduct/code_of_conduct.md -o CODE_OF_CONDUCT.md
 ```
-then replace the contact placeholder the text contains (search for `INSERT`) with `the maintainer via GitHub private vulnerability reporting or a private message to @misaon`. If the 3.0 URL is unavailable, use version 2.1 at <https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md>.
+then replace the reporting placeholder (`**[NOTE: describe your means of reporting here.]**` in version 3.0) with `contact the maintainer via GitHub private vulnerability reporting or a private message to @misaon.` and delete the adopter note about a community-specific enforcement process (ByteBureau uses the upstream enforcement ladder). If the 3.0 URL is unavailable, use version 2.1 at <https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md>.
 
 - [ ] **Step 4: Run tests and markdown lint, then commit**
 
