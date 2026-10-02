@@ -537,7 +537,8 @@ Then run `cd packages/i18n && bun add -D --exact @inlang/paraglide-js && cd ../.
     "outDir": "src/paraglide",
     "types": []
   },
-  "include": ["src/paraglide/**/*.js"]
+  "include": ["src/paraglide/**/*.js"],
+  "exclude": []
 }
 ```
 `packages/i18n/vitest.config.ts`:
