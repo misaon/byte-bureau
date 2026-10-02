@@ -877,7 +877,7 @@ git commit -m "feat(protocol): add event, ask, employee and config schemas with 
 
 **Files:**
 - Create: `packages/plugin-api/package.json`, `packages/plugin-api/tsconfig.json`, `packages/plugin-api/vitest.config.ts`, `packages/plugin-api/src/index.ts`, `packages/plugin-api/src/ports.ts`, `packages/plugin-api/src/plugin.ts`, `packages/plugin-api/src/logger.ts`, `packages/plugin-api/src/plugin.test.ts`
-- Modify: `vitest.config.ts` (add the project), `knip.ts` (add the workspace), `scripts/license.test.ts` (MIT manifests)
+- Modify: `vitest.config.ts` (add the project), `knip.ts` (add the workspace), `scripts/license.test.ts` (MIT manifests), `.github/workflows/semantic-pr.yml` (`plugin-api` scope), `.oxlintrc.jsonc` (`typescript/method-signature-style` off under `packages/plugin-api/src/**`: ports and the plugin contract are implemented by classes and need bivariant parameters so `Plugin<Config>` assigns to `Plugin`), `cspell-words.txt` (`bivariant`)
 
 **Interfaces:**
 - Consumes: the protocol types from Task 1 (`EmployeeSpec`, `PromptInput`, `Ask`, `AskAnswer`, `AgentEvent`, `KernelEvent`, `Effort`, `PermissionMode`) — type-only imports, so no Effect code is loaded at runtime.
@@ -1314,7 +1314,7 @@ export type {
 
 - [ ] **Step 5: Run the test, wire the gates**
 
-Run: `bunx vitest run --project plugin-api` → PASS (1 test).
+Run: `bunx vitest run --project plugin-api` → PASS (2 tests: identity, and a typed `Plugin<MyConfig>` assigned to `readonly Plugin[]`, which only compiles with method signatures).
 
 `vitest.config.ts` (root): add `'packages/plugin-api'` to `projects` after `'packages/protocol'`.
 `knip.ts`: add `'packages/plugin-api': { project: ['src/**/*.ts'] }` to `workspaces`.
@@ -1327,7 +1327,7 @@ Expected: green (the new workspace typechecks under Turborepo, knip reports noth
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/plugin-api vitest.config.ts knip.ts scripts/license.test.ts bun.lock
+git add packages/plugin-api vitest.config.ts knip.ts scripts/license.test.ts bun.lock .github/workflows/semantic-pr.yml .oxlintrc.jsonc cspell-words.txt
 git commit -m "feat(plugin-api): define the agent, workspace and secret ports and the plugin contract"
 ```
 
