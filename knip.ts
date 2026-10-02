@@ -18,6 +18,7 @@ const config: KnipConfig = {
       ignoreDependencies: ['@inlang/plugin-message-format'],
     },
     'packages/protocol': { entry: ['scripts/*.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/plugin-api': { project: ['src/**/*.ts'] },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }

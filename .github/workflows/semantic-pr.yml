@@ -39,6 +39,7 @@ jobs:
             bytebureau
             docs
             i18n
+            plugin-api
             protocol
             tsconfig
             cli

@@ -65,6 +65,17 @@
         "@inlang/plugin-message-format": "4.4.4",
       },
     },
+    "packages/plugin-api": {
+      "name": "@bytebureau/plugin-api",
+      "version": "0.0.0",
+      "dependencies": {
+        "@bytebureau/protocol": "workspace:*",
+        "@standard-schema/spec": "1.1.0",
+      },
+      "devDependencies": {
+        "@bytebureau/tsconfig": "workspace:*",
+      },
+    },
     "packages/protocol": {
       "name": "@bytebureau/protocol",
       "version": "0.0.0",
@@ -152,6 +163,8 @@
     "@bytebureau/docs": ["@bytebureau/docs@workspace:apps/docs"],
 
     "@bytebureau/i18n": ["@bytebureau/i18n@workspace:packages/i18n"],
+
+    "@bytebureau/plugin-api": ["@bytebureau/plugin-api@workspace:packages/plugin-api"],
 
     "@bytebureau/protocol": ["@bytebureau/protocol@workspace:packages/protocol"],
 
@@ -810,6 +823,8 @@
     "@sinclair/typebox": ["@sinclair/typebox@0.31.30", "", {}, "sha512-MGsM7bVmHg3sUKCphlu3SGQ+T+5JTbygZWYArfKQCW5anJeACHeqLhcnf+R7XlCWZ+QR3C8JTBx3kCKJTN69ow=="],
 
     "@sindresorhus/merge-streams": ["@sindresorhus/merge-streams@4.0.0", "", {}, "sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ=="],
+
+    "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
     "@swc/core": ["@swc/core@1.16.13", "", { "dependencies": { "@swc/counter": "^0.1.3", "@swc/types": "^0.1.28" }, "optionalDependencies": { "@swc/core-darwin-arm64": "1.16.13", "@swc/core-darwin-x64": "1.16.13", "@swc/core-linux-arm-gnueabihf": "1.16.13", "@swc/core-linux-arm64-gnu": "1.16.13", "@swc/core-linux-arm64-musl": "1.16.13", "@swc/core-linux-ppc64-gnu": "1.16.13", "@swc/core-linux-s390x-gnu": "1.16.13", "@swc/core-linux-x64-gnu": "1.16.13", "@swc/core-linux-x64-musl": "1.16.13", "@swc/core-win32-arm64-msvc": "1.16.13", "@swc/core-win32-ia32-msvc": "1.16.13", "@swc/core-win32-x64-msvc": "1.16.13" }, "peerDependencies": { "@swc/helpers": ">=0.5.17" }, "optionalPeers": ["@swc/helpers"] }, "sha512-k4uUsIMS0IwOKVsrQs48IZK75O4roV3FnuJEdL7ES+DFESftdgvz73QBqN3VUAbUmUr78We4tzG0kgYj36M22Q=="],
 

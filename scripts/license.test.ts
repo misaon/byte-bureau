@@ -7,18 +7,25 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
 
 // SDK packages published under MIT (ADR-0005); every other manifest is FSL-1.1-MIT
-const MIT_MANIFESTS = new Set(['packages/protocol/package.json'])
+const MIT_MANIFESTS = new Set([
+  'packages/protocol/package.json',
+  'packages/plugin-api/package.json',
+])
 const expectedLicense = (manifest: string): string =>
   MIT_MANIFESTS.has(manifest) ? 'MIT' : 'FSL-1.1-MIT'
 
-// The root manifest plus apps/*/package.json and packages/*/package.json
+// The root manifest plus apps/*/package.json, packages/*/package.json and plugins/*/package.json
 const manifests = [
   'package.json',
-  ...['apps', 'packages'].flatMap((parent) =>
-    readdirSync(path.join(root, parent))
+  ...['apps', 'packages', 'plugins'].flatMap((parent) => {
+    const parentPath = path.join(root, parent)
+    if (!existsSync(parentPath)) {
+      return []
+    }
+    return readdirSync(parentPath)
       .map((name) => path.join(parent, name, 'package.json'))
-      .filter((manifest) => existsSync(path.join(root, manifest))),
-  ),
+      .filter((manifest) => existsSync(path.join(root, manifest)))
+  }),
 ]
 
 describe('licence layer', () => {
