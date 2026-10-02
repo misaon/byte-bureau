@@ -15,10 +15,11 @@
   "scripts": {
     "prepare": "lefthook install",
     "build": "turbo run build",
+    "build:i18n": "bun run --cwd packages/i18n build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run build --filter=@bytebureau/i18n && vitest run",
     "test:coverage": "turbo run build --filter=@bytebureau/i18n && vitest run --coverage",
-    "lint": "oxlint --type-aware",
+    "lint": "bun run build:i18n && oxlint --type-aware",
     "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && bun --cwd tools/eslint-long-tail run lint",
     "lint:md": "markdownlint-cli2",
     "lint:ls": "ls-lint",
