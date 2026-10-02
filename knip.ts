@@ -12,7 +12,11 @@ const config: KnipConfig = {
       entry: ['scripts/*.ts'],
       project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
     },
-    'packages/i18n': { project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/i18n': {
+      project: ['src/**/*.ts', 'scripts/**/*.ts'],
+      // Loaded by the inlang SDK from project.inlang/settings.json (modules), never imported
+      ignoreDependencies: ['@inlang/plugin-message-format'],
+    },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }
