@@ -1,0 +1,17 @@
+{
+  "name": "@bytebureau/docs",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run scripts/sync-decisions.ts && astro dev",
+    "docs:build": "bun run scripts/sync-decisions.ts && astro build",
+    "typecheck": "astro sync && tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.5",
+    "astro": "7.3.5",
+    "sharp": "0.35.5"
+  }
+}

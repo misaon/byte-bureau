@@ -24,6 +24,7 @@
     { "filename": "**/messages/cs.json", "language": "en,cs" },
     { "filename": "**/*.test.ts", "language": "en,cs" },
     { "filename": "README.cs.md", "language": "en,cs" },
-    { "filename": "apps/docs/src/content/docs/cs/**", "language": "en,cs" }
+    { "filename": "apps/docs/src/content/docs/cs/**", "language": "en,cs" },
+    { "filename": "apps/docs/astro.config.mjs", "language": "en,cs" }
   ]
 }

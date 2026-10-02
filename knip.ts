@@ -12,6 +12,10 @@ const config: KnipConfig = {
   workspaces: {
     '.': { entry: ['scripts/*.ts'], project: ['scripts/**/*.ts'] },
     'apps/bytebureau': { project: ['src/**/*.ts'] },
+    'apps/docs': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
+    },
     'packages/i18n': { project: ['src/**/*.ts', 'scripts/**/*.ts'] },
     'packages/tsconfig': { entry: [], project: [] },
   },
