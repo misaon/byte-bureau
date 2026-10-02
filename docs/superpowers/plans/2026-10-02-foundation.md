@@ -149,10 +149,11 @@ bytebureau-diag-*.zip
   },
   "scripts": {
     "build": "turbo run build",
+    "build:i18n": "bun run --cwd packages/i18n build",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run build --filter=@bytebureau/i18n && vitest run",
-    "test:coverage": "turbo run build --filter=@bytebureau/i18n && vitest run --coverage",
-    "lint": "oxlint --type-aware",
+    "test": "bun run build:i18n && vitest run",
+    "test:coverage": "bun run build:i18n && vitest run --coverage",
+    "lint": "bun run build:i18n && oxlint --type-aware",
     "lint:long-tail": "bun install --frozen-lockfile --cwd tools/eslint-long-tail && bun --cwd tools/eslint-long-tail run lint",
     "lint:md": "markdownlint-cli2",
     "lint:ls": "ls-lint",
@@ -1357,11 +1358,12 @@ Run: `bun add -D --exact turbo`
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "src/paraglide/**"] },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
+    "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
     "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
   }
 }
 ```
-Change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
+(The package-specific entry makes the i18n typecheck wait for its own build, because its generated `src/paraglide` output is git-ignored.) Change the root `build:i18n` script to `"turbo run build --filter=@bytebureau/i18n"` so the generated output is cached, and change the root `typecheck` script to: `"typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json"`, and add `"packageManager": "bun@1.4.2"` to the root `package.json` right after `"engines"` (Turborepo reads it to detect the package manager; Bun accepts the field).
 
 - [ ] **Step 2: Verify the graph**
 
@@ -1503,7 +1505,7 @@ If `@cspell/dict-cs-cz` installed, add `"import": ["@cspell/dict-cs-cz/cspell-ex
 
 `cspell-words.txt` (one word per line): `bytebureau`, `ByteBureau`, `Ondřej`, `Misák`, `misaon`, `oxlint`, `oxfmt`, `tsgolint`, `lefthook`, `commitlint`, `changelogen`, `paraglide`, `inlang`, `citty`, `clack`, `picocolors`, `turborepo`, `turbo`, `knip`, `depcruise`, `zizmor`, `actionlint`, `cosign`, `sigstore`, `SBOM`, `cyclonedx`, `syft`, `musl`, `Codex`, `OpenCode`, `Anthropic`, `Starlight`, `Astro`, `pagefind`, `MADR`, `worktree`, `worktrees`, `Paseo`, `monorepo`, `devcontainer`, `bunfig`, `tsconfig`, `tsbuildinfo`, `renovatebot`, `Renovate`, `Dependabot`, `Scorecard`, `OpenSSF`, `Jira`, `Tauri`, `Pixi`, `PixiJS`, `Effect`, `JSONC`, `NDJSON`, `WebCrypto`, `gitignore`, `gitattributes`, `editorconfig`, `Homebrew`, `Scoop`, `winget`, `attestations`, `provenance`, `kebab`, `Zod`, `OTLP`, `OpenTelemetry`.
 
-`.markdownlint-cli2.yaml`:
+`.markdownlint-cli2.yaml` (`gitignore: true` keeps generated, git-ignored files such as Paraglide's output out of the lint):
 ```yaml
 config:
   default: true
@@ -1512,6 +1514,7 @@ config:
     siblings_only: true
   MD033: false
   MD041: false
+gitignore: true
 globs:
   - '**/*.md'
 ignores:
@@ -1522,7 +1525,7 @@ ignores:
   - 'LICENSE.md'
   - 'CODE_OF_CONDUCT.md'
 ```
-`.ls-lint.yml`:
+`.ls-lint.yml` (if the installed ls-lint rejects `point.case`, replace every `point.case` with `regex:^[a-z0-9]+([.-][a-z0-9]+)*$`, which accepts dotted names such as `vitest.config` and `README.cs`):
 ```yaml
 ls:
   .ts: kebab-case | point.case
