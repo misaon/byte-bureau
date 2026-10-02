@@ -1,0 +1,41 @@
+name: Bug report
+description: Something is broken
+labels: ['kind: bug', 'status: needs-triage']
+body:
+  - type: input
+    id: version
+    attributes:
+      label: ByteBureau version
+      description: Output of `bytebureau --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 26.0 arm64 / Ubuntu 24.04 x64 / Windows 11
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent CLI and version (if relevant)
+      placeholder: claude 2.1.287, codex 0.160.0
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour (include logs; redact secrets)
+    validations:
+      required: true

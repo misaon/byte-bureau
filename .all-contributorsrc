@@ -1,0 +1,12 @@
+{
+  "projectName": "byte-bureau",
+  "projectOwner": "misaon",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": ["README.md"],
+  "imageSize": 64,
+  "commit": false,
+  "commitConvention": "angular",
+  "contributors": [],
+  "contributorsPerLine": 7
+}
