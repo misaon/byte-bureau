@@ -43,7 +43,7 @@
 package.json bunfig.toml bun.lock                     workspace root, catalog, scripts, install policy
 tsconfig.json                                         root config for scripts and config files
 packages/tsconfig/{package.json,base.json,library.json,app.json}
-.oxlintrc.json .oxfmtrc.json                          lint/format
+.oxlintrc.jsonc .oxfmtrc.json                          lint/format
 lefthook.yml commitlint.config.ts                     hooks and commit rules
 vitest.config.ts                                      root test runner config (projects + coverage)
 packages/i18n/{package.json,tsconfig.json,vitest.config.ts,project.inlang/settings.json,messages/{en,cs}.json,scripts/compile.ts,src/index.ts,src/parity.test.ts}
@@ -129,6 +129,7 @@ bytebureau-diag-*.zip
 .env
 .env.*
 .DS_Store
+*.bun-build
 .idea/
 .superpowers/
 ```
@@ -163,7 +164,7 @@ bytebureau-diag-*.zip
     "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
     "spell": "cspell --no-progress --gitignore \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
-    "build:binaries": "bun run scripts/build-binaries.ts",
+    "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
     "release": "changelogen --release --push"
   },
@@ -275,7 +276,7 @@ git commit -m "chore(repo): bootstrap bun workspace with shared tsconfig bases"
 ### Task 2: Formatter and linter (oxfmt + type-aware oxlint)
 
 **Files:**
-- Create: `.oxfmtrc.json`, `.oxlintrc.json`
+- Create: `.oxfmtrc.json`, `.oxlintrc.jsonc`
 - Modify: `package.json` (devDependencies)
 
 **Interfaces:**
@@ -304,9 +305,9 @@ Expected: version lines (oxlint 1.x, oxfmt 0.7x).
 ```
 If `bunx oxfmt --check` reports an unknown key, open `node_modules/oxfmt/configuration_schema.json`, rename the key to the schema's spelling, and keep the same intent (width 100, no semicolons, single quotes, trailing commas, ignore generated output).
 
-- [ ] **Step 3: Create `.oxlintrc.json`**
+- [ ] **Step 3: Create `.oxlintrc.jsonc`** (JSONC: oxlint discovers `.oxlintrc.jsonc` and the curated exceptions carry one-line justification comments)
 
-```json
+```jsonc
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node", "vitest"],
@@ -369,7 +370,7 @@ Expected: `format:check` exits 0.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add .oxfmtrc.json .oxlintrc.json package.json bun.lock
+git add .oxfmtrc.json .oxlintrc.jsonc package.json bun.lock
 git commit -m "chore(repo): add oxfmt and type-aware oxlint gates"
 ```
 
@@ -1081,7 +1082,7 @@ Run:
 bunx tsc --noEmit -p apps/bytebureau/tsconfig.json
 bun run lint && bun run format:check
 ```
-Expected: clean. Fix any `restriction`-category findings by changing code (not by disabling rules) unless the rule contradicts the CLI's purpose, in which case add the rule to the existing `apps/bytebureau/src/**` override in `.oxlintrc.json`.
+Expected: clean. Fix any `restriction`-category findings by changing code (not by disabling rules) unless the rule contradicts the CLI's purpose, in which case add the rule to the existing `apps/bytebureau/src/**` override in `.oxlintrc.jsonc`.
 
 - [ ] **Step 8: Commit**
 
@@ -1263,7 +1264,7 @@ export function parseArgs(argv: readonly string[], defaults: { version: string }
 }
 
 function compile(target: Target, outfile: string, version: string, bytecode: boolean): number {
-  const args = ['build', '--compile', '--minify', '--sourcemap']
+  const args = ['build', '--compile', '--minify', '--sourcemap', '--format=esm']
   if (bytecode) args.push('--bytecode')
   args.push(`--target=${target}`, '--define', `BYTEBUREAU_VERSION=${JSON.stringify(version)}`, ENTRY, '--outfile', outfile)
   const result = Bun.spawnSync(['bun', ...args], { cwd: ROOT, stdout: 'inherit', stderr: 'inherit' })
@@ -1536,7 +1537,7 @@ ignore:
   - .editorconfig
   - .gitattributes
   - .gitignore
-  - .oxlintrc.json
+  - .oxlintrc.jsonc
   - .oxfmtrc.json
   - .markdownlint-cli2.yaml
   - .ls-lint.yml
@@ -1963,7 +1964,7 @@ body:
 ```yaml
 'area: foundation':
   - changed-files:
-      - any-glob-to-any-file: ['package.json', 'bunfig.toml', 'turbo.json', 'tsconfig.json', 'packages/tsconfig/**', 'scripts/**', '.oxlintrc.json', '.oxfmtrc.json', 'knip.ts', '.dependency-cruiser.cjs']
+      - any-glob-to-any-file: ['package.json', 'bunfig.toml', 'turbo.json', 'tsconfig.json', 'packages/tsconfig/**', 'scripts/**', '.oxlintrc.jsonc', '.oxfmtrc.json', 'knip.ts', '.dependency-cruiser.cjs']
 'area: ci':
   - changed-files:
       - any-glob-to-any-file: ['.github/**']

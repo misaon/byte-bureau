@@ -8,7 +8,7 @@
     "perf": "error",
     "restriction": "error",
     "style": "error",
-    "nursery": "off"
+    "nursery": "off",
   },
   "env": { "builtin": true, "es2024": true },
   "ignorePatterns": [
@@ -16,7 +16,7 @@
     "**/coverage/**",
     "packages/i18n/src/paraglide/**",
     "apps/docs/.astro/**",
-    "docs/research/**"
+    "docs/research/**",
   ],
   "rules": {
     "import/no-default-export": "error",
@@ -41,8 +41,8 @@
       {
         "onlyFunctionsWithAsyncKeyword": true,
         "onlyFunctionsWithExpectInLoop": true,
-        "onlyFunctionsWithExpectInCallback": true
-      }
+        "onlyFunctionsWithExpectInCallback": true,
+      },
     ],
     // Vitest accepts expect(value, message); the Jest default of one argument is wrong here
     "vitest/valid-expect": ["error", { "maxArgs": 2 }],
@@ -99,7 +99,7 @@
     // (c) Demands deep readonly on every parameter, including types that come from Node and Bun
     "typescript/prefer-readonly-parameter-types": "off",
     // (c) Wants a timeout argument on every test; timeouts belong in the Vitest config (testTimeout)
-    "vitest/require-test-timeout": "off"
+    "vitest/require-test-timeout": "off",
   },
   "overrides": [
     {
@@ -109,22 +109,22 @@
         "knip.ts",
         "commitlint.config.ts",
         "changelog.config.ts",
-        "apps/docs/src/**"
+        "apps/docs/src/**",
       ],
-      "rules": { "import/no-default-export": "off" }
+      "rules": { "import/no-default-export": "off" },
     },
     {
       "files": [
         "apps/bytebureau/src/**",
         "scripts/**",
         "packages/i18n/scripts/**",
-        "apps/docs/scripts/**"
+        "apps/docs/scripts/**",
       ],
-      "rules": { "no-console": "off", "unicorn/no-process-exit": "off" }
+      "rules": { "no-console": "off", "unicorn/no-process-exit": "off" },
     },
     {
       "files": ["**/*.test.ts"],
-      "rules": { "no-console": "off", "vitest/require-hook": "error" }
-    }
-  ]
+      "rules": { "no-console": "off", "vitest/require-hook": "error" },
+    },
+  ],
 }
