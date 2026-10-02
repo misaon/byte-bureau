@@ -43,6 +43,7 @@ while IFS='|' read -r name color description; do
   run gh label create "$name" --repo "$REPO" --color "$color" --description "$description" --force
 done < scripts/repo-settings/labels.txt
 
+# The admin role bypasses the main ruleset so release commits can land on main; tags stay immutable for everyone.
 run gh api -X POST "repos/${REPO}/rulesets" --input scripts/repo-settings/ruleset-main.json
 run gh api -X POST "repos/${REPO}/rulesets" --input scripts/repo-settings/ruleset-tags.json
 
