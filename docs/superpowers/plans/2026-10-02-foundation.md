@@ -1979,7 +1979,7 @@ body:
 - [ ] **Step 3: Create the health files**
 
 `CONTRIBUTING.md`:
-```markdown
+````markdown
 # Contributing to ByteBureau
 
 Thank you for helping build the AI office. This guide covers the setup, the rules the CI enforces, and how to get a change merged.
@@ -2041,7 +2041,7 @@ Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `doc
 ## Editors
 
 VS Code: accept the recommended extensions (`.vscode/extensions.json`). WebStorm: the lefthook hooks keep formatting and linting consistent; run `bun run format` before committing if your IDE formatter differs.
-```
+````
 `SECURITY.md`:
 ```markdown
 # Security policy
