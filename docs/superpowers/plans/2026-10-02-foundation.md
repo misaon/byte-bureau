@@ -730,9 +730,6 @@ git add vitest.config.ts packages/i18n package.json bun.lock
 git commit -m "feat(i18n): add paraglide message catalogues for en and cs with parity tests"
 ```
 (`packages/i18n/src/paraglide/` is git-ignored; only sources, configs and tests are committed.)
-```bash
-true
-```
 
 ---
 
