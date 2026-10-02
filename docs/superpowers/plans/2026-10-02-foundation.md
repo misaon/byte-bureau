@@ -1349,7 +1349,12 @@ Run: `bun add -D --exact turbo`
     },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
-    "docs:build": { "dependsOn": ["^build"], "outputs": ["dist/**"] }
+    "docs:build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/docs/decisions/**"],
+      "env": ["DOCS_SITE", "DOCS_BASE"],
+      "outputs": ["dist/**"]
+    }
   }
 }
 ```
@@ -2644,8 +2649,10 @@ git commit -m "docs: add readme in english and czech, changelog seed and wordmar
     "docs:build": "bun run scripts/sync-decisions.ts && astro build",
     "typecheck": "astro sync && tsc --noEmit -p tsconfig.json"
   },
-  "devDependencies": {
-    "@bytebureau/tsconfig": "workspace:*"
+  "dependencies": {
+    "@astrojs/starlight": "0.42.5",
+    "astro": "7.3.5",
+    "sharp": "0.35.5"
   }
 }
 ```
@@ -2656,7 +2663,7 @@ Run: `cd apps/docs && bun add --exact astro @astrojs/starlight sharp && cd ../..
 {
   "extends": "astro/tsconfigs/strictest",
   "compilerOptions": {
-    "types": ["bun"],
+    "types": ["bun", "astro/client"],
     "noEmit": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
@@ -2673,11 +2680,13 @@ export default defineProject({ test: { name: 'docs', include: ['scripts/**/*.tes
 ```
 Add `'apps/docs'` to the root `projects` and this workspace to `knip.ts`:
 ```ts
-'apps/docs': {
-  entry: ['astro.config.mjs', 'src/content.config.ts', 'scripts/*.ts'],
-  project: ['src/**/*.{ts,mjs}', 'scripts/**/*.ts'],
-  ignoreDependencies: ['sharp'],
-},
+  'apps/docs': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
+    },
+    'packages/i18n': { project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/tsconfig': { entry: [], project: [] },
+  },
 ```
 
 - [ ] **Step 2: Write the failing sync-script test**
@@ -2687,22 +2696,22 @@ Add `'apps/docs'` to the root `projects` and this workspace to `knip.ts`:
 import { describe, expect, it } from 'vitest'
 import { withFrontmatter } from './sync-decisions.js'
 
-describe('withFrontmatter', () => {
+describe(withFrontmatter, () => {
   it('moves the first heading into Starlight frontmatter and keeps the body', () => {
     const input = '# Bun as runtime\n\n- Status: accepted\n\n## Context\n\nText.\n'
     expect(withFrontmatter(input, '0002-bun-runtime.md')).toBe(
-      '---\ntitle: "Bun as runtime"\nsidebar:\n  label: "0002 Bun as runtime"\n---\n\n- Status: accepted\n\n## Context\n\nText.\n',
+      '---\ntitle: "Bun as runtime"\nsidebar:\n  label: "0002 Bun as runtime"\neditUrl: https://github.com/misaon/byte-bureau/edit/main/docs/decisions/0002-bun-runtime.md\n---\n\n- Status: accepted\n\n## Context\n\nText.\n',
     )
   })
 
   it('falls back to the file name when there is no heading', () => {
     expect(withFrontmatter('Just text\n', '0042-no-heading.md')).toBe(
-      '---\ntitle: "0042 no heading"\nsidebar:\n  label: "0042 no heading"\n---\n\nJust text\n',
+      '---\ntitle: "0042 no heading"\nsidebar:\n  label: "0042 no heading"\neditUrl: https://github.com/misaon/byte-bureau/edit/main/docs/decisions/0042-no-heading.md\n---\n\nJust text\n',
     )
   })
 
   it('escapes double quotes in titles', () => {
-    expect(withFrontmatter('# Say "hi"\n', '0001-x.md')).toContain('title: "Say \\"hi\\""')
+    expect(withFrontmatter('# Say "hi"\n', '0001-x.md')).toContain(String.raw`title: "Say \"hi\""`)
   })
 })
 ```
@@ -2713,13 +2722,15 @@ Run: `bunx vitest run --project docs` → FAIL.
 `apps/docs/scripts/sync-decisions.ts`:
 ```ts
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import path from 'node:path'
 
-const SOURCE = join(import.meta.dirname, '../../../docs/decisions')
-const TARGET = join(import.meta.dirname, '../src/content/docs/decisions')
+const SOURCE = path.join(import.meta.dirname, '../../../docs/decisions')
+const TARGET = path.join(import.meta.dirname, '../src/content/docs/decisions')
+// Synced copies are not tracked, so the site-wide edit link would point at a missing file
+const EDIT_URL_BASE = 'https://github.com/misaon/byte-bureau/edit/main/docs/decisions/'
 
 function quote(value: string): string {
-  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+  return `"${value.replaceAll('\\', String.raw`\\`).replaceAll('"', String.raw`\"`)}"`
 }
 
 function labelFor(fileName: string, title: string): string {
@@ -2730,23 +2741,29 @@ function labelFor(fileName: string, title: string): string {
 export function withFrontmatter(markdown: string, fileName: string): string {
   const lines = markdown.split('\n')
   const headingIndex = lines.findIndex((line) => line.startsWith('# '))
-  const fallback = fileName.replace(/\.md$/u, '').replace(/^\d{4}-/u, '').replaceAll('-', ' ')
+  const fallback = fileName
+    .replace(/\.md$/u, '')
+    .replace(/^\d{4}-/u, '')
+    .replaceAll('-', ' ')
   const headingTitle = headingIndex === -1 ? undefined : (lines[headingIndex] ?? '').slice(2).trim()
   const title = headingTitle ?? labelFor(fileName, fallback)
   const label = headingTitle === undefined ? title : labelFor(fileName, headingTitle)
-  const body = headingIndex === -1 ? lines : lines.filter((_, index) => index !== headingIndex)
+  const body = headingIndex === -1 ? lines : lines.filter((_line, index) => index !== headingIndex)
   const bodyText = body.join('\n').replace(/^\n+/u, '')
-  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\n---\n\n${bodyText}`
+  return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\neditUrl: ${EDIT_URL_BASE}${fileName}\n---\n\n${bodyText}`
 }
 
 export async function syncDecisions(): Promise<string[]> {
   await rm(TARGET, { recursive: true, force: true })
   await mkdir(TARGET, { recursive: true })
-  const files = (await readdir(SOURCE)).filter((name) => name.endsWith('.md')).sort()
-  for (const name of files) {
-    const markdown = await readFile(join(SOURCE, name), 'utf8')
-    await writeFile(join(TARGET, name), withFrontmatter(markdown, name))
-  }
+  const entries = await readdir(SOURCE)
+  const files = entries.filter((name) => name.endsWith('.md')).toSorted()
+  await Promise.all(
+    files.map(async (name) => {
+      const markdown = await readFile(path.join(SOURCE, name), 'utf8')
+      await writeFile(path.join(TARGET, name), withFrontmatter(markdown, name))
+    }),
+  )
   return files
 }
 
@@ -2792,7 +2809,11 @@ export default defineConfig({
             'contributing',
           ],
         },
-        { label: 'Decisions', translations: { cs: 'Rozhodnutí' }, autogenerate: { directory: 'decisions' } },
+        {
+          label: 'Decisions',
+          translations: { cs: 'Rozhodnutí' },
+          items: [{ autogenerate: { directory: 'decisions' } }],
+        },
       ],
     }),
   ],
@@ -2882,9 +2903,9 @@ hero:
 import { CardGrid, LinkCard } from '@astrojs/starlight/components'
 
 <CardGrid>
-  <LinkCard title="Instalace" description="Stáhněte binárku pro svou platformu." href="../install/" />
-  <LinkCard title="Architektura" description="Jak do sebe zapadají daemon, jádro a pluginy." href="../architecture/" />
-  <LinkCard title="Přispívání" description="Nastavení, pravidla commitů a proces review." href="../contributing/" />
+  <LinkCard title="Instalace" description="Stáhněte binární soubor pro svou platformu." href="install/" />
+  <LinkCard title="Architektura" description="Jak do sebe zapadají daemon, jádro a pluginy." href="architecture/" />
+  <LinkCard title="Přispívání" description="Nastavení, pravidla Conventional Commits a proces review." href="contributing/" />
 </CardGrid>
 ```
 
