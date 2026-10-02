@@ -202,7 +202,7 @@ export default defineProject({ test: { name: 'protocol', include: ['src/**/*.tes
 `packages/protocol/src/config.test.ts`:
 ```ts
 import { describe, expect, it } from 'vitest'
-import { decodeProjectConfig, defaultProjectConfig } from './config.js'
+import { decodeProjectConfig, decodeUserConfig, defaultProjectConfig } from './config.js'
 
 describe(decodeProjectConfig, () => {
   it('accepts the documented sample and fills nothing silently', () => {
@@ -217,6 +217,36 @@ describe(decodeProjectConfig, () => {
     expect(() => decodeProjectConfig(broken)).toThrow(/extra/u)
   })
 })
+
+describe(decodeUserConfig, () => {
+  const userConfig = {
+    server: { host: '127.0.0.1', port: 4747 },
+    defaults: { provider: 'claude', profile: 'work' },
+    profiles: {
+      work: {
+        providerId: 'claude',
+        name: 'Work',
+        kind: 'login',
+        configDir: '/home/me/.claude-work',
+      },
+      ci: { providerId: 'claude', name: 'CI', kind: 'api_key' },
+    },
+    locale: 'cs',
+    logging: { level: 'debug' },
+    telemetry: { content: 'local', otlpEndpoint: 'http://localhost:4318' },
+    ui: { theme: 'dark', panes: { left: 3 } },
+  }
+
+  it('decodes profiles, ui and the telemetry endpoint unchanged', () => {
+    expect(decodeUserConfig(userConfig)).toStrictEqual(userConfig)
+  })
+
+  it('still rejects an unknown user key and a profile with an unknown kind', () => {
+    const oauth = { profiles: { work: { ...userConfig.profiles.work, kind: 'oauth' } } }
+    expect(() => decodeUserConfig({ ...userConfig, extra: true })).toThrow(/extra/u)
+    expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
+  })
+})
 ```
 `packages/protocol/src/json-schema.test.ts`:
 ```ts
@@ -224,11 +254,16 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { KERNEL_EVENT_TYPES } from './events.js'
 import { configJsonSchema, eventsJsonSchema } from './json-schema.js'
 
 const schemasDir = fileURLToPath(new URL('../schemas/', import.meta.url))
 const readSchema = (name: string): unknown =>
   JSON.parse(readFileSync(path.join(schemasDir, name), 'utf8'))
+const definitionsOf = (document: Record<string, unknown>): Record<string, unknown> => {
+  const definitions = document['$defs']
+  return typeof definitions === 'object' && definitions !== null ? { ...definitions } : {}
+}
 
 describe('generated JSON Schema files', () => {
   it('config.json is up to date and strict', () => {
@@ -243,6 +278,17 @@ describe('generated JSON Schema files', () => {
     expect(readSchema('events.json')).toStrictEqual(generated)
     expect(generated['$defs']).toHaveProperty(['session.created'])
     expect(generated['$defs']).toHaveProperty(['message.assistant.delta'])
+  })
+
+  it('events.json defines every payload as a closed object', () => {
+    expect.hasAssertions()
+    const payloads = Object.entries(definitionsOf(eventsJsonSchema())).filter(
+      ([name]) => name !== 'EventEnvelope',
+    )
+    expect(payloads).toHaveLength(KERNEL_EVENT_TYPES.length)
+    for (const [name, definition] of payloads) {
+      expect(definition, name).toMatchObject({ type: 'object', additionalProperties: false })
+    }
   })
 
   it('publishes numbers as number or integer, without Infinity or NaN alternatives', () => {
@@ -488,7 +534,7 @@ If `Schema.Struct.Fields` is not the exported name of the fields constraint in t
 `packages/protocol/src/events.ts`:
 ```ts
 import { Schema } from 'effect'
-import { RateLimit, Usage } from './agent-event.js'
+import { RateLimit, ToolKind, Usage } from './agent-event.js'
 import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
 
@@ -514,6 +560,8 @@ const project = Schema.Struct({
 })
 const sessionRef = Schema.Struct({ status: SessionStatus })
 const turnRef = Schema.Struct({ turnId: Id, index: Schema.Int, status: TurnStatus })
+// Closed empty object: only {} decodes (Schema.Struct({}) would accept any non-null value)
+const emptyPayload = Schema.Record(Schema.String, Schema.Never)
 
 // Payload schema per kernel event type; the key is the wire `type`
 export const KernelEventSchemas = {
@@ -542,7 +590,7 @@ export const KernelEventSchemas = {
   'session.completed': sessionRef,
   'session.errored': Schema.Struct({
     ...sessionRef.fields,
-    kind: Schema.String,
+    kind: Schema.Literals(['auth', 'ratelimit', 'crash', 'protocol']),
     message: Schema.String,
     retryable: Schema.Boolean,
   }),
@@ -558,7 +606,7 @@ export const KernelEventSchemas = {
   'tool.started': Schema.Struct({
     id: Schema.String,
     name: Schema.String,
-    kind: Schema.String,
+    kind: ToolKind,
     input: Schema.Unknown,
   }),
   'tool.completed': Schema.Struct({
@@ -576,8 +624,8 @@ export const KernelEventSchemas = {
   'ask.cancelled': Schema.Struct({ askId: Id }),
   'usage.updated': Schema.Struct({ usage: Usage }),
   'ratelimit.updated': Schema.Struct({ profileId: Schema.NullOr(Id), rateLimit: RateLimit }),
-  'compaction.started': Schema.Struct({}),
-  'compaction.completed': Schema.Struct({}),
+  'compaction.started': emptyPayload,
+  'compaction.completed': emptyPayload,
   'workspace.provisioned': Schema.Struct({
     path: Schema.String,
     branch: Schema.String,
@@ -695,16 +743,27 @@ const UserDefaults = Schema.Struct({
   provider: Schema.optionalKey(Schema.String),
   profile: Schema.optionalKey(Schema.String),
 })
+const UserProfile = Schema.Struct({
+  providerId: Schema.String,
+  name: Schema.String,
+  kind: Schema.Literals(['login', 'api_key']),
+  configDir: Schema.optionalKey(Schema.String),
+})
+const ProfilesSection = Schema.Record(Schema.String, UserProfile)
 const TelemetrySection = Schema.Struct({
   content: Schema.optionalKey(Schema.Literals(['local', 'off'])),
+  otlpEndpoint: Schema.optionalKey(Schema.String),
 })
+const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
+  profiles: Schema.optionalKey(ProfilesSection),
   defaults: Schema.optionalKey(UserDefaults),
   locale: Schema.optionalKey(Schema.String),
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
+  ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
 export type LogLevel = typeof LogLevel.Type
