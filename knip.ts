@@ -5,10 +5,6 @@ const config: KnipConfig = {
     // Loaded by dependency-cruiser as its TypeScript parser (parser: 'swc' in its config)
     '@swc/core',
   ],
-  // The root "release" script calls changelogen before it is installed
-  // Remove this entry once changelogen is a devDependency
-  // Then list changelog.config.ts in the root workspace entry as well
-  ignoreBinaries: ['changelogen'],
   workspaces: {
     '.': { entry: ['scripts/*.ts'], project: ['scripts/**/*.ts'] },
     'apps/bytebureau': { project: ['src/**/*.ts'] },
