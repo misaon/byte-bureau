@@ -15,5 +15,6 @@ describe('@bytebureau/i18n', () => {
     setLocale('cs')
     expect(m.hello_greeting({ name: 'Ondřej' })).toBe('Ahoj, Ondřej! ByteBureau je připraveno.')
     expect(m.hello_anonymous()).toBe('Ahoj! ByteBureau je připraveno.')
+    expect(m.hello_outro()).toBe('Spusťte bytebureau --help a podívejte se, co je k dispozici.')
   })
 })
