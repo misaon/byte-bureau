@@ -13,6 +13,7 @@
   },
   "type": "module",
   "scripts": {
+    "prepare": "lefthook install",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run build --filter=@bytebureau/i18n && vitest run",
@@ -33,8 +34,12 @@
   },
   "devDependencies": {
     "@bytebureau/tsconfig": "workspace:*",
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@commitlint/types": "21.2.3",
     "@tsconfig/strictest": "2.0.8",
     "@types/bun": "1.4.2",
+    "lefthook": "2.1.16",
     "oxfmt": "0.71.0",
     "oxlint": "1.86.0",
     "oxlint-tsgolint": "7.0.2003",
