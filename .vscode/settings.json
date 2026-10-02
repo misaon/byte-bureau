@@ -3,7 +3,7 @@
   "editor.defaultFormatter": "oxc.oxc-vscode",
   "[markdown]": { "editor.formatOnSave": false },
   "oxc.fmt.experimental": true,
-  "typescript.tsdk": "node_modules/typescript/lib",
+  "js/ts.experimental.useTsgo": true,
   "cSpell.language": "en,cs",
   "files.eol": "\n"
 }

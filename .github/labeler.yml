@@ -12,6 +12,20 @@
             '.oxfmtrc.json',
             'knip.ts',
             '.dependency-cruiser.cjs',
+            'lefthook.yml',
+            'commitlint.config.ts',
+            'vitest.config.ts',
+            'renovate.json',
+            'cspell.json',
+            'cspell-words.txt',
+            '.ls-lint.yml',
+            '.markdownlint-cli2.yaml',
+            'mise.toml',
+            '.bun-version',
+            '.node-version',
+            'tools/**',
+            '.vscode/**',
+            '.editorconfig',
           ]
 'area: ci':
   - changed-files:
