@@ -34,7 +34,6 @@ const config: UserConfig = {
       ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'revert'],
     ],
     'scope-enum': [2, 'always', scopes],
-    'subject-case': [2, 'always', 'lower-case'],
     'body-max-line-length': [0, 'always', 0],
   },
 }
