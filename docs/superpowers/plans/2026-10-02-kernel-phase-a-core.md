@@ -134,7 +134,7 @@ apps/bytebureau/src/kernel.ts                       in-process kernel bootstrap 
 **Interfaces:**
 - Produces: the schema constants and derived types named in the table (`typeof X.Type` for every schema), `KERNEL_EVENT_TYPES`, `EPHEMERAL_EVENT_TYPES`, `configJsonSchema()`, `eventsJsonSchema()`, `decodeProjectConfig(input): ProjectConfig` (throws a `ParseError` whose message lists every issue with its path).
 
-Verified facts this task relies on (fact sheet §1, §9): `effect@4.0.0` exports `Schema` from `effect/Schema`; `Schema.Struct`, `Schema.Literals([...])`, `Schema.Literal`, `Schema.optionalKey`, `Schema.Array`, `Schema.Record`, `Schema.NullOr`, `Schema.Union([...])` (v4 takes one array of members — if the installed `effect/Schema` d.ts shows a variadic `Union`, spread the array), `Schema.toJsonSchemaDocument(S, { onExcessProperty: 'error' })`, `Schema.decodeUnknownSync(S)(input, { onExcessProperty: 'error', errors: 'all' })`, `JsonSchema.META_SCHEMA_URI_DRAFT_2020_12`. Effect's class-based APIs do not compile under `isolatedDeclarations`, hence `effect.json`. `effect@4.0.0` was published 2026-10-01T03:11Z: with the repository's 3-day install cooldown `bun add effect` resolves 4.0.0 only from 2026-10-04T03:12Z; before that, add the exact names (`effect`, `@effect/vitest`, `@effect/sql-sqlite-bun`, `@effect/sql-sqlite-node`) to `minimumReleaseAgeExcludes` in `bunfig.toml` temporarily (wildcards are not honoured) and remove the entry in Task 16.
+Verified facts this task relies on (fact sheet §1, §9): `effect@4.0.0` exports `Schema` from `effect/Schema`; `Schema.Struct`, `Schema.Literals([...])`, `Schema.Literal`, `Schema.optionalKey`, `Schema.Array`, `Schema.Record`, `Schema.NullOr`, `Schema.Union([...])` (v4 takes one array of members — if the installed `effect/Schema` d.ts shows a variadic `Union`, spread the array), `Schema.toJsonSchemaDocument(S, { onExcessProperty: 'error' })`, `Schema.decodeUnknownSync(S)(input, { onExcessProperty: 'error', errors: 'all' })`, `JsonSchema.META_SCHEMA_URI_DRAFT_2020_12`. Effect's class-based APIs do not compile under `isolatedDeclarations`, hence `effect.json`. `effect@4.0.0` was published 2026-10-01T03:11Z; the repository's install cooldown is one day during development (`bunfig.toml`, ADR-0009), so `bun add effect@4.0.0` resolves normally.
 
 - [ ] **Step 1: Effect tsconfig base and package manifests**
 
@@ -673,7 +673,7 @@ console.log('wrote schemas/config.json and schemas/events.json')
 
 - [ ] **Step 6: Generate, test, wire the gates, commit**
 
-Run `bun install` (after adding `effect` 4.0.0 — see the cooldown note), then `bun run --cwd packages/protocol build` (writes the two schema files; commit them), then `bunx vitest run --project protocol` → PASS (4 tests).
+Run `bun install` (after adding `effect` 4.0.0), then `bun run --cwd packages/protocol build` (writes the two schema files; commit them), then `bunx vitest run --project protocol` → PASS (4 tests).
 Wiring: `vitest.config.ts` projects gain `'packages/protocol'`; `knip.ts` gains `'packages/protocol': { entry: ['scripts/*.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] }`; `turbo.json` gains `"@bytebureau/protocol#build": { "outputs": ["schemas/**"] }` so `bun run build` regenerates the schemas; `scripts/license.test.ts` learns the MIT manifest set (Task 2 extends it); `.oxlintrc.jsonc` needs no change (the `tagged` helper's `const` generic is allowed). Run `bun run check` → green.
 
 ```bash
@@ -2371,7 +2371,7 @@ describe(defaultBranchOf, () => {
 ```
 `packages/kernel/src/projects/project-registry.test.ts`:
 ```ts
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { assert, it, layer } from '@effect/vitest'
@@ -2393,6 +2393,7 @@ layer(TestLayer)('ProjectRegistry', (it) => {
       const registry = yield* ProjectRegistry
       const log = yield* EventLog
       const repo = createTempRepo()
+      mkdirSync(path.join(repo, 'src'), { recursive: true })
       const first = yield* registry.register(path.join(repo, 'src'))
       const second = yield* registry.register(repo)
       assert.strictEqual(first.id, second.id)
@@ -2413,7 +2414,6 @@ layer(TestLayer)('ProjectRegistry', (it) => {
       const plain = yield* Effect.result(registry.register(mkdtempSync(path.join(tmpdir(), 'bb-plain-'))))
       assert.strictEqual(plain._tag, 'Failure')
       const repo = createTempRepo()
-      const { writeFileSync } = yield* Effect.promise(() => import('node:fs'))
       writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
       const worktree = yield* Effect.result(registry.register(repo))
       assert.strictEqual(worktree._tag, 'Failure')
@@ -2421,8 +2421,6 @@ layer(TestLayer)('ProjectRegistry', (it) => {
   )
 })
 ```
-(Replace the dynamic `import('node:fs')` with a static `import { writeFileSync } from 'node:fs'` at the top; it is shown inline only to keep the snippet self-contained.)
-
 - [ ] **Step 2: Implementation**
 
 `packages/kernel/src/projects/git-root.ts`:
@@ -4681,11 +4679,11 @@ layer(UsageServiceLive.pipe(Layer.provideMerge(StoreTest)))('UsageService', (it)
 ```
 `packages/kernel/src/sessions/session-manager.test.ts`:
 ```ts
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { assert, it, layer } from '@effect/vitest'
-import { Effect, Fiber, Layer, Stream } from 'effect'
+import { Effect, Fiber, Stream } from 'effect'
 import { AskService } from '../asks/ask-service.js'
 import { EventLog } from '../events/event-log.js'
 import { KernelTest } from '../kernel-live.js'
@@ -4732,9 +4730,13 @@ layer(KernelTest({ home: mkdtempSync(path.join(tmpdir(), 'bb-home-')) }))('Sessi
     Effect.gen(function* () {
       yield* (yield* PluginHost).load()
       const repo = createTempRepo()
+      writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify({ version: 1, project: { name: 'yolo-test' }, employees: { cowboy: { name: 'Cowboy', provider: 'fake', model: 'm', permissionMode: 'yolo' } } }))
       const project = yield* (yield* ProjectRegistry).register(repo)
       const sessions = yield* SessionManager
-      const missing = yield* Effect.result(sessions.create({ projectId: project.id, title: 'x', providerId: 'nope' }))
+      const yolo = yield* Effect.result(sessions.create({ projectId: project.id, title: 'x', employeeId: 'cowboy' }))
+      assert.strictEqual(yolo._tag, 'Failure')
+      assert.match(String(yolo._tag === 'Failure' ? yolo.failure : ''), /yolo.*local/u)
+      const missing = yield* Effect.result(sessions.create({ projectId: project.id, title: 'x', employeeId: 'cowboy', providerId: 'nope' }))
       assert.strictEqual(missing._tag, 'Failure')
       assert.ok(!existsSync(path.join(repo, '.bytebureau', 'worktrees')))
     }),
@@ -6311,7 +6313,7 @@ git commit -m "feat(cli): add run, config, projects and workspaces commands on t
 
 **Files:**
 - Create: `docs/decisions/0010-sqlite-through-effect-sql.md`
-- Modify: `.github/workflows/ci.yml` (smoke the compiled binary with the fake provider), `CONTRIBUTING.md` (kernel onboarding paragraph), `apps/docs/src/content/docs/architecture.md`, `README.md` + `README.cs.md` (status line), `bunfig.toml` (remove any temporary `minimumReleaseAgeExcludes`), `vitest.config.ts` (final coverage include), `.dependency-cruiser.cjs` (verify, no change expected)
+- Modify: `.github/workflows/ci.yml` (smoke the compiled binary with the fake provider), `CONTRIBUTING.md` (kernel onboarding paragraph), `apps/docs/src/content/docs/architecture.md`, `README.md` + `README.cs.md` (status line), `vitest.config.ts` (final coverage include), `.dependency-cruiser.cjs` (verify, no change expected)
 
 - [ ] **Step 1: ADR-0010**
 
@@ -6361,7 +6363,7 @@ No typed query builder; queries are reviewed as SQL. Revisit Drizzle (schema as 
 
 - [ ] **Step 4: Final gate on a fresh clone**
 
-Remove any temporary `minimumReleaseAgeExcludes` from `bunfig.toml` (the cooldown for `effect@4.0.0` ends 2026-10-04T03:12Z). Then:
+Confirm `bunfig.toml` still has `minimumReleaseAge = 86400` and no `minimumReleaseAgeExcludes` entry. Then:
 ```bash
 rm -rf /tmp/bb-clean && git clone --quiet . /tmp/bb-clean && cd /tmp/bb-clean
 bun install --frozen-lockfile
