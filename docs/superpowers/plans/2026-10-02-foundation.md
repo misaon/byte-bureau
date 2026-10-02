@@ -24,7 +24,7 @@
 - README ≤ 300 lines, markdownlint clean; `README.cs.md` mirrors section structure.
 - Coverage thresholds 80 % lines/branches on `packages/*` (apps excluded until SP1).
 
-**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push --no-github` alone (it bumps the root version, writes the changelog, commits and tags; the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6. (5) The admin repository role bypasses the main ruleset so the owner's release commit and tag can be pushed to `main` directly.
+**Deviations from the spec (recorded so reviewers see them):** (1) repo-wide tools (oxlint, oxfmt, knip, dependency-cruiser, cspell, markdownlint, ls-lint, Vitest) run as root scripts instead of per-package Turborepo tasks — same gates, faster; Turborepo runs `build`, `typecheck`, `docs:build`. (2) Versioning uses `changelogen --release --push --no-github` alone (it bumps the root version, writes the changelog, commits and tags; the workflow creates the GitHub release); `bumpp` is not added because it would bump twice. (3) Turbo remote cache uses the documented `TURBO_TOKEN`/`TURBO_TEAM` variables when the owner adds them; until then the local cache is used (OIDC linking is an owner action). (4) `release.yml` has no Homebrew job: homebrew-releaser requires `{repo}-{version}-{os}-{amd64|arm64}.tar.gz` archives, which raw binaries cannot satisfy; installers arrive with sub-project 6. (5) The admin repository role bypasses the main ruleset so the owner's release commit and tag can be pushed to `main` directly. (6) The dependency catalog is deferred until Renovate reads Bun's `workspaces.catalog`; versions stay in the manifests.
 
 ## Review Focus
 
@@ -3910,14 +3910,14 @@ git commit -m "chore(repo): add renovate config and owner-run repository setting
 
 ---
 
-### Task 18: Editor configuration, dependency catalog, full gate run
+### Task 18: Editor configuration, complete local gate, full gate run
 
 **Files:**
 - Create: `.vscode/extensions.json`, `.vscode/settings.json`
-- Modify: `package.json` (catalog), `apps/bytebureau/package.json`, `packages/i18n/package.json`, `apps/docs/package.json` (switch to `catalog:`)
+- Modify: `package.json` (`check` script gains `lint:long-tail`)
 
 **Interfaces:**
-- Produces: a green `bun run check` on a clean clone; the catalog convention every later package follows.
+- Produces: a green `bun run check` on a clean clone, with the ESLint long tail included in `check` so the local gate equals CI's `static` job.
 
 - [ ] **Step 1: Editor files**
 
@@ -3946,34 +3946,26 @@ git commit -m "chore(repo): add renovate config and owner-run repository setting
 }
 ```
 
-- [ ] **Step 2: Move workspace dependency versions into the catalog**
+- [ ] **Step 2: Include the ESLint long tail in `check`**
 
-List every third-party dependency the workspace manifests pin:
+In the root `package.json`, append `&& bun run lint:long-tail` to the `check` script so the local gate runs every CI gate (CONTRIBUTING promises that). The dependency catalog is deferred: Renovate does not read Bun's `workspaces.catalog` yet (renovatebot/renovate#42909), so versions stay in the manifests and `workspaces.catalog` stays `{}` until it does.
+
+- [ ] **Step 3: Run the full gate in a fresh clone and fix what fails**
+
+Never run `git clean -xdf` in the working tree: it deletes git-ignored IDE settings and scratch directories. Clone instead (Bun and Node come from `.bun-version`/`.node-version`; `mise install` only when mise is installed):
 ```bash
-for manifest in apps/bytebureau/package.json packages/i18n/package.json apps/docs/package.json; do
-  jq -r --arg m "$manifest" '(.dependencies // {}) + (.devDependencies // {}) | to_entries[] | select(.value | startswith("workspace:") | not) | "\($m) \(.key) \(.value)"' "$manifest"
-done
-```
-Expected output lists `citty`, `@clack/prompts`, `picocolors` (apps/bytebureau), `@inlang/paraglide-js` (packages/i18n), `astro`, `@astrojs/starlight`, `sharp` (apps/docs) with their pinned versions. Copy each `name` and `version` pair verbatim into `workspaces.catalog` in the root `package.json` (one entry per name; the version string is the exact value printed), then replace each of those entries in the three manifests with `"catalog:"` and run `bun install`. Expected: `bun.lock` records the same resolved versions as before (`git diff bun.lock` shows only catalog bookkeeping, no version changes), and `bun run check` still passes.
-
-- [ ] **Step 3: Run the full gate on a clean tree and fix what fails**
-
-Run:
-```bash
-git clean -xdn   # review; then:
-git clean -xdf
-mise install
+rm -rf /tmp/bytebureau-clean && git clone --quiet . /tmp/bytebureau-clean && cd /tmp/bytebureau-clean
 bun install --frozen-lockfile
 bun run check
 bun run build:binaries --host
 ```
-Expected: `bun run check` exits 0; the host binary is produced. Typical fixes: add legitimate words to `cspell-words.txt`, extract helper functions for cognitive-complexity findings, tighten `knip.ts` entries.
+Expected: `bun run check` exits 0 (lint, format, spell, markdown, ls-lint, knip, dependency-cruiser, typecheck, coverage, ESLint long tail); the host binary is produced. Typical fixes: add legitimate words to `cspell-words.txt`, extract helper functions for cognitive-complexity findings, tighten `knip.ts` entries. Apply fixes in the working tree, not in the clone.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add .vscode package.json apps/bytebureau/package.json packages/i18n/package.json apps/docs/package.json bun.lock
-git commit -m "chore(repo): add editor settings and dependency catalog"
+git add .vscode package.json
+git commit -m "chore(repo): add editor settings and run the eslint long tail in check"
 ```
 
 ---
