@@ -15,7 +15,7 @@
 - Runtime: Bun pinned in `.bun-version` (`1.4.2`) and `mise.toml`; `engines.bun >= 1.4.0`; Node 26 is dev-only (Vitest, ESLint long tail, Astro) and never required at runtime.
 - TypeScript: `typescript` 7.0.x at the root; `@tsconfig/strictest` base plus `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`, `noImplicitOverride`, `noUncheckedSideEffectImports`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `isolatedDeclarations` (libraries), `module`/`moduleResolution` = `nodenext`, explicit `types`.
 - Lint: oxlint with every category (`correctness`, `suspicious`, `pedantic`, `perf`, `restriction`, `style`) at `error`, type-aware mode on; oxfmt `--check` is a CI gate; ESLint long tail runs in CI only.
-- Commits: Conventional Commits validated by commitlint with `scope-enum` = workspace directory names + `cli`, `deps`, `release`, `repo`, `ci`, `docs`; PR titles validated; squash-only merges.
+- Commits: Conventional Commits validated by commitlint with `type-enum` = `feat fix perf refactor docs test build ci chore revert` and `scope-enum` = workspace directory names + `cli`, `deps`, `release`, `repo`, `ci`, `docs`; PR titles validated with the same types and scopes; squash-only merges; subject starts lowercase (config-conventional's default `subject-case`, proper nouns inside the subject allowed).
 - Licence strings: root and app packages `"license": "FSL-1.1-MIT"`; the project is described as "fair source" / "source-available", never as "open source".
 - Package naming: workspace packages are `@bytebureau/<name>`; `apps/bytebureau` is the `bytebureau` binary package (private).
 - Dependency rules (dependency-cruiser): only `packages/kernel`, `packages/api`, `packages/protocol` may import `effect`; `plugins/*` may import only `@bytebureau/plugin-api`, `@bytebureau/protocol` and third-party packages; nothing imports from `apps/*`; no circular dependencies.
@@ -413,8 +413,8 @@ const scopes = [...new Set([...workspaceDirs.flatMap((directory) => directoriesI
 const config: UserConfig = {
   extends: ['@commitlint/config-conventional'],
   rules: {
+    'type-enum': [2, 'always', ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'revert']],
     'scope-enum': [2, 'always', scopes],
-    'subject-case': [2, 'always', 'lower-case'],
     'body-max-line-length': [0, 'always', 0],
   },
 }
@@ -426,15 +426,17 @@ export default config
 
 ```yaml
 pre-commit:
-  parallel: true
+  parallel: false
   commands:
-    format:
-      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
-      run: bunx oxfmt {staged_files}
-      stage_fixed: true
     lint:
+      priority: 1
       glob: '*.{ts,tsx,mts,cts,js,mjs,cjs}'
-      run: bunx oxlint --type-aware --fix {staged_files}
+      run: bunx oxlint --type-aware --fix --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+    format:
+      priority: 2
+      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,yml,yaml}'
+      run: bunx oxfmt --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
 
 commit-msg:
