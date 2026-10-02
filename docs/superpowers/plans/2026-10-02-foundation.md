@@ -162,7 +162,7 @@ bytebureau-diag-*.zip
     "format:check": "oxfmt --check",
     "knip": "knip",
     "depcruise": "depcruise --config .dependency-cruiser.cjs apps packages plugins scripts",
-    "spell": "cspell --no-progress --gitignore \"**/*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}\"",
+    "spell": "cspell --no-progress --gitignore --dot \",
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
@@ -943,16 +943,17 @@ export const version: string =
 ```
 `apps/bytebureau/src/commands/hello.ts`:
 ```ts
+import { isatty } from 'node:tty'
 import { m } from '@bytebureau/i18n'
 import { intro, log, outro } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { createContext, globalArgs, type Context } from '../context.js'
 
-export function greeting(name: string | undefined): string {
+function greeting(name: string | undefined): string {
   return name === undefined || name.trim() === '' ? m.hello_anonymous() : m.hello_greeting({ name })
 }
 
-export function runHello({ output, interactive }: Context, name: string | undefined): void {
+function runHello({ output, interactive }: Context, name: string | undefined): void {
   const message = greeting(name)
   if (output.json) {
     output.emit({ command: 'hello', message })
@@ -977,7 +978,7 @@ export const helloCommand = defineCommand({
     const context = createContext(
       { lang: args.lang, json: args.json, color: args.color },
       process.env,
-      process.stdout.isTTY === true,
+      isatty(process.stdout.fd),
     )
     runHello(context, args.name)
   },
@@ -1397,14 +1398,33 @@ import type { KnipConfig } from 'knip'
 
 const config: KnipConfig = {
   ignore: ['packages/i18n/src/paraglide/**', 'docs/**', 'tools/**'],
-  ignoreDependencies: ['@tsconfig/strictest', 'oxlint-tsgolint', '@types/bun', '@cspell/dict-cs-cz'],
+  ignoreDependencies: [
+    '@tsconfig/strictest',
+    'oxlint-tsgolint',
+    '@types/bun',
+    '@cspell/dict-cs-cz',
+    // Loaded by dependency-cruiser as its TypeScript parser (parser: 'swc' in its config)
+    '@swc/core',
+  ],
+  // The root "release" script calls changelogen before it is installed
+  // Remove this entry once changelogen is a devDependency
+  ignoreBinaries: ['changelogen'],
   workspaces: {
     '.': {
-      entry: ['scripts/*.ts', 'vitest.config.ts', 'commitlint.config.ts', 'changelog.config.ts', 'knip.ts'],
+      entry: [
+        'scripts/*.ts',
+        'vitest.config.ts',
+        'commitlint.config.ts',
+        'changelog.config.ts',
+        'knip.ts',
+      ],
       project: ['scripts/**/*.ts'],
     },
     'apps/bytebureau': { entry: ['src/main.ts'], project: ['src/**/*.ts'] },
-    'packages/i18n': { entry: ['src/index.ts', 'scripts/compile.ts'], project: ['src/**/*.ts', 'scripts/**/*.ts'] },
+    'packages/i18n': {
+      entry: ['src/index.ts', 'scripts/compile.ts'],
+      project: ['src/**/*.ts', 'scripts/**/*.ts'],
+    },
     'packages/tsconfig': { entry: [], project: [] },
   },
 }
@@ -1422,7 +1442,17 @@ module.exports = {
     {
       name: 'no-orphans',
       severity: 'warn',
-      from: { orphan: true, pathNot: ['\\.d\\.ts$', '\\.test\\.ts$', '\\.config\\.(ts|mjs|cjs)$', '(^|/)\\.[^/]+\\.(js|cjs|mjs|ts)$'] },
+      from: {
+        orphan: true,
+        pathNot: [
+          String.raw`\.d\.ts$`,
+          String.raw`\.test\.ts$`,
+          String.raw`\.config\.(ts|mjs|cjs)$`,
+          String.raw`(^|/)\.[^/]+\.(js|cjs|mjs|ts)$`,
+          // Entry-point scripts (run from package.json scripts or CI) are never imported by design
+          String.raw`(^|/)scripts/`,
+        ],
+      },
       to: {},
     },
     {
@@ -1430,12 +1460,15 @@ module.exports = {
       severity: 'error',
       comment: 'Only packages/kernel, packages/api and packages/protocol may depend on Effect.',
       from: { path: '^(packages/(?!(kernel|api|protocol)/)|plugins/)' },
-      to: { path: '^node_modules/(effect|@effect)/' },
+      // Bun's isolated linker resolves packages to node_modules/.bun/<name>@<version>/node_modules/
+      // The pattern is therefore not anchored to the first node_modules segment
+      to: { path: '(^|/)node_modules/(effect|@effect)/' },
     },
     {
       name: 'plugins-depend-only-on-contracts',
       severity: 'error',
-      comment: 'Plugins may import only @bytebureau/plugin-api and @bytebureau/protocol from the workspace.',
+      comment:
+        'Plugins may import only @bytebureau/plugin-api and @bytebureau/protocol from the workspace.',
       from: { path: '^plugins/' },
       to: { path: '^packages/', pathNot: '^packages/(plugin-api|protocol)/' },
     },
@@ -1448,7 +1481,13 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: ['node_modules'] },
-    exclude: { path: ['node_modules', 'dist', 'coverage', 'src/paraglide', '\\.astro'] },
+    // Excluded modules vanish from the graph, so node_modules must stay out of this list
+    // Otherwise a rule that targets a third-party package (effect-only-in-core) could never match
+    exclude: { path: ['dist', 'coverage', 'src/paraglide', String.raw`\.astro`] },
+    // The TypeScript API of dependency-cruiser stops at typescript 6 and this repo uses 7
+    // So swc parses the sources, and the "missing-typescript-transpiler" notice is expected
+    // Once TypeScript 7 is supported, drop swc and this option; tsPreCompilationDeps takes over
+    parser: 'swc',
     tsPreCompilationDeps: true,
     tsConfig: { fileName: 'tsconfig.json' },
     enhancedResolveOptions: {
@@ -1468,8 +1507,11 @@ module.exports = {
 {
   "version": "0.2",
   "language": "en",
-  "dictionaries": ["typescript", "node", "npm", "softwareTerms", "bytebureau"],
-  "dictionaryDefinitions": [{ "name": "bytebureau", "path": "./cspell-words.txt", "addWords": true }],
+  "import": ["@cspell/dict-cs-cz/cspell-ext.json"],
+  "dictionaries": ["typescript", "node", "npm", "softwareTerms", "en-gb", "bytebureau"],
+  "dictionaryDefinitions": [
+    { "name": "bytebureau", "path": "./cspell-words.txt", "addWords": true }
+  ],
   "ignorePaths": [
     "node_modules",
     "dist",
@@ -1477,6 +1519,7 @@ module.exports = {
     "bun.lock",
     "**/paraglide/**",
     "docs/research/**",
+    "docs/superpowers/**",
     "CHANGELOG.md",
     "LICENSE.md",
     "CODE_OF_CONDUCT.md",
@@ -1485,6 +1528,7 @@ module.exports = {
   "ignoreRegExpList": ["/\\b[0-9a-f]{40}\\b/g", "/sha256-[A-Za-z0-9+/=]+/g"],
   "overrides": [
     { "filename": "**/messages/cs.json", "language": "en,cs" },
+    { "filename": "**/*.test.ts", "language": "en,cs" },
     { "filename": "README.cs.md", "language": "en,cs" },
     { "filename": "apps/docs/src/content/docs/cs/**", "language": "en,cs" }
   ]
@@ -1510,6 +1554,7 @@ ignores:
   - 'node_modules/**'
   - '**/node_modules/**'
   - 'docs/research/**'
+  - 'docs/superpowers/**'
   - 'CHANGELOG.md'
   - 'LICENSE.md'
   - 'CODE_OF_CONDUCT.md'
@@ -1517,26 +1562,28 @@ ignores:
 `.ls-lint.yml` (if the installed ls-lint rejects `point.case`, replace every `point.case` with `regex:^[a-z0-9]+([.-][a-z0-9]+)*$`, which accepts dotted names such as `vitest.config` and `README.cs`):
 ```yaml
 ls:
-  .ts: kebab-case | point.case
+  .ts: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
   .tsx: kebab-case | PascalCase
-  .mjs: kebab-case | point.case
-  .cjs: kebab-case | point.case
-  .json: kebab-case | point.case
-  .md: kebab-case | SCREAMING_SNAKE_CASE | point.case
+  .mjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .cjs: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .json: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .md: kebab-case | SCREAMING_SNAKE_CASE | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
   .mdx: kebab-case
-  .yml: kebab-case | point.case
-  .yaml: kebab-case | point.case
-  .dir: kebab-case | point.case
+  .yml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .yaml: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
+  .dir: kebab-case | regex:^[a-z0-9]+([.-][a-z0-9]+)*$
 
 ignore:
-  - node_modules
+  - '**/node_modules'
   - .git
   - .github
   - .vscode
-  - .astro
-  - .turbo
-  - dist
-  - coverage
+  - .idea
+  - .superpowers
+  - '**/.astro'
+  - '**/.turbo'
+  - '**/dist'
+  - '**/coverage'
   - docs/research
   - packages/i18n/src/paraglide
   - packages/i18n/project.inlang
@@ -1547,7 +1594,7 @@ ignore:
   - .editorconfig
   - .gitattributes
   - .gitignore
-  - .oxlintrc.jsonc
+  - .oxlintrc.json
   - .oxfmtrc.json
   - .markdownlint-cli2.yaml
   - .ls-lint.yml
@@ -1559,8 +1606,9 @@ ignore:
 Append to the `pre-commit.commands` block of `lefthook.yml` (Task 3 created the file without it because cspell did not exist yet):
 ```yaml
     spell:
-      glob: '*.{ts,tsx,md,mdx,json,yml,yaml}'
-      run: bunx cspell --no-progress {staged_files}
+      priority: 4
+      glob: '*.{ts,tsx,mts,cts,js,mjs,cjs,json,jsonc,md,mdx,yml,yaml}'
+      run: bunx cspell --no-progress --no-must-find-files {staged_files}
 ```
 
 - [ ] **Step 6: Run every gate and fix findings**
