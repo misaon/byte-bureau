@@ -180,6 +180,8 @@ export async function buildAll(options: BuildOptions): Promise<string[]> {
   return options.targets.map((target) => buildTarget(target, outdir, options))
 }
 
+/* v8 ignore start */
 if (import.meta.main) {
   await buildAll(parseArgs(Bun.argv.slice(2), { version: rootPackage.version }))
 }
+/* v8 ignore stop */

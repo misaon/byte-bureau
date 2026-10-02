@@ -27,24 +27,27 @@ export function withFrontmatter(markdown: string, fileName: string): string {
   const label = headingTitle === undefined ? title : labelFor(fileName, headingTitle)
   const body = headingIndex === -1 ? lines : lines.filter((_line, index) => index !== headingIndex)
   const bodyText = body.join('\n').replace(/^\n+/u, '')
+  // The editUrl stays unquoted: .ls-lint.yml limits .md names to kebab-case or SCREAMING_SNAKE_CASE
   return `---\ntitle: ${quote(title)}\nsidebar:\n  label: ${quote(label)}\neditUrl: ${EDIT_URL_BASE}${fileName}\n---\n\n${bodyText}`
 }
 
-export async function syncDecisions(): Promise<string[]> {
-  await rm(TARGET, { recursive: true, force: true })
-  await mkdir(TARGET, { recursive: true })
-  const entries = await readdir(SOURCE)
+export async function syncDecisions(source = SOURCE, target = TARGET): Promise<string[]> {
+  await rm(target, { recursive: true, force: true })
+  await mkdir(target, { recursive: true })
+  const entries = await readdir(source)
   const files = entries.filter((name) => name.endsWith('.md')).toSorted()
   await Promise.all(
     files.map(async (name) => {
-      const markdown = await readFile(path.join(SOURCE, name), 'utf8')
-      await writeFile(path.join(TARGET, name), withFrontmatter(markdown, name))
+      const markdown = await readFile(path.join(source, name), 'utf8')
+      await writeFile(path.join(target, name), withFrontmatter(markdown, name))
     }),
   )
   return files
 }
 
+/* v8 ignore start */
 if (import.meta.main) {
   const files = await syncDecisions()
   console.log(`synced ${files.length} decision records`)
 }
+/* v8 ignore stop */

@@ -1,10 +1,11 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'eslint/config'
 import jsdocPlugin from 'eslint-plugin-jsdoc'
 import security from 'eslint-plugin-security'
 import sonarjs from 'eslint-plugin-sonarjs'
 import tseslint from 'typescript-eslint'
 
-const repoRoot = new URL('../..', import.meta.url).pathname
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 export default defineConfig(
   { ignores: ['**/dist/**', '**/coverage/**', '**/paraglide/**', '**/.astro/**', '**/*.config.*'] },

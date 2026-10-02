@@ -1,8 +1,20 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
-const read = (path: string): string => readFileSync(`${root}/${path}`, 'utf8')
+const root = fileURLToPath(new URL('..', import.meta.url))
+const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
+
+// The root manifest plus apps/*/package.json and packages/*/package.json
+const manifests = [
+  'package.json',
+  ...['apps', 'packages'].flatMap((parent) =>
+    readdirSync(path.join(root, parent))
+      .map((name) => path.join(parent, name, 'package.json'))
+      .filter((manifest) => existsSync(path.join(root, manifest))),
+  ),
+]
 
 describe('licence layer', () => {
   it('ships the FSL-1.1-MIT text with the licensor filled in', () => {
@@ -12,14 +24,10 @@ describe('licence layer', () => {
     expect(licence).not.toMatch(/\{[A-Za-z ]+\}/u)
   })
 
-  it('declares FSL-1.1-MIT in every private package manifest', () => {
+  it('declares FSL-1.1-MIT in the root, app and package manifests', () => {
     expect.hasAssertions()
-    for (const manifest of [
-      'package.json',
-      'apps/bytebureau/package.json',
-      'packages/i18n/package.json',
-      'packages/tsconfig/package.json',
-    ]) {
+    expect(manifests).toContain('apps/docs/package.json')
+    for (const manifest of manifests) {
       expect(JSON.parse(read(manifest)), manifest).toHaveProperty('license', 'FSL-1.1-MIT')
     }
   })

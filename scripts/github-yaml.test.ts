@@ -1,9 +1,36 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
+const root = fileURLToPath(new URL('..', import.meta.url))
+const USES = /^\s*-?\s*uses:\s*(?<ref>\S+)(?<rest>.*)$/u
+const PINNED = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/u
+const TAG_COMMENT = /^\s+#\s*\S+/u
+
+interface UsesLine {
+  readonly where: string
+  readonly ref: string
+  readonly rest: string
+}
+
+function usesLines(file: string): UsesLine[] {
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .flatMap((line, index) => {
+      const { groups } = USES.exec(line) ?? {}
+      return groups === undefined
+        ? []
+        : [
+            {
+              where: `${file.replace(root, '')}:${index + 1}`,
+              ref: groups['ref'] ?? '',
+              rest: groups['rest'] ?? '',
+            },
+          ]
+    })
+}
 
 function yamlFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -39,6 +66,18 @@ describe('.github YAML', () => {
       expect(() => {
         parse(readFileSync(file, 'utf8'))
       }, file).not.toThrow()
+    }
+  })
+
+  it('pins every non-local action to a commit SHA with its tag in a comment', () => {
+    expect.hasAssertions()
+    const uses = files.flatMap((file) => usesLines(file))
+    const external = uses.filter(({ ref }) => !ref.startsWith('./'))
+    expect(external.length).toBeGreaterThan(0)
+    expect(uses.length).toBeGreaterThan(external.length)
+    for (const { where, ref, rest } of external) {
+      expect(ref, where).toMatch(PINNED)
+      expect(rest, where).toMatch(TAG_COMMENT)
     }
   })
 

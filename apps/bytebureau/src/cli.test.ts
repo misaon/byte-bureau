@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const cwd = new URL('..', import.meta.url).pathname
+const cwd = fileURLToPath(new URL('..', import.meta.url))
 const baseEnv = {
   PATH: process.env['PATH'] ?? '',
   HOME: process.env['HOME'] ?? '',

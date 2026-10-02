@@ -29,6 +29,12 @@ describe(extractReleaseNotes, () => {
     expect(extractReleaseNotes(changelog, '0.1.0')).toBe('### 🏡 Chore\n\n- **repo:** bootstrap')
   })
 
+  it('matches the exact version heading, not a prerelease or a longer version', () => {
+    const boundaries =
+      '# Changelog\n\n## v10.1.0\n\nten\n\n## v0.1.0-rc\n\nrelease candidate\n\n## v0.1.0\n\nfinal\n\n## v0.1.0-beta\n\nbeta\n'
+    expect(extractReleaseNotes(boundaries, '0.1.0')).toBe('final')
+  })
+
   it('throws when the version is missing', () => {
     expect(() => extractReleaseNotes(changelog, '9.9.9')).toThrow('no section for version 9.9.9')
   })

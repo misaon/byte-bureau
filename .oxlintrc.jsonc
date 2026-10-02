@@ -36,6 +36,8 @@
     "func-style": ["error", "declaration", { "allowArrowFunctions": true }],
     // One binding per declaration (the default combines them: const a = 1, b = 2)
     "one-var": ["error", "never"],
+    // The v8 coverage hints around the import.meta.main entry blocks are lowercase by definition
+    "capitalized-comments": ["error", "always", { "ignorePattern": "v8 ignore (?:start|stop)\\b" }],
     // Property tests assert through fast-check
     "vitest/expect-expect": ["error", { "assertFunctionNames": ["expect", "fc.assert"] }],
     // Only where an assertion can be skipped silently (async tests, loops, callbacks), not in every test

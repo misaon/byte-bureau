@@ -1,8 +1,9 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const root = new URL('..', import.meta.url).pathname
+const root = fileURLToPath(new URL('..', import.meta.url))
 const read = (file: string): string => readFileSync(path.join(root, file), 'utf8')
 const headings = (markdown: string): number =>
   markdown.split('\n').filter((line) => line.startsWith('## ')).length

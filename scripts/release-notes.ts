@@ -4,29 +4,30 @@ import path from 'node:path'
 
 const ROOT = path.join(import.meta.dirname, '..')
 
-function headingOf(version: string): RegExp {
+function headingPattern(version: string): RegExp {
   const escaped = version.replaceAll('.', String.raw`\.`)
   return new RegExp(`^## v?${escaped}(?:\\s|$)`, 'mu')
 }
 
-function bodyOf(section: string): string {
+function bodyAfterHeading(section: string): string {
   const afterHeading = section.slice(section.indexOf('\n') + 1)
   const nextHeading = afterHeading.search(/^## /mu)
   return nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading)
 }
 
 export function extractReleaseNotes(changelog: string, version: string): string {
-  const start = changelog.search(headingOf(version))
+  const start = changelog.search(headingPattern(version))
   if (start === -1) {
     throw new Error(`CHANGELOG.md has no section for version ${version}`)
   }
-  const body = bodyOf(changelog.slice(start)).trim()
+  const body = bodyAfterHeading(changelog.slice(start)).trim()
   if (body === '') {
     throw new Error(`CHANGELOG.md section for version ${version} is empty`)
   }
   return body
 }
 
+/* v8 ignore start */
 if (import.meta.main) {
   const [version, outfile] = Bun.argv.slice(2)
   if (version === undefined || outfile === undefined) {
@@ -36,3 +37,4 @@ if (import.meta.main) {
   const changelog = await readFile(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
   await writeFile(outfile, `${extractReleaseNotes(changelog, version)}\n`)
 }
+/* v8 ignore stop */
