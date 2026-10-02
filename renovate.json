@@ -21,6 +21,7 @@
     {
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies",
       "minimumReleaseAge": "14 days",
       "automerge": true,
       "platformAutomerge": true

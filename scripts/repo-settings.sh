@@ -2,9 +2,11 @@
 # Owner-run: configures the GitHub repository (features, security, labels, rulesets).
 # Usage: scripts/repo-settings.sh <owner>/<repo> [--dry-run]
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 REPO="${1:?usage: repo-settings.sh <owner>/<repo> [--dry-run]}"
 MODE="${2:-}"
+case "$MODE" in '' | --dry-run) ;; *) echo "usage: repo-settings.sh <owner>/<repo> [--dry-run]" >&2; exit 2 ;; esac
 
 run() {
   if [ "$MODE" = "--dry-run" ]; then
