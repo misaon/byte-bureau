@@ -8,18 +8,18 @@ const tagged = <const Tag extends string, Fields extends Schema.Struct.Fields>(
   Schema.Struct({ type: Schema.Literal(type), ...fields })
 
 export const Usage = Schema.Struct({
-  inputTokens: Schema.Number,
-  outputTokens: Schema.Number,
-  cacheReadTokens: Schema.optionalKey(Schema.Number),
-  cacheWriteTokens: Schema.optionalKey(Schema.Number),
-  costUsd: Schema.optionalKey(Schema.Number),
-  contextPct: Schema.optionalKey(Schema.Number),
+  inputTokens: Schema.Int,
+  outputTokens: Schema.Int,
+  cacheReadTokens: Schema.optionalKey(Schema.Int),
+  cacheWriteTokens: Schema.optionalKey(Schema.Int),
+  costUsd: Schema.optionalKey(Schema.Finite),
+  contextPct: Schema.optionalKey(Schema.Finite),
 })
 
 export const RateLimit = Schema.Struct({
-  fiveHourPct: Schema.optionalKey(Schema.Number),
+  fiveHourPct: Schema.optionalKey(Schema.Finite),
   fiveHourResetsAt: Schema.optionalKey(Schema.String),
-  sevenDayPct: Schema.optionalKey(Schema.Number),
+  sevenDayPct: Schema.optionalKey(Schema.Finite),
   sevenDayResetsAt: Schema.optionalKey(Schema.String),
 })
 
@@ -42,7 +42,7 @@ export const AgentEvent = Schema.Union([
   tagged('tool.completed', {
     id: Schema.String,
     outputSummary: Schema.String,
-    bytes: Schema.Number,
+    bytes: Schema.Int,
   }),
   tagged('tool.failed', { id: Schema.String, error: Schema.String }),
   tagged('subagent.started', { id: Schema.String, name: Schema.String }),

@@ -4,7 +4,7 @@ import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
 
 export const EventEnvelope = Schema.Struct({
-  seq: Schema.Number,
+  seq: Schema.Int,
   id: Id,
   ts: Timestamp,
   type: Schema.String,
@@ -24,7 +24,7 @@ const project = Schema.Struct({
   defaultBranch: Schema.String,
 })
 const sessionRef = Schema.Struct({ status: SessionStatus })
-const turnRef = Schema.Struct({ turnId: Id, index: Schema.Number, status: TurnStatus })
+const turnRef = Schema.Struct({ turnId: Id, index: Schema.Int, status: TurnStatus })
 
 // Payload schema per kernel event type; the key is the wire `type`
 export const KernelEventSchemas = {
@@ -76,7 +76,7 @@ export const KernelEventSchemas = {
     id: Schema.String,
     name: Schema.String,
     outputSummary: Schema.String,
-    bytes: Schema.Number,
+    bytes: Schema.Int,
   }),
   'tool.failed': Schema.Struct({ id: Schema.String, name: Schema.String, error: Schema.String }),
   'subagent.started': Schema.Struct({ id: Schema.String, name: Schema.String }),

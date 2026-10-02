@@ -24,7 +24,7 @@ export const EmployeeSpec = Schema.Struct({
   tools: ToolPolicy,
   permissionMode: PermissionMode,
   skills: Schema.Array(Schema.String),
-  maxTurns: Schema.optionalKey(Schema.Number),
+  maxTurns: Schema.optionalKey(Schema.Int),
   askTimeout: Schema.optionalKey(Schema.String),
   appearance: Appearance,
 })

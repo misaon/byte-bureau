@@ -7,19 +7,7 @@
       "type": "object",
       "properties": {
         "seq": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         },
         "id": {
           "type": "string",
@@ -488,19 +476,7 @@
           "description": "Time-ordered UUID (v7)"
         },
         "index": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         },
         "status": {
           "type": "string",
@@ -528,19 +504,7 @@
           "description": "Time-ordered UUID (v7)"
         },
         "index": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         },
         "status": {
           "type": "string",
@@ -558,94 +522,22 @@
           "type": "object",
           "properties": {
             "inputTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "outputTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "cacheReadTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "cacheWriteTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "costUsd": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             },
             "contextPct": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             }
           },
           "required": [
@@ -673,19 +565,7 @@
           "description": "Time-ordered UUID (v7)"
         },
         "index": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         },
         "status": {
           "type": "string",
@@ -767,19 +647,7 @@
           "type": "string"
         },
         "bytes": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         }
       },
       "required": [
@@ -1158,94 +1026,22 @@
           "type": "object",
           "properties": {
             "inputTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "outputTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "cacheReadTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "cacheWriteTokens": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "integer"
             },
             "costUsd": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             },
             "contextPct": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             }
           },
           "required": [
@@ -1279,37 +1075,13 @@
           "type": "object",
           "properties": {
             "fiveHourPct": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             },
             "fiveHourResetsAt": {
               "type": "string"
             },
             "sevenDayPct": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "Infinity",
-                    "-Infinity",
-                    "NaN"
-                  ]
-                }
-              ]
+              "type": "number"
             },
             "sevenDayResetsAt": {
               "type": "string"

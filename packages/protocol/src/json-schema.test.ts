@@ -22,4 +22,9 @@ describe('generated JSON Schema files', () => {
     expect(generated['$defs']).toHaveProperty(['session.created'])
     expect(generated['$defs']).toHaveProperty(['message.assistant.delta'])
   })
+
+  it('publishes numbers as number or integer, without Infinity or NaN alternatives', () => {
+    expect(JSON.stringify(configJsonSchema())).not.toMatch(/Infinity|NaN/u)
+    expect(JSON.stringify(eventsJsonSchema())).not.toMatch(/Infinity|NaN/u)
+  })
 })

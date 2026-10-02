@@ -14,7 +14,7 @@ export const EmployeeConfig = Schema.Struct({
   permissionMode: PermissionMode,
   tools: Schema.optionalKey(ToolPolicy),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
-  maxTurns: Schema.optionalKey(Schema.Number),
+  maxTurns: Schema.optionalKey(Schema.Int),
   askTimeout: Schema.optionalKey(Schema.String),
   appearance: Schema.optionalKey(Appearance),
 })
@@ -29,7 +29,7 @@ const LoggingSection = Schema.Struct({ level: Schema.optionalKey(LogLevel) })
 const WorkspaceSection = Schema.Struct({
   runtime: Schema.optionalKey(Schema.String),
   copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
-  retainDays: Schema.optionalKey(Schema.Number),
+  retainDays: Schema.optionalKey(Schema.Int),
 })
 const ProvidersSection = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))
 const ProjectDefaults = Schema.Struct({
@@ -54,7 +54,7 @@ export const ProjectConfig = Schema.Struct({
 
 const ServerSection = Schema.Struct({
   host: Schema.optionalKey(Schema.String),
-  port: Schema.optionalKey(Schema.Number),
+  port: Schema.optionalKey(Schema.Int),
 })
 const UserDefaults = Schema.Struct({
   provider: Schema.optionalKey(Schema.String),

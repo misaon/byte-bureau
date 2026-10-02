@@ -41,19 +41,7 @@
           }
         },
         "retainDays": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "Infinity",
-                "-Infinity",
-                "NaN"
-              ]
-            }
-          ]
+          "type": "integer"
         }
       },
       "additionalProperties": false
@@ -138,19 +126,7 @@
             }
           },
           "maxTurns": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "Infinity",
-                  "-Infinity",
-                  "NaN"
-                ]
-              }
-            ]
+            "type": "integer"
           },
           "askTimeout": {
             "type": "string"
