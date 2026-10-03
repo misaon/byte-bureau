@@ -81,11 +81,11 @@ function patternsOf(glob: string): readonly string[] | undefined {
 }
 
 // Where a glob reaches: one place for each pattern its braces stand for, escapes dropped, below its base or where an absolute pattern points
-// Only the literal part of a pattern can lead anywhere, so a pattern with a .. segment, which climbs out of any directory, leads nowhere that can be judged
+// Only the literal part of a pattern can lead anywhere, so a pattern with a .. segment, which climbs out of any directory, or a leading ~, which the tool may expand, leads nowhere that can be judged
 export function globPlaces(
   glob: string,
   base: string,
-  resolve: (written: string) => string,
+  resolve: (written: string) => string | null,
 ): readonly Place[] {
   const patterns = patternsOf(glob)
   if (patterns === undefined) {
@@ -95,6 +95,7 @@ export function globPlaces(
     .map((pattern) => pattern.replaceAll(ESCAPE, '$<char>'))
     .map((pattern) => {
       const word = posix.isAbsolute(pattern) ? pattern : posix.join(base, pattern)
-      return { word, resolved: pattern.split('/').includes('..') ? null : resolve(word) }
+      const opaque = pattern.split('/').includes('..') || pattern.startsWith('~')
+      return { word, resolved: opaque ? null : resolve(word) }
     })
 }

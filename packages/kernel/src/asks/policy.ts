@@ -90,12 +90,17 @@ const RULES: readonly Rule[] = [
 export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
 
 // A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
-const resolveTarget = (filePath: string, root: string): string =>
-  root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
+// A path that starts with ~ leads nowhere that can be judged: the tool may expand it to a home directory
+const resolveTarget = (filePath: string, root: string): string | null => {
+  if (filePath.startsWith('~')) {
+    return null
+  }
+  return root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
+}
 
 // A glob searches its pattern below its path, so the two together say where it reaches
 const pathsOf = ({ name, input }: ToolCall, root: string): readonly Place[] => {
-  const resolve = (written: string): string => resolveTarget(written, root)
+  const resolve = (written: string): string | null => resolveTarget(written, root)
   const pattern = field(input, 'pattern')
   if (name === 'Glob' && pattern !== '') {
     return globPlaces(pattern, field(input, 'path') || '.', resolve)
