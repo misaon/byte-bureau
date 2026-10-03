@@ -3334,6 +3334,18 @@ it.effect('decodes the init template on its own, with no defaults merged in', ()
     })
   }),
 )
+
+it.effect('validates the environment layer like a load, naming the variable', () =>
+  Effect.gen(function* validatesEnvironment() {
+    const { config, project } = yield* workspace()
+    const env = { BYTEBUREAU_LOG_LEVEL: 'loud' }
+    const issues = yield* config.validate(project, env)
+    const failure = yield* Effect.flip(config.load({ projectPath: project, env }))
+    assert.deepStrictEqual(where(issues), [['env:BYTEBUREAU_LOG_LEVEL', LEVEL]])
+    assert.strictEqual(failure.file, 'env:BYTEBUREAU_LOG_LEVEL')
+    assert.deepStrictEqual(yield* config.validate(project), [])
+  }),
+)
 ```
 `packages/kernel/src/config/config.files.test.ts`:
 ```ts
@@ -4008,7 +4020,11 @@ export interface ResolvedConfig {
 
 export interface ConfigShape {
   readonly load: (request: LoadRequest) => Effect.Effect<ResolvedConfig, ConfigError>
-  readonly validate: (projectPath: string) => Effect.Effect<readonly ConfigIssue[]>
+  // The environment layer takes part as in load, so an issue can name the variable it comes from
+  readonly validate: (
+    projectPath: string,
+    env?: LoadRequest['env'],
+  ) => Effect.Effect<readonly ConfigIssue[]>
   readonly schema: () => Record<string, unknown>
 }
 
@@ -4120,8 +4136,11 @@ const resolveConfig = (
   })
 
 // A file that cannot be read or parsed is one issue, not an empty document blamed for missing keys
-const validateConfig = (home: string, projectPath: string): Effect.Effect<readonly ConfigIssue[]> =>
-  inspect(home, { projectPath }).pipe(
+const validateConfig = (
+  home: string,
+  request: LoadRequest,
+): Effect.Effect<readonly ConfigIssue[]> =>
+  inspect(home, request).pipe(
     Effect.map((inspected) => inspected.issues),
     Effect.catchTag('ConfigError', (failure) =>
       Effect.succeed([{ file: failure.file, pointer: failure.pointer, message: failure.reason }]),
@@ -4130,7 +4149,7 @@ const validateConfig = (home: string, projectPath: string): Effect.Effect<readon
 
 const make = (home: string): ConfigShape => ({
   load: (request) => resolveConfig(home, request),
-  validate: (projectPath) => validateConfig(home, projectPath),
+  validate: (projectPath, env = {}) => validateConfig(home, { projectPath, env }),
   schema: configJsonSchema,
 })
 
@@ -13125,6 +13144,8 @@ import { recommendForPermission, type PermissionRecommendation } from './policy.
 const ws = '/repo/.bytebureau/worktrees/s1'
 
 const NOTHING: PermissionRecommendation = { recommended: null, ruleId: null }
+const EDIT = 'in-workspace-edit'
+const SECRETS_RULE = 'secrets-path'
 
 const touching = (name: string, filePath: string, workspace = ws): PermissionRecommendation =>
   recommendForPermission({ name, input: { file_path: filePath } }, workspace, 'supervised')
@@ -13152,12 +13173,12 @@ describe('recommendForPermission paths that leave the workspace', () => {
 
 describe('recommendForPermission paths inside the workspace', () => {
   it.each([
-    ['Write', `${ws}/src/../src/a.ts`, 'in-workspace-edit'],
+    ['Write', `${ws}/src/../src/a.ts`, EDIT],
     ['Read', `${ws}/src/../src/a.ts`, 'in-workspace-read'],
-    ['Write', 'src/a.ts', 'in-workspace-edit'],
+    ['Write', 'src/a.ts', EDIT],
     ['Read', 'src/a.ts', 'in-workspace-read'],
     ['Read', './src/a.ts', 'in-workspace-read'],
-    ['Write', `${ws}//src/./a.ts`, 'in-workspace-edit'],
+    ['Write', `${ws}//src/./a.ts`, EDIT],
   ])('allows %s of %s once it is resolved', (name, filePath, ruleId) => {
     expect(touching(name, filePath)).toStrictEqual({ recommended: 'allow', ruleId })
   })
@@ -13165,7 +13186,7 @@ describe('recommendForPermission paths inside the workspace', () => {
   it('resolves against a workspace that was written with a trailing slash', () => {
     expect(touching('Write', 'src/a.ts', `${ws}/`)).toStrictEqual({
       recommended: 'allow',
-      ruleId: 'in-workspace-edit',
+      ruleId: EDIT,
     })
   })
 })
@@ -13174,7 +13195,7 @@ describe('recommendForPermission secrets behind a resolved path', () => {
   it('denies a secret outside the workspace that a traversal reaches', () => {
     expect(touching('Read', `${ws}/../other/.env`)).toStrictEqual({
       recommended: 'deny',
-      ruleId: 'secrets-path',
+      ruleId: SECRETS_RULE,
     })
   })
 
@@ -13186,7 +13207,7 @@ describe('recommendForPermission secrets behind a resolved path', () => {
     [`${ws}/src/../.env.local`],
     ['src/../.env'],
   ])('denies the secret %s once the path is resolved', (filePath) => {
-    expect(touching('Read', filePath).ruleId).toBe('secrets-path')
+    expect(touching('Read', filePath).ruleId).toBe(SECRETS_RULE)
   })
 })
 
@@ -13201,8 +13222,77 @@ describe('recommendForPermission without a workspace', () => {
 
   it('still denies a secret and a recursive removal', () => {
     const removal = { name: 'Bash', input: { command: 'rm -rf /' } }
-    expect(touching('Read', '/home/me/.env', '').ruleId).toBe('secrets-path')
+    expect(touching('Read', '/home/me/.env', '').ruleId).toBe(SECRETS_RULE)
     expect(recommendForPermission(removal, '', 'supervised').ruleId).toBe('rm-outside-workspace')
+  })
+})
+
+const glob = (input: Record<string, string>): PermissionRecommendation =>
+  recommendForPermission({ name: 'Glob', input }, ws, 'supervised')
+
+describe('recommendForPermission globs whose braces, escapes or .. leave the workspace', () => {
+  it.each([
+    [{ pattern: '{../../..,src}/**' }],
+    [{ pattern: '{..,src}/**' }],
+    [{ pattern: '{src,{lib,..}}/*.ts' }],
+    [{ pattern: '{/etc,src}/**' }],
+    [{ pattern: '{.,.}./**' }],
+    [{ pattern: 'src/**/../../../etc/*' }],
+    [{ pattern: String.raw`\.\./**` }],
+    [{ pattern: String.raw`\/etc/**` }],
+    [{ pattern: '{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}' }],
+  ])('recommends nothing for %o', (input) => {
+    expect(glob(input)).toStrictEqual(NOTHING)
+  })
+
+  it.each([
+    [{ pattern: 'src/{a,b}/*.ts' }],
+    [{ pattern: '**/*.{ts,tsx}' }],
+    [{ pattern: '{src,test}/**', path: 'packages' }],
+    [{ pattern: '{a}/{b,c}/*' }],
+    [{ pattern: 'src/{a,b' }],
+  ])('allows %o, which stays inside', (input) => {
+    expect(glob(input)).toStrictEqual({ recommended: 'allow', ruleId: EDIT })
+  })
+
+  it('denies the secret one of its braces names', () => {
+    expect(glob({ pattern: '**/.{env,npmrc}' })).toStrictEqual({
+      recommended: 'deny',
+      ruleId: SECRETS_RULE,
+    })
+  })
+})
+
+describe('recommendForPermission file tool paths that start with ~', () => {
+  it.each([
+    ['Read', '~/notes.txt'],
+    ['Write', '~/x'],
+    ['Edit', '~'],
+  ])('recommends nothing for %s of %s, which a tool may expand', (name, filePath) => {
+    expect(touching(name, filePath)).toStrictEqual(NOTHING)
+  })
+
+  it('still denies the secret behind ~', () => {
+    expect(touching('Read', '~/.ssh/id_rsa')).toStrictEqual({
+      recommended: 'deny',
+      ruleId: SECRETS_RULE,
+    })
+  })
+
+  it.each([
+    [{ pattern: '*', path: '~' }],
+    [{ pattern: '*.md', path: '~/notes' }],
+    [{ pattern: '~/notes/*' }],
+    [{ pattern: '{~,src}/*' }],
+  ])('recommends nothing for a glob from ~: %o', (input) => {
+    expect(glob(input)).toStrictEqual(NOTHING)
+  })
+
+  it('allows a path that merely holds a ~ further on', () => {
+    expect(touching('Read', 'src/~backup.ts')).toStrictEqual({
+      recommended: 'allow',
+      ruleId: 'in-workspace-read',
+    })
   })
 })
 ```
@@ -14864,6 +14954,7 @@ export const flush: Effect.Effect<void> = Effect.forEach(
 import path from 'node:path'
 import type { PermissionMode } from '@bytebureau/protocol'
 import { isReadOnly, isUnder, placesOf, removesOutside, type Place } from './policy-command.js'
+import { globPlaces } from './policy-glob.js'
 
 const { posix } = path
 
@@ -14883,9 +14974,8 @@ interface Facts {
   readonly command: string
   // What the command names, resolved against the workspace
   readonly places: readonly Place[]
-  // The file as the tool names it, and the file it lands on once `.` and `..` are resolved
-  readonly filePath: string
-  readonly target: string
+  // The files as the tool names them, and where each lands once `.` and `..` are resolved; a glob names one per pattern its braces stand for
+  readonly paths: readonly Place[]
   // The workspace when it is an absolute path, else empty: nothing is inside a workspace that is not one
   readonly root: string
   readonly mode: PermissionMode
@@ -14913,13 +15003,15 @@ const field = (input: unknown, key: string): string => {
 
 // The check is lexical: a symlink inside the workspace that points out of it cannot be told from a plain path, only the file system knows
 // With no absolute workspace nothing is inside it, whatever the path looks like
-const inWorkspace = ({ root, target }: Facts): boolean =>
-  root !== '' && target !== '' && isUnder(root, target)
+const inWorkspace = ({ root, paths }: Facts): boolean =>
+  root !== '' &&
+  paths.length > 0 &&
+  paths.every((place) => place.resolved !== null && isUnder(root, place.resolved))
 
-const namesSecret = ({ filePath, target, places }: Facts): boolean =>
-  SECRETS.test(filePath) ||
-  SECRETS.test(target) ||
-  places.some((place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''))
+const namesSecret = ({ paths, places }: Facts): boolean =>
+  [...paths, ...places].some(
+    (place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''),
+  )
 
 // Rules are evaluated top-down and the first match decides, so the deny rules come first
 const RULES: readonly Rule[] = [
@@ -14951,32 +15043,33 @@ const RULES: readonly Rule[] = [
 export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
 
 // A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
-const resolveTarget = (filePath: string, root: string): string => {
-  if (filePath === '') {
-    return ''
+// A path that starts with ~ leads nowhere that can be judged: the tool may expand it to a home directory
+const resolveTarget = (filePath: string, root: string): string | null => {
+  if (filePath.startsWith('~')) {
+    return null
   }
   return root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
 }
 
 // A glob searches its pattern below its path, so the two together say where it reaches
-const filePathOf = ({ name, input }: ToolCall): string => {
+const pathsOf = ({ name, input }: ToolCall, root: string): readonly Place[] => {
+  const resolve = (written: string): string | null => resolveTarget(written, root)
   const pattern = field(input, 'pattern')
   if (name === 'Glob' && pattern !== '') {
-    return posix.isAbsolute(pattern) ? pattern : posix.join(field(input, 'path') || '.', pattern)
+    return globPlaces(pattern, field(input, 'path') || '.', resolve)
   }
-  return field(input, 'file_path') || field(input, 'path')
+  const filePath = field(input, 'file_path') || field(input, 'path')
+  return filePath === '' ? [] : [{ word: filePath, resolved: resolve(filePath) }]
 }
 
 const factsOf = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): Facts => {
   const root = posix.isAbsolute(workspacePath) ? workspacePath : ''
   const command = field(toolCall.input, 'command')
-  const filePath = filePathOf(toolCall)
   return {
     name: toolCall.name,
     command,
     places: placesOf(command, root),
-    filePath,
-    target: resolveTarget(filePath, root),
+    paths: pathsOf(toolCall, root),
     root,
     mode,
   }
@@ -16673,6 +16766,14 @@ describe('the configuration of the facade', () => {
     expect(issues).toStrictEqual([])
   })
 
+  it('validates with the environment it was opened with, naming the variable of a bad value', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const kernel = await openKernel({ env: { BYTEBUREAU_LOG_LEVEL: 'loud' } })
+    const issues = await kernel.config.validate(repo)
+    expect(issues).toMatchObject([{ file: 'env:BYTEBUREAU_LOG_LEVEL', pointer: '/logging/level' }])
+  })
+
   it('offers the JSON schema of the configuration without a promise', async () => {
     expect.hasAssertions()
     const kernel = await openKernel()
@@ -17510,7 +17611,7 @@ export const configApi = (
   env: KernelOptions['env'],
 ): Kernel['config'] => ({
   load: promised(Config, (config, projectPath) => config.load({ projectPath, env })),
-  validate: promised(Config, (config, projectPath) => config.validate(projectPath)),
+  validate: promised(Config, (config, projectPath) => config.validate(projectPath, env)),
   schema: () => Context.get(services, Config).schema(),
 })
 ```
@@ -17604,29 +17705,39 @@ Verified in Effect 4.0.0: `Effect.context<R>()`, `Stream.provideContext`, `Manag
 import path from 'node:path'
 import { Layer } from 'effect'
 import { bootLevel } from './facade/boot-logging.js'
+import type { Services } from './facade/promised.js'
 import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 import { KernelLayer } from './kernel-live.js'
-import { effectLevelOf } from './logging/logging.js'
+import { effectLevelOf, kernelLogger, type KernelLogLevel } from './logging/logging.js'
 import { prepareHome, restrictDatabase } from './store/home.js'
 import { StoreLive } from './store/store-live.js'
 
 export { StoreLive } from './store/store-live.js'
 export type { Kernel, KernelOptions } from './facade.js'
 
-// The kernel of the binary: its store is the database under the home of the user, which only the user can read
-// The log level is resolved once, so LogTape and Effect's own minimum agree; --debug lowers Effect's minimum to debug
-export async function createKernel(options: KernelOptions): Promise<Kernel> {
-  const database = path.join(prepareHome(options.home), 'bytebureau.db')
-  const level = await bootLevel(options)
+// The services over the store in the database; Effect drops its records below the level LogTape logs at, or below debug with --debug
+function layerOf(
+  options: KernelOptions,
+  level: KernelLogLevel,
+  database: string,
+): Layer.Layer<Services> {
   const debug = options.logging === undefined ? undefined : options.logging.debug
   const layer = KernelLayer({ ...options, logLevel: effectLevelOf(level, debug) })
-  const store = StoreLive(database)
+  return layer.pipe(Layer.provideMerge(StoreLive(database)))
+}
+
+// The kernel of the binary: its store is the database under the home of the user, which only the user can read
+// The log level is resolved once, so LogTape and Effect's own minimum agree; what could not be made private is logged once logging is configured
+export async function createKernel(options: KernelOptions): Promise<Kernel> {
+  const home = prepareHome(options.home)
+  const database = path.join(home.data, 'bytebureau.db')
+  const level = await bootLevel(options)
   const logging = { ...options.logging, level }
-  const kernel = await createKernelFrom(layer.pipe(Layer.provideMerge(store)), {
-    ...options,
-    logging,
-  })
-  restrictDatabase(database)
+  const kernel = await createKernelFrom(layerOf(options, level, database), { ...options, logging })
+  const logger = kernelLogger(['bb', 'store'])
+  for (const warning of [...home.warnings, ...restrictDatabase(database)]) {
+    logger.warn(warning)
+  }
   return kernel
 }
 ```
