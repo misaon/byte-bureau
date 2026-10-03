@@ -10,6 +10,9 @@ export type ConfigError = InstanceType<typeof ConfigError>
 export const StoreError = Data.TaggedError('StoreError')<{ readonly cause: unknown }>
 export type StoreError = InstanceType<typeof StoreError>
 
+// Wraps a failure of the store layer, for Effect.mapError
+export const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
+
 export const WorkspaceError = Data.TaggedError('WorkspaceError')<{
   readonly code: string
   readonly reason: string

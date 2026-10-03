@@ -46,3 +46,13 @@ export {
   type KillSignal,
 } from './process/supervisor.js'
 export { allowlistEnv } from './process/env-allowlist.js'
+export {
+  WorkspaceManager,
+  WorkspaceManagerLive,
+  type ProvisionInput,
+  type WorkspaceInfo,
+  type PruneReport,
+  type WorkspaceManagerShape,
+} from './workspace/workspace-manager.js'
+export { WorkspaceRuntimes, type WorkspaceRuntimesShape } from './workspace/runtimes.js'
+export { branchSlug } from './workspace/slug.js'

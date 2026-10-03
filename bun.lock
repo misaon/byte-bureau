@@ -71,6 +71,7 @@
       "dependencies": {
         "@bytebureau/plugin-api": "workspace:*",
         "@bytebureau/protocol": "workspace:*",
+        "@bytebureau/workspace-local": "workspace:*",
         "@effect/sql-sqlite-bun": "4.0.0",
         "@logtape/file": "2.3.10",
         "@logtape/logtape": "2.3.10",
