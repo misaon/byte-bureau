@@ -15810,51 +15810,88 @@ git commit -m "feat(kernel): run sessions through providers with turns, asks, us
 ### Task 14: Kernel layers and the Promise facade (`KernelLive`, `KernelTest`, `createKernel`)
 
 **Files:**
-- Create: `packages/kernel/src/kernel-live.ts`, `packages/kernel/src/facade.ts`, `packages/kernel/src/facade.test.ts`
-- Modify: `packages/kernel/src/index.ts`, `packages/kernel/src/bun.ts`
+- Create: `packages/kernel/src/kernel-foundation.ts` (the service layers below the session manager; import cap), `packages/kernel/src/kernel-live.ts` (`KernelLayer`, `composeKernel`), `packages/kernel/src/kernel-test.ts` (`KernelTest`, behind the `./testing` package export), `packages/kernel/src/facade.ts` + `packages/kernel/src/facade/{types,promised,projects,config,sessions,events,workspaces,plugins}.ts`, `packages/kernel/src/facade-fixtures.ts`, and the tests `facade.test.ts`, `facade-areas.test.ts`, `facade-close.test.ts`, `facade-logging.test.ts`, `facade-boot.test.ts`, `kernel-live.test.ts`, `kernel-test.test.ts`, `logging/log-level.test.ts`
+- Modify: `packages/kernel/src/index.ts`, `packages/kernel/src/bun.ts`, `packages/kernel/package.json` (`./testing` export), `packages/kernel/src/events/event-log.ts` (hub shutdown finalizer), `packages/kernel/src/logging/logging.ts` (Effect log-level mapping), `packages/kernel/src/sessions/session-layers.ts` (now an adapter over `KernelTest`)
 
 **Interfaces:**
 - Consumes: every `*Live` layer from Tasks 3–13; `ManagedRuntime.make(layer)` → `runPromise`, `dispose` (verified).
 - Produces: `KernelLayer(options: KernelLayerOptions): Layer<KernelServices, never, SqlClient>` (everything but the store), `KernelTest(options): Layer<KernelServices | SqlClient>` (over `StoreTest`), `createKernelFrom(layer, options): Promise<Kernel>` (facade over any store layer), `createKernel(options: KernelOptions): Promise<Kernel>` in `bun.ts` (over `StoreLive` at `<home>/data/bytebureau.db`), the `Kernel` interface exactly as Task 15 lists it, `KernelLayerOptions { home: string; extraPlugins?: readonly Plugin[]; pluginConfig?: Record<string, unknown> }`, `KernelOptions = KernelLayerOptions & { env: Record<string, string | undefined>; logging?: { debug?: string; level?: string } }`.
 
+Semantics (as shipped): `KernelLayer(options)` composes every `KernelServices` member over a caller-provided `SqlClient` and includes `Layer.succeed(References.MinimumLogLevel, …)` from `options.logLevel` (default `info`); `KernelTest(options, usage?)` lives in `kernel-test.ts` and is reachable only through the `./testing` package export, so neither the root bundle nor the Bun entry carries `@effect/sql-sqlite-node`/`node:sqlite` (`bun build … | grep -c` is 0 for both); `createKernelFrom` configures logging, builds a `ManagedRuntime`, captures the services once, runs `host.load()` and disposes the runtime when the start fails; `events.subscribe` runs outside `runPromise` with the captured services, so a `for await` consumer works across awaits, `break` releases the subscription and `close()` ends a parked consumer because `EventLogLive` now shuts its hub down on release; `createKernel` (Bun entry) creates `<home>/data` and uses `StoreLive(<home>/data/bytebureau.db)`; after `close()` facade calls reject; typed errors keep their identity (Task 15 formats them from `name`, `code` and `reason`). Known limits (final fix wave): a rejecting `dispose()` during a failed boot masks the original error; `createKernelFrom` applies `logging.level` to LogTape only; `--debug` does not lower Effect's own minimum level.
+
 - [ ] **Step 1: Failing facade test**
 
 `packages/kernel/src/facade.test.ts`:
 ```ts
-import { existsSync, mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
+import { existsSync } from 'node:fs'
+import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
-import { createKernelFrom } from './facade.js'
-import { KernelTest } from './kernel-live.js'
-import { createTempRepo } from './testing/temp-repo.js'
+import { QUIET } from './facade-fixtures.js'
+import { createKernelFrom, type Kernel } from './facade.js'
+import { KernelTest } from './kernel-test.js'
+import { helloFileOf } from './sessions/session-helpers.js'
+import type { Session } from './sessions/types.js'
+import { createTempRepo, tempDir } from './testing/temp-repo.js'
+
+// The fake agent asks whether it may write; the answer is the one it offers
+async function answerTheAsk(kernel: Kernel, sessionId: string): Promise<void> {
+  const [ask] = await kernel.asks.pending(sessionId)
+  if (ask === undefined) {
+    throw new Error('the agent asked, yet no ask is pending')
+  }
+  await kernel.asks.answer(ask.id, { selected: ['yes'] }, 'cli')
+}
+
+// What the CLI does with a run: follow the events, answer the question, complete the session once its turn is over
+async function followRun(
+  kernel: Kernel,
+  sessionId: string,
+  events: AsyncIterable<EventEnvelope>,
+): Promise<readonly string[]> {
+  const seen: string[] = []
+  for await (const event of events) {
+    seen.push(event.type)
+    if (event.type === 'ask.requested') {
+      await answerTheAsk(kernel, sessionId)
+    }
+    if (event.type === 'turn.completed') {
+      await kernel.sessions.complete(sessionId)
+    }
+    if (event.type === 'session.completed') {
+      break
+    }
+  }
+  return seen
+}
+
+interface Run {
+  readonly session: Session
+  readonly seen: readonly string[]
+  readonly turns: number
+}
+
+// A session of the fake agent, from its registration to its completion
+async function runFakeSession(kernel: Kernel): Promise<Run> {
+  const project = await kernel.projects.register(createTempRepo())
+  const input = { projectId: project.id, title: 'facade run', providerId: 'fake' }
+  const session = await kernel.sessions.create(input)
+  const events = kernel.events.subscribe({ sessionId: session.id, since: 0 })
+  await kernel.sessions.prompt(session.id, { text: 'go' })
+  const seen = await followRun(kernel, session.id, events)
+  const usage = await kernel.usage.session(session.id)
+  return { session, seen, turns: usage.turns }
+}
 
 describe(createKernelFrom, () => {
   it('drives a whole fake-provider run through Promises and AsyncIterables only', async () => {
-    const home = mkdtempSync(path.join(tmpdir(), 'bb-home-'))
-    const kernel = await createKernelFrom(KernelTest({ home }), { home, env: {} })
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const kernel = await createKernelFrom(KernelTest({ home }), { home, env: {}, logging: QUIET })
     try {
-      const project = await kernel.projects.register(createTempRepo())
-      const session = await kernel.sessions.create({ projectId: project.id, title: 'facade run', providerId: 'fake' })
-      const events = kernel.events.subscribe({ sessionId: session.id, since: 0 })
-      await kernel.sessions.prompt(session.id, { text: 'go' })
-      const seen: string[] = []
-      for await (const event of events) {
-        seen.push(event.type)
-        if (event.type === 'ask.requested') {
-          const [ask] = await kernel.asks.pending(session.id)
-          await kernel.asks.answer(ask!.id, { selected: ['yes'] }, 'cli')
-        }
-        if (event.type === 'turn.completed') {
-          await kernel.sessions.complete(session.id)
-        }
-        if (event.type === 'session.completed') {
-          break
-        }
-      }
+      const { session, seen, turns } = await runFakeSession(kernel)
       expect(seen).toContain('ask.answered')
-      expect((await kernel.usage.session(session.id)).turns).toBe(1)
-      expect(existsSync(path.join(session.workspace!.path, 'src', 'hello.ts'))).toBe(true)
+      expect(turns).toBe(1)
+      expect(existsSync(helloFileOf(session))).toBe(true)
       expect(kernel.providers.list().map((provider) => provider.id)).toContain('fake')
     } finally {
       await kernel.close()
@@ -15862,131 +15899,833 @@ describe(createKernelFrom, () => {
   })
 })
 ```
+`packages/kernel/src/facade-areas.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import { AskError, ConfigError, SessionError, WorkspaceError } from './errors.js'
+import { openKernel, startFakeSession } from './facade-fixtures.js'
+import { createTempRepo } from './testing/temp-repo.js'
+
+describe('the projects of the facade', () => {
+  it('registers a repository, lists and reads it, and removes it again', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const project = await kernel.projects.register(createTempRepo())
+    const listed = await kernel.projects.list()
+    const found = await kernel.projects.get(project.id)
+    await kernel.projects.remove(project.id)
+    const gone = await kernel.projects.get(project.id)
+    expect([listed, found, gone]).toStrictEqual([[project], project, undefined])
+  })
+})
+
+describe('the configuration of the facade', () => {
+  it('resolves the configuration of a project with the environment it was opened with', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const kernel = await openKernel({ env: { BYTEBUREAU_LOG_LEVEL: 'debug' } })
+    const config = await kernel.config.load(repo)
+    const issues = await kernel.config.validate(repo)
+    expect(config).toMatchObject({ projectPath: repo, project: { logging: { level: 'debug' } } })
+    expect(issues).toStrictEqual([])
+  })
+
+  it('offers the JSON schema of the configuration without a promise', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    expect(kernel.config.schema()).toHaveProperty('$schema')
+  })
+})
+
+describe('the sessions of the facade', () => {
+  it('lists and reads its sessions, stops one and resumes it', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const session = await startFakeSession(kernel)
+    const listed = await kernel.sessions.list()
+    await kernel.sessions.stop(session.id)
+    const stopped = await kernel.sessions.get(session.id)
+    const resumed = await kernel.sessions.resume(session.id)
+    expect(listed.map((each) => each.id)).toStrictEqual([session.id])
+    expect(stopped).toMatchObject({ id: session.id, status: 'stopped' })
+    expect(resumed).toMatchObject({ id: session.id, status: 'ready' })
+  })
+
+  it('has no ask pending and no usage for a session that has not been prompted', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const session = await startFakeSession(kernel)
+    const pending = await kernel.asks.pending(session.id)
+    const usage = await kernel.usage.session(session.id)
+    expect(pending).toStrictEqual([])
+    expect(usage).toMatchObject({ turns: 0, costUsd: null })
+  })
+
+  it('reads the events of a session from the log, in the order they happened', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const session = await startFakeSession(kernel)
+    const events = await kernel.events.read({ sessionId: session.id }, { from: 0 })
+    expect(events.map((event) => event.type)).toStrictEqual([
+      'session.created',
+      'session.provisioning',
+      'workspace.provisioned',
+      'session.ready',
+    ])
+  })
+})
+
+describe('the workspaces of the facade', () => {
+  it('lists the worktree of a session and keeps it while the session is ready', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const session = await startFakeSession(kernel)
+    const listed = await kernel.workspaces.list(session.projectId)
+    const report = await kernel.workspaces.prune(session.projectId)
+    expect(listed.map((info) => [info.sessionId, info.sessionStatus, info.exists])).toStrictEqual([
+      [session.id, 'ready', true],
+    ])
+    expect(report.removed).toStrictEqual([])
+    expect(report.retained.map((kept) => kept.reason)).toStrictEqual(['session is ready'])
+  })
+})
+
+describe('the failures of the facade', () => {
+  it('rejects with the errors of the sessions and of the asks as they are', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    await expect(kernel.sessions.prompt('x', { text: 'y' })).rejects.toBeInstanceOf(SessionError)
+    await expect(kernel.sessions.interrupt('x')).rejects.toBeInstanceOf(SessionError)
+    await expect(kernel.asks.answer('x', { selected: [] }, 'cli')).rejects.toBeInstanceOf(AskError)
+  })
+
+  it('rejects with the errors of the projects and of the configuration as they are', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    await expect(kernel.projects.register('/')).rejects.toBeInstanceOf(WorkspaceError)
+    await expect(kernel.config.load('/no/such/dir')).rejects.toBeInstanceOf(ConfigError)
+  })
+})
+```
+`packages/kernel/src/facade-close.test.ts`:
+```ts
+import type { Plugin } from '@bytebureau/plugin-api'
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { describe, expect, it } from 'vitest'
+import { eventsUntil, openKernel } from './facade-fixtures.js'
+import { manifestOf, providerOf } from './plugins/plugin-fixtures.js'
+import { createTempRepo } from './testing/temp-repo.js'
+
+const failing: Plugin = {
+  manifest: manifestOf('failing'),
+  setup: async () => {
+    await Promise.resolve()
+    throw new Error('this plugin cannot start')
+  },
+}
+
+const offering: Plugin = {
+  manifest: manifestOf('offering'),
+  setup: () => ({ agentProviders: [providerOf('offered')] }),
+}
+
+describe('closing the kernel', () => {
+  it('ends the iteration that waits for the next event, as an iteration that has run out', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const project = await kernel.projects.register(createTempRepo())
+    const events = kernel.events.subscribe({ projectId: project.id, since: 0 })
+    const iterator = events[Symbol.asyncIterator]()
+    const replayed = await iterator.next()
+    const waiting = iterator.next()
+    await kernel.close()
+    expect(replayed).toMatchObject({ done: false, value: { type: 'project.registered' } })
+    await expect(waiting).resolves.toStrictEqual({ done: true, value: undefined })
+  })
+
+  it('rejects the calls made after it, and closing again does no harm', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    await kernel.close()
+    await kernel.close()
+    await expect(kernel.projects.list()).rejects.toBeDefined()
+    await expect(kernel.sessions.list()).rejects.toBeDefined()
+  })
+})
+
+describe('leaving an iteration of events', () => {
+  it('leaves the kernel serving: the next iteration replays what the first one saw', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const one = await kernel.projects.register(createTempRepo())
+    const two = await kernel.projects.register(createTempRepo())
+    const atTwo = (event: EventEnvelope): boolean => event.projectId === two.id
+    const filter = { types: ['project.registered'], since: 0 }
+    const seen = await eventsUntil(kernel.events.subscribe(filter), atTwo)
+    const again = await eventsUntil(kernel.events.subscribe(filter), atTwo)
+    expect(seen.map((event) => event.projectId)).toStrictEqual([one.id, two.id])
+    expect(again).toStrictEqual(seen)
+  })
+})
+
+describe('starting the kernel', () => {
+  it('starts without the plugin that cannot load and offers the agents of the others', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel({ extraPlugins: [failing, offering] })
+    const ids = kernel.providers.list().map((provider) => provider.id)
+    expect(ids).toStrictEqual(['fake', 'offered'])
+  })
+})
+```
+`packages/kernel/src/facade-logging.test.ts`:
+```ts
+import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
+import { createKernelFrom, type KernelOptions } from './facade.js'
+import { KernelTest } from './kernel-test.js'
+import { kernelLogger } from './logging/logging.js'
+import { tempDir } from './testing/temp-repo.js'
+
+const probe = kernelLogger(['bb', 'probe'])
+
+// The console method, kept from printing for the rest of the test
+function mute(method: 'debug' | 'info'): MockInstance {
+  const spy = vi.spyOn(console, method).mockReturnValue()
+  onTestFinished(() => {
+    spy.mockRestore()
+  })
+  return spy
+}
+
+// What the console was given, as text
+const linesOf = (spy: MockInstance): readonly string[] =>
+  spy.mock.calls.map((call) => String(call[0]))
+
+// A kernel opened with the logging, which the process is configured with; the console shows what is logged afterwards
+async function openLogging(logging?: KernelOptions['logging']): Promise<void> {
+  const home = tempDir('bb-home-')
+  const kernel = await createKernelFrom(KernelTest({ home }), { home, env: {}, logging })
+  onTestFinished(async () => {
+    await kernel.close()
+  })
+}
+
+describe('the logging of the facade', () => {
+  it('logs from the level it is given on, as JSON lines when asked to', async () => {
+    expect.hasAssertions()
+    const debug = mute('debug')
+    await openLogging({ level: 'debug', json: true })
+    probe.debug('probe debug')
+    const lines = linesOf(debug)
+    expect(lines).toStrictEqual([expect.stringContaining('probe debug')])
+    expect(JSON.parse(lines.join(''))).toMatchObject({ level: 'DEBUG', message: 'probe debug' })
+  })
+
+  it('prints text, not JSON lines, when told not to use them', async () => {
+    expect.hasAssertions()
+    const debug = mute('debug')
+    await openLogging({ level: 'debug', json: false })
+    probe.debug('probe text')
+    const lines = linesOf(debug)
+    expect(lines).toStrictEqual([expect.stringContaining('probe text')])
+    expect(lines.join('')).not.toMatch(/^\{/u)
+  })
+
+  it('logs from info on when it is given no logging at all', async () => {
+    expect.hasAssertions()
+    const [debug, info] = [mute('debug'), mute('info')]
+    await openLogging()
+    probe.debug('below info')
+    probe.info('at info')
+    expect(linesOf(debug)).toStrictEqual([])
+    expect(linesOf(info)).toStrictEqual([expect.stringContaining('at info')])
+  })
+
+  it('debugs the categories it is told to, whatever the level', async () => {
+    expect.hasAssertions()
+    const debug = mute('debug')
+    await openLogging({ level: 'error', json: true, debug: 'bb.probe' })
+    probe.debug('selected')
+    kernelLogger(['bb', 'other']).debug('not selected')
+    expect(linesOf(debug)).toStrictEqual([expect.stringContaining('selected')])
+  })
+})
+```
+`packages/kernel/src/facade-boot.test.ts`:
+```ts
+import { Effect, Layer } from 'effect'
+import { describe, expect, it } from 'vitest'
+import { QUIET } from './facade-fixtures.js'
+import { createKernelFrom } from './facade.js'
+import { KernelTest } from './kernel-test.js'
+import { PluginHost } from './plugins/plugin-host.js'
+import { tempDir } from './testing/temp-repo.js'
+
+// Notes in the journal that its layer was released, which happens when the runtime is disposed
+const releasing = (journal: string[]): Layer.Layer<never> =>
+  Layer.effectDiscard(
+    Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        journal.push('released')
+      }),
+    ),
+  )
+
+// Everything the kernel stands on is up when the layer that dies is built
+const dying = Layer.effectDiscard(Effect.die(new Error('this layer cannot be built')))
+
+// The plugins cannot be loaded, however the kernel was composed
+const failingLoad = Layer.effect(
+  PluginHost,
+  PluginHost.useSync((host) =>
+    PluginHost.of({ ...host, load: () => Effect.die(new Error('the plugins cannot be loaded')) }),
+  ),
+)
+
+describe('a kernel that cannot start', () => {
+  it('releases its layers when one of them cannot be built, and rejects with that failure', async () => {
+    expect.hasAssertions()
+    const journal: string[] = []
+    const home = tempDir('bb-home-')
+    const layer = dying.pipe(
+      Layer.provideMerge(releasing(journal)),
+      Layer.provideMerge(KernelTest({ home })),
+    )
+    const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    await expect(starting).rejects.toThrow('this layer cannot be built')
+    expect(journal).toStrictEqual(['released'])
+  })
+
+  it('releases its layers when the plugins cannot be loaded, and rejects with that failure', async () => {
+    expect.hasAssertions()
+    const journal: string[] = []
+    const home = tempDir('bb-home-')
+    const layer = failingLoad.pipe(
+      Layer.provideMerge(releasing(journal)),
+      Layer.provideMerge(KernelTest({ home })),
+    )
+    const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    await expect(starting).rejects.toThrow('the plugins cannot be loaded')
+    expect(journal).toStrictEqual(['released'])
+  })
+
+  it('keeps the layers of a kernel that starts until it is closed', async () => {
+    expect.hasAssertions()
+    const journal: string[] = []
+    const home = tempDir('bb-home-')
+    const layer = releasing(journal).pipe(Layer.provideMerge(KernelTest({ home })))
+    const kernel = await createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    expect(journal).toStrictEqual([])
+    await kernel.close()
+    expect(journal).toStrictEqual(['released'])
+  })
+})
+```
+`packages/kernel/src/kernel-live.test.ts`:
+```ts
+import type { LogRecord } from '@logtape/logtape'
+import { assert, describe, expect, it } from '@effect/vitest'
+import { Effect, Layer } from 'effect'
+import { KernelLayer } from './kernel-live.js'
+import { configureLogging, resetLogging, type KernelLogLevel } from './logging/logging.js'
+import { SessionManager } from './sessions/session-manager.js'
+import { StoreTest } from './store/store-test.js'
+import { tempDir } from './testing/temp-repo.js'
+
+// The kernel without a store, over the in-memory one the caller provides
+const kernelOver = (logLevel?: KernelLogLevel): Layer.Layer<SessionManager> =>
+  KernelLayer({ home: tempDir('bb-home-'), logLevel }).pipe(Layer.provideMerge(StoreTest))
+
+// A debug and an info record logged by Effect inside the kernel layer; LogTape itself lets both through
+async function loggedInKernel(logLevel?: KernelLogLevel): Promise<readonly unknown[]> {
+  const seen: LogRecord[] = []
+  await configureLogging({
+    level: 'debug',
+    json: true,
+    capture: (record) => {
+      seen.push(record)
+    },
+  })
+  try {
+    const logging = Effect.andThen(Effect.logDebug('debug'), Effect.logInfo('info'))
+    await Effect.runPromise(Effect.provide(logging, kernelOver(logLevel)))
+  } finally {
+    await resetLogging()
+  }
+  return seen.map((record) => record.message[0])
+}
+
+describe(KernelLayer, () => {
+  it('lets Effect log from info up unless the options give a level', async () => {
+    expect.hasAssertions()
+    await expect(loggedInKernel()).resolves.toStrictEqual(['info'])
+  })
+
+  it('lets the debug records of Effect reach the logger when the level is debug', async () => {
+    expect.hasAssertions()
+    await expect(loggedInKernel('debug')).resolves.toStrictEqual(['debug', 'info'])
+  })
+
+  it.effect('is the whole kernel but the store, which the caller provides', () =>
+    Effect.gen(function* providesStore() {
+      const sessions = yield* SessionManager
+      assert.deepStrictEqual(yield* sessions.list(), [])
+    }).pipe(Effect.provide(kernelOver())),
+  )
+})
+```
+`packages/kernel/src/kernel-test.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import type { UsageLayer } from './kernel-foundation.js'
+import { KernelTest } from './kernel-test.js'
+import { failingUsage } from './sessions/session-gate-fixtures.js'
+import { tempDir } from './testing/temp-repo.js'
+import { UsageService } from './usage/usage-service.js'
+
+// Whether the usage service of a kernel records a rate limit
+const records = (usage?: UsageLayer): Effect.Effect<boolean> => {
+  const kernel = KernelTest({ home: tempDir('bb-home-') }, usage)
+  return Effect.gen(function* recordsRateLimit() {
+    const service = yield* UsageService
+    return yield* Effect.match(service.record('profile', {}), {
+      onFailure: () => false,
+      onSuccess: () => true,
+    })
+  }).pipe(Effect.provide(kernel))
+}
+
+it.effect('offers the live usage service unless a test swaps in its own', () =>
+  Effect.gen(function* offersLiveUsage() {
+    assert.isTrue(yield* records())
+  }),
+)
+
+it.effect('offers the usage service a test swaps in', () =>
+  Effect.gen(function* offersSwappedUsage() {
+    assert.isFalse(yield* records(failingUsage()))
+  }),
+)
+```
+`packages/kernel/src/facade-fixtures.ts` (shared fixtures):
+```ts
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { onTestFinished } from 'vitest'
+import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
+import type { KernelLayerOptions } from './kernel-live.js'
+import { KernelTest } from './kernel-test.js'
+import type { Session } from './sessions/types.js'
+import { createTempRepo, tempDir } from './testing/temp-repo.js'
+
+type Extras = Pick<KernelLayerOptions, 'extraPlugins'> & Partial<Pick<KernelOptions, 'env'>>
+
+// A kernel logs its own warnings, such as an employee without a prompt file; a test is not about them
+export const QUIET: KernelOptions['logging'] = { level: 'error' }
+
+// A kernel over the in-memory store, closed when the test is over; closing it earlier does no harm
+export async function openKernel(extras: Extras = {}): Promise<Kernel> {
+  const home = tempDir('bb-home-')
+  const layer = KernelTest({ home, extraPlugins: extras.extraPlugins })
+  const kernel = await createKernelFrom(layer, {
+    home,
+    env: extras.env ?? {},
+    logging: QUIET,
+  })
+  onTestFinished(async () => {
+    await kernel.close()
+  })
+  return kernel
+}
+
+// A session of the fake agent in a fresh repository, ready for its first prompt
+export async function startFakeSession(kernel: Kernel): Promise<Session> {
+  const project = await kernel.projects.register(createTempRepo())
+  return kernel.sessions.create({ projectId: project.id, title: 'facade', providerId: 'fake' })
+}
+
+// The events up to the first the predicate accepts, which is included; the loop is left there
+export async function eventsUntil(
+  events: AsyncIterable<EventEnvelope>,
+  accepts: (event: EventEnvelope) => boolean,
+): Promise<readonly EventEnvelope[]> {
+  const seen: EventEnvelope[] = []
+  for await (const event of events) {
+    seen.push(event)
+    if (accepts(event)) {
+      break
+    }
+  }
+  return seen
+}
+```
 
 - [ ] **Step 2: Layers and facade**
 
 `packages/kernel/src/kernel-live.ts`:
 ```ts
-import type { Plugin } from '@bytebureau/plugin-api'
 import { Layer } from 'effect'
 import type { SqlClient } from 'effect/sql'
-import { AskService, AskServiceLive } from './asks/ask-service.js'
-import { Config, ConfigLive } from './config/config.js'
-import { EventLog, EventLogLive } from './events/event-log.js'
-import { EffectLoggerLive } from './logging/logging.js'
-import { PluginHost, PluginHostLive } from './plugins/plugin-host.js'
-import { Supervisor, SupervisorLive } from './process/supervisor.js'
-import { ProjectRegistry, ProjectRegistryLive } from './projects/project-registry.js'
-import { SessionManager, SessionManagerLive } from './sessions/session-manager.js'
-import { StoreTest } from './store/store-test.js'
-import { UsageService, UsageServiceLive } from './usage/usage-service.js'
-import { WorkspaceRuntimes } from './workspace/runtimes.js'
-import { WorkspaceManager, WorkspaceManagerLive } from './workspace/workspace-manager.js'
+import { AskServiceLive, type AskService } from './asks/ask-service.js'
+import {
+  FoundationLive,
+  type FoundationOptions,
+  type FoundationServices,
+  type UsageLayer,
+} from './kernel-foundation.js'
+import { PluginHostLive, type PluginHost, type PluginHostOptions } from './plugins/plugin-host.js'
+import { ProjectRegistryLive, type ProjectRegistry } from './projects/project-registry.js'
+import { SessionManagerLive, type SessionManager } from './sessions/session-manager.js'
+import type { WorkspaceRuntimes } from './workspace/runtimes.js'
+import { WorkspaceManagerLive, type WorkspaceManager } from './workspace/workspace-manager.js'
 
-export interface KernelLayerOptions {
-  readonly home: string
-  readonly extraPlugins?: readonly Plugin[] | undefined
-  readonly pluginConfig?: Readonly<Record<string, unknown>> | undefined
-}
+export interface KernelLayerOptions
+  extends FoundationOptions, Pick<PluginHostOptions, 'extraPlugins' | 'pluginConfig'> {}
 
-export type KernelServices = Config | EventLog | ProjectRegistry | Supervisor | PluginHost | WorkspaceRuntimes | WorkspaceManager | AskService | UsageService | SessionManager
+export type KernelServices =
+  | FoundationServices
+  | ProjectRegistry
+  | PluginHost
+  | WorkspaceRuntimes
+  | WorkspaceManager
+  | AskService
+  | SessionManager
 
-// Everything except the store; the caller provides SqlClient (StoreLive in the binary, StoreTest in tests)
-export const KernelLayer = (options: KernelLayerOptions): Layer.Layer<KernelServices, never, SqlClient.SqlClient> => {
-  const base = Layer.mergeAll(ConfigLive(options.home), EventLogLive, SupervisorLive, UsageServiceLive, EffectLoggerLive)
-  const plugins = PluginHostLive({ extraPlugins: options.extraPlugins, pluginConfig: options.pluginConfig }).pipe(Layer.provideMerge(base))
-  const registry = Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive).pipe(Layer.provideMerge(plugins))
+// The layers of the kernel; KernelTest is the only caller that passes the usage service
+export const composeKernel = (
+  options: KernelLayerOptions,
+  usage?: UsageLayer,
+): Layer.Layer<KernelServices, never, SqlClient.SqlClient> => {
+  const foundation = FoundationLive(options, usage)
+  const plugins = PluginHostLive({
+    extraPlugins: options.extraPlugins,
+    pluginConfig: options.pluginConfig,
+  }).pipe(Layer.provideMerge(foundation))
+  const registry = Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive).pipe(
+    Layer.provideMerge(plugins),
+  )
   return SessionManagerLive.pipe(Layer.provideMerge(registry))
 }
 
-export const KernelTest = (options: KernelLayerOptions): Layer.Layer<KernelServices | SqlClient.SqlClient> => KernelLayer(options).pipe(Layer.provideMerge(StoreTest))
+// Everything except the store; the caller provides SqlClient (StoreLive in the binary)
+export const KernelLayer = (
+  options: KernelLayerOptions,
+): Layer.Layer<KernelServices, never, SqlClient.SqlClient> => composeKernel(options)
+```
+`packages/kernel/src/kernel-foundation.ts`:
+```ts
+import { Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { ConfigLive, type Config } from './config/config.js'
+import { EventLogLive, type EventLog } from './events/event-log.js'
+import { EffectLoggerLive, EffectLogLevelLive, type KernelLogLevel } from './logging/logging.js'
+import { SupervisorLive, type Supervisor } from './process/supervisor.js'
+import { UsageServiceLive, type UsageService } from './usage/usage-service.js'
+
+export interface FoundationOptions {
+  readonly home: string
+  // Effect drops its own logs below this level; info when absent
+  readonly logLevel?: KernelLogLevel | undefined
+}
+
+export type FoundationServices = Config | EventLog | Supervisor | UsageService
+
+export type UsageLayer = Layer.Layer<UsageService, never, SqlClient.SqlClient>
+
+// What the other services stand on; these need nothing of each other
+// The usage service is the live one unless a test swaps its own in
+export const FoundationLive = (
+  options: FoundationOptions,
+  usage: UsageLayer = UsageServiceLive,
+): Layer.Layer<FoundationServices, never, SqlClient.SqlClient> =>
+  Layer.mergeAll(
+    ConfigLive(options.home),
+    EventLogLive,
+    SupervisorLive,
+    usage,
+    EffectLoggerLive,
+    EffectLogLevelLive(options.logLevel ?? 'info'),
+  )
+```
+`packages/kernel/src/kernel-test.ts`:
+```ts
+import { Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { UsageLayer } from './kernel-foundation.js'
+import { composeKernel, type KernelLayerOptions, type KernelServices } from './kernel-live.js'
+import { StoreTest } from './store/store-test.js'
+
+// The layers of the kernel over an in-memory store; a test may swap in its own usage service
+export const KernelTest = (
+  options: KernelLayerOptions,
+  usage?: UsageLayer,
+): Layer.Layer<KernelServices | SqlClient.SqlClient> =>
+  composeKernel(options, usage).pipe(Layer.provideMerge(StoreTest))
 ```
 `packages/kernel/src/facade.ts`:
 ```ts
-import type { AgentProvider, Plugin } from '@bytebureau/plugin-api'
-import type { Ask, AskAnswer, AnsweredVia, EventEnvelope, PromptInput } from '@bytebureau/protocol'
-import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
-import type { SqlClient } from 'effect/sql'
-import { AskService } from './asks/ask-service.js'
-import { Config, type ConfigIssue, type ResolvedConfig } from './config/config.js'
-import { EventLog, type EventFilter } from './events/event-log.js'
-import type { KernelLayerOptions, KernelServices } from './kernel-live.js'
-import { configureLogging, type KernelLogLevel } from './logging/logging.js'
-import { PluginHost } from './plugins/plugin-host.js'
-import { ProjectRegistry, type Project } from './projects/project-registry.js'
-import { SessionManager } from './sessions/session-manager.js'
-import type { CreateSessionInput, Session, Turn } from './sessions/types.js'
-import { UsageService, type SessionUsage } from './usage/usage-service.js'
-import { WorkspaceManager, type PruneReport, type WorkspaceInfo } from './workspace/workspace-manager.js'
+import { Effect, ManagedRuntime, type Layer } from 'effect'
+import { configApi } from './facade/config.js'
+import { eventsApi } from './facade/events.js'
+import { loadPlugins, providersApi } from './facade/plugins.js'
+import { projectsApi } from './facade/projects.js'
+import { promisedBy, type Runtime, type Services } from './facade/promised.js'
+import { asksApi, sessionsApi, usageApi } from './facade/sessions.js'
+import type { Kernel, KernelOptions } from './facade/types.js'
+import { workspacesApi } from './facade/workspaces.js'
+import { configureLogging, parseLogLevel } from './logging/logging.js'
 
-export interface KernelOptions extends KernelLayerOptions {
-  readonly env: Readonly<Record<string, string | undefined>>
-  readonly logging?: { readonly debug?: string | undefined; readonly level?: string | undefined; readonly json?: boolean | undefined } | undefined
-}
+export type { Kernel, KernelOptions } from './facade/types.js'
 
-export interface Kernel {
-  readonly projects: { register(path: string): Promise<Project>; list(): Promise<readonly Project[]>; get(id: string): Promise<Project | undefined>; remove(id: string): Promise<void> }
-  readonly config: { load(projectPath?: string): Promise<ResolvedConfig>; validate(projectPath: string): Promise<readonly ConfigIssue[]>; schema(): Record<string, unknown> }
-  readonly sessions: { create(input: CreateSessionInput): Promise<Session>; prompt(sessionId: string, input: PromptInput): Promise<Turn>; interrupt(sessionId: string): Promise<void>; stop(sessionId: string): Promise<void>; complete(sessionId: string): Promise<void>; resume(sessionId: string): Promise<Session>; list(): Promise<readonly Session[]>; get(id: string): Promise<Session | undefined> }
-  readonly asks: { pending(sessionId?: string): Promise<readonly Ask[]>; answer(askId: string, answer: AskAnswer, via: AnsweredVia): Promise<void> }
-  readonly events: { subscribe(filter: EventFilter): AsyncIterable<EventEnvelope>; read(filter: EventFilter, range: { readonly from: number; readonly to?: number }): Promise<readonly EventEnvelope[]> }
-  readonly workspaces: { list(projectId?: string): Promise<readonly WorkspaceInfo[]>; prune(projectId?: string): Promise<PruneReport> }
-  readonly usage: { session(sessionId: string): Promise<SessionUsage> }
-  readonly providers: { list(): readonly { readonly id: string; readonly displayName: string }[] }
-  close(): Promise<void>
-}
-
-const levelOf = (value: string | undefined): KernelLogLevel => (value === 'trace' || value === 'debug' || value === 'info' || value === 'warn' || value === 'error' ? value : 'info')
-
-export async function createKernelFrom(layer: Layer.Layer<KernelServices | SqlClient.SqlClient>, options: KernelOptions): Promise<Kernel> {
-  await configureLogging({ level: levelOf(options.logging?.level), json: options.logging?.json ?? !process.stdout.isTTY, debug: options.logging?.debug })
-  const runtime = ManagedRuntime.make(layer)
-  const run = <A, E>(effect: Effect.Effect<A, E, KernelServices | SqlClient.SqlClient>): Promise<A> => runtime.runPromise(effect)
-  // The services, captured once, let event streams run outside runPromise (AsyncIterable consumers)
-  const services = await run(Effect.context<KernelServices | SqlClient.SqlClient>())
-  await run(Effect.flatMap(PluginHost, (host) => host.load()))
-  const summary = (provider: AgentProvider) => ({ id: provider.id, displayName: provider.displayName })
+// The steps that can fail while a kernel starts
+async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {
+  const { level, json, debug } = options.logging ?? {}
+  await configureLogging({
+    level: parseLogLevel(level),
+    json: json ?? !process.stdout.isTTY,
+    debug,
+  })
+  const promised = promisedBy(runtime)
+  // Captured once, so that an event stream can run outside the runtime
+  const services = await runtime.runPromise(Effect.context<Services>())
+  await loadPlugins(promised)
   return {
-    projects: {
-      register: (path) => run(Effect.flatMap(ProjectRegistry, (registry) => registry.register(path))),
-      list: () => run(Effect.flatMap(ProjectRegistry, (registry) => registry.list())),
-      get: (id) => run(Effect.flatMap(ProjectRegistry, (registry) => registry.get(id))),
-      remove: (id) => run(Effect.flatMap(ProjectRegistry, (registry) => registry.remove(id))),
+    projects: projectsApi(promised),
+    config: configApi(promised, services, options.env),
+    sessions: sessionsApi(promised),
+    asks: asksApi(promised),
+    events: eventsApi(promised, services),
+    workspaces: workspacesApi(promised),
+    usage: usageApi(promised),
+    providers: providersApi(services),
+    close: async () => {
+      await runtime.dispose()
     },
-    config: {
-      load: (projectPath) => run(Effect.flatMap(Config, (config) => config.load({ projectPath, env: options.env }))),
-      validate: (projectPath) => run(Effect.flatMap(Config, (config) => config.validate(projectPath))),
-      schema: () => runtime.runSync(Effect.map(Config, (config) => config.schema())),
-    },
-    sessions: {
-      create: (input) => run(Effect.flatMap(SessionManager, (sessions) => sessions.create(input))),
-      prompt: (sessionId, input) => run(Effect.flatMap(SessionManager, (sessions) => sessions.prompt(sessionId, input))),
-      interrupt: (sessionId) => run(Effect.flatMap(SessionManager, (sessions) => sessions.interrupt(sessionId))),
-      stop: (sessionId) => run(Effect.flatMap(SessionManager, (sessions) => sessions.stop(sessionId))),
-      complete: (sessionId) => run(Effect.flatMap(SessionManager, (sessions) => sessions.complete(sessionId))),
-      resume: (sessionId) => run(Effect.flatMap(SessionManager, (sessions) => sessions.resume(sessionId))),
-      list: () => run(Effect.flatMap(SessionManager, (sessions) => sessions.list())),
-      get: (id) => run(Effect.flatMap(SessionManager, (sessions) => sessions.get(id))),
-    },
-    asks: {
-      pending: (sessionId) => run(Effect.flatMap(AskService, (asks) => asks.pending(sessionId))),
-      answer: (askId, answer, via) => run(Effect.flatMap(AskService, (asks) => Effect.asVoid(asks.answer(askId, answer, via)))),
-    },
-    events: {
-      subscribe: (filter) => Stream.toAsyncIterable(Stream.unwrap(Effect.map(EventLog, (log) => log.subscribe(filter))).pipe(Stream.provideContext(services))),
-      read: (filter, range) => run(Effect.flatMap(EventLog, (log) => log.read(filter, range))),
-    },
-    workspaces: {
-      list: (projectId) => run(Effect.flatMap(WorkspaceManager, (workspaces) => workspaces.list(projectId))),
-      prune: (projectId) => run(Effect.flatMap(WorkspaceManager, (workspaces) => workspaces.prune(projectId))),
-    },
-    usage: { session: (sessionId) => run(Effect.flatMap(UsageService, (usage) => usage.sessionUsage(sessionId))) },
-    providers: { list: () => runtime.runSync(Effect.map(PluginHost, (host) => host.agentProviders().map(summary))) },
-    close: () => runtime.dispose(),
+  }
+}
+
+// A kernel over a layer that brings its own store, with its plugins loaded
+// One that fails to start is disposed before the failure is passed on, so no handle or fiber stays behind
+export async function createKernelFrom(
+  layer: Layer.Layer<Services>,
+  options: KernelOptions,
+): Promise<Kernel> {
+  const runtime = ManagedRuntime.make(layer)
+  try {
+    return await boot(runtime, options)
+  } catch (error) {
+    await runtime.dispose()
+    throw error
   }
 }
 ```
-`Effect.context<R>()` and `Stream.provideContext` are the Effect 3 names; if the installed `effect@4.0.0` d.ts names them `Effect.services` / `Stream.provideServices` (the v4 rename of `Context` values to services), use those — the shape (capture once, provide to the stream) stays the same. `Stream.toAsyncIterable` is verified.
+`packages/kernel/src/facade/types.ts`:
+```ts
+import type { AnsweredVia, Ask, AskAnswer, EventEnvelope, PromptInput } from '@bytebureau/protocol'
+import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
+import type { EventFilter } from '../events/event-log.js'
+import type { KernelLayerOptions } from '../kernel-live.js'
+import type { Project } from '../projects/project-registry.js'
+import type { CreateSessionInput, Session, Turn } from '../sessions/types.js'
+import type { SessionUsage } from '../usage/usage-service.js'
+import type { PruneReport, WorkspaceInfo } from '../workspace/workspace-manager.js'
+
+// The log level of the layer comes from logging.level, a string as the command line gives it
+export interface KernelOptions extends Omit<KernelLayerOptions, 'logLevel'> {
+  readonly env: Readonly<Record<string, string | undefined>>
+  readonly logging?:
+    | {
+        readonly debug?: string | undefined
+        readonly level?: string | undefined
+        readonly json?: boolean | undefined
+      }
+    | undefined
+}
+
+export interface Kernel {
+  readonly projects: {
+    readonly register: (path: string) => Promise<Project>
+    readonly list: () => Promise<readonly Project[]>
+    readonly get: (id: string) => Promise<Project | undefined>
+    readonly remove: (id: string) => Promise<void>
+  }
+  readonly config: {
+    readonly load: (projectPath?: string) => Promise<ResolvedConfig>
+    readonly validate: (projectPath: string) => Promise<readonly ConfigIssue[]>
+    readonly schema: () => Record<string, unknown>
+  }
+  readonly sessions: {
+    readonly create: (input: CreateSessionInput) => Promise<Session>
+    readonly prompt: (sessionId: string, input: PromptInput) => Promise<Turn>
+    readonly interrupt: (sessionId: string) => Promise<void>
+    readonly stop: (sessionId: string) => Promise<void>
+    readonly complete: (sessionId: string) => Promise<void>
+    readonly resume: (sessionId: string) => Promise<Session>
+    readonly list: () => Promise<readonly Session[]>
+    readonly get: (id: string) => Promise<Session | undefined>
+  }
+  readonly asks: {
+    readonly pending: (sessionId?: string) => Promise<readonly Ask[]>
+    readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
+  }
+  readonly events: {
+    readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope>
+    readonly read: (
+      filter: EventFilter,
+      range: { readonly from: number; readonly to?: number },
+    ) => Promise<readonly EventEnvelope[]>
+  }
+  readonly workspaces: {
+    readonly list: (projectId?: string) => Promise<readonly WorkspaceInfo[]>
+    readonly prune: (projectId?: string) => Promise<PruneReport>
+  }
+  readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsage> }
+  readonly providers: {
+    readonly list: () => readonly { readonly id: string; readonly displayName: string }[]
+  }
+  /** Stops the agents and ends the open event subscriptions; a call made after it may reject. */
+  readonly close: () => Promise<void>
+}
+```
+`packages/kernel/src/facade/promised.ts`:
+```ts
+import type { Context, Effect, ManagedRuntime } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { KernelServices } from '../kernel-live.js'
+
+// Everything a kernel layer offers, the store included
+export type Services = KernelServices | SqlClient.SqlClient
+
+export type Runtime = ManagedRuntime.ManagedRuntime<Services, never>
+
+// A call of a service as a function that returns a promise
+export type Promised = <Id extends Services, Shape, Args extends readonly unknown[], Value>(
+  service: Context.Service<Id, Shape>,
+  call: (shape: Shape, ...args: Args) => Effect.Effect<Value, unknown>,
+) => (...args: Args) => Promise<Value>
+
+export const promisedBy =
+  (runtime: Runtime): Promised =>
+  (service, call) =>
+  async (...args) => {
+    const value = await runtime.runPromise(service.use((shape) => call(shape, ...args)))
+    return value
+  }
+```
+`packages/kernel/src/facade/projects.ts`:
+```ts
+import { ProjectRegistry } from '../projects/project-registry.js'
+import type { Promised } from './promised.js'
+import type { Kernel } from './types.js'
+
+export const projectsApi = (promised: Promised): Kernel['projects'] => ({
+  register: promised(ProjectRegistry, (registry, path) => registry.register(path)),
+  list: promised(ProjectRegistry, (registry) => registry.list()),
+  get: promised(ProjectRegistry, (registry, id) => registry.get(id)),
+  remove: promised(ProjectRegistry, (registry, id) => registry.remove(id)),
+})
+```
+`packages/kernel/src/facade/config.ts`:
+```ts
+import { Context } from 'effect'
+import { Config } from '../config/config.js'
+import type { Promised, Services } from './promised.js'
+import type { Kernel, KernelOptions } from './types.js'
+
+// The overrides come from the environment the caller gave
+export const configApi = (
+  promised: Promised,
+  services: Context.Context<Services>,
+  env: KernelOptions['env'],
+): Kernel['config'] => ({
+  load: promised(Config, (config, projectPath) => config.load({ projectPath, env })),
+  validate: promised(Config, (config, projectPath) => config.validate(projectPath)),
+  schema: () => Context.get(services, Config).schema(),
+})
+```
+`packages/kernel/src/facade/sessions.ts`:
+```ts
+import { Effect } from 'effect'
+import { AskService } from '../asks/ask-service.js'
+import { SessionManager } from '../sessions/session-manager.js'
+import { UsageService } from '../usage/usage-service.js'
+import type { Promised } from './promised.js'
+import type { Kernel } from './types.js'
+
+export const sessionsApi = (promised: Promised): Kernel['sessions'] => ({
+  create: promised(SessionManager, (sessions, input) => sessions.create(input)),
+  prompt: promised(SessionManager, (sessions, sessionId, input) =>
+    sessions.prompt(sessionId, input),
+  ),
+  interrupt: promised(SessionManager, (sessions, sessionId) => sessions.interrupt(sessionId)),
+  stop: promised(SessionManager, (sessions, sessionId) => sessions.stop(sessionId)),
+  complete: promised(SessionManager, (sessions, sessionId) => sessions.complete(sessionId)),
+  resume: promised(SessionManager, (sessions, sessionId) => sessions.resume(sessionId)),
+  list: promised(SessionManager, (sessions) => sessions.list()),
+  get: promised(SessionManager, (sessions, id) => sessions.get(id)),
+})
+
+// The record of the settled ask is not handed on
+export const asksApi = (promised: Promised): Kernel['asks'] => ({
+  pending: promised(AskService, (asks, sessionId) => asks.pending(sessionId)),
+  answer: promised(AskService, (asks, ...args) => Effect.asVoid(asks.answer(...args))),
+})
+
+export const usageApi = (promised: Promised): Kernel['usage'] => ({
+  session: promised(UsageService, (usage, sessionId) => usage.sessionUsage(sessionId)),
+})
+```
+`packages/kernel/src/facade/events.ts`:
+```ts
+import { Stream, type Context } from 'effect'
+import { EventLog } from '../events/event-log.js'
+import type { Promised, Services } from './promised.js'
+import type { Kernel } from './types.js'
+
+// A stream outlives any one call, so it runs on the captured services instead of through the runtime
+export const eventsApi = (
+  promised: Promised,
+  services: Context.Context<Services>,
+): Kernel['events'] => ({
+  subscribe: (filter) =>
+    Stream.toAsyncIterable(
+      Stream.unwrap(EventLog.useSync((log) => log.subscribe(filter))).pipe(
+        Stream.provideContext(services),
+      ),
+    ),
+  read: promised(EventLog, (log, filter, range) => log.read(filter, range)),
+})
+```
+`packages/kernel/src/facade/workspaces.ts`:
+```ts
+import { WorkspaceManager } from '../workspace/workspace-manager.js'
+import type { Promised } from './promised.js'
+import type { Kernel } from './types.js'
+
+export const workspacesApi = (promised: Promised): Kernel['workspaces'] => ({
+  list: promised(WorkspaceManager, (workspaces, projectId) => workspaces.list(projectId)),
+  prune: promised(WorkspaceManager, (workspaces, projectId) => workspaces.prune(projectId)),
+})
+```
+`packages/kernel/src/facade/plugins.ts`:
+```ts
+import { Context } from 'effect'
+import { PluginHost } from '../plugins/plugin-host.js'
+import type { Promised, Services } from './promised.js'
+import type { Kernel } from './types.js'
+
+// A plugin that fails to load is reported by the host and does not stop the kernel
+export async function loadPlugins(promised: Promised): Promise<void> {
+  await promised(PluginHost, (host) => host.load())()
+}
+
+export const providersApi = (services: Context.Context<Services>): Kernel['providers'] => ({
+  list: () =>
+    Context.get(services, PluginHost)
+      .agentProviders()
+      .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
+})
+```
+Verified in Effect 4.0.0: `Effect.context<R>()`, `Stream.provideContext`, `ManagedRuntime.make` → `runPromise`/`runSync`/`dispose`, `References.MinimumLogLevel` provided with `Layer.succeed`, `PubSub.shutdown` completing parked `Stream.fromSubscription` streams, `Stream.toAsyncIterable`.
 
 `packages/kernel/src/bun.ts`:
 ```ts
@@ -15995,18 +16734,24 @@ import path from 'node:path'
 import { Layer } from 'effect'
 import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 import { KernelLayer } from './kernel-live.js'
+import { parseLogLevel } from './logging/logging.js'
 import { StoreLive } from './store/store-live.js'
 
-export { StoreLive }
-export type { Kernel, KernelOptions }
+export { StoreLive } from './store/store-live.js'
+export type { Kernel, KernelOptions } from './facade.js'
 
-export function createKernel(options: KernelOptions): Promise<Kernel> {
+// The kernel of the binary: its store is the database under the home of the user
+export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const dataDir = path.join(options.home, 'data')
   mkdirSync(dataDir, { recursive: true })
-  return createKernelFrom(KernelLayer(options).pipe(Layer.provideMerge(StoreLive(path.join(dataDir, 'bytebureau.db')))), options)
+  const { level } = options.logging ?? {}
+  const layer = KernelLayer({ ...options, logLevel: parseLogLevel(level) })
+  const store = StoreLive(path.join(dataDir, 'bytebureau.db'))
+  const kernel = await createKernelFrom(layer.pipe(Layer.provideMerge(store)), options)
+  return kernel
 }
 ```
-Add to `index.ts`: `export { KernelLayer, KernelTest, type KernelLayerOptions, type KernelServices } from './kernel-live.js'`, `export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'`. Task 15's CLI imports `createKernel` and `Kernel` from `@bytebureau/kernel/bun` (not from the package root, which stays Node-safe).
+Add to `index.ts`: `export { KernelLayer, composeKernel, type KernelLayerOptions, type KernelServices } from './kernel-live.js'`, `export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'`; `KernelTest` is exported only from `@bytebureau/kernel/testing`. Task 15's CLI imports `createKernel` and `Kernel` from `@bytebureau/kernel/bun` (not from the package root, which stays Node-safe).
 
 - [ ] **Step 3: Run everything, commit**
 
