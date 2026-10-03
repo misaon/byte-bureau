@@ -18355,8 +18355,8 @@ git commit -m "feat(cli): add run, config, projects and workspaces commands on t
 ### Task 16: Gates, ADR-0010, docs, binary smoke in CI, full fresh-clone run
 
 **Files:**
-- Create: `docs/decisions/0010-sqlite-through-effect-sql.md`
-- Modify: `.github/workflows/ci.yml` (smoke the compiled binary with the fake provider), `CONTRIBUTING.md` (kernel onboarding paragraph), `apps/docs/src/content/docs/architecture.md`, `README.md` + `README.cs.md` (status line), `vitest.config.ts` (final coverage include), `.dependency-cruiser.cjs` (verify, no change expected)
+- Create: `docs/decisions/0010-sqlite-through-effect-sql.md`, `docs/decisions/0011-configuration-files-are-data.md` (jsonc-parser instead of c12, JSON/JSONC only, `extends` deferred as a kernel-native feature, binaries built with Bun's dotenv and bunfig autoload off)
+- Modify: `.github/workflows/ci.yml` (the kernel smoke step in `build-smoke`, `smoke-arm64` and `smoke-macos`, with `HOME_DIR=$(mktemp -d)` on its own line and the last three events printed on failure), `scripts/build-binaries.ts` + `scripts/build-binaries.test.ts` (`compileArgs` with `--no-compile-autoload-dotenv` and `--no-compile-autoload-bunfig` — a cwd `bunfig.toml` preload used to run on `bytebureau --version` and a cwd `.env` could move `BYTEBUREAU_HOME`), `CONTRIBUTING.md` ("Working in the kernel", links to ADR-0003/0010/0011), `apps/docs/src/content/docs/architecture.md` (package table, run flow, Phase A decisions), `README.md` + `README.cs.md` (status lines), `vitest.config.ts` (`context.ts` in the coverage include), `cspell-words.txt`; `bunfig.toml` and `.dependency-cruiser.cjs` verified unchanged
 
 - [ ] **Step 1: ADR-0010**
 
@@ -18379,6 +18379,25 @@ The kernel persists sessions, events and asks in SQLite and must run inside a co
 
 No typed query builder; queries are reviewed as SQL. Revisit Drizzle (schema as source of truth, `drizzle-kit generate` for migrations) once a stable release loads on Effect 4 and offers a `node:sqlite` driver. Node 24 prints an `ExperimentalWarning` for `node:sqlite` that the Vitest project silences.
 ```
+`docs/decisions/0011-configuration-files-are-data.md` (ruled during Task 5, written here):
+```markdown
+# Configuration files are data: JSON and JSONC read as text, c12 dropped
+
+- Status: accepted
+- Date: 2026-10-03
+
+## Context and problem statement
+
+The kernel merges `~/.bytebureau/config.json`, `<project>/bytebureau.json`, `<project>/bytebureau.local.json`, `BYTEBUREAU_*` variables and flags, and a project file comes from a repository the user has just cloned. The first loader was c12. With its RC files, dotenv, environment-specific keys, `package.json`, `extends` and giget switched off it was still a code loader and a normaliser: it imported the target of a symbolic link, turned a scalar root into `{}` and dropped top-level `null` sections and `$meta` before validation, so a file the schema would have rejected passed.
+
+## Decision
+
+The kernel reads `bytebureau.json` or `.jsonc`, `bytebureau.local.json` or `.jsonc` and `~/.bytebureau/config.json` or `.jsonc` as text and parses it with `jsonc-parser@3.3.1` (comments and trailing commas allowed); nothing is imported or run. Of the two extensions at most one may exist per layer, and only a regular file counts: a link to a file is read, a link to nowhere is an error, a directory of that name is ignored. A syntax error names its code, line and column, and a root that is not an object is an error of its file. The merged layers are validated with `effect/Schema` (unknown keys are errors), and every issue carries a JSON pointer and the layer that holds it: the file, `env:<NAME>` for a `BYTEBUREAU_*` variable or `flag:<key>` for a flag. The `extends` of team presets from the spec is deferred to a later phase as a kernel-native feature: JSON or JSONC presets by relative path, merged as the lowest project layer, with cycle detection. The binaries are built with `--no-compile-autoload-dotenv` and `--no-compile-autoload-bunfig` for the same reason: Bun would otherwise read a `.env` and run a `bunfig.toml` preload from the directory the binary starts in.
+
+## Consequences
+
+A configuration file can never run code, and a file that does not fit the schema is reported where it is wrong instead of being repaired silently. There are no `.ts` or `.js` config files, no dotenv loading and no remote presets, and until presets return `extends` is an unknown key. The loader is a small module the project owns and tests (`packages/kernel/src/config`) instead of a dependency to configure away.
+```
 
 - [ ] **Step 2: CI smoke of the compiled binary (Bun-only store path)**
 
@@ -18396,7 +18415,7 @@ No typed query builder; queries are reviewed as SQL. Revisit Drizzle (schema as 
           grep -q '"type":"session.completed"' events.ndjson
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts
 ```
-(`smoke-macos` gets the same step with `dist/bytebureau-*-darwin-arm64`.) The step is the only place the `StoreLive`/`bun:sqlite` path runs in CI; keep it. Run `bun run lint:actions` → clean (no new `uses:`; nothing to pin).
+As shipped, all three smoke jobs carry the step with their binary glob (`linux-x64`, `linux-arm64` with a `chmod +x` after the artifact download, `darwin-arm64`), `HOME_DIR=$(mktemp -d)` assigned on its own line and `tail -n 3 events.ndjson` printed when a check fails. The step is the only place the compiled binary runs the kernel in CI (the CLI subprocess tests also run `StoreLive` under Bun, from source). `bun run lint:actions` → clean (no new `uses:`).
 
 - [ ] **Step 3: Docs and contributor notes**
 
