@@ -11,6 +11,7 @@ describe(allowlistEnv, () => {
         LC_ALL: 'C',
         TMPDIR: '/t',
         TERM: 'xterm',
+        SSH_AUTH_SOCK: '/tmp/agent.sock',
         ANTHROPIC_API_KEY: 'not-a-real-key',
         AWS_SECRET: 'y',
         BYTEBUREAU_HOME: '/bb',
@@ -26,6 +27,7 @@ describe(allowlistEnv, () => {
       'LANG',
       'LC_ALL',
       'PATH',
+      'SSH_AUTH_SOCK',
       'TERM',
       'TMPDIR',
       'TRACEPARENT',
@@ -34,7 +36,15 @@ describe(allowlistEnv, () => {
 
   it('drops look-alike names, unset variables and extras the source does not have', () => {
     const env = allowlistEnv(
-      { PATHS: '/x', path: '/lower', LC: 'x', BYTEBUREAU: 'y', HOME: undefined, LANG: 'C' },
+      {
+        PATHS: '/x',
+        path: '/lower',
+        LC: 'x',
+        BYTEBUREAU: 'y',
+        SSH_AUTH_SOCKET: '/z',
+        HOME: undefined,
+        LANG: 'C',
+      },
       ['MISSING'],
     )
     expect(env).toStrictEqual({ LANG: 'C' })

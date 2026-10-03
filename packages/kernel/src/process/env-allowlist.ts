@@ -1,4 +1,4 @@
-const FIXED = new Set(['PATH', 'HOME', 'LANG', 'TMPDIR', 'TERM', 'TRACEPARENT'])
+const FIXED = new Set(['PATH', 'HOME', 'LANG', 'TMPDIR', 'TERM', 'SSH_AUTH_SOCK', 'TRACEPARENT'])
 
 const allowed = (name: string, extra: ReadonlySet<string>): boolean =>
   FIXED.has(name) || name.startsWith('LC_') || name.startsWith('BYTEBUREAU_') || extra.has(name)
