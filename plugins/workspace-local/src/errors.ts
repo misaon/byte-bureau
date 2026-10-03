@@ -5,6 +5,7 @@ export type WorkspaceErrorCode =
   | 'locked'
   | 'dirty'
   | 'git_failed'
+  | 'fs_failed'
 
 export class WorkspaceError extends Error {
   public readonly code: WorkspaceErrorCode

@@ -7,12 +7,13 @@ import {
   spySpawner,
   versionSpawner,
   workspaceSpec,
+  type SpawnCall,
 } from './testing/fixtures.js'
 import { nodeSpawner } from './testing/node-spawner.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
-const fetches = (calls: readonly (readonly string[])[]): readonly (readonly string[])[] =>
-  calls.filter((args) => args[0] === 'fetch')
+const fetches = (calls: readonly SpawnCall[]): readonly SpawnCall[] =>
+  calls.filter((call) => call.args[0] === 'fetch')
 
 // Pushes one commit to origin from a second clone and returns its id
 function pushFromElsewhere(repo: string): string {
@@ -44,6 +45,27 @@ describe('base ref', () => {
   })
 })
 
+describe('new branch', () => {
+  it('has no upstream, so a push does not aim at the base branch', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.baseRef).toBe('origin/main')
+    expect(git(repo, 'for-each-ref', '--format=%(upstream)', 'refs/heads/bb/add-hello')).toBe('')
+  })
+})
+
+describe('git environment', () => {
+  it('runs every git command without a terminal prompt', async () => {
+    expect.hasAssertions()
+    const { spawner, calls } = spySpawner()
+    const spec = workspaceSpec(createTempRepo({ withRemote: true }))
+    await createRuntime(spawner).provision(spec)
+    expect(fetches(calls)).toHaveLength(1)
+    expect(calls.filter((call) => call.env['GIT_TERMINAL_PROMPT'] !== '0')).toStrictEqual([])
+  })
+})
+
 describe('fetching', () => {
   it('fetches once per minute and project', async () => {
     expect.hasAssertions()
@@ -72,14 +94,17 @@ describe('fetching', () => {
     expect(fetches(calls)).toHaveLength(2)
   })
 
-  it('goes on with the last known refs and says so when the fetch fails', async () => {
+  it('goes on with the last known refs and tells the session when the fetch fails', async () => {
     expect.hasAssertions()
     const repo = createTempRepo({ withRemote: true })
     git(repo, 'remote', 'set-url', 'origin', path.join(tempDir('bb-gone-'), 'missing'))
-    const { logger, entries } = recordingLogger()
-    const handle = await createRuntime(nodeSpawner, logger).provision(workspaceSpec(repo))
+    const session = recordingLogger()
+    const daemon = recordingLogger()
+    const spec = workspaceSpec(repo, { logger: session.logger })
+    const handle = await createRuntime(nodeSpawner, daemon.logger).provision(spec)
     expect(handle.baseRef).toBe('origin/main')
-    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+    expect(session.entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+    expect(daemon.entries.filter((entry) => entry.level === 'warn')).toStrictEqual([])
   })
 })
 

@@ -20,13 +20,13 @@ function readHeader(line: string, status: { ahead: number; behind: number; branc
   }
 }
 
-// Output of `git status --porcelain=v2 --branch`: `#` headers, then one entry per change
+// Output of `git status --porcelain=v2 --branch`: `#` headers, then one entry per change; `!` entries are ignored files
 export function parseStatusV2(text: string): ParsedStatus {
   const status = { dirty: false, ahead: 0, behind: 0, branch: '' }
   for (const line of text.split('\n')) {
     if (line.startsWith('#')) {
       readHeader(line, status)
-    } else if (line.trim() !== '') {
+    } else if (line.trim() !== '' && !line.startsWith('! ')) {
       status.dirty = true
     }
   }

@@ -59,12 +59,17 @@ export function createRuntime(
   return new LocalWorkspaceRuntime(spawner, logger)
 }
 
-// Records the arguments of every spawn, then runs the process for real
-export function spySpawner(): { readonly spawner: ProcessSpawner; readonly calls: string[][] } {
-  const calls: string[][] = []
+export interface SpawnCall {
+  readonly args: readonly string[]
+  readonly env: Readonly<Record<string, string>>
+}
+
+// Records the arguments and the environment of every spawn, then runs the process for real
+export function spySpawner(): { readonly spawner: ProcessSpawner; readonly calls: SpawnCall[] } {
+  const calls: SpawnCall[] = []
   const spawner: ProcessSpawner = {
     async spawn(spec) {
-      calls.push([...spec.args])
+      calls.push({ args: [...spec.args], env: { ...spec.env } })
       const child = await nodeSpawner.spawn(spec)
       return child
     },
@@ -78,6 +83,18 @@ export function scriptedSpawner(scriptFor: (args: readonly string[]) => string):
     async spawn(spec) {
       const args = ['-e', scriptFor(spec.args)]
       const child = await nodeSpawner.spawn({ ...spec, command: process.execPath, args })
+      return child
+    },
+  }
+}
+
+// A spawner that fails the git commands that start with one of the phrases, such as 'branch -D', and runs the rest for real
+export function failingSpawner(...phrases: readonly string[]): ProcessSpawner {
+  return {
+    async spawn(spec) {
+      const fails = phrases.includes(spec.args.slice(0, 2).join(' '))
+      const failure = { ...spec, command: process.execPath, args: ['-e', 'process.exit(1)'] }
+      const child = await nodeSpawner.spawn(fails ? failure : spec)
       return child
     },
   }

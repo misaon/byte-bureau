@@ -1,11 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import type { WorkspaceSpec } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import { LocalWorkspaceRuntime } from './local-runtime.js'
 import { SESSION_ID, createRuntime, readJson, workspaceSpec } from './testing/fixtures.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
 const worktreeOf = (repo: string): string => path.join(repo, '.bytebureau', 'worktrees', SESSION_ID)
+
+// Every session asks for the same branch name
+const sameBranch = (sessionId: string, projectPath: string): WorkspaceSpec =>
+  workspaceSpec(projectPath, { sessionId, branch: 'bb/x' })
 
 describe(LocalWorkspaceRuntime, () => {
   it('provisions a worktree on the requested branch from the local base branch', async () => {
@@ -72,6 +77,40 @@ describe('project checks', () => {
   })
 })
 
+describe('project paths', () => {
+  it('refuses a project path that is not a directory', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const missing = workspaceSpec(path.join(tempDir('bb-plain-'), 'missing'))
+    const file = workspaceSpec(path.join(repo, 'README.md'))
+    await expect(createRuntime().provision(missing)).rejects.toMatchObject({
+      code: 'not_a_repository',
+    })
+    await expect(createRuntime().provision(file)).rejects.toMatchObject({
+      code: 'not_a_repository',
+    })
+  })
+
+  it('refuses a repository that holds a session marker', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
+    await expect(createRuntime().provision(workspaceSpec(repo))).rejects.toMatchObject({
+      code: 'is_bytebureau_worktree',
+    })
+  })
+
+  it('still knows a ByteBureau worktree whose marker was deleted', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    rmSync(path.join(handle.path, '.bytebureau-session.json'))
+    await expect(runtime.provision(workspaceSpec(handle.path))).rejects.toMatchObject({
+      code: 'is_bytebureau_worktree',
+    })
+  })
+})
+
 describe('branch names', () => {
   it('suffixes the branch when it already exists', async () => {
     expect.hasAssertions()
@@ -89,5 +128,24 @@ describe('branch names', () => {
     const handle = await createRuntime().provision(workspaceSpec(repo))
     expect(handle.branch).toBe('bb/add-hello-3')
     expect(git(handle.path, 'branch', '--show-current')).toBe('bb/add-hello-3')
+  })
+
+  it('gives sessions that start at once a name each, however they name the project', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const inside = path.join(repo, 'src')
+    mkdirSync(inside)
+    const runtime = createRuntime()
+    const handles = await Promise.all([
+      runtime.provision(sameBranch('a', repo)),
+      runtime.provision(sameBranch('b', inside)),
+      runtime.provision(sameBranch('c', repo)),
+    ])
+    expect(handles.map((handle) => handle.branch).toSorted()).toStrictEqual([
+      'bb/x',
+      'bb/x-2',
+      'bb/x-3',
+    ])
+    expect(handles.map((handle) => existsSync(handle.path))).toStrictEqual([true, true, true])
   })
 })

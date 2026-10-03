@@ -1,14 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   SESSION_ID,
   createRuntime,
+  failingSpawner,
   readJson,
   recordingLogger,
   workspaceSpec,
 } from './testing/fixtures.js'
-import { nodeSpawner } from './testing/node-spawner.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
 // A repository that ignores what a worktree is meant to receive, committed like a real project's
@@ -29,13 +29,45 @@ function repoWithIgnoredFiles(): string {
   return repo
 }
 
+// A temporary directory outside any project, with a secret file in it
+function outsideWithSecret(): { readonly dir: string; readonly secret: string } {
+  const dir = tempDir('bb-outside-')
+  const secret = path.join(dir, 'secret.txt')
+  writeFileSync(secret, 'secret\n')
+  return { dir, secret }
+}
+
 // Entries that point out of the project by relative and by absolute path, and one that is a directory
 function escapingEntries(repo: string): { outside: string; copyIgnored: string[] } {
-  const outside = tempDir('bb-outside-')
-  writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
+  const { dir, secret } = outsideWithSecret()
   mkdirSync(path.join(repo, 'config'))
-  const relative = path.join('..', path.basename(outside), 'secret.txt')
-  return { outside, copyIgnored: [relative, path.join(outside, 'secret.txt'), 'config'] }
+  const relative = path.join('..', path.basename(dir), path.basename(secret))
+  return { outside: dir, copyIgnored: [relative, secret, 'config'] }
+}
+
+// A project with links to something outside it, a link to something inside it and a plain file
+function repoWithLinks(): string {
+  const repo = createTempRepo()
+  const { dir, secret } = outsideWithSecret()
+  symlinkSync(secret, path.join(repo, 'leak.env'))
+  symlinkSync(dir, path.join(repo, 'linked'))
+  mkdirSync(path.join(repo, 'config'))
+  writeFileSync(path.join(repo, 'config', 'shared.env'), 'SHARED=1\n')
+  symlinkSync(path.join('config', 'shared.env'), path.join(repo, '.env'))
+  return repo
+}
+
+// The base branch holds a directory where the main checkout keeps a file
+function repoWithClashingBase(): string {
+  const repo = createTempRepo()
+  git(repo, 'checkout', '-q', '-b', 'clash')
+  mkdirSync(path.join(repo, 'scratch'))
+  writeFileSync(path.join(repo, 'scratch', 'tracked.txt'), 'x\n')
+  git(repo, 'add', 'scratch')
+  git(repo, 'commit', '-q', '-m', 'directory')
+  git(repo, 'checkout', '-q', 'main')
+  writeFileSync(path.join(repo, 'scratch'), 'a file\n')
+  return repo
 }
 
 describe('copying ignored files', () => {
@@ -55,14 +87,79 @@ describe('copying ignored files', () => {
     const repo = createTempRepo()
     const { outside, copyIgnored } = escapingEntries(repo)
     const { logger, entries } = recordingLogger()
-    const handle = await createRuntime(nodeSpawner, logger).provision(
-      workspaceSpec(repo, { copyIgnored }),
-    )
+    const handle = await createRuntime().provision(workspaceSpec(repo, { copyIgnored, logger }))
     const beside = path.join(handle.path, '..', path.basename(outside))
     expect(existsSync(beside)).toBe(false)
     expect(existsSync(path.join(handle.path, 'config'))).toBe(false)
     expect(existsSync(path.join(handle.path, outside))).toBe(false)
     expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(3)
+  })
+})
+
+describe('symlinked entries', () => {
+  it('skips a link that leads out of the project, also through a linked directory', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const copyIgnored = ['leak.env', 'linked/secret.txt']
+    const spec = workspaceSpec(repoWithLinks(), { copyIgnored, logger })
+    const handle = await createRuntime().provision(spec)
+    expect(existsSync(path.join(handle.path, 'leak.env'))).toBe(false)
+    expect(existsSync(path.join(handle.path, 'linked'))).toBe(false)
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(2)
+  })
+
+  it('copies the content of a link that stays inside the project to the path of the entry', async () => {
+    expect.hasAssertions()
+    const spec = workspaceSpec(repoWithLinks(), { copyIgnored: ['.env'] })
+    const handle = await createRuntime().provision(spec)
+    expect(readFileSync(path.join(handle.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+    expect(existsSync(path.join(handle.path, 'config'))).toBe(false)
+  })
+
+  it('skips an entry that runs through a file without a warning', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const spec = workspaceSpec(createTempRepo(), { copyIgnored: ['README.md/x'], logger })
+    await expect(createRuntime().provision(spec)).resolves.toMatchObject({ branch: 'bb/add-hello' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toStrictEqual([])
+  })
+})
+
+describe('a provision that fails halfway', () => {
+  it('takes back the worktree and the branch and reports the file system error', async () => {
+    expect.hasAssertions()
+    const repo = repoWithClashingBase()
+    const spec = workspaceSpec(repo, { baseBranch: 'clash', copyIgnored: ['scratch'] })
+    await expect(createRuntime().provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(existsSync(path.join(repo, '.bytebureau', 'worktrees', SESSION_ID))).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('')
+    expect(git(repo, 'worktree', 'list')).not.toContain('.bytebureau')
+  })
+
+  it('reports the original error and says so when it cannot take the worktree back', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const runtime = createRuntime(failingSpawner('worktree remove', 'branch -D'))
+    const spec = workspaceSpec(repoWithClashingBase(), {
+      baseBranch: 'clash',
+      copyIgnored: ['scratch'],
+      logger,
+    })
+    await expect(runtime.provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+  })
+
+  it('creates nothing when the exclude list cannot be updated', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const exclude = path.join(repo, '.git', 'info', 'exclude')
+    rmSync(exclude)
+    mkdirSync(exclude)
+    await expect(createRuntime().provision(workspaceSpec(repo))).rejects.toMatchObject({
+      code: 'fs_failed',
+    })
+    expect(existsSync(path.join(repo, '.bytebureau'))).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('')
   })
 })
 

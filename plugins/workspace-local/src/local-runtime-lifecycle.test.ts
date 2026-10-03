@@ -124,6 +124,46 @@ describe('destroy', () => {
   })
 })
 
+// A provisioned worktree whose base branch has been renamed away
+async function withoutBaseRef(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
+  const repo = createTempRepo()
+  const handle = await runtime.provision(workspaceSpec(repo))
+  git(repo, 'branch', '-m', 'main', 'trunk')
+  return handle
+}
+
+describe('without its base ref', () => {
+  it.each([[{}], [{ force: true }]])('destroys the worktree with %j', async (options) => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await runtime.destroy(handle, options)
+    expect(existsSync(handle.path)).toBe(false)
+  })
+
+  it('cannot say how far it is from the base, as git_failed', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await expect(runtime.status(handle)).rejects.toMatchObject({ code: 'git_failed' })
+  })
+})
+
+describe('git configuration', () => {
+  it('sees untracked files whatever status.showUntrackedFiles says', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    git(repo, 'config', 'status.showUntrackedFiles', 'no')
+    writeFileSync(path.join(handle.path, 'agent.txt'), 'work\n')
+    expect(git(handle.path, 'status', '--porcelain')).toBe('')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ dirty: true })
+    await expect(runtime.destroy(handle)).rejects.toMatchObject({ code: 'dirty' })
+    expect(existsSync(path.join(handle.path, 'agent.txt'))).toBe(true)
+  })
+})
+
 describe('exec', () => {
   it('runs a command in the worktree', async () => {
     expect.hasAssertions()
