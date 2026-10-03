@@ -3844,59 +3844,280 @@ git commit -m "feat(kernel): load layered configuration with c12 and report poin
 - Consumes: `SqlClient` (Task 3), `uuidv7`/`nowIso` (Task 4), `EventEnvelope`, `KernelEvent`, `isEphemeral` (Task 1); Effect `PubSub.unbounded`, `Stream.fromPubSub`, `Stream.toAsyncIterable` (verified).
 - Produces: `EventLog` service `{ publish(event: KernelEvent): Effect<EventEnvelope, StoreError>; subscribe(filter: EventFilter): Stream<EventEnvelope, StoreError>; read(filter: EventFilter, range: { from: number; to?: number }): Effect<readonly EventEnvelope[], StoreError> }`, `EventLogLive: Layer<EventLog, never, SqlClient>`, `EventFilter { sessionId?, projectId?, types?, since?, ephemeral? }`, `matches(filter, envelope)`.
 
-Semantics: durable events get the next `seq` from SQLite (`RETURNING seq`) and `seq` is monotonic across the process; ephemeral events carry `seq: 0`, are never persisted and are delivered only to live subscribers. `subscribe` opens the live subscription first, then replays rows with `seq > since`, then forwards live envelopes whose `seq` is greater than the last replayed one (or any ephemeral), so a subscriber sees no gap and no duplicate.
+Semantics: durable events get the next `seq` from SQLite (`RETURNING seq`) and `seq` is monotonic across the process; ephemeral events carry `seq: 0`, are never persisted and are delivered only to live subscribers. `subscribe` takes the hub subscription explicitly (`PubSub.subscribe` inside `Stream.unwrap`) before the replay read, replays rows with `seq > since`, then forwards live envelopes whose `seq` is greater than the replay watermark (ephemeral always pass), so a subscriber sees no gap and no duplicate. As shipped: the watermark is the static last replayed `seq` (a moving one would drop a late lower-`seq` event from a concurrent publisher, so live delivery is complete but not ordered under concurrency — consumers order by `seq`); `read` narrows with `sql.and` so the `(session_id, seq)`/`(project_id, seq)` indexes are used; a missing `RETURNING` row fails the publish; the hub is never shut down (Task 14 adds the finalizer).
 
 - [ ] **Step 1: Failing tests**
 
 `packages/kernel/src/events/event-log.test.ts`:
 ```ts
-import { assert, it, layer } from '@effect/vitest'
-import type { EventEnvelope } from '@bytebureau/protocol'
-import { Effect, Fiber, Layer, Stream } from 'effect'
+import type { EventEnvelope, KernelEvent } from '@bytebureau/protocol'
+import { assert, describe, expect, it } from '@effect/vitest'
+import { Effect, Fiber, Latch, Layer, Stream } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { StoreError } from '../errors.js'
 import { StoreTest } from '../store/store-test.js'
-import { EventLog, EventLogLive, matches } from './event-log.js'
+import {
+  EventLog,
+  EventLogLive,
+  matches,
+  type EventFilter,
+  type EventLogShape,
+} from './event-log.js'
 
 const TestLayer = EventLogLive.pipe(Layer.provideMerge(StoreTest))
 
-layer(TestLayer)('EventLog', (it) => {
-  it.effect('assigns increasing seq to durable events and none to ephemeral ones', () =>
-    Effect.gen(function* () {
+const created = (sessionId: string): KernelEvent => ({
+  type: 'session.created',
+  sessionId,
+  payload: { status: 'created', title: 'Fix the build', employeeId: 'dev', providerId: 'fake' },
+})
+
+const provisioning = (sessionId: string): KernelEvent => ({
+  type: 'session.provisioning',
+  sessionId,
+  payload: { status: 'provisioning' },
+})
+
+const ready = (sessionId: string): KernelEvent => ({
+  type: 'session.ready',
+  sessionId,
+  payload: { status: 'ready' },
+})
+
+const delta = (sessionId: string, text: string): KernelEvent => ({
+  type: 'message.assistant.delta',
+  sessionId,
+  payload: { kind: 'text', text },
+})
+
+// The subscriber has subscribed and replayed up to its first wait when this returns
+const collect = (
+  log: EventLogShape,
+  filter: EventFilter,
+  count: number,
+): Effect.Effect<Fiber.Fiber<EventEnvelope[], StoreError>> =>
+  Effect.forkChild(log.subscribe(filter).pipe(Stream.take(count), Stream.runCollect), {
+    startImmediately: true,
+  })
+
+describe(matches, () => {
+  const envelope: EventEnvelope = {
+    seq: 1,
+    id: 'x',
+    ts: 't',
+    type: 'tool.started',
+    sessionId: 's',
+    projectId: 'p',
+    payload: {},
+  }
+
+  it('filters by session, project and type', () => {
+    expect(matches({ sessionId: 's' }, envelope)).toBe(true)
+    expect(matches({ types: ['tool.started'] }, envelope)).toBe(true)
+    expect(matches({ projectId: 'other' }, envelope)).toBe(false)
+    expect(matches({ sessionId: 'other' }, envelope)).toBe(false)
+    expect(matches({ types: ['tool.completed'] }, envelope)).toBe(false)
+  })
+
+  it('lets every envelope through an empty filter', () => {
+    expect(matches({}, envelope)).toBe(true)
+    expect(matches({ projectId: 'p', sessionId: 's', types: ['tool.started'] }, envelope)).toBe(
+      true,
+    )
+  })
+
+  it('rejects ephemeral envelopes only when ephemeral is false', () => {
+    const live: EventEnvelope = { ...envelope, seq: 0, type: 'heartbeat' }
+    expect(matches({ ephemeral: false }, live)).toBe(false)
+    expect(matches({ ephemeral: true }, live)).toBe(true)
+    expect(matches({}, live)).toBe(true)
+    expect(matches({ ephemeral: false }, envelope)).toBe(true)
+  })
+})
+
+it.layer(TestLayer)('EventLog publish', (suite) => {
+  suite.effect('assigns increasing seq to durable events and none to ephemeral ones', () =>
+    Effect.gen(function* assignsSeq() {
       const log = yield* EventLog
-      const a = yield* log.publish({ type: 'session.created', sessionId: 's1', payload: { status: 'created', title: 't', employeeId: 'e', providerId: 'fake' } })
-      const delta = yield* log.publish({ type: 'message.assistant.delta', sessionId: 's1', payload: { kind: 'text', text: 'x' } })
-      const b = yield* log.publish({ type: 'session.ready', sessionId: 's1', payload: { status: 'ready' } })
-      assert.ok(b.seq > a.seq)
-      assert.strictEqual(delta.seq, 0)
+      const first = yield* log.publish(created('s1'))
+      const chunk = yield* log.publish(delta('s1', 'x'))
+      const second = yield* log.publish(ready('s1'))
+      assert.ok(first.seq > 0)
+      assert.ok(second.seq > first.seq)
+      assert.strictEqual(chunk.seq, 0)
       const stored = yield* log.read({ sessionId: 's1' }, { from: 0 })
-      assert.deepStrictEqual(stored.map((event) => event.type), ['session.created', 'session.ready'])
+      assert.deepStrictEqual(
+        stored.map((event) => event.type),
+        ['session.created', 'session.ready'],
+      )
     }),
   )
 
-  it.effect('replays from since and continues live without gaps or duplicates', () =>
-    Effect.gen(function* () {
+  suite.effect('stores the envelope as published and omits the ids an event lacks', () =>
+    Effect.gen(function* roundTrips() {
       const log = yield* EventLog
-      const first = yield* log.publish({ type: 'session.created', sessionId: 's2', payload: { status: 'created', title: 't', employeeId: 'e', providerId: 'fake' } })
-      yield* log.publish({ type: 'session.provisioning', sessionId: 's2', payload: { status: 'provisioning' } })
-      const collected = yield* Effect.forkChild(log.subscribe({ sessionId: 's2', since: first.seq }).pipe(Stream.take(3), Stream.runCollect))
-      yield* Effect.yieldNow()
-      yield* Effect.yieldNow()
-      yield* log.publish({ type: 'session.ready', sessionId: 's2', payload: { status: 'ready' } })
-      yield* log.publish({ type: 'message.assistant.delta', sessionId: 's2', payload: { kind: 'text', text: 'live' } })
-      const events = [...(yield* Fiber.join(collected))] as EventEnvelope[]
-      assert.deepStrictEqual(events.map((event) => event.type), ['session.provisioning', 'session.ready', 'message.assistant.delta'])
-      assert.ok(events[0]!.seq > first.seq && events[1]!.seq > events[0]!.seq)
+      const scoped = yield* log.publish({
+        type: 'tool.started',
+        projectId: 'p1',
+        sessionId: 's2',
+        turnId: 't1',
+        payload: { id: 'call-1', name: 'Read', kind: 'builtin', input: { path: 'a.ts' } },
+      })
+      const bare = yield* log.publish({ type: 'profile.removed', payload: { profileId: 'x' } })
+      const stored = yield* log.read({}, { from: scoped.seq - 1, to: bare.seq })
+      assert.deepStrictEqual(stored, [scoped, bare])
+      assert.deepStrictEqual(Object.keys(bare).toSorted(), ['id', 'payload', 'seq', 'ts', 'type'])
     }),
   )
 })
 
-it('matches filters by session, project and type', () => {
-  const envelope = { seq: 1, id: 'x', ts: 't', type: 'tool.started', sessionId: 's', projectId: 'p', payload: {} } as EventEnvelope
-  assert.ok(matches({ sessionId: 's' }, envelope))
-  assert.ok(matches({ types: ['tool.started'] }, envelope))
-  assert.ok(!matches({ projectId: 'other' }, envelope))
+it.layer(TestLayer)('EventLog read', (suite) => {
+  suite.effect('filters by project and session', () =>
+    Effect.gen(function* readsScoped() {
+      const log = yield* EventLog
+      const first = yield* log.publish({ ...created('s3'), projectId: 'p3' })
+      const second = yield* log.publish({ ...created('s3b'), projectId: 'p3' })
+      const other = yield* log.publish({ ...created('s4'), projectId: 'p4' })
+      assert.deepStrictEqual(yield* log.read({ projectId: 'p3' }, { from: 0 }), [first, second])
+      assert.deepStrictEqual(yield* log.read({ projectId: 'p4' }, { from: 0 }), [other])
+      assert.deepStrictEqual(yield* log.read({ sessionId: 's3' }, { from: 0 }), [first])
+      const both = { projectId: 'p4', sessionId: 's3' }
+      assert.deepStrictEqual(yield* log.read(both, { from: 0 }), [])
+    }),
+  )
+
+  suite.effect('filters by type and keeps to the range, after from and up to to', () =>
+    Effect.gen(function* readsRange() {
+      const log = yield* EventLog
+      const first = yield* log.publish(created('s12'))
+      const second = yield* log.publish(provisioning('s12'))
+      const third = yield* log.publish(ready('s12'))
+      const types = ['session.provisioning', 'session.ready']
+      const typed = yield* log.read({ sessionId: 's12', types }, { from: 0 })
+      assert.deepStrictEqual(typed, [second, third])
+      const window = yield* log.read({ sessionId: 's12' }, { from: first.seq, to: second.seq })
+      assert.deepStrictEqual(window, [second])
+    }),
+  )
+
+  suite.effect('returns nothing when no stored event matches', () =>
+    Effect.gen(function* readsNothing() {
+      const log = yield* EventLog
+      const only = yield* log.publish(created('s5'))
+      assert.deepStrictEqual(yield* log.read({ sessionId: 'nobody' }, { from: 0 }), [])
+      assert.deepStrictEqual(yield* log.read({ projectId: 'nowhere' }, { from: 0 }), [])
+      assert.deepStrictEqual(yield* log.read({ types: ['tool.failed'] }, { from: 0 }), [])
+      assert.deepStrictEqual(yield* log.read({ sessionId: 's5' }, { from: only.seq }), [])
+    }),
+  )
 })
+
+it.layer(TestLayer)('EventLog replay and live', (suite) => {
+  suite.effect('replays from since and continues live without gaps or duplicates', () =>
+    Effect.gen(function* replaysThenLive() {
+      const log = yield* EventLog
+      const first = yield* log.publish(created('s6'))
+      const second = yield* log.publish(provisioning('s6'))
+      const collected = yield* collect(log, { sessionId: 's6', since: first.seq }, 3)
+      // The subscriber already runs up to its first wait; the two turns are margin
+      yield* Effect.yieldNow
+      yield* Effect.yieldNow
+      const third = yield* log.publish(ready('s6'))
+      const fourth = yield* log.publish(delta('s6', 'live'))
+      assert.deepStrictEqual(yield* Fiber.join(collected), [second, third, fourth])
+      assert.ok(second.seq > first.seq && third.seq > second.seq)
+    }),
+  )
+
+  suite.effect('keeps what is published while the replay is still being consumed', () =>
+    Effect.gen(function* publishesDuringReplay() {
+      const log = yield* EventLog
+      const first = yield* log.publish(created('s7'))
+      const [replaying, resume] = yield* Effect.all([Latch.make(), Latch.make()])
+      const hold = Effect.andThen(replaying.open, resume.await)
+      const stream = log.subscribe({ sessionId: 's7' }).pipe(Stream.tap(() => hold))
+      const collected = yield* Effect.forkChild(Stream.runCollect(Stream.take(stream, 2)))
+      yield* replaying.await
+      const second = yield* log.publish(ready('s7'))
+      yield* resume.open
+      assert.deepStrictEqual(yield* Fiber.join(collected), [first, second])
+    }),
+  )
+})
+
+it.layer(TestLayer)('EventLog overlap', (suite) => {
+  suite.effect('delivers an event once when the replay and the live feed both carry it', () =>
+    Effect.gen(function* deliversOnce() {
+      const [sql, log, commit, replayed] = yield* Effect.all([
+        SqlClient.SqlClient,
+        EventLog,
+        Latch.make(),
+        Latch.make(),
+      ])
+      // The open transaction holds the connection, so the replay query waits for its commit
+      const publishing = Effect.andThen(commit.await, log.publish(ready('s8')))
+      const writer = yield* Effect.forkChild(sql.withTransaction(publishing), {
+        startImmediately: true,
+      })
+      const stream = log.subscribe({ sessionId: 's8' }).pipe(Stream.tap(() => replayed.open))
+      const collected = yield* Effect.forkChild(Stream.runCollect(Stream.take(stream, 2)), {
+        startImmediately: true,
+      })
+      yield* commit.open
+      const second = yield* Fiber.join(writer)
+      yield* replayed.await
+      const third = yield* log.publish(provisioning('s8'))
+      assert.deepStrictEqual(yield* Fiber.join(collected), [second, third])
+    }),
+  )
+})
+
+it.layer(TestLayer)('EventLog live delivery', (suite) => {
+  suite.effect('skips live events at or below since', () =>
+    Effect.gen(function* skipsBelowSince() {
+      const log = yield* EventLog
+      const first = yield* log.publish(created('s9'))
+      const upToDate = yield* collect(log, { sessionId: 's9', since: first.seq }, 1)
+      const ahead = yield* collect(log, { sessionId: 's9', since: first.seq + 100 }, 1)
+      const second = yield* log.publish(ready('s9'))
+      const chunk = yield* log.publish(delta('s9', 'x'))
+      assert.deepStrictEqual(yield* Fiber.join(upToDate), [second])
+      assert.deepStrictEqual(yield* Fiber.join(ahead), [chunk])
+    }),
+  )
+
+  suite.effect('fans ephemeral events out to live subscribers only', () =>
+    Effect.gen(function* fansOutEphemeral() {
+      const log = yield* EventLog
+      yield* log.publish(delta('s10', 'early'))
+      const everything = yield* collect(log, { sessionId: 's10' }, 2)
+      const durableOnly = yield* collect(log, { sessionId: 's10', ephemeral: false }, 1)
+      yield* log.publish(ready('elsewhere'))
+      const chunk = yield* log.publish(delta('s10', 'live'))
+      const second = yield* log.publish(ready('s10'))
+      assert.deepStrictEqual(yield* Fiber.join(everything), [chunk, second])
+      assert.deepStrictEqual(yield* Fiber.join(durableOnly), [second])
+    }),
+  )
+})
+
+it.effect('reports a failing statement as a StoreError from publish, read and subscribe', () =>
+  Effect.gen(function* failsWithStoreError() {
+    const sql = yield* SqlClient.SqlClient
+    const log = yield* EventLog
+    yield* sql`DROP TABLE events`
+    const failures = [
+      yield* Effect.flip(log.publish(created('s11'))),
+      yield* Effect.flip(log.read({}, { from: 0 })),
+      yield* Effect.flip(Stream.runCollect(log.subscribe({}))),
+    ]
+    for (const failure of failures) {
+      assert.instanceOf(failure, StoreError)
+    }
+  }).pipe(Effect.provide(TestLayer)),
+)
 ```
-Under `it.effect` the clock is a `TestClock`; the subscription is started with `Effect.forkChild` and given two turns with `Effect.yieldNow()` before the live events are published, so no real sleep is needed.
+Under `it.effect` the clock is a `TestClock`; the subscription is started with `Effect.forkChild(…, { startImmediately: true })` and given two turns with `Effect.yieldNow` (a value in Effect 4.0.0, not a call) before the live events are published, so no real sleep is needed; the overlap test holds a transaction open to force a publish during the replay read.
 
 - [ ] **Step 2: Implementation**
 
@@ -3904,7 +4125,7 @@ Under `it.effect` the clock is a `TestClock`; the subscription is started with `
 ```ts
 import { type EventEnvelope, isEphemeral, type KernelEvent } from '@bytebureau/protocol'
 import { Context, Effect, Layer, PubSub, Stream } from 'effect'
-import { SqlClient } from 'effect/sql'
+import { SqlClient, type Statement } from 'effect/sql'
 import { StoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
 
@@ -3916,10 +4137,18 @@ export interface EventFilter {
   readonly ephemeral?: boolean | undefined
 }
 
+interface EventRange {
+  readonly from: number
+  readonly to?: number
+}
+
 export interface EventLogShape {
-  publish(event: KernelEvent): Effect.Effect<EventEnvelope, StoreError>
-  subscribe(filter: EventFilter): Stream.Stream<EventEnvelope, StoreError>
-  read(filter: EventFilter, range: { readonly from: number; readonly to?: number }): Effect.Effect<readonly EventEnvelope[], StoreError>
+  readonly publish: (event: KernelEvent) => Effect.Effect<EventEnvelope, StoreError>
+  readonly subscribe: (filter: EventFilter) => Stream.Stream<EventEnvelope, StoreError>
+  readonly read: (
+    filter: EventFilter,
+    range: EventRange,
+  ) => Effect.Effect<readonly EventEnvelope[], StoreError>
 }
 
 export class EventLog extends Context.Service<EventLog, EventLogShape>()('bb/EventLog') {}
@@ -3948,6 +4177,7 @@ interface Row {
   readonly payload_json: string
 }
 
+// The protocol declares the ids optional keys, so an absent one is left out and never set to undefined
 const fromRow = (row: Row): EventEnvelope => ({
   seq: row.seq,
   id: row.id,
@@ -3956,34 +4186,59 @@ const fromRow = (row: Row): EventEnvelope => ({
   ...(row.project_id === null ? {} : { projectId: row.project_id }),
   ...(row.session_id === null ? {} : { sessionId: row.session_id }),
   ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
-  payload: JSON.parse(row.payload_json) as unknown,
+  payload: JSON.parse(row.payload_json),
 })
 
-const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-  const hub = yield* PubSub.unbounded<EventEnvelope>()
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> =>
-    Effect.mapError(effect, (cause) => new StoreError({ cause }))
+const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
 
-  const insert = (event: KernelEvent, id: string, ts: string): Effect.Effect<number, StoreError> =>
-    wrap(
-      Effect.map(
-        sql<{ readonly seq: number }>`INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
-          VALUES (${id}, ${ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${JSON.stringify(event.payload)})
-          RETURNING seq`,
-        (rows) => rows[0]?.seq ?? 0,
+// RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
+const insertEvent = (
+  sql: SqlClient.SqlClient,
+  event: KernelEvent,
+  stamp: { readonly id: string; readonly ts: string },
+): Effect.Effect<number, StoreError> =>
+  sql<Pick<Row, 'seq'>>`
+    INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
+    VALUES (${stamp.id}, ${stamp.ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${JSON.stringify(event.payload)})
+    RETURNING seq`.pipe(
+    Effect.flatMap(([row]) => Effect.fromNullishOr(row)),
+    Effect.map((row) => row.seq),
+    Effect.mapError(toStoreError),
+  )
+
+// Session and project narrow the query itself, so the (session_id, seq) and (project_id, seq) indexes serve it
+const conditions = (
+  sql: SqlClient.SqlClient,
+  filter: EventFilter,
+  range: EventRange,
+): readonly Statement.Fragment[] => [
+  sql`seq > ${range.from}`,
+  ...(range.to === undefined ? [] : [sql`seq <= ${range.to}`]),
+  ...(filter.sessionId === undefined ? [] : [sql`session_id = ${filter.sessionId}`]),
+  ...(filter.projectId === undefined ? [] : [sql`project_id = ${filter.projectId}`]),
+]
+
+const makeRead =
+  (sql: SqlClient.SqlClient): EventLogShape['read'] =>
+  (filter, range) =>
+    sql<Row>`
+      SELECT seq, id, ts, type, project_id, session_id, turn_id, payload_json FROM events
+      WHERE ${sql.and(conditions(sql, filter, range))} ORDER BY seq`.pipe(
+      Effect.map((rows) =>
+        rows.map((row) => fromRow(row)).filter((event) => matches(filter, event)),
       ),
+      Effect.mapError(toStoreError),
     )
 
-  const publish: EventLogShape['publish'] = (event) =>
-    Effect.gen(function* () {
-      const id = uuidv7()
-      const ts = nowIso()
-      const seq = isEphemeral(event.type) ? 0 : yield* insert(event, id, ts)
+const makePublish =
+  (sql: SqlClient.SqlClient, hub: PubSub.PubSub<EventEnvelope>): EventLogShape['publish'] =>
+  (event) =>
+    Effect.gen(function* publishEvent() {
+      const stamp = { id: uuidv7(), ts: nowIso() }
+      const seq = isEphemeral(event.type) ? 0 : yield* insertEvent(sql, event, stamp)
       const envelope: EventEnvelope = {
         seq,
-        id,
-        ts,
+        ...stamp,
         type: event.type,
         ...(event.projectId === undefined ? {} : { projectId: event.projectId }),
         ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
@@ -3994,38 +4249,40 @@ const make = Effect.gen(function* () {
       return envelope
     })
 
-  const read: EventLogShape['read'] = (filter, range) =>
-    wrap(
-      Effect.map(
-        sql<Row>`SELECT seq, id, ts, type, project_id, session_id, turn_id, payload_json FROM events
-          WHERE seq > ${range.from} AND seq <= ${range.to ?? Number.MAX_SAFE_INTEGER}
-          AND (${filter.sessionId ?? null} IS NULL OR session_id = ${filter.sessionId ?? null})
-          AND (${filter.projectId ?? null} IS NULL OR project_id = ${filter.projectId ?? null})
-          ORDER BY seq`,
-        (rows) => rows.map(fromRow).filter((event) => matches(filter, event)),
-      ),
-    )
-
-  const subscribe: EventLogShape['subscribe'] = (filter) =>
+// The subscription opens before the replay is read, so nothing published meanwhile is lost
+// An event can then arrive twice; the live part drops those the replay already carried
+const makeSubscribe =
+  (read: EventLogShape['read'], hub: PubSub.PubSub<EventEnvelope>): EventLogShape['subscribe'] =>
+  (filter) =>
     Stream.unwrap(
-      Effect.gen(function* () {
-        const live = Stream.fromPubSub(hub)
-        const replayed = yield* read(filter, { from: filter.since ?? 0 })
-        let last = replayed.at(-1)?.seq ?? filter.since ?? 0
-        const liveFiltered = live.pipe(
-          Stream.filter((event) => matches(filter, event) && (event.seq === 0 || event.seq > last)),
-          Stream.tap((event) => Effect.sync(() => { last = Math.max(last, event.seq) })),
+      Effect.gen(function* openSubscription() {
+        const subscription = yield* PubSub.subscribe(hub)
+        const since = filter.since ?? 0
+        const replayed = yield* read(filter, { from: since })
+        const last = replayed.at(-1)
+        const replayedTo = last === undefined ? since : last.seq
+        const live = Stream.fromSubscription(subscription).pipe(
+          Stream.filter(
+            (event) => matches(filter, event) && (event.seq === 0 || event.seq > replayedTo),
+          ),
         )
-        return Stream.concat(Stream.fromIterable(replayed), liveFiltered)
+        return Stream.concat(Stream.fromIterable(replayed), live)
       }),
     )
 
-  return EventLog.of({ publish, subscribe, read })
+const make = Effect.gen(function* makeEventLog() {
+  const sql = yield* SqlClient.SqlClient
+  const hub = yield* PubSub.unbounded<EventEnvelope>()
+  const read = makeRead(sql)
+  return EventLog.of({ publish: makePublish(sql, hub), subscribe: makeSubscribe(read, hub), read })
 })
 
-export const EventLogLive: Layer.Layer<EventLog, never, SqlClient.SqlClient> = Layer.effect(EventLog, make)
+export const EventLogLive: Layer.Layer<EventLog, never, SqlClient.SqlClient> = Layer.effect(
+  EventLog,
+  make,
+)
 ```
-`Stream.fromPubSub(hub)` must be created before the replay query so live events published during the replay are buffered (the unbounded hub subscription starts at creation). Verify `Stream.fromPubSub` subscribes eagerly in the installed version (its d.ts documents the scoped subscription); if it subscribes lazily, call `PubSub.subscribe(hub)` inside `Stream.unwrapScoped` and read it with `Stream.fromQueue`.
+Verified in Effect 4.0.0: `Stream.fromPubSub` subscribes lazily on the first pull (`Channel.unwrap`), so the shipped code subscribes explicitly first; there is no `Stream.unwrapScoped` — `Stream.unwrap` scopes the inner effect to the stream.
 
 Add to `index.ts`: `export { EventLog, EventLogLive, matches, type EventFilter, type EventLogShape } from './events/event-log.js'`.
 
