@@ -40,6 +40,53 @@ it.effect('splits CRLF and keeps an unterminated last line', () =>
   }),
 )
 
+it.effect('keeps blank lines', () =>
+  Effect.gen(function* keepsBlankLines() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('one\n\ntwo\n\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['one', '', 'two', ''])
+  }),
+)
+
+it.effect('breaks at a lone CR and counts CRLF as one break', () =>
+  Effect.gen(function* breaksAtCarriageReturn() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('a\rb\r\nc\r\r\nd\r')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b', 'c', '', 'd'])
+  }),
+)
+
+it.effect('joins a CRLF that arrives in two chunks', () =>
+  Effect.gen(function* joinsSplitCrlf() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.write('a\r')
+    yield* turn
+    input.end('\nb\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b'])
+  }),
+)
+
+it.effect('streams without keeping any recent line when the capacity is zero', () =>
+  Effect.gen(function* keepsNothing() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 0)
+    input.end('a\nb\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b'])
+    assert.deepStrictEqual(pump.recent(), [])
+  }),
+)
+
 it.effect('keeps the newest lines for diagnostics while the stream carries every line', () =>
   Effect.gen(function* boundsRecent() {
     const input = new PassThrough()

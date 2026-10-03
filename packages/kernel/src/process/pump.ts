@@ -15,7 +15,8 @@ export interface OutputPump {
 }
 
 // Lines are taken from readline's line event, as it emits them, and not from its async iterator
-// Under Bun the iterator throws ERR_USE_AFTER_CLOSE once its consumer lags, which loses the last lines
+// Once its consumer yields to the event loop the iterator throws ERR_USE_AFTER_CLOSE and loses the last line
+// It does so on Bun and on Node 24.14 alike, over 8000 lines from a real pipe
 const openReader = (input: Readable | null, onLine: (line: string) => void): Interface | null => {
   if (input === null) {
     return null
@@ -30,12 +31,15 @@ const openReader = (input: Readable | null, onLine: (line: string) => void): Int
 }
 
 // Reads eagerly into an unbounded queue, so recent() is current even when nobody consumes the stream
+// A maxLines of 0 keeps no recent lines at all
 export const startPump = (input: Readable | null, maxLines: number): Effect.Effect<OutputPump> =>
   Effect.gen(function* startOutputPump() {
     const queue = yield* Queue.unbounded<string, Cause.Done>()
-    const buffer = new LineBuffer(maxLines)
+    const buffer = maxLines > 0 ? new LineBuffer(maxLines) : null
     const record = (line: string): void => {
-      buffer.push(line)
+      if (buffer !== null) {
+        buffer.push(line)
+      }
       Queue.offerUnsafe(queue, line)
     }
     const reader = openReader(input, record)
@@ -45,5 +49,6 @@ export const startPump = (input: Readable | null, maxLines: number): Effect.Effe
       }
     })
     const finish = closeReader.pipe(Effect.andThen(Queue.end(queue)), Effect.asVoid)
-    return { lines: Stream.fromQueue(queue), recent: () => buffer.lines(), append: record, finish }
+    const recent = (): readonly string[] => (buffer === null ? [] : buffer.lines())
+    return { lines: Stream.fromQueue(queue), recent, append: record, finish }
   })

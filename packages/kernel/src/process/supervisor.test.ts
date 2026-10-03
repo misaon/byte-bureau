@@ -146,6 +146,24 @@ it.layer(SupervisorLive, live)('Supervisor line streams', (suite) => {
   )
 })
 
+// A consumer that is slower than the child must neither lose a line nor see the pipe fail
+it.layer(SupervisorLive, live)('Supervisor lagging consumer', (suite) => {
+  suite.effect('delivers every line to a consumer that yields to the event loop on each line', () =>
+    Effect.gen(function* lagsBehind() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec('for (let i = 0; i < 8000; i++) console.log("line-" + i)'),
+      )
+      const lines = yield* child.stdout.pipe(
+        Stream.tap(() => Effect.yieldNow),
+        Stream.runCollect,
+      )
+      assert.strictEqual(lines.length, 8000)
+      assert.strictEqual(lines.at(-1), 'line-7999')
+    }),
+  )
+})
+
 it.layer(SupervisorLive, live)('Supervisor registry', (suite) => {
   suite.effect('lists a running process until it exits', () =>
     Effect.gen(function* listsRunning() {
@@ -202,11 +220,26 @@ it.layer(SupervisorLive, live)('Supervisor start failures', (suite) => {
       assert.strictEqual(reasons.length, 1)
     }),
   )
+})
 
-  suite.effect('reports an argument the runtime refuses', () =>
+// The runtime echoes the offending value in its message, which may well be a secret
+it.layer(SupervisorLive, live)('Supervisor invalid arguments', (suite) => {
+  suite.effect('reports an invalid argument by its code alone', () =>
     Effect.gen(function* reportsInvalidArgument() {
       const reasons = yield* failsToStart(nodeSpec('1\0'))
       assert.strictEqual(reasons.length, 1)
+      assert.ok(reasons.every((line) => line.includes('ERR_INVALID_ARG_VALUE')))
+      assert.ok(reasons.every((line) => !line.includes('Received')))
+    }),
+  )
+
+  suite.effect('reports an invalid environment value without echoing it', () =>
+    Effect.gen(function* hidesInvalidValue() {
+      const spec = nodeSpec('1', { env: { MY_SECRET: 'swordfish\0' }, passEnv: ['MY_SECRET'] })
+      const reasons = yield* failsToStart(spec)
+      assert.strictEqual(reasons.length, 1)
+      assert.ok(reasons.every((line) => line.includes('ERR_INVALID_ARG_VALUE')))
+      assert.ok(reasons.every((line) => !line.includes('swordfish')))
     }),
   )
 })

@@ -1,4 +1,4 @@
-// Bounded ring of the newest lines; the Supervisor keeps one per stream for diagnostics
+// Bounded ring of the newest lines; the Supervisor keeps one for stderr, stdout is streamed and nothing else
 export class LineBuffer {
   public dropped = 0
   private readonly items: string[] = []
