@@ -96,9 +96,10 @@ export const decodeProjectConfig = (input: unknown): ProjectConfig =>
 export const decodeUserConfig = (input: unknown): UserConfig =>
   Schema.decodeUnknownSync(UserConfig)(input, STRICT)
 
+// The branch keys are left out on purpose: a default here would hide the one detected from each repository
 export const defaultProjectConfig: ProjectConfig = {
   version: 1,
-  project: { name: 'my-app', defaultBranch: 'main' },
+  project: { name: 'my-app' },
   workspace: { runtime: 'local', copyIgnored: ['.env', '.env.local'], retainDays: 7 },
   providers: { claude: { executable: 'claude', settingSources: ['user', 'project', 'local'] } },
   employees: {
@@ -115,7 +116,7 @@ export const defaultProjectConfig: ProjectConfig = {
       appearance: {},
     },
   },
-  defaults: { employee: 'developer', branch: 'main' },
+  defaults: { employee: 'developer' },
   plugins: [],
   logging: { level: 'info' },
 }

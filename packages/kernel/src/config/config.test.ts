@@ -112,7 +112,8 @@ it.effect('falls back to defaults named after the directory when no project file
     const { config, project } = yield* workspace()
     const resolved = yield* config.load({ projectPath: project })
     assert.strictEqual(resolved.project.project.name, path.basename(project))
-    assert.deepStrictEqual(resolved.project.defaults, { employee: 'developer', branch: 'main' })
+    assert.deepStrictEqual(resolved.project.defaults, { employee: 'developer' })
+    assert.strictEqual(resolved.project.project.defaultBranch, undefined)
     assert.deepStrictEqual(resolved.files, { user: null, project: null, local: null })
   }),
 )

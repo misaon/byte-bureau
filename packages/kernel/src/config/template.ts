@@ -10,8 +10,8 @@ export function defaultProjectConfigText(): string {
   return `{
   "$schema": "https://bytebureau.dev/schema/v1/config.json",
   "version": 1,
-  // Project identity; defaultBranch is the base of every session worktree
-  "project": { "name": ${JSON.stringify(defaultProjectConfig.project.name)}, "defaultBranch": "main" },
+  // Project identity; defaultBranch (optional) overrides the detected default branch: origin/HEAD, else main
+  "project": { "name": ${JSON.stringify(defaultProjectConfig.project.name)} },
   // Worktrees live under .bytebureau/worktrees; copyIgnored files are copied from the main checkout
   "workspace": { "runtime": "local", "copyIgnored": [".env", ".env.local"], "retainDays": 7 },
   "providers": { "claude": { "executable": "claude", "settingSources": ["user", "project", "local"] } },
@@ -19,7 +19,8 @@ export function defaultProjectConfigText(): string {
   "employees": {
     "developer": ${employee}
   },
-  "defaults": { "employee": "developer", "branch": "main" },
+  // branch (optional) is the base of session worktrees; it defaults to the project's default branch
+  "defaults": { "employee": "developer" },
   "plugins": [],
   "logging": { "level": "info" }
 }
