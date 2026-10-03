@@ -1,11 +1,36 @@
 import { describe, expect, it } from 'vitest'
 import { decodeProjectConfig, decodeUserConfig, defaultProjectConfig } from './config.js'
 
+const withTimeout = (askTimeout: string): unknown => ({
+  ...defaultProjectConfig,
+  employees: { developer: { ...defaultProjectConfig.employees['developer'], askTimeout } },
+})
+
 describe(decodeProjectConfig, () => {
   it('accepts the documented sample and fills nothing silently', () => {
     const config = decodeProjectConfig(defaultProjectConfig)
     expect(config.version).toBe(1)
     expect(config.employees['developer']).toMatchObject({ permissionMode: 'supervised' })
+  })
+
+  it('takes an ask timeout of a whole number and a unit only', () => {
+    expect.hasAssertions()
+    for (const accepted of ['500ms', '30s', '30m', '1h', '2 h']) {
+      expect(() => decodeProjectConfig(withTimeout(accepted))).not.toThrow()
+    }
+    for (const refused of ['soon', '30', '1.5h', '30min', '-1m']) {
+      expect(() => decodeProjectConfig(withTimeout(refused))).toThrow(/askTimeout/u)
+    }
+  })
+
+  it('reads the passEnv list of a provider and leaves its other keys to the provider', () => {
+    const providers = {
+      claude: { executable: 'claude', passEnv: ['GH_TOKEN'], extra: { depth: 1 } },
+    }
+    const config = decodeProjectConfig({ ...defaultProjectConfig, providers })
+    expect(config.providers).toStrictEqual(providers)
+    const broken = { ...defaultProjectConfig, providers: { claude: { passEnv: 'GH_TOKEN' } } }
+    expect(() => decodeProjectConfig(broken)).toThrow(/passEnv/u)
   })
 
   it('reports every problem with its path and rejects unknown keys', () => {

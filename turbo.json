@@ -14,7 +14,10 @@
       ],
       "outputs": ["dist/**"]
     },
-    "@bytebureau/protocol#build": { "outputs": ["schemas/**"] },
+    "@bytebureau/protocol#build": {
+      "inputs": ["$TURBO_DEFAULT$", "!schemas/**"],
+      "outputs": ["schemas/**"]
+    },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
     "docs:build": {

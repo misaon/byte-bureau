@@ -2,6 +2,9 @@ import { Schema } from 'effect'
 import { RateLimit, ToolKind, Usage } from './agent-event.js'
 import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
+import { EventPayloadError } from './event-payload-error.js'
+
+export { EventPayloadError } from './event-payload-error.js'
 
 export const EventEnvelope = Schema.Struct({
   seq: Schema.Int,
@@ -144,11 +147,14 @@ export function isEphemeral(type: string): boolean {
   return (EPHEMERAL_EVENT_TYPES as readonly string[]).includes(type)
 }
 
+// The same contract as the published JSON Schema: every payload is a closed object
+const STRICT = { errors: 'all', onExcessProperty: 'error' } as const
+
 /**
  * Decodes the payload of an event against the schema of its type.
  * A type narrowed to a literal gives the typed payload; any other string is checked at run time.
- * Throws when the type is not in the catalogue or the payload does not fit its schema.
- * Fields the schema does not know are ignored, so a newer kernel can add to a payload without breaking an older reader.
+ * Throws an EventPayloadError when the type is not in the catalogue or the payload does not fit its schema.
+ * A field the schema does not know is refused, as the published JSON Schema refuses it; a payload grows with a new schema version.
  */
 export function decodeEventPayload<EventType extends KernelEventType>(
   type: EventType,
@@ -158,7 +164,14 @@ export function decodeEventPayload<EventType extends KernelEventType>(
 export function decodeEventPayload(type: string, payload: unknown): unknown
 export function decodeEventPayload(type: string, payload: unknown): unknown {
   if (!isKernelEventType(type)) {
-    throw new Error(`unknown kernel event type: ${type}`)
+    throw new EventPayloadError(type, `unknown kernel event type: ${type}`)
   }
-  return Schema.decodeUnknownSync(KernelEventSchemas[type])(payload, { errors: 'all' })
+  try {
+    return Schema.decodeUnknownSync(KernelEventSchemas[type])(payload, STRICT)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new EventPayloadError(type, `the payload of ${type} does not fit its schema: ${reason}`, {
+      cause: error,
+    })
+  }
 }

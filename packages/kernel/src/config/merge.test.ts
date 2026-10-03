@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { mergeConfig } from './merge.js'
+import { isPlain, mergeConfig, type Plain } from './merge.js'
+
+// A document parsed by JSON.parse, which defines every key, __proto__ too, as an own key
+function parsed(text: string): Plain {
+  const value: unknown = JSON.parse(text)
+  if (!isPlain(value)) {
+    throw new TypeError('not an object')
+  }
+  return value
+}
+
+function sectionOf(merged: Plain): Plain {
+  const { section } = merged
+  if (!isPlain(section)) {
+    throw new TypeError('no section')
+  }
+  return section
+}
 
 describe(mergeConfig, () => {
   it('merges objects deeply and replaces arrays instead of concatenating them', () => {
@@ -34,5 +51,13 @@ describe(mergeConfig, () => {
     expect(overlay).toStrictEqual({ section: { fromOverlay: 2 }, added: { nested: true } })
     expect(merged['added']).toStrictEqual({ nested: true })
     expect(merged['added']).not.toBe(overlay.added)
+  })
+
+  it('keeps a __proto__ key a key, never the prototype of the result', () => {
+    const merged = mergeConfig({}, parsed('{ "section": { "__proto__": { "polluted": true } } }'))
+    const section = sectionOf(merged)
+    expect(Reflect.getPrototypeOf(section)).toBe(Object.prototype)
+    expect(Object.keys(section)).toStrictEqual(['__proto__'])
+    expect(Reflect.get(section, 'polluted')).toBeUndefined()
   })
 })

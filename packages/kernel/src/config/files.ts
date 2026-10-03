@@ -3,6 +3,7 @@ import path from 'node:path'
 import { Effect } from 'effect'
 import { parse, printParseErrorCode, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
+import { pointerOf } from './issues.js'
 import { isPlain, type Plain } from './merge.js'
 
 // Configuration files are data: the kernel reads JSON or JSONC as text and parses it with jsonc-parser, nothing is imported or run
@@ -66,19 +67,44 @@ function positionOf(text: string, offset: number): string {
 interface Parsed {
   readonly value: unknown
   readonly errors: readonly ParseError[]
+  // The keys to the first object whose prototype a "__proto__" key replaced, if any
+  readonly prototyped: readonly string[] | null
+}
+
+const childrenOf = (value: object): readonly (readonly [string, unknown])[] =>
+  Array.isArray(value)
+    ? value.map((item: unknown, index) => [String(index), item] as const)
+    : Object.entries(value)
+
+// The parser assigns the keys it reads, so a "__proto__" key sets the prototype of its object instead of becoming a key
+function prototypedPath(value: unknown, keys: readonly string[]): readonly string[] | null {
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    return [...keys, '__proto__']
+  }
+  for (const [key, child] of childrenOf(value)) {
+    const found = prototypedPath(child, [...keys, key])
+    if (found !== null) {
+      return found
+    }
+  }
+  return null
 }
 
 function parseText(text: string): Parsed {
   const errors: ParseError[] = []
   const value: unknown = parse(text, errors, { allowTrailingComma: true, allowEmptyContent: true })
-  return { value, errors }
+  return { value, errors, prototyped: prototypedPath(value, []) }
 }
 
 // The parser recurses, so a pathologically nested file throws instead of returning
 function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigError> {
   const text = raw.startsWith(BOM) ? raw.slice(BOM.length) : raw
   return Effect.gen(function* parseJson() {
-    const { value, errors } = yield* Effect.try({
+    const { value, errors, prototyped } = yield* Effect.try({
       try: () => parseText(text),
       catch: (cause) => failure(file, String(cause)),
     })
@@ -86,6 +112,10 @@ function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigErro
     if (first !== undefined) {
       const position = positionOf(text, first.offset)
       return yield* failure(file, `${printParseErrorCode(first.error)} at ${position}`)
+    }
+    if (prototyped !== null) {
+      const reason = 'a "__proto__" key is not allowed'
+      return yield* new ConfigError({ file, pointer: pointerOf(prototyped), reason })
     }
     return isPlain(value) ? value : yield* failure(file, 'expected a JSON object')
   })

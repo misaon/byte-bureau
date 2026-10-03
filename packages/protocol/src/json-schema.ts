@@ -1,5 +1,6 @@
 import { JsonSchema, Schema } from 'effect'
 import { ProjectConfig } from './config.js'
+import { addDefinitions } from './definitions.js'
 import { EventEnvelope, KernelEventSchemas } from './events.js'
 
 const CONFIG_ID = 'https://bytebureau.dev/schema/v1/config.json'
@@ -16,14 +17,18 @@ export function configJsonSchema(): Record<string, unknown> {
   }
 }
 
-/** JSON Schema (draft 2020-12) of the event envelope and of each kernel event payload, keyed by wire type */
+/**
+ * JSON Schema (draft 2020-12) of the event envelope and of each kernel event payload, keyed by wire type.
+ * Every payload is a closed object, and decodeEventPayload decodes with the same strictness.
+ */
 export function eventsJsonSchema(): Record<string, unknown> {
   const envelope = Schema.toJsonSchemaDocument(EventEnvelope, { onExcessProperty: 'error' })
-  const defs: Record<string, unknown> = { EventEnvelope: envelope.schema, ...envelope.definitions }
+  const defs: Record<string, unknown> = {}
+  addDefinitions(defs, { EventEnvelope: envelope.schema, ...envelope.definitions })
   for (const [type, schema] of Object.entries(KernelEventSchemas)) {
     const document = Schema.toJsonSchemaDocument(schema, { onExcessProperty: 'error' })
-    defs[type] = document.schema
-    Object.assign(defs, document.definitions)
+    addDefinitions(defs, { [type]: document.schema })
+    addDefinitions(defs, document.definitions)
   }
   return {
     $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12,

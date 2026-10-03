@@ -27,7 +27,7 @@ const escapeSegment = (segment: string): string =>
   segment.replaceAll('~', '~0').replaceAll('/', '~1')
 
 // RFC 6901: the document itself is the empty pointer
-const pointerOf = (keys: readonly PropertyKey[]): string =>
+export const pointerOf = (keys: readonly PropertyKey[]): string =>
   keys.map((key) => `/${escapeSegment(String(key))}`).join('')
 
 function containsPath(root: unknown, keys: readonly PropertyKey[]): boolean {

@@ -4,6 +4,9 @@ import { Appearance, ToolPolicy } from './employee.js'
 
 export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
 
+// A whole number and a unit, as the kernel parses it: 500ms, 30s, 30m, 1h
+const DurationText = Schema.String.check(Schema.isPattern(/^\d+\s*(?:ms|s|m|h)$/u))
+
 export const EmployeeConfig = Schema.Struct({
   name: Schema.String,
   provider: Schema.String,
@@ -15,7 +18,7 @@ export const EmployeeConfig = Schema.Struct({
   tools: Schema.optionalKey(ToolPolicy),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
   maxTurns: Schema.optionalKey(Schema.Int),
-  askTimeout: Schema.optionalKey(Schema.String),
+  askTimeout: Schema.optionalKey(DurationText),
   appearance: Schema.optionalKey(Appearance),
 })
 
@@ -31,7 +34,13 @@ const WorkspaceSection = Schema.Struct({
   copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
   retainDays: Schema.optionalKey(Schema.Int),
 })
-const ProvidersSection = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))
+// The kernel reads passEnv: the names of further variables of its environment an agent of the provider is given
+// Every other key belongs to the provider plugin
+const PassEnv = Schema.optionalKey(Schema.Array(Schema.String))
+const ProviderSection = Schema.StructWithRest(Schema.Struct({ passEnv: PassEnv }), [
+  Schema.Record(Schema.String, Schema.Unknown),
+])
+const ProvidersSection = Schema.Record(Schema.String, ProviderSection)
 const ProjectDefaults = Schema.Struct({
   employee: Schema.optionalKey(Schema.String),
   branch: Schema.optionalKey(Schema.String),

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { addDefinitions } from './definitions.js'
 import { KERNEL_EVENT_TYPES } from './events.js'
 import { configJsonSchema, eventsJsonSchema } from './json-schema.js'
 
@@ -22,10 +23,12 @@ describe('generated JSON Schema files', () => {
   })
 
   it('events.json is up to date and lists every event type', () => {
+    expect.hasAssertions()
     const generated = eventsJsonSchema()
     expect(readSchema('events.json')).toStrictEqual(generated)
-    expect(generated['$defs']).toHaveProperty(['session.created'])
-    expect(generated['$defs']).toHaveProperty(['message.assistant.delta'])
+    for (const type of KERNEL_EVENT_TYPES) {
+      expect(generated['$defs']).toHaveProperty([type])
+    }
   })
 
   it('events.json defines every payload as a closed object', () => {
@@ -39,8 +42,26 @@ describe('generated JSON Schema files', () => {
     }
   })
 
+  it('publishes the ask timeout as a duration and the passEnv list of a provider beside its own keys', () => {
+    const text = JSON.stringify(configJsonSchema())
+    expect(text).toContain(String.raw`"pattern":"^\\d+\\s*(?:ms|s|m|h)$"`)
+    expect(text).toContain('"passEnv":{"type":"array","items":{"type":"string"}}')
+  })
+
   it('publishes numbers as number or integer, without Infinity or NaN alternatives', () => {
     expect(JSON.stringify(configJsonSchema())).not.toMatch(/Infinity|NaN/u)
     expect(JSON.stringify(eventsJsonSchema())).not.toMatch(/Infinity|NaN/u)
+  })
+})
+
+describe(addDefinitions, () => {
+  it('adds a definition twice when it is the same, and refuses a different one under a taken name', () => {
+    const defs: Record<string, unknown> = {}
+    addDefinitions(defs, { Usage: { type: 'object' } })
+    addDefinitions(defs, { Usage: { type: 'object' } })
+    expect(defs).toStrictEqual({ Usage: { type: 'object' } })
+    expect(() => {
+      addDefinitions(defs, { Usage: { type: 'string' } })
+    }).toThrow('two different JSON Schema definitions are named Usage')
   })
 })
