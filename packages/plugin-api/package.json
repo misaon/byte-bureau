@@ -1,0 +1,24 @@
+{
+  "name": "@bytebureau/plugin-api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Ports and plugin contract for ByteBureau plugins (plain TypeScript, no Effect)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bytebureau/protocol": "workspace:*",
+    "@standard-schema/spec": "1.1.0"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  }
+}

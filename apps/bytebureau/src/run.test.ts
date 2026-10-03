@@ -1,5 +1,7 @@
+import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand, type CommandDef } from 'citty'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
+import { globalArgs } from './context.js'
 import { run } from './run.js'
 
 interface Console {
@@ -72,6 +74,21 @@ describe(run, () => {
   })
 })
 
+describe('run with a typed error of the kernel', () => {
+  it('prints it as its name, its reason and its code, and returns 2', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const error = new WorkspaceError({
+      code: 'not_a_repository',
+      reason: '/tmp/x is not inside a git repository',
+    })
+    await expect(run(failingWith(error), [])).resolves.toBe(2)
+    expect(output.error).toHaveBeenCalledWith(
+      'WorkspaceError: /tmp/x is not inside a git repository (not_a_repository)',
+    )
+  })
+})
+
 describe('run built-in flags', () => {
   it('prints the usage of the named subcommand for --help', async () => {
     expect.hasAssertions()
@@ -95,5 +112,56 @@ describe('run built-in flags', () => {
     const command = defineCommand({ run: vi.fn<() => void>() })
     await expect(run(command, ['--version'])).resolves.toBe(1)
     expect(output.error).toHaveBeenCalledWith('No version specified')
+  })
+})
+
+interface Given {
+  readonly rawArgs: readonly string[]
+  readonly json: boolean
+  readonly debug: string | undefined
+  readonly prompt: string | undefined
+}
+
+// `projects ls` with the global flags and a positional, telling what it was given
+function listing(): { readonly command: CommandDef; readonly given: Given[] } {
+  const given: Given[] = []
+  const ls = defineCommand({
+    meta: { name: 'ls', description: 'List' },
+    args: { ...globalArgs, prompt: { type: 'positional', required: false } },
+    run({ rawArgs, args }) {
+      given.push({ rawArgs, json: args.json, debug: args.debug, prompt: args.prompt })
+    },
+  })
+  const projects = defineCommand({ meta: { name: 'projects' }, subCommands: { ls } })
+  return { command: defineCommand({ meta: { name: 'bb' }, subCommands: { projects } }), given }
+}
+
+describe('run with a bare --debug', () => {
+  it('keeps the flag that follows it a flag, and debugs every category', async () => {
+    expect.hasAssertions()
+    const { command, given } = listing()
+    await expect(run(command, ['projects', 'ls', '--debug', '--json'])).resolves.toBe(0)
+    expect(given).toMatchObject([{ json: true, debug: '' }])
+  })
+
+  it('keeps the positional that follows it a positional', async () => {
+    expect.hasAssertions()
+    const { command, given } = listing()
+    await run(command, ['projects', 'ls', '--debug', 'fix the build'])
+    expect(given).toMatchObject([{ debug: '', prompt: 'fix the build' }])
+  })
+
+  it('leaves --debug=<categories> as it is', async () => {
+    expect.hasAssertions()
+    const { command, given } = listing()
+    await run(command, ['projects', 'ls', '--debug=bb.core,!bb.store', '--json'])
+    expect(given).toMatchObject([{ json: true, debug: 'bb.core,!bb.store' }])
+  })
+
+  it('leaves what follows -- alone, since it is no flag', async () => {
+    expect.hasAssertions()
+    const { command, given } = listing()
+    await run(command, ['projects', 'ls', '--', '--debug'])
+    expect(given).toMatchObject([{ rawArgs: ['--', '--debug'], debug: undefined }])
   })
 })

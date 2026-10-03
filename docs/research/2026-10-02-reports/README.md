@@ -19,5 +19,6 @@ Fourteen parallel research agents, each restricted to online verification (offic
 | 12 | Skills ecosystem, multi-agent workflow, HITL, token efficiency | employee roster, work-item state machine, risk register |
 | 13 | Licensing, repo/community setup, README, docs site | FSL-1.1-MIT recommendation, name-collision findings |
 | 14 | Competitive landscape | ~60 pixel-office projects, orchestration UIs, vendor moves |
+| 15 | SP1 Phase A stack (Effect 4, SQLite drivers, Drizzle, c12, LogTape, git worktree) | verified 2026-10-02 with executed probes; §0 lists blockers (install cooldown, isolatedDeclarations, Drizzle on Effect 4) |
 
 Caveat: the session's web-search budget ran out part-way; later clusters relied on direct fetches of documentation, release pages and registry APIs rather than search discovery.

@@ -103,9 +103,14 @@ export function parseArgs(argv: readonly string[], defaults: { version: string }
   return { ...flags, version: defaults.version }
 }
 
-function compile(job: CompileJob): number {
+// The binary reads no .env and no bunfig.toml from the directory it starts in
+// A bunfig.toml preload would run the code of whoever owns that directory
+// A .env could move the data of the kernel
+const NO_AUTOLOAD = ['--no-compile-autoload-dotenv', '--no-compile-autoload-bunfig'] as const
+
+export function compileArgs(job: CompileJob): string[] {
   // ESM output: Bun's bytecode default is CommonJS, which rejects the top-level await in main.ts
-  const args = ['build', '--compile', '--minify', '--sourcemap', '--format=esm']
+  const args = ['build', '--compile', ...NO_AUTOLOAD, '--minify', '--sourcemap', '--format=esm']
   if (job.bytecode) {
     args.push('--bytecode')
   }
@@ -117,7 +122,11 @@ function compile(job: CompileJob): number {
     '--outfile',
     job.outfile,
   )
-  const result = Bun.spawnSync(['bun', ...args], {
+  return args
+}
+
+function compile(job: CompileJob): number {
+  const result = Bun.spawnSync(['bun', ...compileArgs(job)], {
     cwd: ROOT,
     stdout: 'inherit',
     stderr: 'inherit',

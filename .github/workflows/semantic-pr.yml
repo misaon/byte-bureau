@@ -39,7 +39,11 @@ jobs:
             bytebureau
             docs
             i18n
+            kernel
+            plugin-api
+            protocol
             tsconfig
+            workspace-local
             cli
             deps
             release

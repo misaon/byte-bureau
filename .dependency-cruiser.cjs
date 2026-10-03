@@ -21,11 +21,13 @@ module.exports = {
     {
       name: 'effect-only-in-core',
       severity: 'error',
-      comment: 'Only packages/kernel, packages/api and packages/protocol may depend on Effect.',
-      from: { path: '^(packages/(?!(kernel|api|protocol)/)|plugins/)' },
+      comment:
+        'Only packages/kernel, packages/api and packages/protocol may depend on Effect; apps and plugins never do.',
+      from: { path: '^(packages/(?!(kernel|api|protocol)/)|plugins/|apps/)' },
       // Bun's isolated linker resolves packages to node_modules/.bun/<name>@<version>/node_modules/
       // The pattern is therefore not anchored to the first node_modules segment
-      to: { path: '(^|/)node_modules/(effect|@effect)/' },
+      // A package that does not declare effect cannot resolve it, so the bare name is matched as well
+      to: { path: String.raw`(^|/)node_modules/(effect|@effect)/|^(effect|@effect/[^/]+)(/|$)` },
     },
     {
       name: 'plugins-depend-only-on-contracts',

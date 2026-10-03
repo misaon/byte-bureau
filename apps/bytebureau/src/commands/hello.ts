@@ -1,8 +1,7 @@
-import { isatty } from 'node:tty'
 import { m } from '@bytebureau/i18n'
 import { intro, log, outro } from '@clack/prompts'
 import { defineCommand } from 'citty'
-import { createContext, globalArgs, type Context } from '../context.js'
+import { globalArgs, processContext, type Context } from '../context.js'
 
 function greeting(name: string | undefined): string {
   return name === undefined || name.trim() === '' ? m.hello_anonymous() : m.hello_greeting({ name })
@@ -30,11 +29,7 @@ export const helloCommand = defineCommand({
     name: { type: 'positional', description: 'Who to greet', required: false },
   },
   run({ args }) {
-    const context = createContext(
-      { lang: args.lang, json: args.json, color: args.color },
-      process.env,
-      isatty(process.stdout.fd),
-    )
+    const context = processContext(args)
     runHello(context, args.name)
   },
 })

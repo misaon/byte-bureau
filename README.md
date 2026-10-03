@@ -27,10 +27,10 @@
 
 ## Status
 
-Pre-alpha. The foundation (toolchain, CI, release pipeline, licence) is in place; the kernel, chat UI and office simulation follow. Progress by sub-project:
+Pre-alpha. The foundation (toolchain, CI, release pipeline, licence) and the core of the kernel (phase A: sessions in isolated git worktrees, a durable event log, asks with a recommended answer, a plugin host) are in place. A test employee already takes a task with `bytebureau run --provider fake`, works on it in its own worktree and hands in the result headless, with no UI, no daemon and no agent subscription. The real agents, the daemon and API, the chat UI and the office simulation follow. Progress by sub-project:
 
 - [x] 0 · Foundation
-- [ ] 1 · Kernel and agent runtime
+- [ ] 1 · Kernel and agent runtime (core in place; daemon, API and agent adapters follow)
 - [ ] 2 · Chat and dashboard UI
 - [ ] 3 · Office simulation
 - [ ] 4 · Workflow engine and integrations (Jira, GitHub, Slack)

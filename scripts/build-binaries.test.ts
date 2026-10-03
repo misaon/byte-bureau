@@ -6,6 +6,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
   TARGETS,
   artifactName,
+  compileArgs,
   compileWithFallback,
   hostTarget,
   parseArgs,
@@ -111,6 +112,17 @@ describe(parseArgs, () => {
 
   it('rejects unknown arguments', () => {
     expect(() => parseArgs(['--fast'], { version: '1.2.3' })).toThrow('unknown argument: --fast')
+  })
+})
+
+describe(compileArgs, () => {
+  it('builds executables that autoload neither .env nor bunfig.toml', () => {
+    expect.hasAssertions()
+    for (const candidate of [job, plainJob]) {
+      const args = compileArgs(candidate)
+      expect(args).toContain('--no-compile-autoload-dotenv')
+      expect(args).toContain('--no-compile-autoload-bunfig')
+    }
   })
 })
 

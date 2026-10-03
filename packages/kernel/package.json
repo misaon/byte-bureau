@@ -1,0 +1,43 @@
+{
+  "name": "@bytebureau/kernel",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau kernel: Effect services for sessions, workspaces, asks, events and plugins",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./bun": {
+      "types": "./src/bun.ts",
+      "default": "./src/bun.ts"
+    },
+    "./testing": {
+      "types": "./src/kernel-test.ts",
+      "default": "./src/kernel-test.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bytebureau/plugin-api": "workspace:*",
+    "@bytebureau/protocol": "workspace:*",
+    "@bytebureau/workspace-local": "workspace:*",
+    "@effect/sql-sqlite-bun": "4.0.0",
+    "@logtape/file": "2.3.10",
+    "@logtape/logtape": "2.3.10",
+    "@logtape/redaction": "2.3.10",
+    "effect": "4.0.0",
+    "jsonc-parser": "3.3.1",
+    "uuid": "14.0.2"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*",
+    "@effect/sql-sqlite-node": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "fast-check": "4.10.2"
+  }
+}

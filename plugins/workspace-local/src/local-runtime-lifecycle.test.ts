@@ -1,0 +1,196 @@
+import { existsSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import type { WorkspaceHandle } from '@bytebureau/plugin-api'
+import { describe, expect, it } from 'vitest'
+import { WorkspaceError } from './errors.js'
+import type { LocalWorkspaceRuntime } from './local-runtime.js'
+import { createRuntime, readLines, scriptedSpawner, workspaceSpec } from './testing/fixtures.js'
+import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
+
+// An empty commit with the message, on whatever is checked out in the directory
+function commitEmpty(directory: string, message: string): void {
+  git(directory, 'commit', '--allow-empty', '-q', '-m', message)
+}
+
+// A provisioned worktree that holds an uncommitted file
+async function dirtyWorktree(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
+  const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+  writeFileSync(path.join(handle.path, 'new.txt'), 'hi\n')
+  return handle
+}
+
+describe('status', () => {
+  it('reports a fresh worktree as clean', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    await expect(runtime.status(handle)).resolves.toStrictEqual({
+      dirty: false,
+      ahead: 0,
+      behind: 0,
+      pushed: false,
+      locked: false,
+      branch: 'bb/add-hello',
+    })
+  })
+
+  it('reports a branch whose head a remote-tracking ref contains as pushed, and a local commit as not', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    commitEmpty(handle.path, 'work')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: false })
+    git(handle.path, 'push', '-q', 'origin', 'bb/add-hello')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: true })
+    commitEmpty(handle.path, 'more')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 2, pushed: false })
+  })
+
+  it('counts the commits ahead of and behind the base ref', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    commitEmpty(handle.path, 'work')
+    commitEmpty(repo, 'upstream one')
+    commitEmpty(repo, 'upstream two')
+    await expect(runtime.status(handle)).resolves.toMatchObject({
+      dirty: false,
+      ahead: 1,
+      behind: 2,
+    })
+  })
+
+  it('reports uncommitted changes', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await dirtyWorktree(runtime)
+    await expect(runtime.status(handle)).resolves.toMatchObject({ dirty: true, locked: false })
+  })
+})
+
+describe('locks', () => {
+  it('reports a lock for the locked worktree only', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const locked = await runtime.provision(workspaceSpec(repo))
+    const other = await runtime.provision(
+      workspaceSpec(repo, { sessionId: 'other', branch: 'bb/o' }),
+    )
+    git(repo, 'worktree', 'lock', locked.path)
+    await expect(runtime.status(other)).resolves.toMatchObject({ locked: false })
+    await expect(runtime.status(locked)).resolves.toMatchObject({ locked: true })
+  })
+
+  it('refuses to destroy a locked worktree even with force', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    git(repo, 'worktree', 'lock', handle.path)
+    await expect(runtime.destroy(handle, { force: true })).rejects.toMatchObject({ code: 'locked' })
+    expect(existsSync(handle.path)).toBe(true)
+  })
+})
+
+describe('git failures', () => {
+  it('reports a git failure as a workspace error', async () => {
+    expect.hasAssertions()
+    const gone = {
+      id: 's',
+      runtimeId: 'local',
+      path: tempDir('bb-plain-'),
+      branch: 'x',
+      baseRef: 'main',
+    }
+    const failure = createRuntime().status(gone)
+    await expect(failure).rejects.toBeInstanceOf(WorkspaceError)
+    await expect(failure).rejects.toMatchObject({ code: 'git_failed' })
+  })
+
+  it('reports a git that died from a signal as a failure', async () => {
+    expect.hasAssertions()
+    const handle = await createRuntime().provision(workspaceSpec(createTempRepo()))
+    const killed = scriptedSpawner(() => "process.kill(process.pid, 'SIGKILL')")
+    await expect(createRuntime(killed).status(handle)).rejects.toMatchObject({ code: 'git_failed' })
+  })
+})
+
+describe('destroy', () => {
+  it('removes a clean worktree without force and keeps its branch', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    await runtime.destroy(handle)
+    expect(existsSync(handle.path)).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('bb/add-hello')
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(handle.path)
+  })
+
+  it('refuses to destroy a dirty worktree without force, then removes it with force', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await dirtyWorktree(runtime)
+    const refusal = runtime.destroy(handle)
+    await expect(refusal).rejects.toBeInstanceOf(WorkspaceError)
+    await expect(refusal).rejects.toMatchObject({ code: 'dirty' })
+    expect(existsSync(path.join(handle.path, 'new.txt'))).toBe(true)
+    await runtime.destroy(handle, { force: true })
+    expect(existsSync(handle.path)).toBe(false)
+  })
+})
+
+// A provisioned worktree whose base branch has been renamed away
+async function withoutBaseRef(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
+  const repo = createTempRepo()
+  const handle = await runtime.provision(workspaceSpec(repo))
+  git(repo, 'branch', '-m', 'main', 'trunk')
+  return handle
+}
+
+describe('without its base ref', () => {
+  it.each([[{}], [{ force: true }]])('destroys the worktree with %j', async (options) => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await runtime.destroy(handle, options)
+    expect(existsSync(handle.path)).toBe(false)
+  })
+
+  it('cannot say how far it is from the base, as git_failed', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await expect(runtime.status(handle)).rejects.toMatchObject({ code: 'git_failed' })
+  })
+})
+
+describe('git configuration', () => {
+  it('sees untracked files whatever status.showUntrackedFiles says', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    git(repo, 'config', 'status.showUntrackedFiles', 'no')
+    writeFileSync(path.join(handle.path, 'agent.txt'), 'work\n')
+    expect(git(handle.path, 'status', '--porcelain')).toBe('')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ dirty: true })
+    await expect(runtime.destroy(handle)).rejects.toMatchObject({ code: 'dirty' })
+    expect(existsSync(path.join(handle.path, 'agent.txt'))).toBe(true)
+  })
+})
+
+describe('exec', () => {
+  it('runs a command in the worktree', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    const args = ['rev-parse', '--show-toplevel']
+    const child = await runtime.exec(handle, { command: 'git', args })
+    await expect(readLines(child.stdout)).resolves.toStrictEqual([handle.path])
+    await expect(child.exited).resolves.toStrictEqual({ code: 0, signal: null })
+  })
+})

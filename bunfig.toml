@@ -1,6 +1,7 @@
 [install]
 exact = true
-# Three days, in seconds: new resolutions skip younger versions; bun.lock entries are unaffected
-minimumReleaseAge = 259200
+# One day, in seconds, during development (new resolutions skip younger versions; bun.lock entries are unaffected).
+# Raised to three days when the tool stabilises (ADR-0009).
+minimumReleaseAge = 86400
 # Lifecycle scripts stay blocked (Bun default); add trusted packages explicitly here if ever needed.
 # trustedDependencies = []

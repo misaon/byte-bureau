@@ -63,6 +63,14 @@ Contributions are licensed under the licence of the package they touch (FSL-1.1-
 
 Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `docs/superpowers/specs/` and the ADRs in `docs/decisions/`. New decisions get a new ADR (MADR format).
 
+## Working in the kernel
+
+- Effect 4 is used only in `packages/kernel`, `packages/api` and `packages/protocol`; plugins never import it, and dependency-cruiser fails the build when one does ([ADR-0003](docs/decisions/0003-effect-in-the-kernel-only.md)).
+- A service is a `Context.Service` class with a `Live` layer beside it (`EventLog` and `EventLogLive`); `KernelLayer` composes them.
+- Persistence goes through `effect/sql`: `StoreLive` (`bun:sqlite`) in the binary, the in-memory `StoreTest` under Vitest ([ADR-0010](docs/decisions/0010-sqlite-through-effect-sql.md)). Configuration files are JSON or JSONC read as text, never run ([ADR-0011](docs/decisions/0011-configuration-files-are-data.md)).
+- Tests use `@effect/vitest` (`it.effect`, `it.layer`), `KernelTest` from `@bytebureau/kernel/testing` (the whole kernel over `StoreTest`), `TestClock` for time and the fake provider for the agent; no test spawns a real agent.
+- `StoreLive` cannot load under Node, so Vitest never imports it: the CLI tests run it in a Bun subprocess, and the compiled-binary smoke in CI (`bytebureau run … --provider fake`) runs it in the shipped binary. To try that by hand, build with `bun run build:binaries --host` and point `BYTEBUREAU_HOME` at a throwaway directory so that `~/.bytebureau` stays untouched.
+
 ## Editors
 
 VS Code: accept the recommended extensions (`.vscode/extensions.json`). WebStorm: the lefthook hooks keep formatting and linting consistent; run `bun run format` before committing if your IDE formatter differs.

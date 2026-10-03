@@ -1,0 +1,26 @@
+{
+  "name": "@bytebureau/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau protocol: event, ask, employee and config schemas with generated JSON Schema",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./schemas/config.json": "./schemas/config.json",
+    "./schemas/events.json": "./schemas/events.json"
+  },
+  "scripts": {
+    "build": "bun run scripts/generate-json-schema.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  }
+}

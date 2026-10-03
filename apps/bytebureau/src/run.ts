@@ -1,4 +1,5 @@
 import { runCommand, showUsage, type CommandDef, type Resolvable } from 'citty'
+import { describeError } from './errors.js'
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(['--help', '-h'])
 const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-v'])
@@ -37,13 +38,22 @@ async function printVersion(command: CommandDef): Promise<void> {
   console.log(meta.version)
 }
 
+// A bare --debug debugs every category; as --debug= it takes nothing from the argument after it
+// What follows -- is no flag
+function withBareDebug(argv: readonly string[]): string[] {
+  const end = argv.indexOf('--')
+  return argv.map((arg, index) =>
+    arg === '--debug' && (end === -1 || index < end) ? '--debug=' : arg,
+  )
+}
+
 async function execute(command: CommandDef, argv: readonly string[]): Promise<void> {
   if (argv.some((arg) => HELP_FLAGS.has(arg))) {
     await printUsage(command, argv)
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    await runCommand(command, { rawArgs: [...argv] })
+    await runCommand(command, { rawArgs: withBareDebug(argv) })
   }
 }
 
@@ -58,7 +68,7 @@ export async function run(command: CommandDef, argv: readonly string[]): Promise
       console.error(error.message)
       return 1
     }
-    console.error(error instanceof Error ? error.message : String(error))
+    console.error(describeError(error))
     return 2
   }
 }

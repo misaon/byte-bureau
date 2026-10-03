@@ -1,0 +1,1262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bytebureau.dev/schema/v1/events.json",
+  "$ref": "#/$defs/EventEnvelope",
+  "$defs": {
+    "EventEnvelope": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "ts": {
+          "type": "string",
+          "title": "Timestamp",
+          "description": "ISO-8601 UTC"
+        },
+        "type": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "sessionId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "turnId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "workItemId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "traceId": {
+          "type": "string"
+        },
+        "spanId": {
+          "type": "string"
+        },
+        "payload": {}
+      },
+      "required": [
+        "seq",
+        "id",
+        "ts",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "project.registered": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "defaultBranch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "defaultBranch"
+      ],
+      "additionalProperties": false
+    },
+    "project.updated": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "defaultBranch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "defaultBranch"
+      ],
+      "additionalProperties": false
+    },
+    "project.removed": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "profile.added": {
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "providerId"
+      ],
+      "additionalProperties": false
+    },
+    "profile.removed": {
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        }
+      },
+      "required": [
+        "profileId"
+      ],
+      "additionalProperties": false
+    },
+    "profile.status": {
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "session.created": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "employeeId": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "title",
+        "employeeId",
+        "providerId"
+      ],
+      "additionalProperties": false
+    },
+    "session.provisioning": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.ready": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.running": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.waiting": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        },
+        "askId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        }
+      },
+      "required": [
+        "status",
+        "askId"
+      ],
+      "additionalProperties": false
+    },
+    "session.paused": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "title": "Timestamp",
+              "description": "ISO-8601 UTC"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "resetsAt"
+      ],
+      "additionalProperties": false
+    },
+    "session.resumed": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.stopped": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.completed": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "session.errored": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "provisioning",
+            "ready",
+            "running",
+            "waiting_for_human",
+            "paused_usage_limit",
+            "completed",
+            "stopped",
+            "errored"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "auth",
+            "ratelimit",
+            "crash",
+            "protocol"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "kind",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "session.warning": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "turn.started": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "interrupted",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "turnId",
+        "index",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "turn.completed": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "interrupted",
+            "errored"
+          ]
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "inputTokens": {
+              "type": "integer"
+            },
+            "outputTokens": {
+              "type": "integer"
+            },
+            "cacheReadTokens": {
+              "type": "integer"
+            },
+            "cacheWriteTokens": {
+              "type": "integer"
+            },
+            "costUsd": {
+              "type": "number"
+            },
+            "contextPct": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "inputTokens",
+            "outputTokens"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "turnId",
+        "index",
+        "status",
+        "stopReason",
+        "usage"
+      ],
+      "additionalProperties": false
+    },
+    "turn.interrupted": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "interrupted",
+            "errored"
+          ]
+        }
+      },
+      "required": [
+        "turnId",
+        "index",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "message.user": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "message.assistant.completed": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "content": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "text",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "tool.started": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "builtin",
+            "mcp",
+            "bash",
+            "subagent",
+            "skill"
+          ]
+        },
+        "input": {}
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "input"
+      ],
+      "additionalProperties": false
+    },
+    "tool.completed": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "outputSummary": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "outputSummary",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "tool.failed": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "subagent.started": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "subagent.stopped": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "ask.requested": {
+      "type": "object",
+      "properties": {
+        "ask": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "title": "UUIDv7",
+              "description": "Time-ordered UUID (v7)"
+            },
+            "sessionId": {
+              "type": "string",
+              "title": "UUIDv7",
+              "description": "Time-ordered UUID (v7)"
+            },
+            "turnId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "title": "UUIDv7",
+                  "description": "Time-ordered UUID (v7)"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "question",
+                "permission"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "header": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "label": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "recommended": {
+                          "type": "boolean"
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "file",
+                                  "test",
+                                  "doc",
+                                  "ticket",
+                                  "rule"
+                                ]
+                              },
+                              "ref": {
+                                "type": "string"
+                              },
+                              "excerpt": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "ref"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "label",
+                        "recommended",
+                        "evidence"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "multiSelect": {
+                    "type": "boolean"
+                  },
+                  "allowOther": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "id",
+                  "header",
+                  "prompt",
+                  "options",
+                  "multiSelect",
+                  "allowOther"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "toolCall": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "input": {}
+              },
+              "required": [
+                "name",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            "policy": {
+              "type": "object",
+              "properties": {
+                "onTimeout": {
+                  "type": "string",
+                  "enum": [
+                    "wait",
+                    "recommended",
+                    "deny"
+                  ]
+                },
+                "timeout": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "onTimeout",
+                "timeout"
+              ],
+              "additionalProperties": false
+            },
+            "recommendationSource": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "policy",
+                "none"
+              ]
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "answered",
+                "expired",
+                "cancelled"
+              ]
+            },
+            "createdAt": {
+              "type": "string",
+              "title": "Timestamp",
+              "description": "ISO-8601 UTC"
+            },
+            "deadlineAt": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "title": "Timestamp",
+                  "description": "ISO-8601 UTC"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "sessionId",
+            "turnId",
+            "kind",
+            "title",
+            "questions",
+            "policy",
+            "recommendationSource",
+            "status",
+            "createdAt",
+            "deadlineAt"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ask"
+      ],
+      "additionalProperties": false
+    },
+    "ask.answered": {
+      "type": "object",
+      "properties": {
+        "askId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "answer": {
+          "type": "object",
+          "properties": {
+            "selected": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "other"
+                  ]
+                }
+              ]
+            },
+            "otherText": {
+              "type": "string"
+            },
+            "remember": {
+              "type": "string",
+              "enum": [
+                "session",
+                "always"
+              ]
+            }
+          },
+          "required": [
+            "selected"
+          ],
+          "additionalProperties": false
+        },
+        "answeredVia": {
+          "type": "string",
+          "enum": [
+            "cli",
+            "api",
+            "timeout",
+            "policy"
+          ]
+        }
+      },
+      "required": [
+        "askId",
+        "answer",
+        "answeredVia"
+      ],
+      "additionalProperties": false
+    },
+    "ask.expired": {
+      "type": "object",
+      "properties": {
+        "askId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        },
+        "fallback": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "askId",
+        "fallback"
+      ],
+      "additionalProperties": false
+    },
+    "ask.cancelled": {
+      "type": "object",
+      "properties": {
+        "askId": {
+          "type": "string",
+          "title": "UUIDv7",
+          "description": "Time-ordered UUID (v7)"
+        }
+      },
+      "required": [
+        "askId"
+      ],
+      "additionalProperties": false
+    },
+    "usage.updated": {
+      "type": "object",
+      "properties": {
+        "usage": {
+          "type": "object",
+          "properties": {
+            "inputTokens": {
+              "type": "integer"
+            },
+            "outputTokens": {
+              "type": "integer"
+            },
+            "cacheReadTokens": {
+              "type": "integer"
+            },
+            "cacheWriteTokens": {
+              "type": "integer"
+            },
+            "costUsd": {
+              "type": "number"
+            },
+            "contextPct": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "inputTokens",
+            "outputTokens"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "usage"
+      ],
+      "additionalProperties": false
+    },
+    "ratelimit.updated": {
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "title": "UUIDv7",
+              "description": "Time-ordered UUID (v7)"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "fiveHourPct": {
+              "type": "number"
+            },
+            "fiveHourResetsAt": {
+              "type": "string"
+            },
+            "sevenDayPct": {
+              "type": "number"
+            },
+            "sevenDayResetsAt": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "profileId",
+        "rateLimit"
+      ],
+      "additionalProperties": false
+    },
+    "compaction.started": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "compaction.completed": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "workspace.provisioned": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "baseRef": {
+          "type": "string"
+        },
+        "runtimeId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "branch",
+        "baseRef",
+        "runtimeId"
+      ],
+      "additionalProperties": false
+    },
+    "workspace.destroyed": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "workspace.retained": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "plugin.loaded": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "ports"
+      ],
+      "additionalProperties": false
+    },
+    "plugin.failed": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "message.assistant.delta": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "text",
+            "thinking"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "tool.progress": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "heartbeat": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string",
+          "title": "Timestamp",
+          "description": "ISO-8601 UTC"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
