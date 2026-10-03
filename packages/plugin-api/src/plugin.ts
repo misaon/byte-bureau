@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { Ask, AskAnswer, KernelEvent, PromptInput } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, EventEnvelope, KernelEvent, PromptInput } from '@bytebureau/protocol'
 import type { Logger } from './logger.js'
 import type { AgentProvider, ExecHandle, ExecSpec, SecretStore, WorkspaceRuntime } from './ports.js'
 
@@ -32,14 +32,16 @@ export interface ProjectInfo {
 
 export interface PluginEvents {
   publish(event: KernelEvent): Promise<void>
+  // Events arrive as the log stores them, with seq, id and timestamp
   subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
-  }): AsyncIterable<KernelEvent>
+  }): AsyncIterable<EventEnvelope>
 }
 
 export interface PluginKv {
-  get<Type = unknown>(key: string): Promise<Type | undefined>
+  // The stored JSON value; a plugin decodes it with its own schema
+  get(key: string): Promise<unknown>
   set(key: string, value: unknown): Promise<void>
   delete(key: string): Promise<void>
 }

@@ -48,6 +48,7 @@ export type {
   AskQuestion,
   Effort,
   EmployeeSpec,
+  EventEnvelope,
   KernelEvent,
   PermissionMode,
   PromptInput,
