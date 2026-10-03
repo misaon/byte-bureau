@@ -4966,14 +4966,14 @@ git commit -m "feat(kernel): register projects by git root with config snapshots
 ### Task 8: `Supervisor` service — spawn, line streams, env allowlist, kill ladder, `TRACEPARENT`
 
 **Files:**
-- Create: `packages/kernel/src/process/env-allowlist.ts`, `packages/kernel/src/process/line-buffer.ts`, `packages/kernel/src/process/supervisor.ts`, `packages/kernel/src/process/env-allowlist.test.ts`, `packages/kernel/src/process/line-buffer.test.ts`, `packages/kernel/src/process/supervisor.test.ts`
+- Create: `packages/kernel/src/process/env-allowlist.ts`, `packages/kernel/src/process/line-buffer.ts`, `packages/kernel/src/process/pump.ts`, `packages/kernel/src/process/kill-ladder.ts`, `packages/kernel/src/process/child-env.ts`, `packages/kernel/src/process/launch.ts`, `packages/kernel/src/process/supervisor.ts`, `packages/kernel/src/process/supervisor-fixtures.ts`, `packages/kernel/src/process/env-allowlist.test.ts`, `packages/kernel/src/process/line-buffer.test.ts`, `packages/kernel/src/process/pump.test.ts`, `packages/kernel/src/process/kill-ladder.test.ts`, `packages/kernel/src/process/launch.test.ts`, `packages/kernel/src/process/supervisor.test.ts`, `packages/kernel/src/process/supervisor-kill.test.ts`, `packages/kernel/src/process/supervisor-group.test.ts` (the lint caps split the brief's three source files and one suite)
 - Modify: `packages/kernel/src/index.ts`
 
 **Interfaces:**
 - Consumes: Node's `child_process.spawn` (Bun implements it), `node:readline` line iteration; Effect `Effect.currentSpan` + `HttpTraceContext.toHeaders` (verified: produces `traceparent`), `Effect.sleep` for the ladder (test-controlled by `TestClock`).
 - Produces: `Supervisor` service `{ spawn(spec: SpawnSpec): Effect<ManagedProcess, never, Scope>; kill(id, signal?): Effect<void>; list(): Effect<readonly ProcessInfo[]> }`, `SupervisorLive: Layer<Supervisor>`, `SpawnSpec { kind: 'agent' | 'git' | 'helper'; command; args; cwd; env?: Record<string, string>; passEnv?: readonly string[]; signal?: AbortSignal; maxLines?: number }`, `ManagedProcess { id, pid, stdout: Stream<string>, stderr: Stream<string>, exit: Effect<ExitInfo>, kill(signal?): Effect<void> }`, `ExitInfo { code: number | null; signal: string | null }`, `allowlistEnv(source, extra?: readonly string[]): Record<string, string>`, `LineBuffer`, `restartSchedule(maxRestarts: number)`.
 
-Env allowlist (spec §13): `PATH`, `HOME`, `LANG`, `LC_*`, `TMPDIR`, `TERM`, `TRACEPARENT`, `BYTEBUREAU_*`, plus `passEnv` names; everything else is dropped. Kill ladder: `SIGINT`, after 5 s `SIGTERM`, after another 10 s `SIGKILL` (each step skipped once the process has exited).
+Env allowlist (spec §13): `PATH`, `HOME`, `LANG`, `LC_*`, `TMPDIR`, `TERM`, `TRACEPARENT`, `BYTEBUREAU_*`, plus `passEnv` names (profile variables arrive through `passEnv`, built by Task 13); everything else is dropped, and `spec.env` goes through the same filter. Kill ladder: `SIGINT`, after 5 s `SIGTERM`, after another 10 s `SIGKILL`, each step skipped once the process has exited; an explicit signal sends only that signal; an aborted `SpawnSpec.signal` runs the ladder. As shipped: children are spawned `detached: true` in their own process group and every signal goes to the group (`process.kill(-pid)`, falling back to `child.kill`), so agent helpers such as MCP servers die with the agent; `exit`, the ladder's "exited", `list()` and the scope finalizer follow the process `exit` event with a 2 s pipe-drain bound (`close` first wins), and nothing is signalled after release (a freed pid may belong to someone else); scope close is `SIGTERM` then `SIGKILL` after 10 s; the pumps read readline `line` events because the readline async iterator loses a line and throws `ERR_USE_AFTER_CLOSE` under consumer lag on Bun and Node alike; queues are unbounded (unread output stays in memory; `maxLines` bounds only `recentStderr()`); start failures (missing command, bad cwd, invalid arguments) resolve `exit` with code -1 and one stderr line, `ERR_INVALID_ARG_*` reported by code so no value is echoed. A terminal Ctrl-C no longer reaches detached children directly: the `--no-daemon` CLI closes its scopes from its own SIGINT handler.
 
 - [ ] **Step 1: Failing tests**
 
@@ -4985,10 +4985,40 @@ import { allowlistEnv } from './env-allowlist.js'
 describe(allowlistEnv, () => {
   it('keeps only the documented variables and explicit extras', () => {
     const env = allowlistEnv(
-      { PATH: '/bin', HOME: '/h', LANG: 'cs_CZ.UTF-8', LC_ALL: 'C', TMPDIR: '/t', TERM: 'xterm', ANTHROPIC_API_KEY: 'sk-ant-x', AWS_SECRET: 'y', BYTEBUREAU_HOME: '/bb', TRACEPARENT: '00-a-b-01', CUSTOM: 'c' },
+      {
+        PATH: '/bin',
+        HOME: '/h',
+        LANG: 'cs_CZ.UTF-8',
+        LC_ALL: 'C',
+        TMPDIR: '/t',
+        TERM: 'xterm',
+        ANTHROPIC_API_KEY: 'not-a-real-key',
+        AWS_SECRET: 'y',
+        BYTEBUREAU_HOME: '/bb',
+        TRACEPARENT: '00-a-b-01',
+        CUSTOM: 'c',
+      },
       ['CUSTOM'],
     )
-    expect(Object.keys(env).sort()).toEqual(['BYTEBUREAU_HOME', 'CUSTOM', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TERM', 'TMPDIR', 'TRACEPARENT'])
+    expect(Object.keys(env).toSorted()).toStrictEqual([
+      'BYTEBUREAU_HOME',
+      'CUSTOM',
+      'HOME',
+      'LANG',
+      'LC_ALL',
+      'PATH',
+      'TERM',
+      'TMPDIR',
+      'TRACEPARENT',
+    ])
+  })
+
+  it('drops look-alike names, unset variables and extras the source does not have', () => {
+    const env = allowlistEnv(
+      { PATHS: '/x', path: '/lower', LC: 'x', BYTEBUREAU: 'y', HOME: undefined, LANG: 'C' },
+      ['MISSING'],
+    )
+    expect(env).toStrictEqual({ LANG: 'C' })
   })
 })
 ```
@@ -5003,63 +5033,1018 @@ describe(LineBuffer, () => {
     for (const line of ['a', 'b', 'c', 'd', 'e']) {
       buffer.push(line)
     }
-    expect(buffer.lines()).toEqual(['c', 'd', 'e'])
+    expect(buffer.lines()).toStrictEqual(['c', 'd', 'e'])
     expect(buffer.dropped).toBe(2)
+  })
+
+  it('drops nothing below the limit and hands out copies', () => {
+    const buffer = new LineBuffer(3)
+    buffer.push('a')
+    const first = buffer.lines()
+    buffer.push('b')
+    expect(first).toStrictEqual(['a'])
+    expect(buffer.lines()).toStrictEqual(['a', 'b'])
+    expect(buffer.dropped).toBe(0)
   })
 })
 ```
 `packages/kernel/src/process/supervisor.test.ts`:
 ```ts
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Fiber, Stream } from 'effect'
-import { TestClock } from 'effect/testing'
-import { Supervisor, SupervisorLive } from './supervisor.js'
+import { assert, describe, it } from '@effect/vitest'
+import { Cause, Duration, Effect, Exit, Fiber, Schedule, Scope, Stream } from 'effect'
+import {
+  restartSchedule,
+  Supervisor,
+  SupervisorLive,
+  type ProcessInfo,
+  type SpawnSpec,
+} from './supervisor.js'
+import { awaitReady, IDLE, node, nodeSpec, ownScope, withEnv } from './supervisor-fixtures.js'
 
-const node = process.execPath
+const TRACE = `00-${'a'.repeat(32)}-${'b'.repeat(16)}-01`
 
-layer(SupervisorLive)('Supervisor', (it) => {
-  it.live('streams stdout lines, passes only allowlisted env and reports the exit code', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const supervisor = yield* Supervisor
-        const child = yield* supervisor.spawn({
-          kind: 'helper',
-          command: node,
-          args: ['-e', 'console.log("one"); console.log(process.env.SECRET ?? "no-secret"); console.log(process.env.KEEP); process.exit(3)'],
-          cwd: process.cwd(),
-          env: { SECRET: 'x', KEEP: 'y' },
-          passEnv: ['KEEP'],
-        })
-        const lines = yield* child.stdout.pipe(Stream.runCollect)
-        assert.deepStrictEqual([...lines], ['one', 'no-secret', 'y'])
-        assert.deepStrictEqual(yield* child.exit, { code: 3, signal: null })
-      }),
-    ),
+const numbered = (prefix: string): string[] =>
+  Array.from({ length: 20 }, (_value, index) => `${prefix}${index}`)
+
+const withoutStamp = ({
+  startedAt: _startedAt,
+  ...rest
+}: ProcessInfo): Omit<ProcessInfo, 'startedAt'> => rest
+
+const hasIsoStamp = ({ startedAt }: ProcessInfo): boolean =>
+  new Date(startedAt).toISOString() === startedAt
+
+// A process that cannot start reports exit code -1, a pid of -1 and only the reason on stderr
+const failsToStart = (
+  spec: SpawnSpec,
+): Effect.Effect<readonly string[], never, Supervisor | Scope.Scope> =>
+  Effect.gen(function* failsToStartGen() {
+    const supervisor = yield* Supervisor
+    const child = yield* supervisor.spawn(spec)
+    assert.deepStrictEqual(yield* child.exit, { code: -1, signal: null })
+    assert.strictEqual(child.pid, -1)
+    assert.deepStrictEqual(yield* Stream.runCollect(child.stdout), [])
+    const reasons = yield* Stream.runCollect(child.stderr)
+    assert.deepStrictEqual(child.recentStderr(), reasons)
+    assert.deepStrictEqual(yield* supervisor.list(), [])
+    return reasons
+  })
+
+// Without a test clock, so the child processes run in real time
+const live = { excludeTestServices: true }
+
+it.layer(SupervisorLive, live)('Supervisor environment', (suite) => {
+  suite.effect('streams stdout lines, passes only allowlisted env and reports the exit code', () =>
+    Effect.gen(function* streamsOutput() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec(
+          'console.log("one"); console.log(process.env.SECRET ?? "no-secret"); console.log(process.env.KEEP); process.exit(3)',
+          { env: { SECRET: 'x', KEEP: 'y' }, passEnv: ['KEEP'] },
+        ),
+      )
+      const lines = yield* Stream.runCollect(child.stdout)
+      assert.deepStrictEqual(lines, ['one', 'no-secret', 'y'])
+      assert.deepStrictEqual(yield* child.exit, { code: 3, signal: null })
+    }),
   )
 
-  it.effect('escalates SIGINT → SIGTERM after 5 s → SIGKILL after 10 s', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
+  suite.effect('keeps the daemon environment out of the child except the allowlist', () =>
+    Effect.gen(function* dropsDaemonEnvironment() {
+      yield* withEnv('ANTHROPIC_API_KEY', 'not-a-real-key')
+      yield* withEnv('BYTEBUREAU_TEST_MARK', 'kept')
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec(
+          'console.log(process.env.ANTHROPIC_API_KEY ?? "dropped"); console.log(process.env.BYTEBUREAU_TEST_MARK); console.log(typeof process.env.PATH)',
+        ),
+      )
+      const lines = yield* Stream.runCollect(child.stdout)
+      assert.deepStrictEqual(lines, ['dropped', 'kept', 'string'])
+    }),
+  )
+})
+
+it.layer(SupervisorLive, live)('Supervisor tracing', (suite) => {
+  suite.effect('hands the current span to the child as TRACEPARENT', () =>
+    Effect.gen(function* passesSpan() {
+      yield* withEnv('TRACEPARENT', TRACE)
+      const supervisor = yield* Supervisor
+      const span = yield* Effect.currentSpan
+      const child = yield* supervisor.spawn(nodeSpec('console.log(process.env.TRACEPARENT)'))
+      const flags = span.sampled ? '01' : '00'
+      const lines = yield* Stream.runCollect(child.stdout)
+      assert.deepStrictEqual(lines, [`00-${span.traceId}-${span.spanId}-${flags}`])
+    }).pipe(Effect.withSpan('parent')),
+  )
+
+  suite.effect('passes the daemon own TRACEPARENT on when no span is active', () =>
+    Effect.gen(function* passesAmbientTrace() {
+      yield* withEnv('TRACEPARENT', TRACE)
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec('console.log(process.env.TRACEPARENT)'))
+      assert.deepStrictEqual(yield* Stream.runCollect(child.stdout), [TRACE])
+    }),
+  )
+})
+
+it.layer(SupervisorLive, live)('Supervisor line streams', (suite) => {
+  suite.effect('splits CRLF and unterminated lines and keeps each stream in its own order', () =>
+    Effect.gen(function* splitsLines() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec(
+          String.raw`for (let i = 0; i < 20; i++) { process.stdout.write("o" + i + "\r\n"); process.stderr.write("e" + i + "\n") } process.stdout.write("tail")`,
+        ),
+      )
+      assert.deepStrictEqual(yield* Stream.runCollect(child.stdout), [...numbered('o'), 'tail'])
+      assert.deepStrictEqual(yield* Stream.runCollect(child.stderr), numbered('e'))
+    }),
+  )
+
+  suite.effect('delivers every line of an output that outgrows the pipe buffer', () =>
+    Effect.gen(function* deliversLongOutput() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec(
+          'for (let i = 0; i < 20000; i++) console.log("line-" + i); process.stdout.write("tail")',
+        ),
+      )
+      const lines = yield* Stream.runCollect(child.stdout)
+      assert.strictEqual(lines.length, 20_001)
+      assert.deepStrictEqual(lines.slice(0, 2), ['line-0', 'line-1'])
+      assert.deepStrictEqual(lines.slice(-2), ['line-19999', 'tail'])
+    }),
+  )
+
+  suite.effect(
+    'keeps the newest stderr lines for diagnostics although nobody reads the stream',
+    () =>
+      Effect.gen(function* keepsStderr() {
         const supervisor = yield* Supervisor
-        const child = yield* supervisor.spawn({
-          kind: 'helper',
-          command: node,
-          args: ['-e', 'process.on("SIGINT", () => {}); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
-          cwd: process.cwd(),
-        })
-        yield* TestClock.withLive(Effect.sleep('200 millis'))
-        const killing = yield* Effect.forkChild(child.kill())
-        yield* TestClock.adjust('5 seconds')
-        yield* TestClock.adjust('10 seconds')
-        yield* Fiber.join(killing)
-        const exit = yield* child.exit
-        assert.strictEqual(exit.signal, 'SIGKILL')
+        const child = yield* supervisor.spawn(
+          nodeSpec('for (const n of [1, 2, 3, 4, 5]) console.error("e" + n)', { maxLines: 3 }),
+        )
+        yield* child.exit
+        assert.deepStrictEqual(child.recentStderr(), ['e3', 'e4', 'e5'])
+        assert.deepStrictEqual(yield* Stream.runCollect(child.stderr), [
+          'e1',
+          'e2',
+          'e3',
+          'e4',
+          'e5',
+        ])
       }),
-    ),
+  )
+})
+
+// A consumer that is slower than the child must neither lose a line nor see the pipe fail
+it.layer(SupervisorLive, live)('Supervisor lagging consumer', (suite) => {
+  suite.effect('delivers every line to a consumer that yields to the event loop on each line', () =>
+    Effect.gen(function* lagsBehind() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(
+        nodeSpec('for (let i = 0; i < 8000; i++) console.log("line-" + i)'),
+      )
+      const lines = yield* child.stdout.pipe(
+        Stream.tap(() => Effect.yieldNow),
+        Stream.runCollect,
+      )
+      assert.strictEqual(lines.length, 8000)
+      assert.strictEqual(lines.at(-1), 'line-7999')
+    }),
+  )
+})
+
+it.layer(SupervisorLive, live)('Supervisor registry', (suite) => {
+  suite.effect('lists a running process until it exits', () =>
+    Effect.gen(function* listsRunning() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec(IDLE))
+      yield* awaitReady(child)
+      const listed = yield* supervisor.list()
+      assert.deepStrictEqual(
+        listed.map((info) => withoutStamp(info)),
+        [{ id: child.id, kind: 'helper', command: node, pid: child.pid }],
+      )
+      assert.ok(listed.every((info) => hasIsoStamp(info)))
+      yield* child.kill('SIGKILL')
+      yield* child.exit
+      assert.deepStrictEqual(yield* supervisor.list(), [])
+    }),
+  )
+
+  suite.effect('keeps streaming after the fiber that spawned the process has ended', () =>
+    Effect.gen(function* outlivesSpawner() {
+      const supervisor = yield* Supervisor
+      const scope = yield* ownScope
+      const spawning = supervisor
+        .spawn(nodeSpec('console.log("a"); console.log("b")'))
+        .pipe(Effect.provideService(Scope.Scope, scope))
+      const child = yield* Fiber.join(yield* Effect.forkChild(spawning))
+      assert.deepStrictEqual(yield* Stream.runCollect(child.stdout), ['a', 'b'])
+      assert.deepStrictEqual(yield* child.exit, { code: 0, signal: null })
+      yield* Scope.close(scope, Exit.void)
+    }),
+  )
+})
+
+it.layer(SupervisorLive, live)('Supervisor start failures', (suite) => {
+  suite.effect('reports a command that does not exist', () =>
+    Effect.gen(function* reportsMissingCommand() {
+      const command = 'bytebureau-no-such-command'
+      const reasons = yield* failsToStart({ kind: 'helper', command, args: [], cwd: process.cwd() })
+      assert.strictEqual(reasons.length, 1)
+      assert.ok(reasons.every((line) => line.includes(command)))
+    }),
+  )
+
+  suite.effect('reports a working directory that does not exist', () =>
+    Effect.gen(function* reportsMissingDirectory() {
+      const reasons = yield* failsToStart(nodeSpec('1', { cwd: '/bytebureau/no/such/directory' }))
+      assert.strictEqual(reasons.length, 1)
+    }),
+  )
+
+  suite.effect('reports a working directory that is a file', () =>
+    Effect.gen(function* reportsFileAsDirectory() {
+      const reasons = yield* failsToStart(nodeSpec('1', { cwd: node }))
+      assert.strictEqual(reasons.length, 1)
+    }),
+  )
+})
+
+// The runtime echoes the offending value in its message, which may well be a secret
+it.layer(SupervisorLive, live)('Supervisor invalid arguments', (suite) => {
+  suite.effect('reports an invalid argument by its code alone', () =>
+    Effect.gen(function* reportsInvalidArgument() {
+      const reasons = yield* failsToStart(nodeSpec('1\0'))
+      assert.strictEqual(reasons.length, 1)
+      assert.ok(reasons.every((line) => line.includes('ERR_INVALID_ARG_VALUE')))
+      assert.ok(reasons.every((line) => !line.includes('Received')))
+    }),
+  )
+
+  suite.effect('reports an invalid environment value without echoing it', () =>
+    Effect.gen(function* hidesInvalidValue() {
+      const spec = nodeSpec('1', { env: { MY_SECRET: 'swordfish\0' }, passEnv: ['MY_SECRET'] })
+      const reasons = yield* failsToStart(spec)
+      assert.strictEqual(reasons.length, 1)
+      assert.ok(reasons.every((line) => line.includes('ERR_INVALID_ARG_VALUE')))
+      assert.ok(reasons.every((line) => !line.includes('swordfish')))
+    }),
+  )
+})
+
+describe(restartSchedule, () => {
+  it.effect('backs off exponentially with jitter and gives up after the limit', () =>
+    Effect.gen(function* backsOff() {
+      const step = yield* Schedule.toStep(restartSchedule(2))
+      const [, first] = yield* step(0, null)
+      const [, second] = yield* step(0, null)
+      const [firstMillis, secondMillis] = [Duration.toMillis(first), Duration.toMillis(second)]
+      assert.ok(firstMillis >= 400 && firstMillis <= 600)
+      assert.ok(secondMillis >= 800 && secondMillis <= 1200)
+      const exhausted = yield* Effect.flip(step(0, null))
+      assert.ok(Cause.isDone(exhausted))
+    }),
   )
 })
 ```
-`TestClock.withLive` (listed among the verified `effect/testing` exports) runs the short sleep on the real clock so the child can install its signal handlers before the ladder starts.
+`packages/kernel/src/process/supervisor-kill.test.ts`:
+```ts
+import { getEventListeners } from 'node:events'
+import { assert, it } from '@effect/vitest'
+import { Effect, Exit, Fiber, Queue, Scope } from 'effect'
+import { TestClock } from 'effect/testing'
+import { Supervisor, SupervisorLive } from './supervisor.js'
+import { awaitReady, IDLE, nodeSpec, ownScope, spawnStubborn } from './supervisor-fixtures.js'
+
+it.layer(SupervisorLive)('Supervisor kill ladder', (suite) => {
+  suite.effect('escalates SIGINT, SIGTERM after 5 s and SIGKILL after another 10 s', () =>
+    Effect.gen(function* escalates() {
+      const supervisor = yield* Supervisor
+      const child = yield* spawnStubborn(supervisor)
+      const lines = yield* awaitReady(child)
+      const killing = yield* Effect.forkChild(child.kill(), { startImmediately: true })
+      assert.strictEqual(yield* Queue.take(lines), 'SIGINT')
+      yield* TestClock.adjust('5 seconds')
+      assert.strictEqual(yield* Queue.take(lines), 'SIGTERM')
+      yield* TestClock.adjust('10 seconds')
+      yield* Fiber.join(killing)
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+    }),
+  )
+
+  suite.effect('stops at SIGINT when the process exits, without waiting out the grace period', () =>
+    Effect.gen(function* stopsEarly() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec(IDLE))
+      yield* awaitReady(child)
+      yield* child.kill()
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGINT' })
+    }),
+  )
+
+  suite.effect('sends only the signal it is given and does not wait', () =>
+    Effect.gen(function* sendsOneSignal() {
+      const supervisor = yield* Supervisor
+      const child = yield* spawnStubborn(supervisor)
+      const lines = yield* awaitReady(child)
+      yield* child.kill('SIGTERM')
+      assert.strictEqual(yield* Queue.take(lines), 'SIGTERM')
+      yield* child.kill('SIGKILL')
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+    }),
+  )
+})
+
+it.layer(SupervisorLive)('Supervisor kill by id', (suite) => {
+  suite.effect('kills by id with the ladder and ignores an id nobody holds', () =>
+    Effect.gen(function* killsById() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec(IDLE))
+      yield* awaitReady(child)
+      yield* supervisor.kill('no-such-process')
+      yield* supervisor.kill(child.id)
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGINT' })
+      assert.deepStrictEqual(yield* supervisor.list(), [])
+    }),
+  )
+
+  suite.effect('kills by id with the signal it is given', () =>
+    Effect.gen(function* killsByIdWithSignal() {
+      const supervisor = yield* Supervisor
+      const child = yield* spawnStubborn(supervisor)
+      yield* awaitReady(child)
+      yield* supervisor.kill(child.id, 'SIGKILL')
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+    }),
+  )
+})
+
+it.layer(SupervisorLive)('Supervisor scope', (suite) => {
+  suite.effect('terminates a running process when its scope closes', () =>
+    Effect.gen(function* closesScope() {
+      const supervisor = yield* Supervisor
+      const scope = yield* ownScope
+      const spawning = supervisor
+        .spawn(nodeSpec(IDLE))
+        .pipe(Effect.provideService(Scope.Scope, scope))
+      const child = yield* spawning
+      yield* awaitReady(child)
+      yield* Scope.close(scope, Exit.void)
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGTERM' })
+      assert.deepStrictEqual(yield* supervisor.list(), [])
+    }),
+  )
+
+  suite.effect('kills a process that ignores SIGTERM ten seconds after its scope closes', () =>
+    Effect.gen(function* escalatesOnClose() {
+      const supervisor = yield* Supervisor
+      const scope = yield* ownScope
+      const child = yield* spawnStubborn(supervisor, scope)
+      const lines = yield* awaitReady(child)
+      const closing = yield* Effect.forkChild(Scope.close(scope, Exit.void), {
+        startImmediately: true,
+      })
+      assert.strictEqual(yield* Queue.take(lines), 'SIGTERM')
+      yield* TestClock.adjust('10 seconds')
+      yield* Fiber.join(closing)
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+    }),
+  )
+})
+
+it.layer(SupervisorLive)('Supervisor abort signal', (suite) => {
+  suite.effect('runs the kill ladder when the abort signal fires', () =>
+    Effect.gen(function* abortsProcess() {
+      const supervisor = yield* Supervisor
+      const controller = new AbortController()
+      const child = yield* supervisor.spawn(nodeSpec(IDLE, { signal: controller.signal }))
+      yield* awaitReady(child)
+      controller.abort()
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGINT' })
+    }),
+  )
+
+  suite.effect('runs the kill ladder at once for a signal that has already aborted', () =>
+    Effect.gen(function* abortsAtStart() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec(IDLE, { signal: AbortSignal.abort() }))
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGINT' })
+    }),
+  )
+
+  suite.effect('leaves a process that has already exited alone when the signal fires later', () =>
+    Effect.gen(function* abortsAfterExit() {
+      const supervisor = yield* Supervisor
+      const controller = new AbortController()
+      const child = yield* supervisor.spawn(nodeSpec('0', { signal: controller.signal }))
+      assert.deepStrictEqual(yield* child.exit, { code: 0, signal: null })
+      controller.abort()
+      assert.deepStrictEqual(yield* supervisor.list(), [])
+    }),
+  )
+})
+
+it.layer(SupervisorLive)('Supervisor abort listener', (suite) => {
+  suite.effect('stops listening to the abort signal once its scope closes', () =>
+    Effect.gen(function* releasesSignal() {
+      const supervisor = yield* Supervisor
+      const controller = new AbortController()
+      const scope = yield* ownScope
+      const spawning = supervisor
+        .spawn(nodeSpec('0', { signal: controller.signal }))
+        .pipe(Effect.provideService(Scope.Scope, scope))
+      const child = yield* spawning
+      yield* child.exit
+      assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1)
+      yield* Scope.close(scope, Exit.void)
+      assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0)
+    }),
+  )
+})
+```
+`packages/kernel/src/process/supervisor-group.test.ts`:
+```ts
+import { assert, it, vi } from '@effect/vitest'
+import { Effect, Exit, Fiber, Queue, Scope } from 'effect'
+import { TestClock } from 'effect/testing'
+import { Supervisor, SupervisorLive } from './supervisor.js'
+import {
+  awaitReady,
+  ESCAPED_HOLDER,
+  hasEnded,
+  HOLDER,
+  IDLE,
+  isPending,
+  nodeSpec,
+  ownScope,
+  REAPING_HOLDER,
+  spawnHolder,
+  untilUnlisted,
+} from './supervisor-fixtures.js'
+
+// A grandchild that holds the pipes keeps the child's close event away, which exit must not wait for
+it.layer(SupervisorLive)('Supervisor drain bound', (suite) => {
+  suite.effect('resolves exit two seconds after a child whose grandchild left the group', () =>
+    Effect.gen(function* boundsDrain() {
+      const supervisor = yield* Supervisor
+      const { child, lines } = yield* spawnHolder(supervisor, ESCAPED_HOLDER)
+      yield* child.kill('SIGKILL')
+      yield* untilUnlisted(supervisor)
+      yield* TestClock.adjust('1999 millis')
+      assert.ok(yield* isPending(child.exit))
+      yield* TestClock.adjust('1 millis')
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+      assert.ok(yield* hasEnded(lines))
+    }),
+  )
+
+  suite.effect('closes the scope within the same bound', () =>
+    Effect.gen(function* closesBounded() {
+      const supervisor = yield* Supervisor
+      const scope = yield* ownScope
+      const { child } = yield* spawnHolder(supervisor, ESCAPED_HOLDER, scope)
+      const closing = yield* Effect.forkChild(Scope.close(scope, Exit.void), {
+        startImmediately: true,
+      })
+      yield* untilUnlisted(supervisor)
+      yield* TestClock.adjust('2 seconds')
+      yield* Fiber.join(closing)
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGTERM' })
+    }),
+  )
+})
+
+// A pid that has been free for a while may belong to somebody else, so a released process gets no signal
+it.layer(SupervisorLive)('Supervisor released process', (suite) => {
+  suite.effect('sends no signal to the group once the process has exited and been released', () =>
+    Effect.gen(function* retiresProcess() {
+      const supervisor = yield* Supervisor
+      const child = yield* supervisor.spawn(nodeSpec(IDLE))
+      yield* awaitReady(child)
+      yield* child.kill()
+      yield* child.exit
+      const killGroup = vi.spyOn(process, 'kill').mockReturnValue(true)
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          killGroup.mockRestore()
+        }),
+      )
+      yield* child.kill('SIGTERM')
+      assert.strictEqual(killGroup.mock.calls.length, 0)
+    }),
+  )
+})
+
+it.layer(SupervisorLive)('Supervisor process group', (suite) => {
+  suite.effect('ends a grandchild of the same group with the child, so exit needs no drain', () =>
+    Effect.gen(function* endsGroup() {
+      const supervisor = yield* Supervisor
+      const { child } = yield* spawnHolder(supervisor, HOLDER)
+      yield* child.kill()
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGINT' })
+    }),
+  )
+
+  suite.effect('signals the whole group and not only the child', () =>
+    Effect.gen(function* signalsGroup() {
+      const supervisor = yield* Supervisor
+      const { child, lines, grandchildPid } = yield* spawnHolder(supervisor, REAPING_HOLDER)
+      yield* child.kill('SIGINT')
+      assert.strictEqual(yield* Queue.take(lines), 'grandchild SIGINT')
+      assert.throws(() => {
+        process.kill(grandchildPid, 0)
+      }, /ESRCH/u)
+      yield* child.kill('SIGKILL')
+      assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
+    }),
+  )
+})
+```
+`packages/kernel/src/process/kill-ladder.test.ts`:
+```ts
+import { assert, describe, expect, it } from '@effect/vitest'
+import { Effect, Fiber, Latch, Queue } from 'effect'
+import { TestClock } from 'effect/testing'
+import {
+  climb,
+  GRACEFUL_LADDER,
+  ladderFor,
+  TERMINATE_LADDER,
+  type KillSignal,
+} from './kill-ladder.js'
+
+interface Sent {
+  readonly signal: KillSignal
+  readonly at: number
+}
+
+// Every signal is stamped with the test clock when it is sent
+const recorder = Effect.gen(function* makeRecorder() {
+  const clock = yield* TestClock.testClockWith(Effect.succeed)
+  const sent = yield* Queue.unbounded<Sent>()
+  const send = (signal: KillSignal): void => {
+    Queue.offerUnsafe(sent, { signal, at: clock.currentTimeMillisUnsafe() })
+  }
+  return { sent, send }
+})
+
+const settle = Effect.forEach(Array.from({ length: 10 }), () => Effect.yieldNow, { discard: true })
+
+// One millisecond short of the grace period nothing may be sent; the last millisecond sends the next signal
+const nextAfter = (sent: Queue.Dequeue<Sent>, grace: number): Effect.Effect<Sent> =>
+  Effect.gen(function* waitsOutGrace() {
+    yield* TestClock.adjust(grace - 1)
+    yield* settle
+    assert.strictEqual(yield* Queue.size(sent), 0)
+    yield* TestClock.adjust(1)
+    return yield* Queue.take(sent)
+  })
+
+// A process that never exits gets every rung of the ladder, one grace period apart
+const climbedAgainstStubborn = (
+  rungs: Parameters<typeof climb>[0],
+  graces: readonly number[],
+): Effect.Effect<readonly Sent[]> =>
+  Effect.gen(function* climbsAll() {
+    const { sent, send } = yield* recorder
+    const fiber = yield* Effect.forkChild(climb(rungs, send, Effect.never), {
+      startImmediately: true,
+    })
+    const seen = [yield* Queue.take(sent)]
+    for (const grace of graces) {
+      seen.push(yield* nextAfter(sent, grace))
+    }
+    yield* Fiber.join(fiber)
+    return seen
+  })
+
+describe(climb, () => {
+  it.effect('sends SIGINT, SIGTERM after 5 s and SIGKILL after another 10 s', () =>
+    Effect.gen(function* climbsFully() {
+      const seen = yield* climbedAgainstStubborn(GRACEFUL_LADDER, [5000, 10_000])
+      assert.deepStrictEqual(seen, [
+        { signal: 'SIGINT', at: 0 },
+        { signal: 'SIGTERM', at: 5000 },
+        { signal: 'SIGKILL', at: 15_000 },
+      ])
+    }),
+  )
+
+  it.effect('starts at SIGTERM on the terminating ladder', () =>
+    Effect.gen(function* climbsTerminating() {
+      const seen = yield* climbedAgainstStubborn(TERMINATE_LADDER, [10_000])
+      assert.deepStrictEqual(seen, [
+        { signal: 'SIGTERM', at: 0 },
+        { signal: 'SIGKILL', at: 10_000 },
+      ])
+    }),
+  )
+})
+
+describe('climb that has nothing left to do', () => {
+  it.effect('stops climbing as soon as the process has exited', () =>
+    Effect.gen(function* stopsOnExit() {
+      const { sent, send } = yield* recorder
+      const exited = yield* Latch.make()
+      const fiber = yield* Effect.forkChild(climb(GRACEFUL_LADDER, send, exited.await), {
+        startImmediately: true,
+      })
+      yield* Queue.take(sent)
+      yield* exited.open
+      yield* Fiber.join(fiber)
+      yield* TestClock.adjust('1 minute')
+      yield* settle
+      assert.strictEqual(yield* Queue.size(sent), 0)
+    }),
+  )
+
+  it.effect('sends a single requested signal and does not wait', () =>
+    Effect.gen(function* sendsOnce() {
+      const { sent, send } = yield* recorder
+      yield* climb(ladderFor('SIGTERM'), send, Effect.never)
+      yield* TestClock.adjust('1 minute')
+      yield* settle
+      assert.deepStrictEqual(yield* Queue.takeAll(sent), [{ signal: 'SIGTERM', at: 0 }])
+    }),
+  )
+})
+
+describe(ladderFor, () => {
+  it('is the graceful ladder without a signal and one rung for a signal', () => {
+    expect(ladderFor()).toBe(GRACEFUL_LADDER)
+    expect(ladderFor('SIGKILL')).toStrictEqual([{ signal: 'SIGKILL', grace: null }])
+  })
+})
+```
+`packages/kernel/src/process/pump.test.ts`:
+```ts
+import { PassThrough } from 'node:stream'
+import { setImmediate as nextTurn } from 'node:timers/promises'
+import { assert, it } from '@effect/vitest'
+import { Effect, Stream } from 'effect'
+import { startPump } from './pump.js'
+
+// Lets the event loop run, so what was written reaches the reader
+const turn = Effect.promise(async () => {
+  await nextTurn()
+})
+
+// The input has ended for good: every chunk has been through the reader by now
+const closed = (input: PassThrough): Effect.Effect<void> =>
+  Effect.callback((resume) => {
+    input.once('close', () => {
+      resume(Effect.void)
+    })
+  })
+
+it.effect('queues the lines that arrive before anybody reads the stream', () =>
+  Effect.gen(function* queuesEarlyLines() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('early\nlines\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['early', 'lines'])
+  }),
+)
+
+it.effect('splits CRLF and keeps an unterminated last line', () =>
+  Effect.gen(function* splitsLines() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('one\r\ntwo\nthree')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['one', 'two', 'three'])
+    assert.deepStrictEqual(pump.recent(), ['one', 'two', 'three'])
+  }),
+)
+
+it.effect('keeps blank lines', () =>
+  Effect.gen(function* keepsBlankLines() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('one\n\ntwo\n\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['one', '', 'two', ''])
+  }),
+)
+
+it.effect('breaks at a lone CR and counts CRLF as one break', () =>
+  Effect.gen(function* breaksAtCarriageReturn() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.end('a\rb\r\nc\r\r\nd\r')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b', 'c', '', 'd'])
+  }),
+)
+
+it.effect('joins a CRLF that arrives in two chunks', () =>
+  Effect.gen(function* joinsSplitCrlf() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 10)
+    input.write('a\r')
+    yield* turn
+    input.end('\nb\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b'])
+  }),
+)
+
+it.effect('streams without keeping any recent line when the capacity is zero', () =>
+  Effect.gen(function* keepsNothing() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 0)
+    input.end('a\nb\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b'])
+    assert.deepStrictEqual(pump.recent(), [])
+  }),
+)
+
+it.effect('keeps the newest lines for diagnostics while the stream carries every line', () =>
+  Effect.gen(function* boundsRecent() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 2)
+    input.end('a\nb\nc\nd\n')
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(pump.recent(), ['c', 'd'])
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['a', 'b', 'c', 'd'])
+  }),
+)
+
+it.effect('appends a line that did not come from the input', () =>
+  Effect.gen(function* appendsLine() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 5)
+    pump.append('spawn failed')
+    input.end()
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['spawn failed'])
+    assert.deepStrictEqual(pump.recent(), ['spawn failed'])
+  }),
+)
+
+it.effect('ends without a line when there is no input at all', () =>
+  Effect.gen(function* endsWithoutInput() {
+    const pump = yield* startPump(null, 5)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), [])
+    assert.deepStrictEqual(pump.recent(), [])
+  }),
+)
+
+it.effect('closes an input that never signals its end', () =>
+  Effect.gen(function* closesOpenInput() {
+    const input = new PassThrough()
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        input.destroy()
+      }),
+    )
+    const pump = yield* startPump(input, 5)
+    yield* pump.finish
+    input.write('late\n')
+    yield* turn
+    assert.deepStrictEqual(pump.recent(), [])
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), [])
+  }),
+)
+
+it.effect('keeps what was read and ends the stream when the input fails', () =>
+  Effect.gen(function* survivesBrokenInput() {
+    const input = new PassThrough()
+    const pump = yield* startPump(input, 5)
+    input.write('kept\n')
+    yield* turn
+    input.destroy(new Error('broken pipe'))
+    yield* closed(input)
+    yield* pump.finish
+    assert.deepStrictEqual(yield* Stream.runCollect(pump.lines), ['kept'])
+  }),
+)
+```
+`packages/kernel/src/process/launch.test.ts`:
+```ts
+import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
+import { describeFailure, signalGroup } from './launch.js'
+
+// With process.kill replaced, a wrong pid can never reach a real process or group
+const stubProcessKill = (implementation: () => true): MockInstance<typeof process.kill> => {
+  const stub = vi.spyOn(process, 'kill').mockImplementation(implementation)
+  onTestFinished(() => {
+    stub.mockRestore()
+  })
+  return stub
+}
+
+describe(signalGroup, () => {
+  it('signals the whole process group of the child', () => {
+    const killGroup = stubProcessKill(() => true)
+    const kill = vi.fn<() => boolean>(() => true)
+    signalGroup({ pid: 4242, kill }, 'SIGTERM')
+    expect(killGroup).toHaveBeenCalledExactlyOnceWith(-4242, 'SIGTERM')
+    expect(kill).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the child when there is no such group', () => {
+    stubProcessKill(() => {
+      throw new Error('kill ESRCH')
+    })
+    const kill = vi.fn<() => boolean>(() => true)
+    signalGroup({ pid: 4242, kill }, 'SIGKILL')
+    expect(kill).toHaveBeenCalledExactlyOnceWith('SIGKILL')
+  })
+
+  it.each([undefined, 0, 1])('never signals a group for the pid %s', (pid) => {
+    const killGroup = stubProcessKill(() => true)
+    const kill = vi.fn<() => boolean>(() => true)
+    signalGroup({ pid, kill }, 'SIGTERM')
+    expect(killGroup).not.toHaveBeenCalled()
+    expect(kill).toHaveBeenCalledExactlyOnceWith('SIGTERM')
+  })
+})
+
+describe(describeFailure, () => {
+  it('gives a system error as its message', () => {
+    const error = Object.assign(new Error('spawn tool ENOENT'), { code: 'ENOENT' })
+    expect(describeFailure(error)).toBe('spawn tool ENOENT')
+  })
+
+  it.each(['ERR_INVALID_ARG_VALUE', 'ERR_INVALID_ARG_TYPE'])(
+    'names an invalid argument by its code %s and leaves the offending value out',
+    (code) => {
+      const error = Object.assign(new Error("Received 'swordfish'"), { code })
+      const text = describeFailure(error)
+      expect(text).toContain(code)
+      expect(text).not.toContain('swordfish')
+    },
+  )
+
+  it('gives an error without a code as its message', () => {
+    expect(describeFailure(new Error('boom'))).toBe('boom')
+  })
+
+  it('turns a thrown value that is no error into text', () => {
+    expect(describeFailure('plain')).toBe('plain')
+  })
+})
+```
+`packages/kernel/src/process/supervisor-fixtures.ts` (shared fixtures):
+```ts
+import { Effect, Exit, Option, Queue, Scope, Stream, type Cause } from 'effect'
+import type { ManagedProcess, SpawnSpec, Supervisor } from './supervisor.js'
+
+export const node = process.execPath
+
+// A helper process that runs one Node script
+export const nodeSpec = (script: string, rest: Partial<SpawnSpec> = {}): SpawnSpec => ({
+  kind: 'helper',
+  command: node,
+  args: ['-e', script],
+  cwd: process.cwd(),
+  ...rest,
+})
+
+// Announces itself once it runs, then idles until a signal ends it
+export const IDLE = 'console.log("ready"); setInterval(() => {}, 1000)'
+
+// Reports SIGINT and SIGTERM instead of dying from them, so only SIGKILL ends it
+const STUBBORN = `for (const name of ["SIGINT", "SIGTERM"]) process.on(name, () => console.log(name)); ${IDLE}`
+
+type Lines = Queue.Dequeue<string, Cause.Done>
+
+// The lines of a stream, taken one at a time; taking past the end of the stream fails
+const lineQueue = (stream: Stream.Stream<string>): Effect.Effect<Lines, never, Scope.Scope> =>
+  Effect.gen(function* collectsLines() {
+    const queue = yield* Queue.unbounded<string, Cause.Done>()
+    const feeding = Stream.runForEach(stream, (line) => Queue.offer(queue, line)).pipe(
+      Effect.ensuring(Queue.end(queue)),
+    )
+    yield* Effect.forkScoped(feeding)
+    return queue
+  })
+
+// The child has printed "ready", so its signal handlers are installed
+export const awaitReady = (child: ManagedProcess): Effect.Effect<Lines, Cause.Done, Scope.Scope> =>
+  Effect.gen(function* awaitsReady() {
+    const lines = yield* lineQueue(child.stdout)
+    yield* Queue.take(lines)
+    return lines
+  })
+
+// The child starts a grandchild that inherits the pipes and idles, then prints the grandchild's pid
+const startsGrandchild = (detached: boolean): string =>
+  `const grand = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit", detached: ${detached} }); console.log("up " + grand.pid)`
+
+// The grandchild is in the child's process group: a signal to the group reaches both
+export const HOLDER = `${startsGrandchild(false)}; setInterval(() => {}, 1000)`
+
+// The grandchild has left the group, so only a pipe ties it to the child
+export const ESCAPED_HOLDER = `${startsGrandchild(true)}; setInterval(() => {}, 1000)`
+
+// Ignores SIGINT and reports how its grandchild ends, which only the grandchild's parent, which reaps it, can see
+export const REAPING_HOLDER = `process.on("SIGINT", () => {}); ${startsGrandchild(false)}; grand.on("exit", (code, signal) => console.log("grandchild " + signal)); setInterval(() => {}, 1000)`
+
+// Only SIGKILL ends it, so the test's own scope sends that when the test ends, or fails halfway
+export const spawnStubborn = (
+  supervisor: Supervisor['Service'],
+  scope?: Scope.Scope,
+): Effect.Effect<ManagedProcess, never, Scope.Scope> =>
+  Effect.gen(function* spawnsStubborn() {
+    const spawning = supervisor.spawn(nodeSpec(STUBBORN))
+    const child = yield* scope === undefined
+      ? spawning
+      : Effect.provideService(spawning, Scope.Scope, scope)
+    yield* Effect.addFinalizer(() => child.kill('SIGKILL'))
+    return child
+  })
+
+// A scope of the test's own, closed with the test's scope unless the test closed it before
+export const ownScope: Effect.Effect<Scope.Closeable, never, Scope.Scope> = Effect.acquireRelease(
+  Scope.make(),
+  (scope) => Scope.close(scope, Exit.void),
+)
+
+// Sets a variable of this process until the test's scope closes
+export const withEnv = (name: string, value: string): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const before = process.env[name]
+      process.env[name] = value
+      return before
+    }),
+    (before) =>
+      Effect.sync(() => {
+        if (before === undefined) {
+          Reflect.deleteProperty(process.env, name)
+        } else {
+          process.env[name] = before
+        }
+      }),
+  ).pipe(Effect.asVoid)
+
+const killQuietly = (pid: number): Effect.Effect<void> =>
+  Effect.sync(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // The process is gone already
+    }
+  })
+
+interface Held {
+  readonly child: ManagedProcess
+  readonly lines: Lines
+  readonly grandchildPid: number
+}
+
+// A child with a grandchild on its pipes; both are killed when the test's scope closes, whatever the test did
+export const spawnHolder = (
+  supervisor: Supervisor['Service'],
+  script: string,
+  scope?: Scope.Scope,
+): Effect.Effect<Held, Cause.Done, Scope.Scope> =>
+  Effect.gen(function* spawnsHolder() {
+    const spawning = supervisor.spawn(nodeSpec(script))
+    const child = yield* scope === undefined
+      ? spawning
+      : Effect.provideService(spawning, Scope.Scope, scope)
+    yield* Effect.addFinalizer(() => child.kill('SIGKILL'))
+    const lines = yield* lineQueue(child.stdout)
+    const grandchildPid = Number((yield* Queue.take(lines)).replace('up ', ''))
+    yield* Effect.addFinalizer(() => killQuietly(grandchildPid))
+    return { child, lines, grandchildPid }
+  })
+
+// The registry lets go of a process as soon as it has exited, which real events decide, hence the turns of the event loop
+export const untilUnlisted = (supervisor: Supervisor['Service']): Effect.Effect<void> =>
+  Effect.gen(function* waitsForExit() {
+    while ((yield* supervisor.list()).length > 0) {
+      yield* Effect.yieldNow
+    }
+  })
+
+// Under the test clock a timeout of zero ends at once, so this tells whether the effect has completed yet
+export const isPending = (effect: Effect.Effect<unknown>): Effect.Effect<boolean> =>
+  Effect.map(Effect.timeoutOption(effect, 0), (done) => Option.isNone(done))
+
+// The stream behind the queue has ended: taking another line fails
+export const hasEnded = (lines: Lines): Effect.Effect<boolean> =>
+  Effect.map(Effect.exit(Queue.take(lines)), (taken) => Exit.isFailure(taken))
+```
+Under `it.effect` the ladder's sleeps are `TestClock` sleeps; the shipped tests replace the 200 ms live sleep with a `ready` line and the child echoing each signal, so there are no real sleeps.
 
 - [ ] **Step 2: Implementation**
 
@@ -5086,14 +6071,17 @@ export function allowlistEnv(
 ```
 `packages/kernel/src/process/line-buffer.ts`:
 ```ts
-// Bounded ring of the newest lines; the Supervisor keeps one per stream for diagnostics
+// Bounded ring of the newest lines; the Supervisor keeps one for stderr, stdout is streamed and nothing else
 export class LineBuffer {
-  dropped = 0
+  public dropped = 0
   private readonly items: string[] = []
+  private readonly limit: number
 
-  constructor(private readonly limit: number) {}
+  public constructor(limit: number) {
+    this.limit = limit
+  }
 
-  push(line: string): void {
+  public push(line: string): void {
     this.items.push(line)
     if (this.items.length > this.limit) {
       this.items.shift()
@@ -5101,23 +6089,322 @@ export class LineBuffer {
     }
   }
 
-  lines(): readonly string[] {
+  public lines(): readonly string[] {
     return [...this.items]
+  }
+}
+```
+`packages/kernel/src/process/pump.ts`:
+```ts
+import { createInterface, type Interface } from 'node:readline'
+import type { Readable } from 'node:stream'
+import { Effect, Queue, Stream, type Cause } from 'effect'
+import { LineBuffer } from './line-buffer.js'
+
+export interface OutputPump {
+  // One consumer at a time: the queue hands each line to whoever takes it
+  readonly lines: Stream.Stream<string>
+  // The newest lines, whether or not anybody reads the stream
+  readonly recent: () => readonly string[]
+  // For a line that did not come from the input; it has to come before finish
+  readonly append: (line: string) => void
+  // The input is done: an input that never signalled its end is closed and the stream ends
+  readonly finish: Effect.Effect<void>
+}
+
+// Lines are taken from readline's line event, as it emits them, and not from its async iterator
+// Once its consumer yields to the event loop the iterator throws ERR_USE_AFTER_CLOSE and loses the last line
+// It does so on Bun and on Node 24.14 alike, over 8000 lines from a real pipe
+const openReader = (input: Readable | null, onLine: (line: string) => void): Interface | null => {
+  if (input === null) {
+    return null
+  }
+  const reader = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY })
+  reader.on('line', onLine)
+  // A read error ends the reading; an error event nobody listens to would throw
+  reader.on('error', () => {
+    reader.close()
+  })
+  return reader
+}
+
+// Reads eagerly into an unbounded queue, so recent() is current even when nobody consumes the stream
+// A maxLines of 0 keeps no recent lines at all
+export const startPump = (input: Readable | null, maxLines: number): Effect.Effect<OutputPump> =>
+  Effect.gen(function* startOutputPump() {
+    const queue = yield* Queue.unbounded<string, Cause.Done>()
+    const buffer = maxLines > 0 ? new LineBuffer(maxLines) : null
+    const record = (line: string): void => {
+      if (buffer !== null) {
+        buffer.push(line)
+      }
+      Queue.offerUnsafe(queue, line)
+    }
+    const reader = openReader(input, record)
+    const closeReader = Effect.sync(() => {
+      if (reader !== null) {
+        reader.close()
+      }
+    })
+    const finish = closeReader.pipe(Effect.andThen(Queue.end(queue)), Effect.asVoid)
+    const recent = (): readonly string[] => (buffer === null ? [] : buffer.lines())
+    return { lines: Stream.fromQueue(queue), recent, append: record, finish }
+  })
+```
+`packages/kernel/src/process/kill-ladder.ts`:
+```ts
+import { Effect, Option, type Duration } from 'effect'
+
+export type KillSignal = 'SIGINT' | 'SIGTERM' | 'SIGKILL'
+
+// A signal and how long the process gets to exit before the next, harsher one
+interface Rung {
+  readonly signal: KillSignal
+  readonly grace: Duration.Input | null
+}
+
+export const GRACEFUL_LADDER: readonly Rung[] = [
+  { signal: 'SIGINT', grace: '5 seconds' },
+  { signal: 'SIGTERM', grace: '10 seconds' },
+  { signal: 'SIGKILL', grace: null },
+]
+
+// A closing scope skips the polite SIGINT
+export const TERMINATE_LADDER: readonly Rung[] = GRACEFUL_LADDER.slice(1)
+
+export const ladderFor = (signal?: KillSignal): readonly Rung[] =>
+  signal === undefined ? GRACEFUL_LADDER : [{ signal, grace: null }]
+
+// Sends each signal in turn; a rung with a grace period gives the process that long to exit first
+export const climb = (
+  rungs: readonly Rung[],
+  send: (signal: KillSignal) => void,
+  exited: Effect.Effect<unknown>,
+): Effect.Effect<void> =>
+  Effect.gen(function* climbLadder() {
+    for (const { signal, grace } of rungs) {
+      send(signal)
+      if (grace === null) {
+        return
+      }
+      const gone = yield* Effect.timeoutOption(exited, grace)
+      if (Option.isSome(gone)) {
+        return
+      }
+    }
+  })
+```
+`packages/kernel/src/process/child-env.ts`:
+```ts
+import { Effect, Option } from 'effect'
+import { Headers, HttpTraceContext } from 'effect/http'
+import { allowlistEnv } from './env-allowlist.js'
+
+interface EnvRequest {
+  readonly env?: Readonly<Record<string, string>> | undefined
+  readonly passEnv?: readonly string[] | undefined
+}
+
+const traceparent: Effect.Effect<Record<string, string>> = Effect.currentSpan.pipe(
+  Effect.option,
+  Effect.map(
+    Option.flatMap((span) => Headers.get(HttpTraceContext.toHeaders(span), 'traceparent')),
+  ),
+  Effect.map(
+    Option.match({
+      onNone: (): Record<string, string> => ({}),
+      onSome: (value): Record<string, string> => ({ TRACEPARENT: value }),
+    }),
+  ),
+)
+
+// The daemon's allowlisted variables, then the spec's, then the current span, which wins
+const merged = (spec: EnvRequest, trace: Record<string, string>): Record<string, string> => ({
+  ...allowlistEnv(process.env, spec.passEnv),
+  ...allowlistEnv(spec.env ?? {}, spec.passEnv),
+  ...trace,
+})
+
+export const childEnv = (spec: EnvRequest): Effect.Effect<Record<string, string>> =>
+  traceparent.pipe(Effect.map((trace) => merged(spec, trace)))
+```
+`packages/kernel/src/process/launch.ts`:
+```ts
+import { spawn, type ChildProcess } from 'node:child_process'
+import type { Readable } from 'node:stream'
+import { Deferred, Effect, Latch } from 'effect'
+import { constVoid } from 'effect/Function'
+import type { KillSignal } from './kill-ladder.js'
+
+export interface ExitInfo {
+  readonly code: number | null
+  readonly signal: string | null
+}
+
+// How a process ended, or why it never started
+interface Exited {
+  readonly exit: ExitInfo
+  readonly failure: string | null
+}
+
+interface LaunchSpec {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly cwd: string
+}
+
+// A started child, or what is left of one that failed to start
+export interface Launched {
+  readonly pid: number
+  readonly stdout: Readable | null
+  readonly stderr: Readable | null
+  // To the child's whole process group, until the process is retired
+  readonly kill: (signal: KillSignal) => void
+  // The process has exited, or it never started
+  readonly exited: Deferred.Deferred<Exited>
+  // Every pipe of the child is released, which a grandchild that holds one can delay for good
+  readonly closed: Latch.Latch
+  // Nothing is left to signal; a pid that has been free for a while may belong to somebody else
+  readonly retire: () => void
+}
+
+interface Gates {
+  readonly exited: Deferred.Deferred<Exited>
+  readonly closed: Latch.Latch
+  readonly retired: Latch.Latch
+}
+
+// What a process that never started, such as a command that does not exist, reports
+const NOT_STARTED: ExitInfo = { code: -1, signal: null }
+
+const INVALID_ARGUMENT = 'ERR_INVALID_ARG'
+
+// A system error says what it is; an invalid argument would echo the value, which may be a secret
+export const describeFailure = (error: unknown): string => {
+  if (!(error instanceof Error)) {
+    return String(error)
+  }
+  const code = 'code' in error ? error.code : undefined
+  return typeof code === 'string' && code.startsWith(INVALID_ARGUMENT)
+    ? `${code}: the command, an argument, the working directory or an environment value is invalid`
+    : error.message
+}
+
+// The pids 0 and 1 would address the caller's own group and every process
+const killGroup = (pid: number | undefined, signal: KillSignal): boolean => {
+  if (pid === undefined || pid <= 1) {
+    return false
+  }
+  try {
+    return process.kill(-pid, signal)
+  } catch {
+    return false
+  }
+}
+
+// A child leads a process group of its own, so what it started receives the signal as well
+// Without a group, or with none left, the child is the one to signal
+export const signalGroup = (
+  child: Pick<ChildProcess, 'pid' | 'kill'>,
+  signal: KillSignal,
+): void => {
+  if (!killGroup(child.pid, signal)) {
+    child.kill(signal)
+  }
+}
+
+const complete = <Value>(deferred: Deferred.Deferred<Value>, value: Value): void => {
+  Deferred.doneUnsafe(deferred, Effect.succeed(value))
+}
+
+const makeGates = (): Gates => ({
+  exited: Deferred.makeUnsafe<Exited>(),
+  closed: Latch.makeUnsafe(),
+  retired: Latch.makeUnsafe(),
+})
+
+// The listeners go on before anything else can run, since an error event nobody listens to throws
+const watch = (child: ChildProcess, { exited, closed }: Gates): void => {
+  child.on('exit', (code, signal) => {
+    complete(exited, { exit: { code, signal }, failure: null })
+  })
+  child.on('close', (code, signal) => {
+    complete(exited, { exit: { code, signal }, failure: null })
+    Latch.openUnsafe(closed)
+  })
+  // A process that started only reports here that a signal could not be delivered
+  child.on('error', (error) => {
+    if (child.pid === undefined) {
+      complete(exited, { exit: NOT_STARTED, failure: describeFailure(error) })
+    }
+  })
+}
+
+const started = (child: ChildProcess, gates: Gates): Launched => {
+  watch(child, gates)
+  const { exited, closed, retired } = gates
+  return {
+    pid: child.pid ?? -1,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    kill: (signal) => {
+      if (!Latch.isOpen(retired)) {
+        signalGroup(child, signal)
+      }
+    },
+    exited,
+    closed,
+    retire: () => {
+      Latch.openUnsafe(retired)
+    },
+  }
+}
+
+const failed = (error: unknown, { exited, closed }: Gates): Launched => {
+  complete(exited, { exit: NOT_STARTED, failure: describeFailure(error) })
+  Latch.openUnsafe(closed)
+  return { pid: -1, stdout: null, stderr: null, kill: constVoid, exited, closed, retire: constVoid }
+}
+
+// Whichever way the runtime reports that a process cannot start, an event or a throw, it ends the same
+export function launch(spec: LaunchSpec, env: Record<string, string>): Launched {
+  const gates = makeGates()
+  try {
+    const child = spawn(spec.command, [...spec.args], {
+      cwd: spec.cwd,
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return started(child, gates)
+  } catch (error) {
+    return failed(error, gates)
   }
 }
 ```
 `packages/kernel/src/process/supervisor.ts`:
 ```ts
-import { spawn, type ChildProcess } from 'node:child_process'
-import { createInterface } from 'node:readline'
-import { Context, Effect, Layer, Queue, Schedule, Scope, Stream } from 'effect'
-import { Headers, HttpTraceContext } from 'effect/http'
+import {
+  Context,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Schedule,
+  type Duration,
+  type Scope,
+  type Stream,
+} from 'effect'
 import { nowIso, uuidv7 } from '../ids.js'
-import { allowlistEnv } from './env-allowlist.js'
-import { LineBuffer } from './line-buffer.js'
+import { childEnv } from './child-env.js'
+import { launch, type ExitInfo, type Launched } from './launch.js'
+import { climb, ladderFor, TERMINATE_LADDER, type KillSignal } from './kill-ladder.js'
+import { startPump, type OutputPump } from './pump.js'
 
-export type ProcessKind = 'agent' | 'git' | 'helper'
-export type KillSignal = 'SIGINT' | 'SIGTERM' | 'SIGKILL'
+export type { ExitInfo } from './launch.js'
+export type { KillSignal } from './kill-ladder.js'
+
+type ProcessKind = 'agent' | 'git' | 'helper'
 
 export interface SpawnSpec {
   readonly kind: ProcessKind
@@ -5126,21 +6413,25 @@ export interface SpawnSpec {
   readonly cwd: string
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly passEnv?: readonly string[] | undefined
+  readonly signal?: AbortSignal | undefined
+  // Bounds only recentStderr(); a stream nobody reads keeps every line queued in memory
   readonly maxLines?: number | undefined
 }
-export interface ExitInfo {
-  readonly code: number | null
-  readonly signal: string | null
-}
+
 export interface ManagedProcess {
   readonly id: string
+  // -1 for a process that never started
   readonly pid: number
+  // One consumer at a time; lines nobody has read stay queued in memory until they are
   readonly stdout: Stream.Stream<string>
   readonly stderr: Stream.Stream<string>
+  // Resolves once the process has exited and its output is queued, two seconds after the exit at most
   readonly exit: Effect.Effect<ExitInfo>
-  kill(signal?: KillSignal): Effect.Effect<void>
-  recentStderr(): readonly string[]
+  // Without a signal the whole ladder runs, with one that signal alone is sent; the signal goes to the process group
+  readonly kill: (signal?: KillSignal) => Effect.Effect<void>
+  readonly recentStderr: () => readonly string[]
 }
+
 export interface ProcessInfo {
   readonly id: string
   readonly kind: ProcessKind
@@ -5148,110 +6439,162 @@ export interface ProcessInfo {
   readonly pid: number
   readonly startedAt: string
 }
-export interface SupervisorShape {
-  spawn(spec: SpawnSpec): Effect.Effect<ManagedProcess, never, Scope.Scope>
-  kill(id: string, signal?: KillSignal): Effect.Effect<void>
-  list(): Effect.Effect<readonly ProcessInfo[]>
+
+interface SupervisorShape {
+  readonly spawn: (spec: SpawnSpec) => Effect.Effect<ManagedProcess, never, Scope.Scope>
+  readonly kill: (id: string, signal?: KillSignal) => Effect.Effect<void>
+  readonly list: () => Effect.Effect<readonly ProcessInfo[]>
 }
 
 export class Supervisor extends Context.Service<Supervisor, SupervisorShape>()('bb/Supervisor') {}
 
-const GRACE_TERM = '5 seconds'
-const GRACE_KILL = '10 seconds'
 const DEFAULT_MAX_LINES = 10_000
 
-export const restartSchedule = (maxRestarts: number) =>
-  Schedule.exponential('500 millis').pipe(Schedule.jittered, Schedule.both(Schedule.recurs(maxRestarts)))
+// How long the pipes of an exited process get to run dry; a grandchild that holds one can keep it open for good
+const DRAIN = '2 seconds'
 
-const traceparent: Effect.Effect<Record<string, string>> = Effect.gen(function* () {
-  const span = yield* Effect.currentSpan.pipe(Effect.option)
-  if (span._tag === 'None') {
-    return {}
-  }
-  const value = Headers.get(HttpTraceContext.toHeaders(span.value), 'traceparent')
-  return value === undefined ? {} : { TRACEPARENT: value }
+// Backoff between restarts of a crashed process: 500 ms doubling, jittered, at most maxRestarts times
+export const restartSchedule = (maxRestarts: number): Schedule.Schedule<Duration.Duration> =>
+  Schedule.max([
+    Schedule.exponential('500 millis').pipe(Schedule.jittered),
+    Schedule.recurs(maxRestarts),
+  ])
+
+const killer =
+  (launched: Launched): ManagedProcess['kill'] =>
+  (signal) =>
+    climb(ladderFor(signal), launched.kill, Deferred.await(launched.exited))
+
+// Scope close: SIGTERM, then SIGKILL when the process ignores it for ten seconds
+const terminate = (launched: Launched, exit: Effect.Effect<ExitInfo>): Effect.Effect<void> =>
+  climb(TERMINATE_LADDER, launched.kill, Deferred.await(launched.exited)).pipe(
+    Effect.andThen(exit),
+    Effect.asVoid,
+  )
+
+const awaitAbort = (signal: AbortSignal): Effect.Effect<void> =>
+  Effect.callback((resume) => {
+    const onAbort = (): void => {
+      resume(Effect.void)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) {
+      onAbort()
+    }
+    return Effect.sync(() => {
+      signal.removeEventListener('abort', onAbort)
+    })
+  })
+
+const killOnAbort = (signal: AbortSignal, managed: ManagedProcess): Effect.Effect<void> =>
+  Effect.andThen(awaitAbort(signal), managed.kill())
+
+interface Running {
+  readonly id: string
+  readonly launched: Launched
+  readonly stdout: OutputPump
+  readonly stderr: OutputPump
+}
+
+const startRunning = (spec: SpawnSpec): Effect.Effect<Running> =>
+  Effect.gen(function* startsProcess() {
+    const env = yield* childEnv(spec)
+    const launched = launch(spec, env)
+    // Only stderr is kept for diagnostics, stdout is streamed and nothing else
+    const stdout = yield* startPump(launched.stdout, 0)
+    const stderr = yield* startPump(launched.stderr, spec.maxLines ?? DEFAULT_MAX_LINES)
+    return { id: uuidv7(), launched, stdout, stderr }
+  })
+
+// The process has exited: the registry lets go at once, its pipes get two seconds to run dry and both pumps finish
+// The pipes are what a grandchild can hold open, the process itself is what exit reports
+const settleExit = (running: Running, release: () => void): Effect.Effect<ExitInfo> =>
+  Effect.gen(function* settlesExit() {
+    const { launched } = running
+    const { exit, failure } = yield* Deferred.await(launched.exited)
+    release()
+    yield* Effect.timeoutOption(launched.closed.await, DRAIN)
+    if (failure !== null) {
+      running.stderr.append(failure)
+    }
+    yield* running.stdout.finish
+    yield* running.stderr.finish
+    launched.retire()
+    return exit
+  })
+
+const present = (running: Running, exit: Effect.Effect<ExitInfo>): ManagedProcess => ({
+  id: running.id,
+  pid: running.launched.pid,
+  stdout: running.stdout.lines,
+  stderr: running.stderr.lines,
+  exit,
+  kill: killer(running.launched),
+  recentStderr: running.stderr.recent,
 })
 
-// Lines of one stream into a Queue; the buffer keeps the newest lines for diagnostics
-const pump = (stream: NodeJS.ReadableStream | null, queue: Queue.Queue<string>, buffer: LineBuffer): Effect.Effect<void> =>
-  Effect.promise(async () => {
-    if (stream === null) {
-      await Queue.end(queue).pipe(Effect.runPromise)
-      return
+interface Entry {
+  readonly info: ProcessInfo
+  readonly kill: ManagedProcess['kill']
+}
+
+type Registry = Map<string, Entry>
+
+const entryOf = (spec: SpawnSpec, running: Running): Entry => ({
+  info: {
+    id: running.id,
+    kind: spec.kind,
+    command: spec.command,
+    pid: running.launched.pid,
+    startedAt: nowIso(),
+  },
+  kill: killer(running.launched),
+})
+
+// The fibers and the finalizer hang on the caller's scope, not on the fiber that happens to spawn
+// The settle fiber is forked before the finalizer, so the finalizer runs first and the process is gone before it is interrupted
+// The abort watcher is forked after the finalizer and is interrupted first, which does no harm
+// Nothing may interrupt the spawn halfway: a process without its finalizer would be orphaned
+const spawnProcess = (
+  registry: Registry,
+  spec: SpawnSpec,
+): Effect.Effect<ManagedProcess, never, Scope.Scope> =>
+  Effect.gen(function* spawnManaged() {
+    const running = yield* startRunning(spec)
+    registry.set(running.id, entryOf(spec, running))
+    const release = (): void => {
+      registry.delete(running.id)
     }
-    for await (const line of createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY })) {
-      buffer.push(line)
-      await Queue.offer(queue, line).pipe(Effect.runPromise)
+    const settled = yield* Effect.forkScoped(settleExit(running, release))
+    const managed = present(running, Fiber.join(settled))
+    yield* Effect.addFinalizer(() => terminate(running.launched, managed.exit))
+    if (spec.signal !== undefined) {
+      yield* Effect.forkScoped(killOnAbort(spec.signal, managed))
     }
-    await Queue.end(queue).pipe(Effect.runPromise)
-  })
+    return managed
+  }).pipe(Effect.uninterruptible)
 
-const waitExit = (child: ChildProcess): Effect.Effect<ExitInfo> =>
-  Effect.async<ExitInfo>((resume) => {
-    child.once('close', (code, signal) => {
-      resume(Effect.succeed({ code, signal }))
-    })
-  })
+const killById = (
+  registry: Registry,
+  id: string,
+  signal: KillSignal | undefined,
+): Effect.Effect<void> => {
+  const entry = registry.get(id)
+  return entry === undefined ? Effect.void : entry.kill(signal)
+}
 
-const make = Effect.gen(function* () {
-  const running = new Map<string, { info: ProcessInfo; child: ChildProcess }>()
-
-  const ladder = (child: ChildProcess, exited: () => boolean, signal: KillSignal | undefined): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      const steps: readonly (readonly [KillSignal, string | null])[] =
-        signal === undefined ? [['SIGINT', GRACE_TERM], ['SIGTERM', GRACE_KILL], ['SIGKILL', null]] : [[signal, null]]
-      for (const [current, wait] of steps) {
-        if (exited()) {
-          return
-        }
-        child.kill(current)
-        if (wait !== null) {
-          yield* Effect.sleep(wait)
-        }
-      }
-    })
-
-  const spawnProcess: SupervisorShape['spawn'] = (spec) =>
-    Effect.gen(function* () {
-      const id = uuidv7()
-      const env = { ...allowlistEnv(process.env, spec.passEnv), ...allowlistEnv(spec.env ?? {}, spec.passEnv), ...(yield* traceparent) }
-      const child = spawn(spec.command, [...spec.args], { cwd: spec.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
-      const stdout = yield* Queue.unbounded<string>()
-      const stderr = yield* Queue.unbounded<string>()
-      const stderrBuffer = new LineBuffer(spec.maxLines ?? DEFAULT_MAX_LINES)
-      yield* Effect.forkChild(pump(child.stdout, stdout, new LineBuffer(spec.maxLines ?? DEFAULT_MAX_LINES)))
-      yield* Effect.forkChild(pump(child.stderr, stderr, stderrBuffer))
-      let done = false
-      const exit = yield* Effect.cached(Effect.tap(waitExit(child), () => Effect.sync(() => { done = true; running.delete(id) })))
-      yield* Effect.forkChild(exit)
-      const info: ProcessInfo = { id, kind: spec.kind, command: spec.command, pid: child.pid ?? -1, startedAt: nowIso() }
-      running.set(id, { info, child })
-      const managed: ManagedProcess = {
-        id,
-        pid: child.pid ?? -1,
-        stdout: Stream.fromQueue(stdout),
-        stderr: Stream.fromQueue(stderr),
-        exit,
-        kill: (signal) => ladder(child, () => done, signal),
-        recentStderr: () => stderrBuffer.lines(),
-      }
-      yield* Scope.addFinalizer(yield* Scope.Scope, Effect.andThen(managed.kill('SIGTERM'), Effect.ignore(exit)))
-      return managed
-    })
-
+const make = Effect.sync(() => {
+  const registry: Registry = new Map()
   return Supervisor.of({
-    spawn: spawnProcess,
-    kill: (id, signal) => {
-      const entry = running.get(id)
-      return entry === undefined ? Effect.void : ladder(entry.child, () => !running.has(id), signal)
-    },
-    list: () => Effect.sync(() => [...running.values()].map((entry) => entry.info)),
+    spawn: (spec) => spawnProcess(registry, spec),
+    kill: (id, signal) => killById(registry, id, signal),
+    list: () => Effect.sync(() => [...registry.values()].map((entry) => entry.info)),
   })
 })
 
 export const SupervisorLive: Layer.Layer<Supervisor> = Layer.effect(Supervisor, make)
 ```
-Names to confirm against the installed d.ts before running: `Queue.end`/`Queue.offer` (v4 queue termination), `Stream.fromQueue`, `Effect.cached`, `Effect.option`, `Scope.addFinalizer(scope, finalizer)`, `Schedule.both` (the fact sheet notes `Schedule.both` does **not** exist in v4 — use `Schedule.exponential('500 millis').pipe(Schedule.jittered, Schedule.recurs(maxRestarts))` or the `Schedule.intersect` equivalent the d.ts offers); `Effect.async` resume signature. The `pump` helper calls `Effect.runPromise` inside a plain async loop deliberately (readline is callback-land); keep it or replace with `Stream.fromAsyncIterable(createInterface(...), onError)` which the fact sheet verified — the latter is simpler: `stdout: Stream.fromAsyncIterable(createInterface({ input: child.stdout }), (cause) => new ProcessError(...))` with `Stream.tap` into the buffer; prefer it and drop the queues if it type-checks.
+Verified in Effect 4.0.0: there is no `Effect.async` (`Effect.callback((resume, signal) => …)` is the constructor) and no `Schedule.both` (`restartSchedule` is `Schedule.max([Schedule.exponential('500 millis').pipe(Schedule.jittered), Schedule.recurs(max)])`, the intersection); `Queue.end` needs `Queue.unbounded<string, Cause.Done>()`; `Effect.yieldNow` is a value; the service type is `Supervisor['Service']`. Node callbacks use only `Deferred.doneUnsafe` and `Queue.offerUnsafe`; the spawn region runs uninterruptible.
 
 Add to `index.ts`: `export { Supervisor, SupervisorLive, restartSchedule, type SpawnSpec, type ManagedProcess, type ExitInfo, type ProcessInfo, type KillSignal } from './process/supervisor.js'`, `export { allowlistEnv } from './process/env-allowlist.js'`.
 
