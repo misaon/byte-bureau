@@ -59,6 +59,7 @@ const liveOf = (id: string): Live => ({
   tools: new Map(),
   pump: undefined,
   turn: null,
+  interrupted: null,
   closed: false,
 })
 

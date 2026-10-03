@@ -27,15 +27,13 @@ export const firstOf = <Item>(
   items: readonly Item[],
 ): Effect.Effect<Item, Cause.NoSuchElementError> => Effect.fromNullishOr(items[0])
 
-// Lets the fibers run until the check passes, which is how a test waits for what nothing announces
-export const untilTrue = (check: () => boolean): Effect.Effect<boolean> =>
-  Effect.repeat(Effect.sync(check).pipe(Effect.tap(() => Effect.yieldNow)), {
-    until: (passed) => passed,
-  })
-
 // Lets every fiber that can run do so a few times over, which is how a test shows that something has not happened
 export const flush: Effect.Effect<void> = Effect.forEach(
   Array.from({ length: 20 }),
   () => Effect.yieldNow,
   { discard: true },
 )
+
+// How many of the types are the given one
+export const countOf = (types: readonly string[], type: string): number =>
+  types.filter((candidate) => candidate === type).length

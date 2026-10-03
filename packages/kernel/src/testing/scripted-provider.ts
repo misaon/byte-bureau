@@ -8,6 +8,7 @@ import {
   type Plugin,
 } from '@bytebureau/plugin-api'
 import type { AgentEvent, AskAnswer, PromptInput } from '@bytebureau/protocol'
+import { Latch } from 'effect'
 import { manifestOf, providerOf } from '../plugins/plugin-fixtures.js'
 import { EventQueue } from './event-queue.js'
 
@@ -17,6 +18,12 @@ export interface ScriptedSession extends AgentSession {
   readonly queue: EventQueue
   readonly prompts: PromptInput[]
   readonly answers: { readonly askId: string; readonly answer: AskAnswer }[]
+  // Each is opened once the kernel has made the call, however it is answered
+  readonly calls: {
+    readonly interrupt: Latch.Latch
+    readonly close: Latch.Latch
+    readonly answer: Latch.Latch
+  }
   externalRef: ExternalSessionRef | null
   interrupts: number
   closed: boolean
@@ -34,15 +41,24 @@ export interface Behaviour {
   // Makes the stream of events of its sessions fail instead of delivering them, or fail to be given at all
   readonly eventsFailure?: Error | undefined
   readonly eventsThrow?: Error | undefined
-  // Makes the provider never finish starting a session
-  readonly startHangs?: boolean | undefined
-  // The calls its sessions never answer
+  // Gives the events as an async generator, which is the usual shape of them: its return waits for the read in progress
+  readonly generator?: boolean | undefined
+  // Holds the start of a session until the test releases it
+  readonly holdsStart?: boolean | undefined
+  // The calls its sessions never answer; a close that never answers does not end the events either
   readonly hangs?: readonly ('interrupt' | 'close' | 'answer')[] | undefined
 }
 
 export interface Scripted {
   readonly provider: AgentProvider
   readonly sessions: readonly ScriptedSession[]
+  // Every request to start a session, those that never finished included
+  readonly requests: readonly CreateSessionRequest[]
+  // Opened when the kernel first asks the provider for a session, and when the first one exists
+  readonly asked: Latch.Latch
+  readonly created: Latch.Latch
+  // Lets the starts that are held go on
+  readonly release: () => void
 }
 
 const rejected = async (failure: Error): Promise<never> => {
@@ -70,21 +86,37 @@ const stall = async (
   }
 }
 
+// The events of a queue as an async generator
+async function* generated(queue: EventQueue): AsyncGenerator<AgentEvent> {
+  for await (const event of queue) {
+    yield event
+  }
+}
+
 // The events of a session as the behaviour has them: delivered, failing when read, or not given at all
 const eventsOf = (queue: EventQueue, behaviour: Behaviour): AsyncIterable<AgentEvent> => {
   if (behaviour.eventsThrow !== undefined) {
     throw behaviour.eventsThrow
   }
-  return behaviour.eventsFailure === undefined ? queue : failing(behaviour.eventsFailure)
+  if (behaviour.eventsFailure !== undefined) {
+    return failing(behaviour.eventsFailure)
+  }
+  return behaviour.generator === true ? generated(queue) : queue
 }
 
 const sessionOf = (request: CreateSessionRequest, behaviour: Behaviour): ScriptedSession => {
   const queue = new EventQueue()
+  const calls = {
+    interrupt: Latch.makeUnsafe(),
+    close: Latch.makeUnsafe(),
+    answer: Latch.makeUnsafe(),
+  }
   const session: ScriptedSession = {
     request,
     queue,
     prompts: [],
     answers: [],
+    calls,
     externalRef: behaviour.externalRef ?? null,
     interrupts: 0,
     closed: false,
@@ -96,10 +128,12 @@ const sessionOf = (request: CreateSessionRequest, behaviour: Behaviour): Scripte
     },
     interrupt: async () => {
       session.interrupts += 1
+      Latch.openUnsafe(calls.interrupt)
       await stall(behaviour, 'interrupt')
     },
     answer: async (askId, answer) => {
       session.answers.push({ askId, answer })
+      Latch.openUnsafe(calls.answer)
       await stall(behaviour, 'answer')
       if (behaviour.onAnswer !== undefined) {
         await behaviour.onAnswer(session)
@@ -108,32 +142,53 @@ const sessionOf = (request: CreateSessionRequest, behaviour: Behaviour): Scripte
     events: () => eventsOf(queue, behaviour),
     close: async () => {
       session.closed = true
-      queue.end()
+      Latch.openUnsafe(calls.close)
       await stall(behaviour, 'close')
+      queue.end()
     },
   }
   return session
 }
 
+// What a start waits for before it goes on: a refusal, or the release of the test
+const beforeStart = async (behaviour: Behaviour, released: Promise<null>): Promise<void> => {
+  if (behaviour.startFailure !== undefined) {
+    throw behaviour.startFailure
+  }
+  if (behaviour.holdsStart === true) {
+    await released
+  }
+}
+
 // A provider whose sessions do nothing by themselves: what they do is what the test pushes into them
 export const scriptedProvider = (id: string, behaviour: Behaviour = {}): Scripted => {
   const sessions: ScriptedSession[] = []
+  const requests: CreateSessionRequest[] = []
+  const asked = Latch.makeUnsafe()
+  const created = Latch.makeUnsafe()
+  const gate = Promise.withResolvers<null>()
   const provider: AgentProvider = {
     ...providerOf(id),
     createSession: async (request) => {
-      if (behaviour.startFailure !== undefined) {
-        throw behaviour.startFailure
-      }
-      if (behaviour.startHangs === true) {
-        await Promise.withResolvers<null>().promise
-      }
+      requests.push(request)
+      Latch.openUnsafe(asked)
+      await beforeStart(behaviour, gate.promise)
       const session = sessionOf(request, behaviour)
       sessions.push(session)
-      await Promise.resolve()
+      Latch.openUnsafe(created)
       return session
     },
   }
-  return { provider, sessions }
+  return {
+    provider,
+    sessions,
+    requests,
+    asked,
+    created,
+    release: () => {
+      gate.resolve(null)
+    },
+  }
 }
 
 // The plugin that offers the provider, with the hooks a test wants beside it

@@ -1,35 +1,15 @@
-import type { AgentEvent, Ask } from '@bytebureau/protocol'
+import type { AgentEvent } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, Result } from 'effect'
-import { AskService } from '../asks/ask-service.js'
 import { toolCallsOf, turnsOf } from './session-db-fixtures.js'
-import { payloadsOf, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
+import { payloadsOf, startSession, typesOf } from './session-fixtures.js'
+import { countOf } from './session-helpers.js'
 import { prompted } from './session-prompted-fixtures.js'
 import { SessionManager } from './session-manager.js'
 import { push } from './session-push-fixtures.js'
 import { driven } from './session-script-fixtures.js'
 
 const world = driven()
-
-const QUESTION: Ask = {
-  id: 'agent-ask',
-  sessionId: 'ignored',
-  turnId: null,
-  kind: 'question',
-  title: 'Which?',
-  questions: [],
-  policy: { onTimeout: 'wait', timeout: '30m' },
-  recommendationSource: 'none',
-  status: 'pending',
-  createdAt: '2026-10-03T00:00:00.000Z',
-  deadlineAt: null,
-}
-
-const FINISH: AgentEvent = {
-  type: 'turn.completed',
-  stopReason: 'end_turn',
-  usage: { inputTokens: 1, outputTokens: 1 },
-}
 
 const NUMBERS = [...Array.from({ length: 60 }).keys()]
 
@@ -50,9 +30,6 @@ const callNumber = (index: number): readonly AgentEvent[] => [
 // How many provider sessions the kernel has started for a session
 const startedFor = (sessionId: string): number =>
   world.scripted.sessions.filter((agent) => agent.request.sessionId === sessionId).length
-
-const countOf = (types: readonly string[], type: string): number =>
-  types.filter((candidate) => candidate === type).length
 
 it.layer(world.layer)('SessionManager simultaneous commands', (suite) => {
   suite.effect('lets exactly one of two simultaneous prompts through', () =>
@@ -85,44 +62,6 @@ it.layer(world.layer)('SessionManager simultaneous commands', (suite) => {
         rows.map((row) => row.status),
         NUMBERS.map(() => 'completed'),
       )
-    }),
-  )
-})
-
-it.layer(world.layer)('SessionManager stop while the agent waits for a human', (suite) => {
-  suite.effect('drops the events the agent had queued behind its question', () =>
-    Effect.gen(function* dropsQueuedEvents() {
-      const sessions = yield* SessionManager
-      const session = yield* startSession({ providerId: 'scripted' })
-      const { agent } = yield* prompted(world, session)
-      agent.queue.push({ type: 'ask.requested', ask: QUESTION }, ...callNumber(1), FINISH)
-      yield* waitFor(session.id, 'session.waiting')
-      yield* sessions.stop(session.id)
-      const types = yield* typesOf(session.id)
-      assert.deepStrictEqual(types.slice(-4), [
-        'session.waiting',
-        'turn.interrupted',
-        'ask.cancelled',
-        'session.stopped',
-      ])
-      assert.deepStrictEqual(
-        types.filter((type) => type === 'tool.started' || type === 'turn.completed'),
-        [],
-      )
-    }),
-  )
-
-  suite.effect('leaves the session stopped and the question cancelled', () =>
-    Effect.gen(function* leavesSessionStopped() {
-      const sessions = yield* SessionManager
-      const asks = yield* AskService
-      const session = yield* startSession({ providerId: 'scripted' })
-      const { agent } = yield* prompted(world, session)
-      agent.queue.push({ type: 'ask.requested', ask: QUESTION }, FINISH)
-      yield* waitFor(session.id, 'session.waiting')
-      yield* sessions.stop(session.id)
-      assert.strictEqual((yield* sessionOf(session.id)).status, 'stopped')
-      assert.deepStrictEqual(yield* asks.pending(session.id), [])
     }),
   )
 })

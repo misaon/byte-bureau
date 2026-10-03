@@ -14,9 +14,11 @@ const defaultEmployeeOf = ({ config }: Project): string =>
     ? 'developer'
     : config.defaults.employee
 
+// A file whose name merely starts with dots is inside; only the parent directory itself, or a path through it, is outside
 const isInside = (parent: string, child: string): boolean => {
   const relative = path.relative(parent, child)
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+  const leaves = relative === '..' || relative.startsWith(`..${path.sep}`)
+  return relative !== '' && !leaves && !path.isAbsolute(relative)
 }
 
 // The prompt file of a project is read from the project; a path that leads out of it, by dots or by a link, is not

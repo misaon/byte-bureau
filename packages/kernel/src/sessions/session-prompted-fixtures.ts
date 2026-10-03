@@ -1,5 +1,6 @@
 import type { PromptInput } from '@bytebureau/protocol'
-import { Effect } from 'effect'
+import { Effect, Fiber } from 'effect'
+import { TestClock } from 'effect/testing'
 import type { ProviderError, SessionError, StoreError } from '../errors.js'
 import { sessionOfKernel, type ScriptedSession } from '../testing/scripted-provider.js'
 import type { Driven } from './session-script-fixtures.js'
@@ -23,4 +24,24 @@ export const prompted = (
     const sessions = yield* SessionManager
     const turn = yield* sessions.prompt(session.id, input)
     return { turn, agent: sessionOfKernel(world.scripted, session.id) }
+  })
+
+// How long the kernel waits for a provider to start a session
+const START_LIMIT = '60 seconds'
+
+type PromptFailure = SessionError | ProviderError | StoreError
+
+// A prompt whose provider session never starts, followed for as long as the kernel waits for it; what the prompt fails with
+export const promptWhileStartHangs = (
+  world: Driven,
+  session: Session,
+): Effect.Effect<PromptFailure, Turn, SessionManager> =>
+  Effect.gen(function* promptsWhileStartHangs() {
+    const sessions = yield* SessionManager
+    const prompting = yield* Effect.forkChild(sessions.prompt(session.id, GO), {
+      startImmediately: true,
+    })
+    yield* world.scripted.asked.await
+    yield* TestClock.adjust(START_LIMIT)
+    return yield* Effect.flip(Fiber.join(prompting))
   })

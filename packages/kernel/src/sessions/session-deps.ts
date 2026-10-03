@@ -21,6 +21,7 @@ export interface SessionDeps {
   readonly host: PluginHostShape
   readonly projects: ProjectRegistryShape
   readonly live: LiveSessions
-  // The fibers that pump provider events live as long as the layer, not as long as the call that started them
-  readonly scope: Scope.Scope
+  // The fibers of the sessions (the pumps of provider events, the prompts on their way) live in a scope of their own: as long as the layer, not as long as the call that started them
+  // The layer closes it once the provider sessions are closed, so a pump that waits for its provider cannot hold the closing of the agents
+  readonly scope: Scope.Closeable
 }

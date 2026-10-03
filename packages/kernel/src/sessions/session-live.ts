@@ -1,4 +1,4 @@
-import { Cause, Effect, Fiber } from 'effect'
+import { Cause, Effect, Exit, Fiber, Scope } from 'effect'
 import { constVoid } from 'effect/Function'
 import type { StoreError } from '../errors.js'
 import { reasonOf } from '../plugins/reason.js'
@@ -36,26 +36,29 @@ export const withinLimit = <Value, Problem>(
 ): Effect.Effect<Value, Problem | Cause.TimeoutError> => Effect.timeout(call, CALL_LIMIT)
 
 // A call into the provider that must not fail the caller: the failure is logged and that is all
+export const attempt = (
+  what: string,
+  sessionId: string,
+  call: () => Promise<void>,
+): Effect.Effect<void> =>
+  withinLimit(Effect.tryPromise({ try: call, catch: reasonOf })).pipe(
+    Effect.match({
+      onFailure: (failure) => {
+        logger.warn(`${what} failed`, { sessionId, reason: reasonOf(failure) })
+      },
+      onSuccess: constVoid,
+    }),
+  )
+
+// The same for a call on the provider session of a live session
 export const bestEffort = (
   what: string,
   live: Live,
   call: (live: Live) => Promise<void>,
 ): Effect.Effect<void> =>
-  withinLimit(
-    Effect.tryPromise({
-      try: async () => {
-        await call(live)
-      },
-      catch: reasonOf,
-    }),
-  ).pipe(
-    Effect.match({
-      onFailure: (failure) => {
-        logger.warn(`${what} failed`, { sessionId: live.session.id, reason: reasonOf(failure) })
-      },
-      onSuccess: constVoid,
-    }),
-  )
+  attempt(what, live.session.id, async () => {
+    await call(live)
+  })
 
 // The kernel lets the provider session go; nothing it still says counts afterwards
 // Closing comes first so the provider can end gracefully, aborting its signal is the hard stop after it
@@ -72,9 +75,22 @@ export const dispose = (deps: SessionDeps, live: Live): Effect.Effect<void> =>
     )
   })
 
-// The pump ends by itself once the provider closes; one that does not is stopped
+// A pump that does not end within this time is given up on: once its provider session is let go, nothing it says counts
+// An events stream that is an async generator ends only when the read in progress is answered, so a provider that does not end its events holds its pump
+const PUMP_LIMIT = '3 seconds'
+
+// The pump ends by itself once the provider closes; one that does not is interrupted, and waited for only so long
 export const interruptPump = (live: Live): Effect.Effect<void> =>
-  live.pump === undefined ? Effect.void : Fiber.interrupt(live.pump)
+  live.pump === undefined
+    ? Effect.void
+    : Effect.ignore(Effect.timeout(Fiber.interrupt(live.pump), PUMP_LIMIT))
+
+// The fibers of the sessions end with their scope, which is closed on a fiber of its own: a pump that does not end cannot hold the caller for more than a while
+export const releaseFibers = (scope: Scope.Closeable): Effect.Effect<void> =>
+  Effect.forkDetach(Scope.close(scope, Exit.void)).pipe(
+    Effect.flatMap((closing) => Effect.timeout(Fiber.await(closing), PUMP_LIMIT)),
+    Effect.ignore,
+  )
 
 // The reference the provider gives its session is what a later resume attaches to
 export const rememberRef = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError> => {

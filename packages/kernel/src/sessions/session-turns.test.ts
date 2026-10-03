@@ -6,13 +6,13 @@ import { messagesOf, seedProfile, turnsOf } from './session-db-fixtures.js'
 import { payloadsOf, startSession } from './session-fixtures.js'
 import { firstOf } from './session-helpers.js'
 import { prompted } from './session-prompted-fixtures.js'
-import { push } from './session-push-fixtures.js'
+import { FINISH, push } from './session-push-fixtures.js'
 import { driven } from './session-script-fixtures.js'
 
 const world = driven()
 
 const USAGE = { inputTokens: 7, outputTokens: 3, costUsd: 0.5, contextPct: 20 }
-const FINISH = { type: 'turn.completed', stopReason: 'end_turn', usage: USAGE } as const
+const FINISH_USED = { ...FINISH, usage: USAGE } as const
 const CONTENT = [{ type: 'text', text: 'Hi' }]
 
 it.layer(world.layer)('SessionManager messages and turns', (suite) => {
@@ -44,7 +44,7 @@ it.layer(world.layer)('SessionManager messages and turns', (suite) => {
     Effect.gen(function* endsTurn() {
       const session = yield* startSession({ providerId: 'scripted' })
       const { turn, agent } = yield* prompted(world, session)
-      yield* push(session.id, agent, FINISH)
+      yield* push(session.id, agent, FINISH_USED)
       const row = yield* firstOf(yield* turnsOf(session.id))
       assert.deepStrictEqual(
         [row.status, row.stop_reason, row.usage_json],
@@ -62,7 +62,7 @@ it.layer(world.layer)('SessionManager usage', (suite) => {
     Effect.gen(function* addsUpTurns() {
       const session = yield* startSession({ providerId: 'scripted' })
       const first = yield* prompted(world, session)
-      yield* push(session.id, first.agent, FINISH)
+      yield* push(session.id, first.agent, FINISH_USED)
       yield* prompted(world, session, { text: 'again' })
       yield* push(session.id, first.agent, {
         ...FINISH,
@@ -88,7 +88,7 @@ it.layer(world.layer)('SessionManager usage', (suite) => {
     Effect.gen(function* countsUsage() {
       const session = yield* startSession({ providerId: 'scripted' })
       const { agent } = yield* prompted(world, session)
-      yield* push(session.id, agent, FINISH)
+      yield* push(session.id, agent, FINISH_USED)
       const usage = yield* UsageService
       assert.deepStrictEqual(yield* usage.sessionUsage(session.id), {
         turns: 1,

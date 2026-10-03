@@ -6,6 +6,13 @@ import { uuidv7 } from '../ids.js'
 import type { ScriptedSession } from '../testing/scripted-provider.js'
 import { waitUntil } from './session-fixtures.js'
 
+// The end of a turn as an agent reports it, with the least usage there can be
+export const FINISH = {
+  type: 'turn.completed',
+  stopReason: 'end_turn',
+  usage: { inputTokens: 1, outputTokens: 1 },
+} as const
+
 const hasMessage = (payload: unknown, message: string): boolean =>
   typeof payload === 'object' &&
   payload !== null &&

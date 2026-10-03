@@ -154,6 +154,14 @@ it.effect('reads the prompt file of the project, whose path is relative to the p
   }),
 )
 
+it.effect('reads a prompt file whose name merely starts with dots', () =>
+  Effect.gen(function* readsDottedName() {
+    const dir = tempDir(PREFIX)
+    writeFileSync(path.join(dir, '..prompt.md'), 'dotted')
+    assert.strictEqual(yield* promptOf(dir, '..prompt.md'), 'dotted')
+  }),
+)
+
 it.effect('gives no system prompt for a prompt file that is missing or is not a file', () =>
   Effect.gen(function* ignoresMissingFile() {
     const dir = tempDir(PREFIX)

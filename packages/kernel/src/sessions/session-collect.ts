@@ -1,4 +1,4 @@
-import { Effect, type Scope } from 'effect'
+import { Effect, Scope } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { AskService } from '../asks/ask-service.js'
 import { EventLog } from '../events/event-log.js'
@@ -19,9 +19,9 @@ export type SessionRequirements =
   | AskService
   | UsageService
 
-// The services the session manager works with, the layer's scope for the fibers it forks and an empty record of running sessions
-export const collectDeps: Effect.Effect<SessionDeps, never, SessionRequirements | Scope.Scope> =
-  Effect.gen(function* collectsDeps() {
+// The services the session manager works with, a scope of its own for the fibers it forks and an empty record of running sessions
+export const collectDeps: Effect.Effect<SessionDeps, never, SessionRequirements> = Effect.gen(
+  function* collectsDeps() {
     return {
       sql: yield* SqlClient.SqlClient,
       log: yield* EventLog,
@@ -31,6 +31,7 @@ export const collectDeps: Effect.Effect<SessionDeps, never, SessionRequirements 
       host: yield* PluginHost,
       projects: yield* ProjectRegistry,
       live: new LiveSessions(),
-      scope: yield* Effect.scope,
+      scope: yield* Scope.make('parallel'),
     }
-  })
+  },
+)

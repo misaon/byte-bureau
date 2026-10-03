@@ -21,6 +21,8 @@ export interface Live {
   pump: Fiber.Fiber<void> | undefined
   // The turn that is running, the one that events are told on
   turn: TurnRef | null
+  // The turn the kernel has asked the agent to interrupt: what that turn still asks is moot
+  interrupted: string | null
   // Set once the kernel has let the provider session go, and then nothing it still says counts
   closed: boolean
 }

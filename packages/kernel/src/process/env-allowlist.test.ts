@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { allowlistEnv } from './env-allowlist.js'
+import { allowlistEnv, bytebureauEnv } from './env-allowlist.js'
 
 describe(allowlistEnv, () => {
   it('keeps only the documented variables and explicit extras', () => {
@@ -48,5 +48,34 @@ describe(allowlistEnv, () => {
       ['MISSING'],
     )
     expect(env).toStrictEqual({ LANG: 'C' })
+  })
+})
+
+describe(bytebureauEnv, () => {
+  it('keeps only the names of ByteBureau, whatever else the source holds', () => {
+    const env = bytebureauEnv({
+      PATH: '/evil',
+      HOME: '/evil',
+      LANG: 'evil',
+      LC_ALL: 'evil',
+      TMPDIR: '/evil',
+      TERM: 'evil',
+      SSH_AUTH_SOCK: '/evil',
+      TRACEPARENT: 'evil',
+      BYTEBUREAU_FAKE_SCRIPT: 'slow',
+      BYTEBUREAU_COLOUR: 'green',
+    })
+    expect(env).toStrictEqual({ BYTEBUREAU_FAKE_SCRIPT: 'slow', BYTEBUREAU_COLOUR: 'green' })
+  })
+
+  it('drops look-alike names and unset variables', () => {
+    const env = bytebureauEnv({
+      BYTEBUREAU: 'a',
+      bytebureau_lower: 'b',
+      NOT_BYTEBUREAU_PREFIX: 'c',
+      BYTEBUREAU_UNSET: undefined,
+      BYTEBUREAU_SET: 'd',
+    })
+    expect(env).toStrictEqual({ BYTEBUREAU_SET: 'd' })
   })
 })

@@ -11,8 +11,7 @@ import {
 } from './session-ask-fixtures.js'
 import { sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
 import { prompted } from './session-prompted-fixtures.js'
-import { untilTrue } from './session-helpers.js'
-import { push } from './session-push-fixtures.js'
+import { FINISH, push } from './session-push-fixtures.js'
 import { driven } from './session-script-fixtures.js'
 
 const plain = driven()
@@ -68,12 +67,6 @@ it.layer(plain.layer)('SessionManager asks of the agent', (suite) => {
   )
 })
 
-const FINISH = {
-  type: 'turn.completed',
-  stopReason: 'end_turn',
-  usage: { inputTokens: 1, outputTokens: 1 },
-} as const
-
 it.layer(plain.layer)('SessionManager asks between two turns', (suite) => {
   suite.effect(
     'asks, answers and passes the answer on without changing the status of the session',
@@ -84,7 +77,7 @@ it.layer(plain.layer)('SessionManager asks between two turns', (suite) => {
         yield* push(session.id, agent, FINISH)
         agent.queue.push(writeRequest(session))
         yield* answerPending(session.id, ['allow'], 'ask.requested')
-        yield* untilTrue(() => agent.answers.length === 1)
+        yield* agent.calls.answer.await
         assert.strictEqual((yield* sessionOf(session.id)).status, 'ready')
         assert.ok(!(yield* typesOf(session.id)).includes('session.waiting'))
       }),
@@ -114,7 +107,7 @@ it.layer(plain.layer)('SessionManager asks of an autonomous employee', (suite) =
       const pending = yield* pendingAsk(session.id)
       assert.deepStrictEqual(pending.policy, { onTimeout: 'recommended', timeout: '5m' })
       yield* TestClock.adjust('5 minutes')
-      yield* untilTrue(() => agent.answers.length === 1)
+      yield* agent.calls.answer.await
       assert.deepStrictEqual(agent.answers, [{ askId: 'agent-ask', answer: { selected: ['a'] } }])
     }),
   )

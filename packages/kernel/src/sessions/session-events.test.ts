@@ -4,7 +4,7 @@ import { toolCallsOf } from './session-db-fixtures.js'
 import { payloadsOf, startSession } from './session-fixtures.js'
 import { firstOf } from './session-helpers.js'
 import { prompted } from './session-prompted-fixtures.js'
-import { push } from './session-push-fixtures.js'
+import { FINISH, push } from './session-push-fixtures.js'
 import { driven } from './session-script-fixtures.js'
 
 const world = driven()
@@ -25,12 +25,6 @@ const READ_START = {
   input: null,
 } as const
 const READ_FAIL = { type: 'tool.failed', id: 't2', error: 'boom' } as const
-const FINISH = {
-  type: 'turn.completed',
-  stopReason: 'end_turn',
-  usage: { inputTokens: 1, outputTokens: 1 },
-} as const
-
 it.layer(world.layer)('SessionManager tool calls', (suite) => {
   suite.effect('records a tool call from its start to its end', () =>
     Effect.gen(function* recordsToolCall() {

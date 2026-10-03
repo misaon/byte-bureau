@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 import { ProviderError } from '../errors.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { payloadsOf, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { untilTrue } from './session-helpers.js'
+import { FINISH } from './session-push-fixtures.js'
 import { SessionManager } from './session-manager.js'
 import { prompted } from './session-prompted-fixtures.js'
 import { driven } from './session-script-fixtures.js'
@@ -20,7 +20,7 @@ const AUTH = {
 // What the agent still says after it reported its error: nothing of it counts
 const LATE = [
   { type: 'tool.started', id: 'late', name: 'Bash', kind: 'bash', input: null },
-  { type: 'turn.completed', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } },
+  FINISH,
 ] as const
 
 const AGENT = { providerId: 'scripted' } as const
@@ -96,7 +96,7 @@ it.layer(plain.layer)('SessionManager agent that reports an error', (suite) => {
       const { agent } = yield* prompted(plain, session)
       agent.queue.push(AUTH, ...LATE)
       yield* waitFor(session.id, ERRORED)
-      yield* untilTrue(() => agent.queue.pending === 0)
+      yield* agent.queue.finished.await
       const types = yield* typesOf(session.id)
       assert.deepStrictEqual(
         types.filter((type) => type === 'tool.started' || type === 'turn.completed'),

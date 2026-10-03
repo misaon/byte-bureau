@@ -28,8 +28,14 @@ const release = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError>
     yield* interruptPump(live)
   })
 
+// The turn is marked before anything else is done, so a question it asks from then on is known to be moot
+const markInterrupted = (live: Live): Effect.Effect<void> =>
+  Effect.sync(() => {
+    live.interrupted = live.turn === null ? null : live.turn.turnId
+  })
+
 // The provider acknowledges an interruption by ending the turn, which is when the session is ready again
-// A question that waits for an answer is not answered by an interrupted agent, so it is cancelled
+// A question that waits for an answer is not answered by an interrupted agent, so it is cancelled, and so is one it asks meanwhile
 export const makeInterrupt =
   (deps: SessionDeps): SessionManagerShape['interrupt'] =>
   (sessionId) =>
@@ -40,7 +46,9 @@ export const makeInterrupt =
           new SessionError({ code: 'not_found', reason: `session ${sessionId} is not running` }),
         )
       }
-      return reported({ sessionId, event: 'interrupt' })(cancelAsks(deps, sessionId)).pipe(
+      const cancelling = reported({ sessionId, event: 'interrupt' })(cancelAsks(deps, sessionId))
+      return markInterrupted(live).pipe(
+        Effect.andThen(cancelling),
         Effect.andThen(bestEffort('interrupting the agent', live, interruptAgent)),
       )
     })
@@ -77,6 +85,7 @@ export const makeComplete =
         const session = yield* requireSession(deps.sql, sessionId)
         yield* ensureAllowed(session, 'complete')
         const live = deps.live.get(sessionId)
+        yield* cancelAsks(deps, sessionId)
         if (live !== undefined) {
           yield* release(deps, live)
         }

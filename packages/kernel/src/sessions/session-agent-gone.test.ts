@@ -2,15 +2,9 @@ import { assert, it } from '@effect/vitest'
 import { Effect, Exit, Layer, Scope } from 'effect'
 import { answerPending, questionRequest } from './session-ask-fixtures.js'
 import { payloadsOf, sessionOf, startSession, waitFor } from './session-fixtures.js'
-import { untilTrue } from './session-helpers.js'
+import { FINISH } from './session-push-fixtures.js'
 import { prompted } from './session-prompted-fixtures.js'
 import { driven } from './session-script-fixtures.js'
-
-const FINISH = {
-  type: 'turn.completed',
-  stopReason: 'end_turn',
-  usage: { inputTokens: 1, outputTokens: 1 },
-} as const
 
 const plain = driven()
 
@@ -42,7 +36,7 @@ it.layer(plain.layer)('SessionManager agent that goes away', (suite) => {
         first.agent.queue.push(FINISH)
         yield* waitFor(session.id, 'session.ready', 1)
         first.agent.queue.end()
-        yield* untilTrue(() => first.agent.closed)
+        yield* first.agent.calls.close.await
         const second = yield* prompted(plain, session, { text: 'again' })
         assert.notStrictEqual(second.agent, first.agent)
         assert.strictEqual((yield* sessionOf(session.id)).status, 'running')

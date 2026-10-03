@@ -113,6 +113,7 @@ it.layer(sessionLayer())('SessionManager refusals', (suite) => {
       const missing = yield* Effect.flip(sessions.create({ ...base, providerId: 'nope' }))
       assert.ok(missing instanceof SessionError && missing.code === 'provider_missing')
       assert.ok(!existsSync(path.join(project.path, '.bytebureau', 'worktrees')))
+      assert.deepStrictEqual(yield* sessions.list(), [])
     }),
   )
 })

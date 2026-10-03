@@ -5,17 +5,25 @@ import { payloadsOf, sessionOf, startSession } from './session-fixtures.js'
 import { workspaceOf } from './session-helpers.js'
 import { SessionManager } from './session-manager.js'
 import { prompted } from './session-prompted-fixtures.js'
-import { push } from './session-push-fixtures.js'
+import { FINISH, push } from './session-push-fixtures.js'
 import { driven } from './session-script-fixtures.js'
 
 const PROMPT = 'Create src/hello.ts exporting hello()\r\nwith čeština and an emoji 🚀'
 const SECRETIVE = { BYTEBUREAU_COLOUR: 'green', SECRET_TOKEN: 'hunter2' }
 
-const FINISH = {
-  type: 'turn.completed',
-  stopReason: 'end_turn',
-  usage: { inputTokens: 1, outputTokens: 1 },
-} as const
+// What a caller of create may not decide: the variables the allowlist takes from the daemon, and the id of the session
+const FORGED = {
+  PATH: '/evil',
+  HOME: '/evil',
+  TMPDIR: '/evil',
+  LANG: 'evil',
+  LC_ALL: 'evil',
+  TERM: 'evil',
+  SSH_AUTH_SOCK: '/evil',
+  TRACEPARENT: 'evil',
+  BYTEBUREAU_SESSION_ID: 'forged',
+  BYTEBUREAU_FAKE_SCRIPT: 'slow',
+}
 
 const plain = driven()
 
@@ -61,6 +69,33 @@ it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
       assert.deepStrictEqual(
         (yield* turnsOf(session.id)).map((turn) => turn.idx),
         [0, 1],
+      )
+    }),
+  )
+})
+
+it.layer(plain.layer)('SessionManager environment the caller adds', (suite) => {
+  suite.effect('keeps the variables of the daemon whatever the caller asks for', () =>
+    Effect.gen(function* keepsDaemonVariables() {
+      const session = yield* startSession({ providerId: 'scripted', env: FORGED })
+      const { agent } = yield* prompted(plain, session)
+      const names = Object.keys(FORGED).filter((name) => !name.startsWith('BYTEBUREAU_'))
+      const given = names.map((name) => agent.request.env[name])
+      assert.deepStrictEqual(
+        given,
+        names.map((name) => process.env[name]),
+      )
+    }),
+  )
+
+  suite.effect('adds the names of ByteBureau, and the id of the session is the real one', () =>
+    Effect.gen(function* addsByteBureauNames() {
+      const session = yield* startSession({ providerId: 'scripted', env: FORGED })
+      const { agent } = yield* prompted(plain, session)
+      const { env } = agent.request
+      assert.deepStrictEqual(
+        [env['BYTEBUREAU_FAKE_SCRIPT'], env['BYTEBUREAU_SESSION_ID']],
+        ['slow', session.id],
       )
     }),
   )

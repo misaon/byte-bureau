@@ -4,15 +4,12 @@ import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { helloFileOf, refusalOf, workspaceOf } from './session-helpers.js'
+import { countOf, helloFileOf, refusalOf, workspaceOf } from './session-helpers.js'
 import { sessionLayer } from './session-layers.js'
 import { SessionManager } from './session-manager.js'
 
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
 const READY = 'session.ready'
-
-const countOf = (types: readonly string[], type: string): number =>
-  types.filter((candidate) => candidate === type).length
 
 it.layer(sessionLayer())('SessionManager prompts', (suite) => {
   suite.effect('refuses a second prompt while a turn is running and records only the first', () =>

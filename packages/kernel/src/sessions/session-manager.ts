@@ -3,7 +3,7 @@ import { collectDeps, type SessionRequirements } from './session-collect.js'
 import type { SessionDeps } from './session-deps.js'
 import { makeCreate } from './session-create.js'
 import { makeComplete, makeInterrupt, makeResume, makeStop } from './session-end.js'
-import { dispose } from './session-live.js'
+import { dispose, releaseFibers } from './session-live.js'
 import { makePrompt } from './session-prompt.js'
 import { listSessions, loadSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
@@ -15,8 +15,11 @@ export class SessionManager extends Context.Service<SessionManager, SessionManag
 ) {}
 
 // Releasing the layer lets every provider session go, so no agent outlives the kernel
+// The agents are closed before the pumps are interrupted: the events of an agent end when it closes, and a pump waits for them
 const closeAll = (deps: SessionDeps): Effect.Effect<void> =>
-  Effect.forEach(deps.live.all(), (live) => dispose(deps, live), { discard: true })
+  Effect.forEach(deps.live.all(), (live) => dispose(deps, live), { discard: true }).pipe(
+    Effect.andThen(releaseFibers(deps.scope)),
+  )
 
 const make = Effect.gen(function* makeSessionManager() {
   const deps = yield* collectDeps

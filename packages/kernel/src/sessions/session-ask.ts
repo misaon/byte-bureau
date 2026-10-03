@@ -62,6 +62,18 @@ const tolerated = <Value>(
     ),
   )
 
+// The turn the kernel has asked the agent to interrupt has nothing left to ask
+const isInterrupted = (live: Live): boolean =>
+  live.turn !== null && live.turn.turnId === live.interrupted
+
+// A question that comes when its turn is being interrupted is recorded and cancelled at once, and the session does not wait for it
+const cancelled = (
+  deps: SessionDeps,
+  live: Live,
+  event: AskRequested,
+): Effect.Effect<AskRecord, StoreError> =>
+  Effect.tap(open(deps, live, event), (record) => deps.asks.cancel(record.id))
+
 // The session waits for a human as soon as the ask is open
 const opened = (
   deps: SessionDeps,
@@ -69,9 +81,11 @@ const opened = (
   event: AskRequested,
 ): Effect.Effect<AskRecord | undefined, SessionError | StoreError> =>
   whileOpen(deps, live, () =>
-    Effect.tap(open(deps, live, event), (record) =>
-      tolerated(moveToWaiting(deps, live.session.id, record.id)),
-    ),
+    isInterrupted(live)
+      ? cancelled(deps, live, event)
+      : Effect.tap(open(deps, live, event), (record) =>
+          tolerated(moveToWaiting(deps, live.session.id, record.id)),
+        ),
   )
 
 // An ask that is cancelled, or whose service closed, has no answer to pass on

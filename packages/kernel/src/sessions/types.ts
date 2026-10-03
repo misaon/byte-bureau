@@ -41,6 +41,6 @@ export interface CreateSessionInput {
   readonly providerId?: string | undefined
   readonly profileId?: string | undefined
   readonly branch?: string | undefined
-  // Extra environment for the agent; only BYTEBUREAU_* names pass the allowlist
+  // Extra environment for the agent; only the BYTEBUREAU_* names are passed on, the rest is dropped
   readonly env?: Readonly<Record<string, string>> | undefined
 }
