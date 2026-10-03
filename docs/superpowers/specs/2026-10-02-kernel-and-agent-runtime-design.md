@@ -185,6 +185,8 @@ All payloads are DTOs (no functions); streams are `AsyncIterable`; cancellation 
 
 Precedence: CLI flags > environment (`BYTEBUREAU_*`) > `<project>/bytebureau.local.json` (gitignored) > `<project>/bytebureau.json` (or `.jsonc`) > `~/.bytebureau/config.json` > defaults. Loader: JSON/JSONC read as text and parsed with `jsonc-parser` — configuration files are data, never code (Phase A dropped c12: with every feature switched off it still imported symlink targets, normalised scalar roots and dropped `null` sections before validation); `extends` for team presets is deferred to a later phase as a kernel-native feature (JSON/JSONC presets by relative path, merged as the lowest project layer, cycle detection). Validation: effect/schema; errors report the file and JSON pointer; unknown keys are errors; plugin sections are validated by the plugin's Standard Schema.
 
+`project.defaultBranch` and `defaults.branch` have no built-in default (amended during Phase A Task 7): the project registry detects the default branch from `origin/HEAD`, else the checked-out branch, else `main`, and sessions base their worktree on `defaults.branch ?? project.defaultBranch`; the example below sets both explicitly.
+
 Project config v1 (`"$schema": "https://bytebureau.dev/schema/v1/config.json"` served also at `/api/v1/schemas/config.json`):
 ```jsonc
 {

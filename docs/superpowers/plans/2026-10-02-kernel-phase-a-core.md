@@ -786,9 +786,10 @@ export const decodeProjectConfig = (input: unknown): ProjectConfig =>
 export const decodeUserConfig = (input: unknown): UserConfig =>
   Schema.decodeUnknownSync(UserConfig)(input, STRICT)
 
+// The branch keys are left out on purpose: a default here would hide the one detected from each repository
 export const defaultProjectConfig: ProjectConfig = {
   version: 1,
-  project: { name: 'my-app', defaultBranch: 'main' },
+  project: { name: 'my-app' },
   workspace: { runtime: 'local', copyIgnored: ['.env', '.env.local'], retainDays: 7 },
   providers: { claude: { executable: 'claude', settingSources: ['user', 'project', 'local'] } },
   employees: {
@@ -805,7 +806,7 @@ export const defaultProjectConfig: ProjectConfig = {
       appearance: {},
     },
   },
-  defaults: { employee: 'developer', branch: 'main' },
+  defaults: { employee: 'developer' },
   plugins: [],
   logging: { level: 'info' },
 }
@@ -2705,7 +2706,8 @@ it.effect('falls back to defaults named after the directory when no project file
     const { config, project } = yield* workspace()
     const resolved = yield* config.load({ projectPath: project })
     assert.strictEqual(resolved.project.project.name, path.basename(project))
-    assert.deepStrictEqual(resolved.project.defaults, { employee: 'developer', branch: 'main' })
+    assert.deepStrictEqual(resolved.project.defaults, { employee: 'developer' })
+    assert.strictEqual(resolved.project.project.defaultBranch, undefined)
     assert.deepStrictEqual(resolved.files, { user: null, project: null, local: null })
   }),
 )
@@ -3807,8 +3809,8 @@ export function defaultProjectConfigText(): string {
   return `{
   "$schema": "https://bytebureau.dev/schema/v1/config.json",
   "version": 1,
-  // Project identity; defaultBranch is the base of every session worktree
-  "project": { "name": ${JSON.stringify(defaultProjectConfig.project.name)}, "defaultBranch": "main" },
+  // Project identity; defaultBranch (optional) overrides the detected default branch: origin/HEAD, else main
+  "project": { "name": ${JSON.stringify(defaultProjectConfig.project.name)} },
   // Worktrees live under .bytebureau/worktrees; copyIgnored files are copied from the main checkout
   "workspace": { "runtime": "local", "copyIgnored": [".env", ".env.local"], "retainDays": 7 },
   "providers": { "claude": { "executable": "claude", "settingSources": ["user", "project", "local"] } },
@@ -3816,7 +3818,8 @@ export function defaultProjectConfigText(): string {
   "employees": {
     "developer": ${employee}
   },
-  "defaults": { "employee": "developer", "branch": "main" },
+  // branch (optional) is the base of session worktrees; it defaults to the project's default branch
+  "defaults": { "employee": "developer" },
   "plugins": [],
   "logging": { "level": "info" }
 }
@@ -4298,30 +4301,55 @@ git commit -m "feat(kernel): add the durable event log with ephemeral fan-out an
 ### Task 7: `ProjectRegistry` service and git root detection
 
 **Files:**
-- Create: `packages/kernel/src/projects/git-root.ts`, `packages/kernel/src/projects/project-registry.ts`, `packages/kernel/src/projects/git-root.test.ts`, `packages/kernel/src/projects/project-registry.test.ts`, `packages/kernel/src/testing/temp-repo.ts` (same helper as Task 9's, kernel-local copy)
-- Modify: `packages/kernel/src/index.ts`
+- Create: `packages/kernel/src/projects/git-root.ts`, `packages/kernel/src/projects/project-registry.ts`, `packages/kernel/src/projects/project-registry-fixtures.ts` (shared test layer; `import/max-dependencies` 10), `packages/kernel/src/projects/git-root.test.ts`, `packages/kernel/src/projects/project-registry.test.ts`, `packages/kernel/src/testing/temp-repo.ts` (kernel-local copy of the Task 9 helper, with `realpathSync` and `onTestFinished` cleanup)
+- Modify: `packages/kernel/src/index.ts`; `packages/protocol/src/config.ts` and `packages/kernel/src/config/template.ts` (the default-branch ruling below)
 
 **Interfaces:**
 - Consumes: `SqlClient`, `EventLog`, `Config` (`load({ projectPath })` for the config snapshot and the default branch), `uuidv7`, `nowIso`, `WorkspaceError`.
 - Produces: `ProjectRegistry` service `{ register(path): Effect<Project, WorkspaceError | ConfigError | StoreError>; list(): Effect<readonly Project[], StoreError>; get(id): Effect<Project | undefined, StoreError>; remove(id): Effect<void, StoreError> }`, `ProjectRegistryLive: Layer<ProjectRegistry, never, SqlClient | EventLog | Config>`, `Project { id, name, path, defaultBranch, config: ProjectConfig, createdAt, updatedAt }`, `findGitRoot(path): string | null`, `isByteBureauWorktree(root): boolean`, `defaultBranchOf(root): string` (`git symbolic-ref --short refs/remotes/origin/HEAD` → strip `origin/`, else `main`).
 
+Semantics (as shipped): `defaultProjectConfig` no longer carries `project.defaultBranch` or `defaults.branch` (per-repository values; merging `'main'` into every project made `defaultBranchOf` dead code and would base sessions of a `develop` repository on `main`), the init template documents both keys in comments instead, and the registry resolves `defaultBranch = config.project.defaultBranch ?? defaultBranchOf(root)` (`origin/HEAD`; the final fix wave adds the checked-out branch before the `main` fallback). `createTempRepo({ withRemote: true })` has no `origin/HEAD` (`push -u` creates only the branch ref), so the test named after it exercises the fallback; the `set-head` case has its own test. `config_json` is the merged, validated `ProjectConfig`; re-registering rebuilds the row from its id, path and `created_at`, so a snapshot that no longer decodes is repaired. `remove(id)` is idempotent on a missing row and fails with `StoreError` (foreign key) while sessions reference the project (Task 15 `projects rm` reports it). Temp repositories are `realpathSync`ed (macOS `/var` → `/private/var`, git reports the real path).
+
 - [ ] **Step 1: Failing tests**
 
 `packages/kernel/src/projects/git-root.test.ts`:
 ```ts
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createTempRepo } from '../testing/temp-repo.js'
+import { createTempRepo, git, tempDir } from '../testing/temp-repo.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
+
+// A repository that has been initialised and holds no commit yet
+function emptyRepo(): string {
+  const repo = tempDir('bb-empty-')
+  git(repo, 'init', '-q', '-b', 'main')
+  return repo
+}
 
 describe(findGitRoot, () => {
   it('finds the toplevel from a nested directory and null outside a repository', () => {
     const repo = createTempRepo()
     mkdirSync(path.join(repo, 'src', 'deep'), { recursive: true })
     expect(findGitRoot(path.join(repo, 'src', 'deep'))).toBe(repo)
-    expect(findGitRoot(mkdtempSync(path.join(tmpdir(), 'bb-plain-')))).toBeNull()
+    expect(findGitRoot(tempDir('bb-plain-'))).toBeNull()
+  })
+
+  it('finds no toplevel for a directory that does not exist', () => {
+    const missing = path.join(tempDir('bb-plain-'), 'nowhere')
+    expect(findGitRoot(missing)).toBeNull()
+  })
+
+  it('reports the physical toplevel when asked through a symlink', () => {
+    const repo = createTempRepo()
+    const link = path.join(tempDir('bb-link-'), 'repo')
+    symlinkSync(repo, link)
+    expect(findGitRoot(link)).toBe(repo)
+  })
+
+  it('finds the toplevel of a repository without commits', () => {
+    const repo = emptyRepo()
+    expect(findGitRoot(repo)).toBe(repo)
   })
 })
 
@@ -4339,59 +4367,271 @@ describe(defaultBranchOf, () => {
     expect(defaultBranchOf(createTempRepo())).toBe('main')
     expect(defaultBranchOf(createTempRepo({ withRemote: true }))).toBe('main')
   })
+
+  it('falls back to main in a repository without commits', () => {
+    expect(defaultBranchOf(emptyRepo())).toBe('main')
+  })
+
+  it.each(['develop', 'release/1.x'])('follows origin/HEAD to %s', (branch) => {
+    const repo = createTempRepo({ withRemote: true })
+    git(repo, 'push', '-q', 'origin', `main:refs/heads/${branch}`)
+    git(repo, 'remote', 'set-head', 'origin', branch)
+    expect(defaultBranchOf(repo)).toBe(branch)
+  })
 })
 ```
 `packages/kernel/src/projects/project-registry.test.ts`:
 ```ts
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
-import { ConfigLive } from '../config/config.js'
-import { EventLog, EventLogLive } from '../events/event-log.js'
-import { StoreTest } from '../store/store-test.js'
-import { createTempRepo } from '../testing/temp-repo.js'
-import { ProjectRegistry, ProjectRegistryLive } from './project-registry.js'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { ConfigError, StoreError, WorkspaceError } from '../errors.js'
+import { EventLog } from '../events/event-log.js'
+import { createTempRepo, tempDir } from '../testing/temp-repo.js'
+import { ProjectRegistry } from './project-registry.js'
+import {
+  namedRepo,
+  registerAt,
+  TestLayer,
+  trackingDevelop,
+  writeProjectFile,
+} from './project-registry-fixtures.js'
 
-const TestLayer = ProjectRegistryLive.pipe(
-  Layer.provideMerge(Layer.mergeAll(EventLogLive, ConfigLive(mkdtempSync(path.join(tmpdir(), 'bb-home-'))))),
-  Layer.provideMerge(StoreTest),
-)
-
-layer(TestLayer)('ProjectRegistry', (it) => {
-  it.effect('registers a repository once (upsert by path) and emits project events', () =>
-    Effect.gen(function* () {
+it.layer(TestLayer)('ProjectRegistry register', (suite) => {
+  suite.effect('registers a repository once, whichever directory inside it is given', () =>
+    Effect.gen(function* registersOnce() {
       const registry = yield* ProjectRegistry
-      const log = yield* EventLog
       const repo = createTempRepo()
       mkdirSync(path.join(repo, 'src'), { recursive: true })
       const first = yield* registry.register(path.join(repo, 'src'))
       const second = yield* registry.register(repo)
-      assert.strictEqual(first.id, second.id)
-      assert.strictEqual(first.path, repo)
-      assert.strictEqual(first.name, path.basename(repo))
-      assert.strictEqual(first.defaultBranch, 'main')
-      const events = yield* log.read({ projectId: first.id }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type), ['project.registered', 'project.updated'])
-      assert.strictEqual((yield* registry.list()).length, 1)
-      yield* registry.remove(first.id)
-      assert.strictEqual(yield* registry.get(first.id), undefined)
+      assert.strictEqual(second.id, first.id)
+      const registered = [first.path, first.name, first.defaultBranch]
+      assert.deepStrictEqual(registered, [repo, path.basename(repo), 'main'])
+      const stored = (yield* registry.list()).filter((project) => project.path === repo)
+      assert.deepStrictEqual(stored, [second])
     }),
   )
 
-  it.effect('refuses directories that are not repositories or are ByteBureau worktrees', () =>
-    Effect.gen(function* () {
+  suite.effect('announces the registration and every later update with the stored identity', () =>
+    Effect.gen(function* announcesProject() {
       const registry = yield* ProjectRegistry
-      const plain = yield* Effect.result(registry.register(mkdtempSync(path.join(tmpdir(), 'bb-plain-'))))
-      assert.strictEqual(plain._tag, 'Failure')
+      const log = yield* EventLog
       const repo = createTempRepo()
-      writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
-      const worktree = yield* Effect.result(registry.register(repo))
-      assert.strictEqual(worktree._tag, 'Failure')
+      const first = yield* registry.register(repo)
+      yield* registry.register(repo)
+      const events = yield* log.read({ projectId: first.id }, { from: 0 })
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ['project.registered', 'project.updated'],
+      )
+      const identity = { id: first.id, name: first.name, path: repo, defaultBranch: 'main' }
+      const payloads = events.map((event) => event.payload)
+      assert.deepStrictEqual(payloads, [identity, identity])
+    }),
+  )
+
+  suite.effect(
+    'names the project after its project file and keeps the resolved configuration',
+    () =>
+      Effect.gen(function* snapshotsConfiguration() {
+        const registry = yield* ProjectRegistry
+        const project = yield* registry.register(namedRepo('Demo'))
+        assert.strictEqual(project.name, 'Demo')
+        assert.strictEqual(project.config.project.name, 'Demo')
+        assert.deepStrictEqual(project.config.defaults, { employee: 'developer' })
+        assert.deepStrictEqual(yield* registry.get(project.id), project)
+      }),
+  )
+})
+
+it.layer(TestLayer)('ProjectRegistry refresh', (suite) => {
+  suite.effect('refreshes the name, default branch and configuration of a known repository', () =>
+    Effect.gen(function* refreshesProject() {
+      const registry = yield* ProjectRegistry
+      const repo = createTempRepo()
+      const first = yield* registerAt(registry, repo, '2026-10-03T08:00:00.000Z')
+      writeProjectFile(repo, { name: 'renamed', defaultBranch: 'develop' })
+      const second = yield* registerAt(registry, repo, '2026-10-03T09:30:00.000Z')
+      assert.deepStrictEqual(
+        [second.id, second.createdAt, second.updatedAt],
+        [first.id, '2026-10-03T08:00:00.000Z', '2026-10-03T09:30:00.000Z'],
+      )
+      assert.deepStrictEqual([second.name, second.defaultBranch], ['renamed', 'develop'])
+      assert.deepStrictEqual(second.config.project, { name: 'renamed', defaultBranch: 'develop' })
+      assert.deepStrictEqual(yield* registry.get(first.id), second)
+    }),
+  )
+
+  suite.effect('takes the default branch from the configuration, else from origin/HEAD', () =>
+    Effect.gen(function* resolvesDefaultBranch() {
+      const registry = yield* ProjectRegistry
+      const detected = trackingDevelop()
+      const configured = trackingDevelop()
+      writeProjectFile(configured, { name: 'configured', defaultBranch: 'trunk' })
+      assert.strictEqual((yield* registry.register(detected)).defaultBranch, 'develop')
+      assert.strictEqual((yield* registry.register(configured)).defaultBranch, 'trunk')
     }),
   )
 })
+
+it.layer(TestLayer)('ProjectRegistry refusals', (suite) => {
+  suite.effect('refuses directories that are not repositories or are ByteBureau worktrees', () =>
+    Effect.gen(function* refusesDirectories() {
+      const registry = yield* ProjectRegistry
+      const before = yield* registry.list()
+      const plain = yield* Effect.flip(registry.register(tempDir('bb-plain-')))
+      const repo = createTempRepo()
+      writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
+      const worktree = yield* Effect.flip(registry.register(repo))
+      assert.instanceOf(plain, WorkspaceError)
+      assert.instanceOf(worktree, WorkspaceError)
+      assert.deepStrictEqual(
+        [plain.code, worktree.code],
+        ['not_a_repository', 'is_bytebureau_worktree'],
+      )
+      assert.deepStrictEqual(yield* registry.list(), before)
+    }),
+  )
+
+  suite.effect('fails with the configuration error and stores nothing for an invalid file', () =>
+    Effect.gen(function* refusesInvalidConfiguration() {
+      const registry = yield* ProjectRegistry
+      const before = yield* registry.list()
+      const repo = createTempRepo()
+      writeProjectFile(repo, { name: 'x', extra: true })
+      const failure = yield* Effect.flip(registry.register(repo))
+      assert.instanceOf(failure, ConfigError)
+      assert.strictEqual(failure.pointer, '/project/extra')
+      assert.deepStrictEqual(yield* registry.list(), before)
+    }),
+  )
+})
+
+it.layer(TestLayer)('ProjectRegistry list, get and remove', (suite) => {
+  suite.effect('lists projects by name and finds none for an unknown id', () =>
+    Effect.gen(function* listsByName() {
+      const registry = yield* ProjectRegistry
+      const beta = yield* registry.register(namedRepo('beta'))
+      const alpha = yield* registry.register(namedRepo('alpha'))
+      const ids = new Set([alpha.id, beta.id])
+      const ours = (yield* registry.list()).filter((project) => ids.has(project.id))
+      assert.deepStrictEqual(ours, [alpha, beta])
+      assert.strictEqual(yield* registry.get('unknown'), undefined)
+    }),
+  )
+
+  suite.effect('removes a project and announces it, also for an id nobody holds', () =>
+    Effect.gen(function* removesProject() {
+      const registry = yield* ProjectRegistry
+      const log = yield* EventLog
+      const project = yield* registry.register(createTempRepo())
+      yield* registry.remove(project.id)
+      yield* registry.remove('unknown')
+      assert.strictEqual(yield* registry.get(project.id), undefined)
+      const known = yield* log.read({ projectId: project.id }, { from: 0 })
+      const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
+      const types = [known, unknown].map((events) => events.map((event) => event.type))
+      assert.deepStrictEqual(types, [
+        ['project.registered', 'project.removed'],
+        ['project.removed'],
+      ])
+    }),
+  )
+})
+
+it.effect('reports a failing statement as a StoreError from every operation', () =>
+  Effect.gen(function* failsWithStoreError() {
+    const sql = yield* SqlClient.SqlClient
+    const registry = yield* ProjectRegistry
+    yield* sql`DROP TABLE projects`
+    const failures = [
+      yield* Effect.flip(registry.register(createTempRepo())),
+      yield* Effect.flip(registry.list()),
+      yield* Effect.flip(registry.get('x')),
+      yield* Effect.flip(registry.remove('x')),
+    ]
+    for (const failure of failures) {
+      assert.instanceOf(failure, StoreError)
+    }
+  }).pipe(Effect.provide(TestLayer)),
+)
+```
+`packages/kernel/src/projects/project-registry-fixtures.ts` (shared test layer and fixtures):
+```ts
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { Effect, Layer } from 'effect'
+import { vi } from 'vitest'
+import { ConfigLive } from '../config/config.js'
+import { EventLogLive } from '../events/event-log.js'
+import { StoreTest } from '../store/store-test.js'
+import { createTempRepo, git } from '../testing/temp-repo.js'
+import { ProjectRegistryLive, type ProjectRegistryShape } from './project-registry.js'
+
+// An empty home directory for the user configuration, removed when the layer is released
+const emptyHome = Effect.acquireRelease(
+  Effect.sync(() => mkdtempSync(path.join(tmpdir(), 'bb-home-'))),
+  (home) =>
+    Effect.sync(() => {
+      rmSync(home, { recursive: true, force: true })
+    }),
+)
+
+const services = Layer.unwrap(
+  emptyHome.pipe(
+    Effect.map((home) => {
+      const config = ConfigLive(home)
+      return Layer.mergeAll(EventLogLive, config)
+    }),
+  ),
+)
+
+export const TestLayer = ProjectRegistryLive.pipe(
+  Layer.provideMerge(services),
+  Layer.provideMerge(StoreTest),
+)
+
+// The project file of a fixture repository, with only the project section the test cares about
+export function writeProjectFile(repo: string, project: Record<string, unknown>): void {
+  const config = { version: 1, project, employees: {} }
+  writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify(config))
+}
+
+export function namedRepo(name: string): string {
+  const repo = createTempRepo()
+  writeProjectFile(repo, { name })
+  return repo
+}
+
+// A repository whose remote HEAD names develop
+export function trackingDevelop(): string {
+  const repo = createTempRepo({ withRemote: true })
+  git(repo, 'push', '-q', 'origin', 'main:refs/heads/develop')
+  git(repo, 'remote', 'set-head', 'origin', 'develop')
+  return repo
+}
+
+// Registers with the system clock stopped at the given instant, and lets it run again afterwards
+export function registerAt(
+  registry: ProjectRegistryShape,
+  directory: string,
+  instant: string,
+): ReturnType<ProjectRegistryShape['register']> {
+  return Effect.suspend(() => {
+    vi.setSystemTime(instant)
+    return registry.register(directory)
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        vi.useRealTimers()
+      }),
+    ),
+  )
+}
 ```
 - [ ] **Step 2: Implementation**
 
@@ -4403,15 +4643,21 @@ import path from 'node:path'
 
 function git(cwd: string, args: readonly string[]): string | null {
   try {
-    return execFileSync('git', [...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
   } catch {
     return null
   }
 }
 
-export const findGitRoot = (directory: string): string | null => git(directory, ['rev-parse', '--show-toplevel'])
+export const findGitRoot = (directory: string): string | null =>
+  git(directory, ['rev-parse', '--show-toplevel'])
 
-export const isByteBureauWorktree = (root: string): boolean => existsSync(path.join(root, '.bytebureau-session.json'))
+export const isByteBureauWorktree = (root: string): boolean =>
+  existsSync(path.join(root, '.bytebureau-session.json'))
 
 export function defaultBranchOf(root: string): string {
   const head = git(root, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
@@ -4421,12 +4667,12 @@ export function defaultBranchOf(root: string): string {
 `packages/kernel/src/projects/project-registry.ts`:
 ```ts
 import path from 'node:path'
-import type { ProjectConfig } from '@bytebureau/protocol'
+import { decodeProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
-import { Config } from '../config/config.js'
-import { ConfigError, StoreError, WorkspaceError } from '../errors.js'
-import { EventLog } from '../events/event-log.js'
+import { Config, type ConfigShape } from '../config/config.js'
+import { StoreError, WorkspaceError, type ConfigError } from '../errors.js'
+import { EventLog, type EventLogShape } from '../events/event-log.js'
 import { nowIso, uuidv7 } from '../ids.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
 
@@ -4441,13 +4687,17 @@ export interface Project {
 }
 
 export interface ProjectRegistryShape {
-  register(directory: string): Effect.Effect<Project, WorkspaceError | ConfigError | StoreError>
-  list(): Effect.Effect<readonly Project[], StoreError>
-  get(id: string): Effect.Effect<Project | undefined, StoreError>
-  remove(id: string): Effect.Effect<void, StoreError>
+  readonly register: (
+    directory: string,
+  ) => Effect.Effect<Project, WorkspaceError | ConfigError | StoreError>
+  readonly list: () => Effect.Effect<readonly Project[], StoreError>
+  readonly get: (id: string) => Effect.Effect<Project | undefined, StoreError>
+  readonly remove: (id: string) => Effect.Effect<void, StoreError>
 }
 
-export class ProjectRegistry extends Context.Service<ProjectRegistry, ProjectRegistryShape>()('bb/ProjectRegistry') {}
+export class ProjectRegistry extends Context.Service<ProjectRegistry, ProjectRegistryShape>()(
+  'bb/ProjectRegistry',
+) {}
 
 interface Row {
   readonly id: string
@@ -4459,69 +4709,248 @@ interface Row {
   readonly updated_at: string
 }
 
+// The snapshot is decoded again, so a row that no longer fits the schema fails loudly
 const fromRow = (row: Row): Project => ({
   id: row.id,
   name: row.name,
   path: row.path,
   defaultBranch: row.default_branch,
-  config: JSON.parse(row.config_json) as ProjectConfig,
+  config: decodeProjectConfig(JSON.parse(row.config_json)),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
 
-const make = Effect.gen(function* () {
+const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
+
+interface Deps {
+  readonly sql: SqlClient.SqlClient
+  readonly log: EventLogShape
+  readonly config: ConfigShape
+}
+
+// The repository's resolved configuration with the two values a project takes from it
+interface Snapshot {
+  readonly name: string
+  readonly defaultBranch: string
+  readonly config: ProjectConfig
+}
+
+// A session worktree is a checkout of a project, never a project of its own
+const repositoryRoot = (directory: string): Effect.Effect<string, WorkspaceError> =>
+  Effect.gen(function* findRepositoryRoot() {
+    const root = findGitRoot(path.resolve(directory))
+    if (root === null) {
+      const reason = `${directory} is not inside a git repository`
+      return yield* new WorkspaceError({ code: 'not_a_repository', reason })
+    }
+    if (isByteBureauWorktree(root)) {
+      const reason = `${root} is a ByteBureau session worktree`
+      return yield* new WorkspaceError({ code: 'is_bytebureau_worktree', reason })
+    }
+    return root
+  })
+
+// A configured default branch wins; otherwise the repository decides: origin/HEAD, else main
+const snapshotOf = (config: ConfigShape, root: string): Effect.Effect<Snapshot, ConfigError> =>
+  Effect.map(config.load({ projectPath: root }), ({ project }) => ({
+    name: project.project.name,
+    defaultBranch: project.project.defaultBranch ?? defaultBranchOf(root),
+    config: project,
+  }))
+
+const findByPath = (
+  sql: SqlClient.SqlClient,
+  root: string,
+): Effect.Effect<Row | undefined, StoreError> =>
+  sql<Row>`SELECT * FROM projects WHERE path = ${root}`.pipe(
+    Effect.map(([row]) => row),
+    Effect.mapError(toStoreError),
+  )
+
+const insertProject = (
+  sql: SqlClient.SqlClient,
+  project: Project,
+): Effect.Effect<void, StoreError> =>
+  sql`
+    INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at)
+    VALUES (${project.id}, ${project.name}, ${project.path}, ${project.defaultBranch}, ${JSON.stringify(project.config)}, ${project.createdAt}, ${project.updatedAt})`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
+  )
+
+const updateProject = (
+  sql: SqlClient.SqlClient,
+  project: Project,
+): Effect.Effect<void, StoreError> =>
+  sql`
+    UPDATE projects
+    SET name = ${project.name}, default_branch = ${project.defaultBranch}, config_json = ${JSON.stringify(project.config)}, updated_at = ${project.updatedAt}
+    WHERE id = ${project.id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
+
+const announce = (
+  log: EventLogShape,
+  type: 'project.registered' | 'project.updated',
+  project: Project,
+): Effect.Effect<void, StoreError> =>
+  Effect.asVoid(
+    log.publish({
+      type,
+      projectId: project.id,
+      payload: {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        defaultBranch: project.defaultBranch,
+      },
+    }),
+  )
+
+const createProject = (
+  { sql, log }: Deps,
+  root: string,
+  snapshot: Snapshot,
+): Effect.Effect<Project, StoreError> =>
+  Effect.gen(function* createNewProject() {
+    const now = nowIso()
+    const project: Project = {
+      id: uuidv7(),
+      path: root,
+      createdAt: now,
+      updatedAt: now,
+      ...snapshot,
+    }
+    yield* insertProject(sql, project)
+    yield* announce(log, 'project.registered', project)
+    return project
+  })
+
+// The id and the creation time stay; the snapshot of the repository and the update time are renewed
+const refreshProject = (
+  { sql, log }: Deps,
+  existing: Row,
+  snapshot: Snapshot,
+): Effect.Effect<Project, StoreError> =>
+  Effect.gen(function* refreshKnownProject() {
+    const project: Project = {
+      id: existing.id,
+      path: existing.path,
+      createdAt: existing.created_at,
+      updatedAt: nowIso(),
+      ...snapshot,
+    }
+    yield* updateProject(sql, project)
+    yield* announce(log, 'project.updated', project)
+    return project
+  })
+
+const makeRegister =
+  (deps: Deps): ProjectRegistryShape['register'] =>
+  (directory) =>
+    Effect.gen(function* registerProject() {
+      const root = yield* repositoryRoot(directory)
+      const snapshot = yield* snapshotOf(deps.config, root)
+      const existing = yield* findByPath(deps.sql, root)
+      if (existing === undefined) {
+        return yield* createProject(deps, root, snapshot)
+      }
+      return yield* refreshProject(deps, existing, snapshot)
+    })
+
+const makeList =
+  (sql: SqlClient.SqlClient): ProjectRegistryShape['list'] =>
+  () =>
+    sql<Row>`SELECT * FROM projects ORDER BY name`.pipe(
+      Effect.map((rows) => rows.map((row) => fromRow(row))),
+      Effect.mapError(toStoreError),
+    )
+
+const makeGet =
+  (sql: SqlClient.SqlClient): ProjectRegistryShape['get'] =>
+  (id) =>
+    sql<Row>`SELECT * FROM projects WHERE id = ${id}`.pipe(
+      Effect.map(([row]) => (row === undefined ? undefined : fromRow(row))),
+      Effect.mapError(toStoreError),
+    )
+
+// Removing an id nobody holds is not an error: the announcement still goes out
+const makeRemove =
+  ({ sql, log }: Deps): ProjectRegistryShape['remove'] =>
+  (id) =>
+    Effect.gen(function* removeProject() {
+      yield* sql`DELETE FROM projects WHERE id = ${id}`.pipe(Effect.mapError(toStoreError))
+      yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
+    })
+
+const make = Effect.gen(function* makeProjectRegistry() {
   const sql = yield* SqlClient.SqlClient
   const log = yield* EventLog
   const config = yield* Config
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> =>
-    Effect.mapError(effect, (cause) => new StoreError({ cause }))
-
-  const byPath = (root: string) => wrap(Effect.map(sql<Row>`SELECT * FROM projects WHERE path = ${root}`, (rows) => rows[0]))
-  const payload = (project: Project) => ({ id: project.id, name: project.name, path: project.path, defaultBranch: project.defaultBranch })
-
-  const register: ProjectRegistryShape['register'] = (directory) =>
-    Effect.gen(function* () {
-      const root = findGitRoot(path.resolve(directory))
-      if (root === null) {
-        return yield* new WorkspaceError({ code: 'not_a_repository', reason: `${directory} is not inside a git repository` })
-      }
-      if (isByteBureauWorktree(root)) {
-        return yield* new WorkspaceError({ code: 'is_bytebureau_worktree', reason: `${root} is a ByteBureau session worktree` })
-      }
-      const resolved = yield* config.load({ projectPath: root })
-      const name = resolved.project.project.name
-      const defaultBranch = resolved.project.project.defaultBranch ?? defaultBranchOf(root)
-      const existing = yield* byPath(root)
-      const now = nowIso()
-      const configJson = JSON.stringify(resolved.project)
-      if (existing === undefined) {
-        const id = uuidv7()
-        yield* wrap(sql`INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES (${id}, ${name}, ${root}, ${defaultBranch}, ${configJson}, ${now}, ${now})`)
-        const project: Project = { id, name, path: root, defaultBranch, config: resolved.project, createdAt: now, updatedAt: now }
-        yield* log.publish({ type: 'project.registered', projectId: id, payload: payload(project) })
-        return project
-      }
-      yield* wrap(sql`UPDATE projects SET name = ${name}, default_branch = ${defaultBranch}, config_json = ${configJson}, updated_at = ${now} WHERE id = ${existing.id}`)
-      const project: Project = { ...fromRow(existing), name, defaultBranch, config: resolved.project, updatedAt: now }
-      yield* log.publish({ type: 'project.updated', projectId: project.id, payload: payload(project) })
-      return project
-    })
-
+  const deps: Deps = { sql, log, config }
   return ProjectRegistry.of({
-    register,
-    list: () => wrap(Effect.map(sql<Row>`SELECT * FROM projects ORDER BY name`, (rows) => rows.map(fromRow))),
-    get: (id) => wrap(Effect.map(sql<Row>`SELECT * FROM projects WHERE id = ${id}`, (rows) => (rows[0] === undefined ? undefined : fromRow(rows[0])))),
-    remove: (id) =>
-      Effect.gen(function* () {
-        yield* wrap(sql`DELETE FROM projects WHERE id = ${id}`)
-        yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
-      }),
+    register: makeRegister(deps),
+    list: makeList(sql),
+    get: makeGet(sql),
+    remove: makeRemove(deps),
   })
 })
 
-export const ProjectRegistryLive: Layer.Layer<ProjectRegistry, never, SqlClient.SqlClient | EventLog | Config> = Layer.effect(ProjectRegistry, make)
+export const ProjectRegistryLive: Layer.Layer<
+  ProjectRegistry,
+  never,
+  SqlClient.SqlClient | EventLog | Config
+> = Layer.effect(ProjectRegistry, make)
 ```
-`packages/kernel/src/testing/temp-repo.ts`: the same helper as `plugins/workspace-local/src/testing/temp-repo.ts` (copy it; a plugin's test helper is not importable by the kernel).
+`packages/kernel/src/testing/temp-repo.ts` (kernel-local copy of the Task 9 helper):
+```ts
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { onTestFinished } from 'vitest'
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Test',
+  GIT_AUTHOR_EMAIL: 'test@example.com',
+  GIT_COMMITTER_NAME: 'Test',
+  GIT_COMMITTER_EMAIL: 'test@example.com',
+}
+
+export function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim()
+}
+
+// Symlinks are resolved, as git reports paths: on macOS the temporary directory sits behind /var -> /private/var
+// The directory is removed when the running test has finished
+export function tempDir(prefix: string): string {
+  const created = mkdtempSync(path.join(tmpdir(), prefix))
+  const dir = realpathSync(created)
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+function addOrigin(dir: string): void {
+  const remote = tempDir('bb-remote-')
+  git(remote, 'init', '-q', '--bare', '-b', 'main')
+  git(dir, 'remote', 'add', 'origin', remote)
+  git(dir, 'push', '-q', '-u', 'origin', 'main')
+}
+
+// A repository with one commit on `main` and an optional bare "origin" remote
+export function createTempRepo(options: { readonly withRemote?: boolean } = {}): string {
+  const dir = tempDir('bb-repo-')
+  git(dir, 'init', '-q', '-b', 'main')
+  writeFileSync(path.join(dir, 'README.md'), '# fixture\n')
+  git(dir, 'add', 'README.md')
+  git(dir, 'commit', '-q', '-m', 'initial')
+  if (options.withRemote === true) {
+    addOrigin(dir)
+  }
+  return dir
+}
+```
 
 Add to `index.ts`: `export { ProjectRegistry, ProjectRegistryLive, type Project, type ProjectRegistryShape } from './projects/project-registry.js'` and `export { findGitRoot, isByteBureauWorktree, defaultBranchOf } from './projects/git-root.js'`.
 
