@@ -1,17 +1,22 @@
 import { setLocale } from '@bytebureau/i18n'
-import type { EventEnvelope, KernelEventPayload } from '@bytebureau/protocol'
+import {
+  EventPayloadError,
+  type EventEnvelope,
+  type KernelEventPayload,
+} from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createOutput } from '../output.js'
 import { event } from '../testing/events.js'
 import { completionLine, readOrSkip, summarizeRun, titleOf, transcriptLine } from './transcript.js'
 
 const ESCAPE = '\u001B'
+const TOOL_STARTED = 'tool.started'
 
 const PLAIN = createOutput({ json: false, color: false })
 const COLOURED = createOutput({ json: false, color: true })
 
 function toolStarted(input: unknown): EventEnvelope {
-  return event('tool.started', { id: 't1', name: 'Write', kind: 'builtin', input })
+  return event(TOOL_STARTED, { id: 't1', name: 'Write', kind: 'builtin', input })
 }
 
 describe(transcriptLine, () => {
@@ -147,20 +152,32 @@ function malformed(type: string, seq: number): EventEnvelope {
   return { ...event('session.ready', { status: 'ready' }, seq), type }
 }
 
+// A read that fails for a reason of its own, such as a bug of the renderer
+function broken(): string {
+  throw new RangeError('a bug in the renderer')
+}
+
+// A read that finds the payload does not fit, as decodeEventPayload throws it
 function unreadable(): string {
-  throw new Error('bad payload')
+  throw new EventPayloadError(TOOL_STARTED, 'bad payload')
 }
 
 describe(readOrSkip, () => {
   it('hands the result of a read that works on, and warns of nothing', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(readOrSkip(malformed('tool.started', 4), PLAIN, () => 'read')).toBe('read')
+    expect(readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, () => 'read')).toBe('read')
     expect(warned).not.toHaveBeenCalled()
   })
 
-  it('skips an event whose read throws, with one warning that names its type and seq', () => {
+  it('lets a failure that is not about the payload go on, and warns of nothing', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(readOrSkip(malformed('tool.started', 4), PLAIN, unreadable)).toBeUndefined()
+    expect(() => readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, broken)).toThrow(RangeError)
+    expect(warned).not.toHaveBeenCalled()
+  })
+
+  it('skips an event whose payload does not fit, with one warning that names its type and seq', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, unreadable)).toBeUndefined()
     expect(warned.mock.calls).toStrictEqual([
       ['Skipped the tool.started event (seq 4): its payload does not fit its type'],
     ])
@@ -182,7 +199,7 @@ describe(readOrSkip, () => {
 describe('transcriptLine and summarizeRun with an event that does not fit its type', () => {
   it('prints no line for the event, and warns once', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(transcriptLine(malformed('tool.started', 6), PLAIN)).toBeUndefined()
+    expect(transcriptLine(malformed(TOOL_STARTED, 6), PLAIN)).toBeUndefined()
     expect(transcriptLine(malformed('workspace.provisioned', 7), PLAIN)).toBeUndefined()
     expect(warned).toHaveBeenCalledTimes(2)
   })

@@ -158,19 +158,35 @@ describe('promptAsk and the marker of a recommended label', () => {
       'Výchozí export (Doporučeno)',
     ])
   })
+})
 
-  it('marks a recommended label that does not end with a marker, and no other', async () => {
+describe('promptAsk and a marker anywhere in a label', () => {
+  it('finds a marker anywhere in the label, in brackets or before punctuation, and marks no other label', async () => {
     expect.hasAssertions()
-    const plain = question([
+    const marked = question([
       labelled('a', true, 'Use the (Recommended) path'),
-      labelled('b', false, 'Keep it (Recommended)'),
+      labelled('b', true, 'Named export [Recommended]'),
+      labelled('c', true, 'Named export (Recommended).'),
+      labelled('d', true, 'Pojmenovaný export (doporučený)'),
+      labelled('e', false, 'Keep it (Recommended)'),
     ])
     const asked = person(['a'])
-    await promptAsk(askOf([plain]), TERMINAL, asked.prompts)
+    await promptAsk(askOf([marked]), TERMINAL, asked.prompts)
     expect(firstLabels(asked)).toStrictEqual([
-      'Use the (Recommended) path (Recommended)',
+      'Use the (Recommended) path',
+      'Named export [Recommended]',
+      'Named export (Recommended).',
+      'Pojmenovaný export (doporučený)',
       'Keep it (Recommended)',
     ])
+  })
+
+  it('marks a recommended label that carries no marker', async () => {
+    expect.hasAssertions()
+    const plain = question([labelled('a', true, 'Recommended path'), labelled('b', false, 'Other')])
+    const asked = person(['a'])
+    await promptAsk(askOf([plain]), TERMINAL, asked.prompts)
+    expect(firstLabels(asked)).toStrictEqual(['Recommended path (Recommended)', 'Other'])
   })
 })
 

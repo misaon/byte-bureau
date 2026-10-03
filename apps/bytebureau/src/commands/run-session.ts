@@ -14,27 +14,17 @@ import {
   type EventEnvelope,
   type PromptInput,
 } from '@bytebureau/protocol'
-import { intro, log, outro } from '@clack/prompts'
 import type { Context } from '../context.js'
 import type { Output } from '../output.js'
 import { promptAsk } from '../render/ask-prompt.js'
-import {
-  completionLine,
-  readOrSkip,
-  summarizeRun,
-  titleOf,
-  transcriptLine,
-} from '../render/transcript.js'
+import { completionLine, readOrSkip, summarizeRun, titleOf } from '../render/transcript.js'
 import { describeError } from '../errors.js'
+import { closeFrame, EXIT_REFUSED, open, refuse, report, show, type Outcome } from './run-output.js'
 
 const EXIT_COMPLETED = 0
 const EXIT_STOPPED = 3
-const EXIT_PROVIDER_ERROR = 4
 
 const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
-
-// A project path that holds no repository to work in, or is a session worktree itself
-const UNUSABLE_PROJECT = new Set(['not_a_repository', 'is_bytebureau_worktree'])
 
 export interface RunOptions {
   readonly prompt: string
@@ -68,44 +58,15 @@ interface Run {
   readonly context: Context
 }
 
-interface Outcome {
-  readonly code: number
-  readonly text: string
-}
-
-// Failures that end a run with exit code 4: no repository to work in, a provider that is missing or fails
+// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
 function isRefusal(error: unknown): boolean {
   if (error instanceof WorkspaceError) {
-    return UNUSABLE_PROJECT.has(error.code)
+    return true
   }
   if (error instanceof SessionError) {
     return error.code === 'provider_missing'
   }
   return error instanceof ProviderError
-}
-
-// A terminal gets a frame: the session opens it, and every way out of the run closes it
-function open({ output, interactive }: Context, prompt: string): void {
-  if (interactive) {
-    const title = titleOf(prompt)
-    intro(output.colors.bold(m.run_intro({ title })))
-  }
-}
-
-function closeFrame({ interactive }: Context): void {
-  if (interactive) {
-    outro()
-  }
-}
-
-// A refusal ends the run with exit code 4: its text is the closing line of the frame, or goes to stderr
-function refuse({ output, interactive }: Context, text: string): number {
-  if (interactive) {
-    outro(text)
-  } else {
-    output.warn(text)
-  }
-  return EXIT_PROVIDER_ERROR
 }
 
 // A named provider is checked before anything is registered or created
@@ -114,23 +75,6 @@ function unknownProvider(kernel: RunKernel, provider: string | undefined): strin
   return provider === undefined || available.includes(provider)
     ? undefined
     : m.run_provider_missing({ provider, available: available.join(', ') })
-}
-
-// JSON output is the events themselves; text output the lines worth reading, decorated at a terminal
-function show(event: EventEnvelope, { output, interactive }: Context): void {
-  if (output.json) {
-    output.emit(event)
-    return
-  }
-  const line = transcriptLine(event, output)
-  if (line === undefined) {
-    return
-  }
-  if (interactive) {
-    log.message(line)
-  } else {
-    output.print(line)
-  }
 }
 
 // An ask nobody can answer is left to the kernel policy; the person is told the session waits
@@ -215,7 +159,7 @@ function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: 
       return { code: EXIT_STOPPED, text: m.run_stopped() }
     }
     case 'session.errored': {
-      return { code: EXIT_PROVIDER_ERROR, text: m.run_errored({ message: reasonOf(last, output) }) }
+      return { code: EXIT_REFUSED, text: m.run_errored({ message: reasonOf(last, output) }) }
     }
     default: {
       return {
@@ -223,16 +167,6 @@ function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: 
         text: output.json ? '' : completionLine(summarizeRun(seen, output)),
       }
     }
-  }
-}
-
-function report({ code, text }: Outcome, { output, interactive }: Context): void {
-  if (interactive) {
-    outro(text)
-  } else if (code === EXIT_PROVIDER_ERROR) {
-    output.warn(text)
-  } else {
-    output.print(text)
   }
 }
 
@@ -277,7 +211,7 @@ async function runOrRefuse(
   return code
 }
 
-// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project or provider refused
+// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project, worktree or provider refused
 // A failure that has no exit code of its own closes the frame and goes on to the runner
 export async function runSession(
   kernel: RunKernel,

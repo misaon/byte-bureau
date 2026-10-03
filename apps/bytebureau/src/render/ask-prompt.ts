@@ -34,8 +34,8 @@ function recommendedAnswer(ask: Ask): AskAnswer | undefined {
   return picks.every((pick) => pick !== undefined) ? { selected: picks } : undefined
 }
 
-// An agent often marks the label it recommends itself, in English or in Czech: one marker is enough
-const MARKED = /\((?:recommended|doporučeno)\)\s*$/iu
+// An agent often marks the label it recommends itself, in English or in Czech, in parentheses or brackets, anywhere in the label: one marker is enough
+const MARKED = /[([](?:recommended|doporučeno|doporučený|doporučená)[)\]]/iu
 
 function labelOf(option: AskOption): string {
   const needsMarker = option.recommended && !MARKED.test(option.label)

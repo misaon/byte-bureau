@@ -89,15 +89,25 @@ describe('runSession when the project is refused', () => {
     ])
   })
 
+  it('exits 4 with a one-line reason when the worktree cannot be provisioned', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const reason =
+      'git worktree add failed (128): fatal: invalid reference: main\nhint: commit first'
+    const failed = new WorkspaceError({ code: 'git_failed', reason })
+    const { kernel } = scripted([COMPLETED], { create: rejecting(failed) })
+    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(4)
+    expect(printed.err()).toStrictEqual([
+      'WorkspaceError: git worktree add failed (128): fatal: invalid reference: main; hint: commit first (git_failed)',
+    ])
+  })
+
   it('passes any other failure on', async () => {
     expect.hasAssertions()
     captureConsole()
     const gone = new SessionError({ code: 'not_found', reason: 'project p1 is not registered' })
-    const runtime = new WorkspaceError({ code: 'runtime_missing', reason: 'no such runtime' })
     const { kernel } = scripted([COMPLETED], { create: rejecting(gone) })
     await expect(runSession(kernel, OPTIONS, contextOf())).rejects.toBe(gone)
-    const other = scripted([COMPLETED], { register: rejecting(runtime) })
-    await expect(runSession(other.kernel, OPTIONS, contextOf())).rejects.toBe(runtime)
   })
 })
 

@@ -1,6 +1,7 @@
 import { m } from '@bytebureau/i18n'
 import {
   decodeEventPayload,
+  EventPayloadError,
   type EventEnvelope,
   type KernelEventPayload,
 } from '@bytebureau/protocol'
@@ -51,7 +52,7 @@ function assistantLine(text: string): string | undefined {
   return text === '' ? undefined : text
 }
 
-// An event whose payload does not fit its type is skipped, with one warning that names it
+// An event whose payload does not fit its type is skipped, with one warning that names it; any other failure is not the event's
 export function readOrSkip<Result>(
   event: EventEnvelope,
   output: Output,
@@ -59,7 +60,10 @@ export function readOrSkip<Result>(
 ): Result | undefined {
   try {
     return read()
-  } catch {
+  } catch (error) {
+    if (!(error instanceof EventPayloadError)) {
+      throw error
+    }
     output.warn(m.run_event_skipped({ type: event.type, seq: event.seq }))
     return undefined
   }

@@ -18,7 +18,8 @@ export const globalArgs = {
   },
   debug: {
     type: 'string',
-    description: 'Debug logging; pass --debug=<categories> to pick some (bb.agent,!bb.store)',
+    description:
+      'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
   },
   'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
 } as const

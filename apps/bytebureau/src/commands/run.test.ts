@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -102,6 +103,21 @@ describe('bytebureau run when it cannot start', () => {
       `WorkspaceError: ${directory} is not inside a git repository (not_a_repository)`,
     )
     expect(readdirSync(directory)).toStrictEqual([])
+  })
+})
+
+describe('bytebureau run on a repository without a commit', () => {
+  it('exits 4 with the one-line reason of the worktree that cannot be provisioned', async () => {
+    expect.hasAssertions()
+    const repo = tempDir('bb-empty-')
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
+    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
+    expect(result.code).toBe(4)
+    const lines = result.stderr.trim().split('\n')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^WorkspaceError: .*invalid reference: main.* \(git_failed\)$/u)
   })
 })
 

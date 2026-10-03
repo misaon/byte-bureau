@@ -101,3 +101,5 @@ giget
 seqno
 NOCASE
 reflog
+doporučený
+doporučená
