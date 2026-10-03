@@ -14928,183 +14928,408 @@ git commit -m "feat(kernel): broker questions and permissions with recommended o
 ### Task 13: Sessions — state machine, `SessionManager`, `UsageService`, the fake agent provider
 
 **Files:**
-- Create: `packages/kernel/src/sessions/state-machine.ts`, `packages/kernel/src/sessions/types.ts`, `packages/kernel/src/sessions/translate.ts`, `packages/kernel/src/sessions/session-manager.ts`, `packages/kernel/src/usage/usage-service.ts`, `packages/kernel/src/testing/fake-agent-provider.ts`, `packages/kernel/src/testing/fake-agent-plugin.ts`, `packages/kernel/src/sessions/state-machine.test.ts`, `packages/kernel/src/sessions/session-manager.test.ts`, `packages/kernel/src/usage/usage-service.test.ts`
-- Modify: `packages/kernel/src/plugins/bundled.ts` (append `fakeAgentPlugin`), `packages/kernel/src/index.ts`, `packages/kernel/package.json` (devDependency `fast-check` 4.10.2)
+- Create (as shipped — the lint caps split the brief's session manager into cohesive modules under `packages/kernel/src/sessions/`, listed by group; the repository is the source of truth for the ones not embedded below): `state-machine.ts`, `types.ts`, `translate.ts`, `session-manager.ts` (the service and layer); records and decoders `session-records.ts`, `session-shape.ts`; status moves `session-status.ts`; turns and tools `session-turns.ts`, `session-tools.ts`; the ask path `session-ask.ts`; provider connection and pump `session-connect.ts`, `session-provider.ts`, `session-pump.ts`, `session-agent.ts`, `live-sessions.ts`, `session-live.ts`; event handling `session-handler.ts`, `session-handlers.ts`, `session-events.ts`, `session-announce.ts`; lifecycle `session-create.ts`, `session-new.ts`, `session-project.ts`, `session-prompt.ts`, `session-send.ts`, `session-end.ts`, `employee-of.ts`; composition `session-deps.ts`, `session-services.ts`, `session-layers.ts` (the local test layer Task 14 supersedes); helpers `session-collect.ts`, `session-helpers.ts`; `packages/kernel/src/usage/usage-service.ts`; the fake provider `packages/kernel/src/testing/{fake-agent-provider,fake-agent-session,fake-agent-plugin,fake-ask,event-queue,scripted-provider,repo-config}.ts`; fixtures `session-*-fixtures.ts`; tests `state-machine`, `translate`, `employee-of`, `session-records`, `session-turns`, `session-events`, `session-create`, `session-lifecycle`, `session-manager`, `session-provider`, `session-agent-asks`, `session-agent-gone`, `session-failures`, `session-concurrency`, `session-gate`, `session-timeouts`, `session-start-timeout`, `session-reporting`, `session-worktree`, `live-sessions`, `fake-agent-provider`, `usage-service`
+- Modify: `packages/kernel/src/plugins/bundled.ts` (`BUNDLED_PLUGINS = [localWorkspacePlugin, fakeAgentPlugin]`), `packages/kernel/src/index.ts`, `packages/kernel/package.json` (devDependency `fast-check` 4.10.2)
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–12; `fast-check` (root devDependency) for the model-based transition test.
 - Produces: `transition(status: SessionStatus, event: SessionEvent): SessionStatus | null` with `SessionEvent = 'provision' | 'provisioned' | 'prompt' | 'ask' | 'answer' | 'turn_done' | 'rate_limit' | 'limit_reset' | 'stop' | 'crash' | 'complete' | 'resume'`; `Session { id; projectId; title; employee: EmployeeSpec; providerId; profileId: string | null; workspace: WorkspaceHandle | null; externalRef: ExternalSessionRef | null; status; createdAt; startedAt; endedAt }`, `Turn { id; sessionId; index; prompt: PromptInput; status; stopReason; usage: Usage | null; startedAt; endedAt }`; `SessionManager` service `{ create(input: CreateSessionInput): Effect<Session, SessionError | WorkspaceError | ConfigError | StoreError>; prompt(sessionId, input): Effect<Turn, SessionError | ProviderError | StoreError>; interrupt(sessionId): Effect<void, SessionError>; stop(sessionId): Effect<void, SessionError | StoreError>; complete(sessionId): Effect<void, SessionError | StoreError>; resume(sessionId): Effect<Session, SessionError | StoreError>; list(): Effect<readonly Session[], StoreError>; get(id): Effect<Session | undefined, StoreError> }`, `SessionManagerLive`, `CreateSessionInput { projectId; title; employeeId?; providerId?; profileId?; branch? }`; `UsageService` `{ sessionUsage(sessionId): Effect<SessionUsage, StoreError>; record(profileId: string | null, rateLimit: RateLimit): Effect<void, StoreError>; snapshot(profileId): Effect<UsageSnapshot | undefined, StoreError> }`, `SessionUsage { turns; inputTokens; outputTokens; costUsd: number | null; contextPct: number | null }`; `FakeAgentProvider` (`id: 'fake'`), `fakeAgentPlugin` (bundled, name `agent-fake`), scripts `hello` (default) and `slow` chosen by `BYTEBUREAU_FAKE_SCRIPT` in the session environment.
 
+Semantics (as shipped): the state machine table is the brief's; `create` refuses an unknown provider, a missing runtime and `yolo` on an `isolation: 'none'` runtime before any row or worktree exists, then publishes `session.created`, `session.provisioning`, (`workspace.provisioned`), `session.ready`; status moves are compare-and-set under a per-session lock; the ask path opens the ask with the session's real workspace path, publishes `session.waiting`, releases the lock while the pump waits for the answer, forwards the answer to the agent and publishes `session.running`; `turn.completed` ends the turn once, publishes `turn.completed` then `session.ready` and unlocks the worktree; `stop` publishes `turn.interrupted`, cancels pending asks and publishes `session.stopped`, keeping the worktree; `complete` also cancels pending asks; an agent refusing a prompt or answer, a `session.error`, or an event stream that ends or fails while the session is running crashes the session (`errored`), while a stream that ends during `complete`/`stop` does not; provider calls other than the prompt are bounded (10 s; 60 s for `createSession`, whose timeout aborts the controller and closes a late result); an `ask.requested` that arrives after `interrupt` is recorded and cancelled at once; the extra session environment keeps only `BYTEBUREAU_*` names (`BYTEBUREAU_SESSION_ID` last) on top of the daemon's allowlisted environment; pumps run in the manager's own scope, closed after the agents (3 s bound) with the pump interruption in `release` bounded too, because `Stream.fromAsyncIterable` waits for the iterator's `return()`; `externalRef` is persisted and handed back on resume; the employee prompt file is confined to the project (`realpath`); every session event carries `projectId`; `ratelimit.updated` carries the session's profile; `UsageService.contextPct` is the latest reported value. Not wired in Phase A: the `rate_limit`/`limit_reset` transitions and hooks other than `prompt.beforeSend`.
+
 - [ ] **Step 1: Failing tests**
 
 `packages/kernel/src/sessions/state-machine.test.ts` (model-based, spec §15):
 ```ts
-import type { SessionStatus } from '@bytebureau/protocol'
-import fc from 'fast-check'
+import { ok, strictEqual } from 'node:assert/strict'
+import { SessionStatus } from '@bytebureau/protocol'
+import { assert, commands, constant, modelRun, property, type Command } from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import { SESSION_EVENTS, transition, type SessionEvent } from './state-machine.js'
 
-const TERMINAL: readonly SessionStatus[] = ['completed']
+const TERMINAL = new Set<SessionStatus>(['completed'])
+const KNOWN = new Set<string>(SessionStatus.literals)
 
-class Step implements fc.Command<{ status: SessionStatus }, { status: SessionStatus }> {
-  readonly event: SessionEvent
-  constructor(event: SessionEvent) {
+interface Tracked {
+  status: SessionStatus
+}
+
+// One event offered to the machine; the model and the real status must agree on what it does
+class Step implements Command<Tracked, Tracked> {
+  public readonly event: SessionEvent
+
+  public constructor(event: SessionEvent) {
     this.event = event
   }
-  check(): boolean {
-    return true
+
+  public check(): boolean {
+    return SESSION_EVENTS.includes(this.event)
   }
-  run(model: { status: SessionStatus }, real: { status: SessionStatus }): void {
+
+  public run(model: Tracked, real: Tracked): void {
     const next = transition(real.status, this.event)
     if (next === null) {
-      expect(real.status).toBe(model.status)
+      strictEqual(real.status, model.status)
       return
     }
-    expect(TERMINAL.includes(model.status)).toBe(false)
+    ok(!TERMINAL.has(model.status), `${model.status} must not be left`)
+    ok(KNOWN.has(next), `${next} is not a status`)
     model.status = next
     real.status = next
   }
-  toString(): string {
+
+  public toString(): string {
     return this.event
   }
 }
 
+const start = (): { model: Tracked; real: Tracked } => ({
+  model: { status: 'created' },
+  real: { status: 'created' },
+})
+
+type Edge = readonly [SessionStatus, SessionEvent, SessionStatus]
+
+const EDGES: readonly Edge[] = [
+  ['created', 'provision', 'provisioning'],
+  ['provisioning', 'provisioned', 'ready'],
+  ['ready', 'prompt', 'running'],
+  ['running', 'ask', 'waiting_for_human'],
+  ['waiting_for_human', 'answer', 'running'],
+  ['running', 'turn_done', 'ready'],
+  ['waiting_for_human', 'turn_done', 'ready'],
+  ['running', 'rate_limit', 'paused_usage_limit'],
+  ['paused_usage_limit', 'limit_reset', 'running'],
+  ['running', 'stop', 'stopped'],
+  ['ready', 'stop', 'stopped'],
+  ['waiting_for_human', 'stop', 'stopped'],
+  ['paused_usage_limit', 'stop', 'stopped'],
+  ['provisioning', 'stop', 'stopped'],
+  ['running', 'crash', 'errored'],
+  ['waiting_for_human', 'crash', 'errored'],
+  ['provisioning', 'crash', 'errored'],
+  ['ready', 'complete', 'completed'],
+  ['stopped', 'resume', 'ready'],
+  ['errored', 'resume', 'ready'],
+]
+
+const REFUSED: readonly (readonly [SessionStatus, SessionEvent])[] = [
+  ['completed', 'prompt'],
+  ['created', 'prompt'],
+  ['ready', 'answer'],
+  ['running', 'complete'],
+  ['errored', 'stop'],
+  ['stopped', 'prompt'],
+  ['ready', 'crash'],
+]
+
 describe(transition, () => {
-  it('follows the documented edges', () => {
-    expect(transition('created', 'provision')).toBe('provisioning')
-    expect(transition('provisioning', 'provisioned')).toBe('ready')
-    expect(transition('ready', 'prompt')).toBe('running')
-    expect(transition('running', 'ask')).toBe('waiting_for_human')
-    expect(transition('waiting_for_human', 'answer')).toBe('running')
-    expect(transition('running', 'turn_done')).toBe('ready')
-    expect(transition('running', 'rate_limit')).toBe('paused_usage_limit')
-    expect(transition('paused_usage_limit', 'limit_reset')).toBe('running')
-    expect(transition('running', 'stop')).toBe('stopped')
-    expect(transition('running', 'crash')).toBe('errored')
-    expect(transition('ready', 'complete')).toBe('completed')
-    expect(transition('stopped', 'resume')).toBe('ready')
-    expect(transition('completed', 'prompt')).toBeNull()
-    expect(transition('created', 'prompt')).toBeNull()
+  it.each(EDGES)('moves a %s session on %s to %s', (from, event, to) => {
+    expect(transition(from, event)).toBe(to)
+  })
+
+  it.each(REFUSED)('refuses %s on %s', (status, event) => {
+    expect(transition(status, event)).toBeNull()
+  })
+
+  it('refuses every event once a session is completed', () => {
+    expect(SESSION_EVENTS.map((event) => transition('completed', event))).toStrictEqual(
+      SESSION_EVENTS.map(() => null),
+    )
   })
 
   it('never leaves a terminal state and only produces known statuses (model-based)', () => {
-    fc.assert(
-      fc.property(fc.commands(SESSION_EVENTS.map((event) => fc.constant(new Step(event))), { maxCommands: 40 }), (commands) => {
-        fc.modelRun(() => ({ model: { status: 'created' as SessionStatus }, real: { status: 'created' as SessionStatus } }), commands)
-      }),
-      { numRuns: 300 },
-    )
+    const steps = SESSION_EVENTS.map((event) => constant(new Step(event)))
+    const sequences = property(commands(steps, { maxCommands: 40 }), (all) => {
+      modelRun(start, all)
+    })
+    expect(() => {
+      assert(sequences, { numRuns: 300 })
+    }).not.toThrow()
   })
 })
 ```
 `packages/kernel/src/usage/usage-service.test.ts`:
 ```ts
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
+import { assert, it } from '@effect/vitest'
+import { Effect, Layer, Result } from 'effect'
 import { SqlClient } from 'effect/sql'
+import { StoreError } from '../errors.js'
 import { StoreTest } from '../store/store-test.js'
 import { UsageService, UsageServiceLive } from './usage-service.js'
 
-layer(UsageServiceLive.pipe(Layer.provideMerge(StoreTest)))('UsageService', (it) => {
-  it.effect('sums turn usage per session and keeps the latest rate-limit snapshot per profile', () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES ('p', 'p', '/p', 'main', '{}', 't', 't')`
-      yield* sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at) VALUES ('s', 'p', 't', '{}', 'fake', '{}', 'ready', 't')`
-      yield* sql`INSERT INTO turns (id, session_id, idx, prompt_json, status, usage_json, started_at) VALUES ('t1', 's', 0, '{}', 'completed', '{"inputTokens":10,"outputTokens":4,"costUsd":0.01,"contextPct":12}', 't'), ('t2', 's', 1, '{}', 'completed', '{"inputTokens":5,"outputTokens":1}', 't')`
+const TIME = 't'
+
+// A session row, and the project it needs, so turns can point at it
+const seedSession = (id: string): Effect.Effect<void, unknown, SqlClient.SqlClient> =>
+  Effect.gen(function* seedsSession() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES ('p', 'p', '/p', 'main', '{}', ${TIME}, ${TIME}) ON CONFLICT DO NOTHING`
+    yield* sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at) VALUES (${id}, 'p', 't', '{}', 'fake', '{}', 'ready', ${TIME})`
+  })
+
+// A turn of a seeded session; null stands for a turn that has reported no usage yet
+const seedTurn = (
+  sessionId: string,
+  index: number,
+  usage: string | null,
+): Effect.Effect<void, unknown, SqlClient.SqlClient> =>
+  Effect.gen(function* seedsTurn() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO turns (id, session_id, idx, prompt_json, status, usage_json, started_at) VALUES (${`${sessionId}-${index}`}, ${sessionId}, ${index}, '{}', 'completed', ${usage}, ${TIME})`
+  })
+
+const FIRST = '{"inputTokens":10,"outputTokens":4,"costUsd":0.01,"contextPct":12}'
+const SECOND = '{"inputTokens":5,"outputTokens":1}'
+const NOTHING = { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: null, contextPct: null }
+
+const Layers = UsageServiceLive.pipe(Layer.provideMerge(StoreTest))
+
+it.layer(Layers)('UsageService', (suite) => {
+  suite.effect(
+    'sums turn usage per session and keeps the latest rate-limit snapshot per profile',
+    () =>
+      Effect.gen(function* summing() {
+        yield* seedSession('s')
+        yield* seedTurn('s', 0, FIRST)
+        yield* seedTurn('s', 1, SECOND)
+        const usage = yield* UsageService
+        assert.deepStrictEqual(yield* usage.sessionUsage('s'), {
+          turns: 2,
+          inputTokens: 15,
+          outputTokens: 5,
+          costUsd: 0.01,
+          contextPct: 12,
+        })
+        yield* usage.record('prof', { fiveHourPct: 40 })
+        yield* usage.record('prof', { fiveHourPct: 55, sevenDayPct: 10 })
+        const snapshot = yield* usage.snapshot('prof')
+        assert.ok(snapshot !== undefined)
+        assert.deepStrictEqual(snapshot.rateLimit, { fiveHourPct: 55, sevenDayPct: 10 })
+      }),
+  )
+
+  suite.effect('reports no cost and no context for a session without turns', () =>
+    Effect.gen(function* reportsNothing() {
+      yield* seedSession('empty')
       const usage = yield* UsageService
-      assert.deepStrictEqual(yield* usage.sessionUsage('s'), { turns: 2, inputTokens: 15, outputTokens: 5, costUsd: 0.01, contextPct: 12 })
-      yield* usage.record('prof', { fiveHourPct: 40 })
-      yield* usage.record('prof', { fiveHourPct: 55, sevenDayPct: 10 })
-      assert.deepStrictEqual((yield* usage.snapshot('prof'))?.rateLimit, { fiveHourPct: 55, sevenDayPct: 10 })
+      assert.deepStrictEqual(yield* usage.sessionUsage('empty'), NOTHING)
+    }),
+  )
+})
+
+it.layer(Layers)('UsageService turns', (suite) => {
+  suite.effect('counts a turn that has no usage yet and leaves other sessions out', () =>
+    Effect.gen(function* countsTurns() {
+      yield* seedSession('mine')
+      yield* seedSession('other')
+      yield* seedTurn('mine', 0, SECOND)
+      yield* seedTurn('mine', 1, null)
+      yield* seedTurn('other', 0, FIRST)
+      const usage = yield* UsageService
+      assert.deepStrictEqual(yield* usage.sessionUsage('mine'), {
+        ...NOTHING,
+        turns: 2,
+        inputTokens: 5,
+        outputTokens: 1,
+      })
+    }),
+  )
+
+  suite.effect('takes the context percentage of the latest turn that reported one', () =>
+    Effect.gen(function* takesLatestContext() {
+      yield* seedSession('context')
+      yield* seedTurn('context', 0, '{"inputTokens":1,"outputTokens":1,"contextPct":10}')
+      yield* seedTurn('context', 1, '{"inputTokens":1,"outputTokens":1,"contextPct":35}')
+      yield* seedTurn('context', 2, SECOND)
+      const usage = yield* UsageService
+      assert.strictEqual((yield* usage.sessionUsage('context')).contextPct, 35)
+    }),
+  )
+
+  suite.effect('fails with a store error for a turn whose usage cannot be read', () =>
+    Effect.gen(function* failsOnCorruption() {
+      yield* seedSession('corrupt')
+      yield* seedTurn('corrupt', 0, '{"inputTokens":"many"}')
+      const usage = yield* UsageService
+      const outcome = yield* Effect.result(usage.sessionUsage('corrupt'))
+      assert.ok(Result.isFailure(outcome))
+      assert.ok(outcome.failure instanceof StoreError)
+    }),
+  )
+})
+
+it.layer(Layers)('UsageService rate limits', (suite) => {
+  suite.effect('keeps every field of a rate limit and files a missing profile as default', () =>
+    Effect.gen(function* keepsRateLimit() {
+      const usage = yield* UsageService
+      const full = {
+        fiveHourPct: 80,
+        fiveHourResetsAt: '2026-10-03T12:00:00.000Z',
+        sevenDayPct: 20,
+        sevenDayResetsAt: '2026-10-09T00:00:00.000Z',
+      }
+      yield* usage.record(null, full)
+      const snapshot = yield* usage.snapshot('default')
+      assert.ok(snapshot !== undefined)
+      assert.strictEqual(snapshot.profileId, 'default')
+      assert.deepStrictEqual(snapshot.rateLimit, full)
+      assert.match(snapshot.observedAt, /^\d{4}-\d{2}-\d{2}T/u)
+    }),
+  )
+
+  suite.effect('has no snapshot for a profile that never reported', () =>
+    Effect.gen(function* hasNone() {
+      const usage = yield* UsageService
+      assert.strictEqual(yield* usage.snapshot('nobody'), undefined)
     }),
   )
 })
 ```
 `packages/kernel/src/sessions/session-manager.test.ts`:
 ```ts
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Fiber, Stream } from 'effect'
-import { AskService } from '../asks/ask-service.js'
-import { EventLog } from '../events/event-log.js'
-import { KernelTest } from '../kernel-live.js'
-import { PluginHost } from '../plugins/plugin-host.js'
-import { ProjectRegistry } from '../projects/project-registry.js'
-import { createTempRepo } from '../testing/temp-repo.js'
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber } from 'effect'
+import { SessionError } from '../errors.js'
 import { SessionManager } from './session-manager.js'
+import { answerPending, collectUntilCompleted } from './session-ask-fixtures.js'
+import { registerRepo, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
+import { helloFileOf, workspaceOf } from './session-helpers.js'
+import { sessionLayer } from './session-layers.js'
 
-const prompt = 'Create src/hello.ts exporting hello()\r\nwith čeština and an emoji 🚀'
+const PROMPT = 'Create src/hello.ts exporting hello()\r\nwith čeština and an emoji 🚀'
+const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
 
-layer(KernelTest({ home: mkdtempSync(path.join(tmpdir(), 'bb-home-')) }))('SessionManager', (it) => {
-  it.effect('runs a prompt through the fake provider: worktree, events, ask, file, usage, completion', () =>
-    Effect.gen(function* () {
-      yield* (yield* PluginHost).load()
-      const project = yield* (yield* ProjectRegistry).register(createTempRepo())
-      const sessions = yield* SessionManager
-      const log = yield* EventLog
-      const session = yield* sessions.create({ projectId: project.id, title: 'Add hello', providerId: 'fake' })
+// Everything a session publishes from creation to completion, in order; the ephemeral deltas are not part of it
+const EXPECTED_TYPES = [
+  'session.created',
+  'session.provisioning',
+  'workspace.provisioned',
+  'session.ready',
+  'session.running',
+  'message.user',
+  'turn.started',
+  'tool.started',
+  'ask.requested',
+  'session.waiting',
+  'ask.answered',
+  'session.running',
+  'tool.completed',
+  'message.assistant.completed',
+  'usage.updated',
+  'turn.completed',
+  'session.ready',
+  'session.completed',
+]
+
+const COWBOY = {
+  version: 1,
+  project: { name: 'yolo-test' },
+  employees: {
+    cowboy: { name: 'Cowboy', provider: 'fake', model: 'm', permissionMode: 'yolo' },
+  },
+}
+
+// The ephemeral events carry seq 0; the persisted ones must follow one another
+const persistedSequence = (events: readonly { readonly seq: number }[]): number[] =>
+  events.map((event) => event.seq).filter((seq) => seq !== 0)
+
+const isAscending = (values: readonly number[]): boolean =>
+  values.every((value, index) => index === 0 || value > (values[index - 1] ?? 0))
+
+// A prompt through the fake provider, the question answered as recommended, the session completed
+const runWholeSession = Effect.gen(function* runsWholeSession() {
+  const sessions = yield* SessionManager
+  const session = yield* startSession()
+  const collected = yield* collectUntilCompleted(session.id)
+  const turn = yield* sessions.prompt(session.id, { text: PROMPT })
+  const ask = yield* answerPending(session.id, ['yes'])
+  yield* waitFor(session.id, 'session.ready', 1)
+  yield* sessions.complete(session.id)
+  return { session, turn, ask, events: yield* Fiber.join(collected) }
+})
+
+it.layer(sessionLayer())('SessionManager', (suite) => {
+  suite.effect('creates a session in a worktree and announces each step', () =>
+    Effect.gen(function* createsSession() {
+      const session = yield* startSession()
       assert.strictEqual(session.status, 'ready')
-      assert.ok(session.workspace !== null && existsSync(session.workspace.path))
-      const collected = yield* Effect.forkChild(log.subscribe({ sessionId: session.id, since: 0 }).pipe(Stream.takeUntil((event) => event.type === 'session.completed'), Stream.runCollect))
-      yield* Effect.yieldNow()
-      const turn = yield* sessions.prompt(session.id, { text: prompt })
-      assert.strictEqual(turn.index, 0)
-      const asks = yield* AskService
-      const [ask] = yield* Effect.repeat(asks.pending(session.id), { until: (pending) => pending.length > 0 })
-      assert.strictEqual(ask?.questions[0]?.options.filter((option) => option.recommended).length, 1)
-      yield* asks.answer(ask!.id, { selected: ['yes'] }, 'cli')
-      yield* Effect.repeat(sessions.get(session.id), { until: (current) => current?.status === 'ready' })
-      yield* sessions.complete(session.id)
-      const events = [...(yield* Fiber.join(collected))]
-      const types = events.map((event) => event.type)
-      for (const expected of ['session.created', 'session.provisioning', 'workspace.provisioned', 'session.ready', 'message.user', 'turn.started', 'tool.started', 'tool.completed', 'ask.requested', 'session.waiting', 'ask.answered', 'session.running', 'message.assistant.completed', 'usage.updated', 'turn.completed', 'session.completed']) {
-        assert.include(types, expected)
-      }
-      const user = events.find((event) => event.type === 'message.user')
-      assert.strictEqual((user?.payload as { text: string }).text, prompt)
-      assert.ok(existsSync(path.join(session.workspace!.path, 'src', 'hello.ts')))
-      assert.ok(events.every((event, index) => index === 0 || event.seq === 0 || event.seq > (events[index - 1]?.seq ?? 0) || events[index - 1]?.seq === 0))
+      assert.ok(existsSync(workspaceOf(session)))
+      assert.deepStrictEqual(yield* typesOf(session.id), [
+        'session.created',
+        'session.provisioning',
+        'workspace.provisioned',
+        'session.ready',
+      ])
     }),
   )
 
-  it.effect('refuses yolo on the local runtime and unknown providers before provisioning', () =>
-    Effect.gen(function* () {
-      yield* (yield* PluginHost).load()
-      const repo = createTempRepo()
-      writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify({ version: 1, project: { name: 'yolo-test' }, employees: { cowboy: { name: 'Cowboy', provider: 'fake', model: 'm', permissionMode: 'yolo' } } }))
-      const project = yield* (yield* ProjectRegistry).register(repo)
-      const sessions = yield* SessionManager
-      const yolo = yield* Effect.result(sessions.create({ projectId: project.id, title: 'x', employeeId: 'cowboy' }))
-      assert.strictEqual(yolo._tag, 'Failure')
-      assert.match(String(yolo._tag === 'Failure' ? yolo.failure : ''), /yolo.*local/u)
-      const missing = yield* Effect.result(sessions.create({ projectId: project.id, title: 'x', employeeId: 'cowboy', providerId: 'nope' }))
-      assert.strictEqual(missing._tag, 'Failure')
-      assert.ok(!existsSync(path.join(repo, '.bytebureau', 'worktrees')))
-    }),
+  suite.effect(
+    'runs a prompt through the fake provider: worktree, events, ask, file, usage, completion',
+    () =>
+      Effect.gen(function* runsPrompt() {
+        const { session, turn, ask, events } = yield* runWholeSession
+        assert.strictEqual(turn.index, 0)
+        assert.strictEqual(
+          ask.questions
+            .flatMap((question) => question.options)
+            .filter((option) => option.recommended).length,
+          1,
+        )
+        const types = events.map((event) => event.type)
+        assert.deepStrictEqual(
+          types.filter((type) => type !== 'message.assistant.delta'),
+          EXPECTED_TYPES,
+        )
+        assert.ok(isAscending(persistedSequence(events)))
+        const user = events.find((event) => event.type === 'message.user')
+        assert.deepStrictEqual(user === undefined ? null : user.payload, { text: PROMPT })
+        assert.ok(existsSync(helloFileOf(session)))
+      }),
   )
+})
 
-  it.effect('stop marks the running turn interrupted, keeps the worktree and resume returns to ready', () =>
-    Effect.gen(function* () {
-      yield* (yield* PluginHost).load()
-      const project = yield* (yield* ProjectRegistry).register(createTempRepo())
+it.layer(sessionLayer())('SessionManager refusals', (suite) => {
+  suite.effect('refuses yolo on the local runtime and unknown providers before provisioning', () =>
+    Effect.gen(function* refusesYolo() {
+      const project = yield* registerRepo(COWBOY)
       const sessions = yield* SessionManager
-      const session = yield* sessions.create({ projectId: project.id, title: 'slow', providerId: 'fake', env: { BYTEBUREAU_FAKE_SCRIPT: 'slow' } })
-      yield* sessions.prompt(session.id, { text: 'take your time' })
-      yield* sessions.stop(session.id)
-      const stopped = yield* sessions.get(session.id)
-      assert.strictEqual(stopped?.status, 'stopped')
-      assert.ok(existsSync(session.workspace!.path))
-      const events = yield* (yield* EventLog).read({ sessionId: session.id, types: ['turn.interrupted', 'session.stopped'] }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type), ['turn.interrupted', 'session.stopped'])
-      assert.strictEqual((yield* sessions.resume(session.id)).status, 'ready')
+      const base = { projectId: project.id, title: 'x', employeeId: 'cowboy' }
+      const yolo = yield* Effect.flip(sessions.create(base))
+      assert.ok(yolo instanceof SessionError)
+      assert.match(yolo.reason, /yolo.*local/u)
+      const missing = yield* Effect.flip(sessions.create({ ...base, providerId: 'nope' }))
+      assert.ok(missing instanceof SessionError && missing.code === 'provider_missing')
+      assert.ok(!existsSync(path.join(project.path, '.bytebureau', 'worktrees')))
+      assert.deepStrictEqual(yield* sessions.list(), [])
     }),
   )
 })
+
+it.layer(sessionLayer())('SessionManager stop and resume', (suite) => {
+  suite.effect(
+    'stop marks the running turn interrupted, keeps the worktree and resume returns to ready',
+    () =>
+      Effect.gen(function* stopsAndResumes() {
+        const sessions = yield* SessionManager
+        const session = yield* startSession({ env: SLOW })
+        yield* sessions.prompt(session.id, { text: 'take your time' })
+        yield* sessions.stop(session.id)
+        assert.strictEqual((yield* sessionOf(session.id)).status, 'stopped')
+        assert.ok(existsSync(workspaceOf(session)))
+        const types = yield* typesOf(session.id)
+        assert.deepStrictEqual(
+          types.filter((type) => type === 'turn.interrupted' || type === 'session.stopped'),
+          ['turn.interrupted', 'session.stopped'],
+        )
+        assert.strictEqual((yield* sessions.resume(session.id)).status, 'ready')
+      }),
+  )
+})
 ```
-`KernelTest(options)` is defined in Task 14; this task's tests run after Task 14 lands — write the session-manager test now, commit it with `it.skip` guards removed only in Task 14 (or keep the whole test file for Task 14's commit). `CreateSessionInput` gains an optional `env` (extra session environment, allowlisted `BYTEBUREAU_*` only) used by the test and the CLI.
+The session tests run on a local layer (`sessions/session-layers.ts`) in this task; Task 14's `KernelTest` supersedes it and the tests switch imports. `CreateSessionInput` has an optional `env` (extra session environment, `BYTEBUREAU_*` names only) used by the tests and the CLI.
 
 - [ ] **Step 2: State machine and types**
 
@@ -15112,10 +15337,25 @@ layer(KernelTest({ home: mkdtempSync(path.join(tmpdir(), 'bb-home-')) }))('Sessi
 ```ts
 import type { SessionStatus } from '@bytebureau/protocol'
 
-export const SESSION_EVENTS = ['provision', 'provisioned', 'prompt', 'ask', 'answer', 'turn_done', 'rate_limit', 'limit_reset', 'stop', 'crash', 'complete', 'resume'] as const
+export const SESSION_EVENTS = [
+  'provision',
+  'provisioned',
+  'prompt',
+  'ask',
+  'answer',
+  'turn_done',
+  'rate_limit',
+  'limit_reset',
+  'stop',
+  'crash',
+  'complete',
+  'resume',
+] as const
 export type SessionEvent = (typeof SESSION_EVENTS)[number]
 
-const EDGES: Readonly<Record<SessionEvent, Partial<Readonly<Record<SessionStatus, SessionStatus>>>>> = {
+const EDGES: Readonly<
+  Record<SessionEvent, Partial<Readonly<Record<SessionStatus, SessionStatus>>>>
+> = {
   provision: { created: 'provisioning' },
   provisioned: { provisioning: 'ready' },
   prompt: { ready: 'running' },
@@ -15124,19 +15364,32 @@ const EDGES: Readonly<Record<SessionEvent, Partial<Readonly<Record<SessionStatus
   turn_done: { running: 'ready', waiting_for_human: 'ready' },
   rate_limit: { running: 'paused_usage_limit' },
   limit_reset: { paused_usage_limit: 'running' },
-  stop: { ready: 'stopped', running: 'stopped', waiting_for_human: 'stopped', paused_usage_limit: 'stopped', provisioning: 'stopped' },
+  stop: {
+    ready: 'stopped',
+    running: 'stopped',
+    waiting_for_human: 'stopped',
+    paused_usage_limit: 'stopped',
+    provisioning: 'stopped',
+  },
   crash: { running: 'errored', waiting_for_human: 'errored', provisioning: 'errored' },
   complete: { ready: 'completed' },
   resume: { stopped: 'ready', errored: 'ready' },
 }
 
-// null means "not allowed from this status"; callers turn it into SessionError('invalid_transition')
-export const transition = (status: SessionStatus, event: SessionEvent): SessionStatus | null => EDGES[event][status] ?? null
+// A null result means "not allowed from this status"; callers turn it into SessionError('invalid_transition')
+export const transition = (status: SessionStatus, event: SessionEvent): SessionStatus | null =>
+  EDGES[event][status] ?? null
 ```
 `packages/kernel/src/sessions/types.ts`:
 ```ts
 import type { ExternalSessionRef, WorkspaceHandle } from '@bytebureau/plugin-api'
-import type { EmployeeSpec, PromptInput, SessionStatus, TurnStatus, Usage } from '@bytebureau/protocol'
+import type {
+  EmployeeSpec,
+  PromptInput,
+  SessionStatus,
+  TurnStatus,
+  Usage,
+} from '@bytebureau/protocol'
 
 export interface Session {
   readonly id: string
@@ -15152,6 +15405,7 @@ export interface Session {
   readonly startedAt: string | null
   readonly endedAt: string | null
 }
+
 export interface Turn {
   readonly id: string
   readonly sessionId: string
@@ -15163,6 +15417,7 @@ export interface Turn {
   readonly startedAt: string
   readonly endedAt: string | null
 }
+
 export interface CreateSessionInput {
   readonly projectId: string
   readonly title: string
@@ -15170,6 +15425,7 @@ export interface CreateSessionInput {
   readonly providerId?: string | undefined
   readonly profileId?: string | undefined
   readonly branch?: string | undefined
+  // Extra environment for the agent; only the BYTEBUREAU_* names are passed on, the rest is dropped
   readonly env?: Readonly<Record<string, string>> | undefined
 }
 ```
@@ -15178,10 +15434,10 @@ export interface CreateSessionInput {
 
 `packages/kernel/src/usage/usage-service.ts`:
 ```ts
-import type { RateLimit, Usage } from '@bytebureau/protocol'
-import { Context, Effect, Layer } from 'effect'
+import { Usage, type RateLimit } from '@bytebureau/protocol'
+import { Context, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/sql'
-import { StoreError } from '../errors.js'
+import { StoreError, toStoreError } from '../errors.js'
 import { nowIso } from '../ids.js'
 
 export interface SessionUsage {
@@ -15191,216 +15447,178 @@ export interface SessionUsage {
   readonly costUsd: number | null
   readonly contextPct: number | null
 }
+
 export interface UsageSnapshot {
   readonly profileId: string
   readonly rateLimit: RateLimit
   readonly observedAt: string
 }
+
 export interface UsageServiceShape {
-  sessionUsage(sessionId: string): Effect.Effect<SessionUsage, StoreError>
-  record(profileId: string | null, rateLimit: RateLimit): Effect.Effect<void, StoreError>
-  snapshot(profileId: string): Effect.Effect<UsageSnapshot | undefined, StoreError>
+  readonly sessionUsage: (sessionId: string) => Effect.Effect<SessionUsage, StoreError>
+  readonly record: (
+    profileId: string | null,
+    rateLimit: RateLimit,
+  ) => Effect.Effect<void, StoreError>
+  readonly snapshot: (profileId: string) => Effect.Effect<UsageSnapshot | undefined, StoreError>
 }
 
-export class UsageService extends Context.Service<UsageService, UsageServiceShape>()('bb/UsageService') {}
+export class UsageService extends Context.Service<UsageService, UsageServiceShape>()(
+  'bb/UsageService',
+) {}
 
-const make = Effect.gen(function* () {
+// Snapshots of a session that has no profile are filed under this one
+const DEFAULT_PROFILE = 'default'
+
+interface TurnRow {
+  readonly usage_json: string | null
+}
+
+interface SnapshotRow {
+  readonly five_hour_pct: number | null
+  readonly five_hour_resets_at: string | null
+  readonly seven_day_pct: number | null
+  readonly seven_day_resets_at: string | null
+  readonly observed_at: string
+}
+
+const decodeUsage = Schema.decodeUnknownEffect(Schema.fromJsonString(Usage))
+
+// A usage record that does not fit the protocol is a failure of the store, not a defect
+const unreadable = (cause: unknown): StoreError =>
+  new StoreError({ cause: new Error('a usage record is unreadable', { cause }) })
+
+const usageOf = (row: TurnRow): Effect.Effect<readonly Usage[], StoreError> =>
+  row.usage_json === null
+    ? Effect.succeed([])
+    : decodeUsage(row.usage_json).pipe(
+        Effect.map((usage) => [usage]),
+        Effect.mapError(unreadable),
+      )
+
+const sum = (values: readonly number[]): number => values.reduce((total, value) => total + value, 0)
+
+// Costs and context percentages are optional on a turn: none reported is null, not zero
+const totalsOf = (turns: number, usages: readonly Usage[]): SessionUsage => {
+  const costs = usages.flatMap((usage) => (usage.costUsd === undefined ? [] : [usage.costUsd]))
+  const contexts = usages.flatMap((usage) =>
+    usage.contextPct === undefined ? [] : [usage.contextPct],
+  )
+  return {
+    turns,
+    inputTokens: sum(usages.map((usage) => usage.inputTokens)),
+    outputTokens: sum(usages.map((usage) => usage.outputTokens)),
+    costUsd: costs.length === 0 ? null : sum(costs),
+    contextPct: contexts.at(-1) ?? null,
+  }
+}
+
+const makeSessionUsage =
+  (sql: SqlClient.SqlClient): UsageServiceShape['sessionUsage'] =>
+  (sessionId) =>
+    sql<TurnRow>`SELECT usage_json FROM turns WHERE session_id = ${sessionId} ORDER BY idx`.pipe(
+      Effect.mapError(toStoreError),
+      Effect.flatMap((rows) => Effect.all(rows.map((row) => usageOf(row)))),
+      Effect.map((usages) => totalsOf(usages.length, usages.flat())),
+    )
+
+const makeRecord =
+  (sql: SqlClient.SqlClient): UsageServiceShape['record'] =>
+  (profileId, rateLimit) =>
+    sql`
+      INSERT INTO usage_snapshots (profile_id, five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, source, observed_at)
+      VALUES (${profileId ?? DEFAULT_PROFILE}, ${rateLimit.fiveHourPct ?? null}, ${rateLimit.fiveHourResetsAt ?? null}, ${rateLimit.sevenDayPct ?? null}, ${rateLimit.sevenDayResetsAt ?? null}, 'provider', ${nowIso()})`.pipe(
+      Effect.asVoid,
+      Effect.mapError(toStoreError),
+    )
+
+// A column that holds null is left out of the rate limit, as the protocol declares its keys optional
+const rateLimitOf = (row: SnapshotRow): RateLimit => ({
+  ...(row.five_hour_pct === null ? {} : { fiveHourPct: row.five_hour_pct }),
+  ...(row.five_hour_resets_at === null ? {} : { fiveHourResetsAt: row.five_hour_resets_at }),
+  ...(row.seven_day_pct === null ? {} : { sevenDayPct: row.seven_day_pct }),
+  ...(row.seven_day_resets_at === null ? {} : { sevenDayResetsAt: row.seven_day_resets_at }),
+})
+
+// The newest row wins; the row id breaks a tie between two snapshots taken in the same millisecond
+const makeSnapshot =
+  (sql: SqlClient.SqlClient): UsageServiceShape['snapshot'] =>
+  (profileId) =>
+    sql<SnapshotRow>`
+      SELECT five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, observed_at
+      FROM usage_snapshots WHERE profile_id = ${profileId} ORDER BY observed_at DESC, rowid DESC LIMIT 1`.pipe(
+      Effect.mapError(toStoreError),
+      Effect.map(([row]) =>
+        row === undefined
+          ? undefined
+          : { profileId, rateLimit: rateLimitOf(row), observedAt: row.observed_at },
+      ),
+    )
+
+const make = Effect.gen(function* makeUsageService() {
   const sql = yield* SqlClient.SqlClient
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> => Effect.mapError(effect, (cause) => new StoreError({ cause }))
   return UsageService.of({
-    sessionUsage: (sessionId) =>
-      wrap(
-        Effect.map(sql<{ readonly usage_json: string | null }>`SELECT usage_json FROM turns WHERE session_id = ${sessionId} ORDER BY idx`, (rows) => {
-          const usages = rows.flatMap((row) => (row.usage_json === null ? [] : [JSON.parse(row.usage_json) as Usage]))
-          const costs = usages.flatMap((usage) => (usage.costUsd === undefined ? [] : [usage.costUsd]))
-          return {
-            turns: rows.length,
-            inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
-            outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
-            costUsd: costs.length === 0 ? null : costs.reduce((sum, cost) => sum + cost, 0),
-            contextPct: usages.at(-1)?.contextPct ?? null,
-          }
-        }),
-      ),
-    record: (profileId, rateLimit) =>
-      wrap(Effect.asVoid(sql`INSERT INTO usage_snapshots (profile_id, five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, source, observed_at) VALUES (${profileId ?? 'default'}, ${rateLimit.fiveHourPct ?? null}, ${rateLimit.fiveHourResetsAt ?? null}, ${rateLimit.sevenDayPct ?? null}, ${rateLimit.sevenDayResetsAt ?? null}, 'provider', ${nowIso()})`)),
-    snapshot: (profileId) =>
-      wrap(
-        Effect.map(
-          sql<{ readonly five_hour_pct: number | null; readonly five_hour_resets_at: string | null; readonly seven_day_pct: number | null; readonly seven_day_resets_at: string | null; readonly observed_at: string }>`SELECT five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, observed_at FROM usage_snapshots WHERE profile_id = ${profileId} ORDER BY observed_at DESC, rowid DESC LIMIT 1`,
-          (rows) => {
-            const row = rows[0]
-            if (row === undefined) {
-              return undefined
-            }
-            const rateLimit: RateLimit = {
-              ...(row.five_hour_pct === null ? {} : { fiveHourPct: row.five_hour_pct }),
-              ...(row.five_hour_resets_at === null ? {} : { fiveHourResetsAt: row.five_hour_resets_at }),
-              ...(row.seven_day_pct === null ? {} : { sevenDayPct: row.seven_day_pct }),
-              ...(row.seven_day_resets_at === null ? {} : { sevenDayResetsAt: row.seven_day_resets_at }),
-            }
-            return { profileId, rateLimit, observedAt: row.observed_at }
-          },
-        ),
-      ),
+    sessionUsage: makeSessionUsage(sql),
+    record: makeRecord(sql),
+    snapshot: makeSnapshot(sql),
   })
 })
 
-export const UsageServiceLive: Layer.Layer<UsageService, never, SqlClient.SqlClient> = Layer.effect(UsageService, make)
+export const UsageServiceLive: Layer.Layer<UsageService, never, SqlClient.SqlClient> = Layer.effect(
+  UsageService,
+  make,
+)
 ```
 
 - [ ] **Step 4: Fake agent provider and plugin**
 
 `packages/kernel/src/testing/fake-agent-provider.ts`:
 ```ts
-import { mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
-import type { AgentProvider, AgentSession, AskAnswer, CreateSessionRequest } from '@bytebureau/plugin-api'
-import type { AgentEvent, Ask, PromptInput } from '@bytebureau/protocol'
+import type {
+  AgentCapabilities,
+  AgentProvider,
+  AgentSession,
+  AuthStatus,
+  CreateSessionRequest,
+} from '@bytebureau/plugin-api'
+import { FakeSession, type Script } from './fake-agent-session.js'
 
-type Script = 'hello' | 'slow'
-
-// Minimal async queue: producers push, the consumer iterates; end() finishes the iteration
-class EventQueue {
-  private readonly items: AgentEvent[] = []
-  private waiter: (() => void) | null = null
-  private closed = false
-  push(event: AgentEvent): void {
-    this.items.push(event)
-    this.waiter?.()
-  }
-  end(): void {
-    this.closed = true
-    this.waiter?.()
-  }
-  async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
-    for (;;) {
-      const next = this.items.shift()
-      if (next !== undefined) {
-        yield next
-        continue
-      }
-      if (this.closed) {
-        return
-      }
-      await new Promise<void>((resolve) => {
-        this.waiter = resolve
-      })
-      this.waiter = null
-    }
-  }
+const CAPABILITIES: AgentCapabilities = {
+  resume: false,
+  interrupt: true,
+  askUser: true,
+  permissions: false,
+  structuredOutput: false,
+  usage: true,
+  rateLimits: false,
+  contextUsage: true,
+  thinking: false,
+  setModel: false,
+  setEffort: false,
+  attachments: false,
 }
 
-const CAPABILITIES = { resume: false, interrupt: true, askUser: true, permissions: false, structuredOutput: false, usage: true, rateLimits: false, contextUsage: true, thinking: false, setModel: false, setEffort: false, attachments: false } as const
+// The session environment picks the script: BYTEBUREAU_FAKE_SCRIPT=slow, anything else is hello
+const scriptOf = (request: CreateSessionRequest): Script =>
+  request.env['BYTEBUREAU_FAKE_SCRIPT'] === 'slow' ? 'slow' : 'hello'
 
-const question = (sessionId: string): Ask => ({
-  id: `fake-ask-${sessionId}`,
-  sessionId,
-  turnId: null,
-  kind: 'question',
-  title: 'Export style',
-  questions: [
-    {
-      id: 'style',
-      header: 'Export',
-      prompt: 'Should hello() be a named export?',
-      multiSelect: false,
-      allowOther: true,
-      options: [
-        { id: 'yes', label: 'Named export (Recommended)', description: 'Matches the existing modules', recommended: true, evidence: [{ kind: 'rule', ref: 'oxlint import/no-default-export' }] },
-        { id: 'default', label: 'Default export', recommended: false, evidence: [] },
-      ],
-    },
-  ],
-  policy: { onTimeout: 'wait', timeout: '30m' },
-  recommendationSource: 'agent',
-  status: 'pending',
-  createdAt: new Date().toISOString(),
-  deadlineAt: null,
-})
-
-class FakeSession implements AgentSession {
-  readonly externalRef = null
-  private readonly queue = new EventQueue()
-  private answerResolver: ((answer: AskAnswer) => void) | null = null
-  private interrupted = false
-  private slowTimer: ReturnType<typeof setTimeout> | null = null
-
-  constructor(
-    private readonly request: CreateSessionRequest,
-    private readonly script: Script,
-  ) {}
-
-  async prompt(input: PromptInput): Promise<void> {
-    await (this.script === 'slow' ? this.runSlow() : this.runHello(input))
-  }
-
-  interrupt(): Promise<void> {
-    this.interrupted = true
-    if (this.slowTimer !== null) {
-      clearTimeout(this.slowTimer)
-    }
-    this.queue.push({ type: 'turn.completed', stopReason: 'interrupted', usage: { inputTokens: 0, outputTokens: 0 } })
-    return Promise.resolve()
-  }
-
-  answer(_askId: string, answer: AskAnswer): Promise<void> {
-    this.answerResolver?.(answer)
-    return Promise.resolve()
-  }
-
-  events(): AsyncIterable<AgentEvent> {
-    return this.queue
-  }
-
-  close(): Promise<void> {
-    this.queue.end()
-    return Promise.resolve()
-  }
-
-  private runSlow(): Promise<void> {
-    this.queue.push({ type: 'turn.started' })
-    return new Promise((resolve) => {
-      this.slowTimer = setTimeout(() => {
-        if (!this.interrupted) {
-          this.queue.push({ type: 'turn.completed', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } })
-        }
-        resolve()
-      }, 10_000)
-    })
-  }
-
-  private async runHello(input: PromptInput): Promise<void> {
-    const push = (event: AgentEvent): void => this.queue.push(event)
-    push({ type: 'turn.started' })
-    push({ type: 'message.delta', kind: 'text', text: 'Creating src/hello.ts' })
-    push({ type: 'tool.started', id: 'tool-1', name: 'Write', kind: 'builtin', input: { path: 'src/hello.ts' } })
-    const target = path.join(this.request.workspace.path, 'src', 'hello.ts')
-    mkdirSync(path.dirname(target), { recursive: true })
-    const answer = await new Promise<AskAnswer>((resolve) => {
-      this.answerResolver = resolve
-      push({ type: 'ask.requested', ask: question(this.request.sessionId) })
-    })
-    const named = answer.selected !== 'other' && answer.selected[0] !== 'default'
-    writeFileSync(target, named ? "export function hello(): string {\n  return 'hello'\n}\n" : "export default function hello(): string {\n  return 'hello'\n}\n")
-    push({ type: 'tool.completed', id: 'tool-1', outputSummary: 'wrote src/hello.ts', bytes: 48 })
-    push({ type: 'message.completed', role: 'assistant', content: [{ type: 'text', text: `Done: ${input.text.length} characters of instructions handled.` }], text: 'Created src/hello.ts exporting hello().' })
-    push({ type: 'usage.updated', usage: { inputTokens: 120, outputTokens: 40, costUsd: 0.002, contextPct: 3 } })
-    push({ type: 'turn.completed', stopReason: 'end_turn', usage: { inputTokens: 120, outputTokens: 40, costUsd: 0.002, contextPct: 3 } })
-  }
+const loggedIn = async (): Promise<AuthStatus> => {
+  const state = await Promise.resolve('loggedIn' as const)
+  return { state }
 }
 
+const startSession = async (request: CreateSessionRequest): Promise<AgentSession> => {
+  const session = await Promise.resolve(new FakeSession(request, scriptOf(request)))
+  return session
+}
+
+// A provider that needs no agent subscription: the way to smoke-test an installation and the fixture of the tests
 export class FakeAgentProvider implements AgentProvider {
-  readonly id = 'fake'
-  readonly displayName = 'Fake agent (tests and CI)'
-  readonly capabilities = CAPABILITIES
-  authStatus(): Promise<{ state: 'loggedIn' }> {
-    return Promise.resolve({ state: 'loggedIn' })
-  }
-  createSession(request: CreateSessionRequest): Promise<AgentSession> {
-    const script = request.env['BYTEBUREAU_FAKE_SCRIPT'] === 'slow' ? 'slow' : 'hello'
-    return Promise.resolve(new FakeSession(request, script))
-  }
+  public readonly id = 'fake'
+  public readonly displayName = 'Fake agent (tests and CI)'
+  public readonly capabilities = CAPABILITIES
+  public readonly authStatus = loggedIn
+  public readonly createSession = startSession
 }
 ```
 `packages/kernel/src/testing/fake-agent-plugin.ts`:
@@ -15409,7 +15627,14 @@ import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
 import { FakeAgentProvider } from './fake-agent-provider.js'
 
 export const fakeAgentPlugin: Plugin = definePlugin({
-  manifest: { name: 'agent-fake', version: '0.0.0', displayName: 'Fake agent', hostApi: '^0', kind: 'in-process', contributes: { agentProviders: ['fake'] } },
+  manifest: {
+    name: 'agent-fake',
+    version: '0.0.0',
+    displayName: 'Fake agent',
+    hostApi: '^0',
+    kind: 'in-process',
+    contributes: { agentProviders: ['fake'] },
+  },
   setup: () => ({ agentProviders: [new FakeAgentProvider()] }),
 })
 ```
@@ -15419,381 +15644,157 @@ export const fakeAgentPlugin: Plugin = definePlugin({
 
 `packages/kernel/src/sessions/translate.ts`:
 ```ts
-import type { AgentEvent, KernelEvent } from '@bytebureau/protocol'
+import type { AgentEvent, AgentEventType, KernelEvent } from '@bytebureau/protocol'
 
 export interface TurnRef {
   readonly turnId: string
   readonly index: number
 }
 
-// Pure mapping provider → kernel catalogue; asks and turn bookkeeping are handled by the SessionManager
-export function translate(event: AgentEvent, turn: TurnRef): KernelEvent | null {
-  switch (event.type) {
-    case 'turn.started': {
-      return { type: 'turn.started', payload: { ...turn, status: 'running' } }
-    }
-    case 'message.delta': {
-      return { type: 'message.assistant.delta', payload: { kind: event.kind, text: event.text } }
-    }
-    case 'message.completed': {
-      return event.role === 'assistant' ? { type: 'message.assistant.completed', payload: { text: event.text, content: event.content } } : null
-    }
-    case 'tool.started': {
-      return { type: 'tool.started', payload: { id: event.id, name: event.name, kind: event.kind, input: event.input } }
-    }
-    case 'tool.completed': {
-      return { type: 'tool.completed', payload: { id: event.id, name: '', outputSummary: event.outputSummary, bytes: event.bytes } }
-    }
-    case 'tool.failed': {
-      return { type: 'tool.failed', payload: { id: event.id, name: '', error: event.error } }
-    }
-    case 'subagent.started':
-    case 'subagent.stopped': {
-      return { type: event.type, payload: { id: event.id, name: event.name } }
-    }
-    case 'usage.updated': {
-      return { type: 'usage.updated', payload: { usage: event.usage } }
-    }
-    case 'ratelimit.updated': {
-      return { type: 'ratelimit.updated', payload: { profileId: null, rateLimit: event.rateLimit } }
-    }
-    case 'compaction.started':
-    case 'compaction.completed': {
-      return { type: event.type, payload: {} }
-    }
-    case 'session.warning': {
-      return { type: 'session.warning', payload: { kind: event.kind, message: event.message } }
-    }
-    default: {
-      return null
-    }
-  }
+// What the kernel knows about the session around an event: how a tool call is named and which profile it runs under
+export interface Lookups {
+  readonly toolName: (toolId: string) => string
+  readonly profileId: string | null
+}
+
+// What the events of a turn are told: the turn that is running, if any
+interface Telling extends Lookups {
+  readonly turn: TurnRef | null
+}
+
+type OfType<Type extends AgentEventType> = Extract<AgentEvent, { readonly type: Type }>
+type Translator<Type extends AgentEventType> = (
+  event: OfType<Type>,
+  telling: Telling,
+) => KernelEvent | null
+type Translators = { readonly [Type in AgentEventType]: Translator<Type> }
+
+const nothing = (): null => null
+
+// The kernel events of the catalogue by the type of the provider event; null leaves an event out
+const TRANSLATORS: Translators = {
+  'turn.started': (_event, { turn }) =>
+    turn === null ? null : { type: 'turn.started', payload: { ...turn, status: 'running' } },
+  'message.delta': (event) => ({
+    type: 'message.assistant.delta',
+    payload: { kind: event.kind, text: event.text },
+  }),
+  'message.completed': (event) =>
+    event.role === 'assistant'
+      ? {
+          type: 'message.assistant.completed',
+          payload: { text: event.text, content: event.content },
+        }
+      : null,
+  'tool.started': (event) => ({
+    type: 'tool.started',
+    payload: { id: event.id, name: event.name, kind: event.kind, input: event.input },
+  }),
+  'tool.completed': (event, { toolName }) => ({
+    type: 'tool.completed',
+    payload: {
+      id: event.id,
+      name: toolName(event.id),
+      outputSummary: event.outputSummary,
+      bytes: event.bytes,
+    },
+  }),
+  'tool.failed': (event, { toolName }) => ({
+    type: 'tool.failed',
+    payload: { id: event.id, name: toolName(event.id), error: event.error },
+  }),
+  'subagent.started': (event) => ({
+    type: 'subagent.started',
+    payload: { id: event.id, name: event.name },
+  }),
+  'subagent.stopped': (event) => ({
+    type: 'subagent.stopped',
+    payload: { id: event.id, name: event.name },
+  }),
+  'ask.requested': nothing,
+  'usage.updated': (event) => ({ type: 'usage.updated', payload: { usage: event.usage } }),
+  'ratelimit.updated': (event, { profileId }) => ({
+    type: 'ratelimit.updated',
+    payload: { profileId, rateLimit: event.rateLimit },
+  }),
+  'compaction.started': () => ({ type: 'compaction.started', payload: {} }),
+  'compaction.completed': () => ({ type: 'compaction.completed', payload: {} }),
+  'turn.completed': nothing,
+  'session.warning': (event) => ({
+    type: 'session.warning',
+    payload: { kind: event.kind, message: event.message },
+  }),
+  'session.error': nothing,
+  'session.closed': nothing,
+  raw: nothing,
+}
+
+// The lookup is generic in the type, which is what lets the compiler pair an event with its translator
+const apply = <Type extends AgentEventType>(
+  type: Type,
+  event: OfType<Type>,
+  telling: Telling,
+): KernelEvent | null => TRANSLATORS[type](event, telling)
+
+const UNKNOWN: Lookups = { toolName: () => '', profileId: null }
+
+// Pure mapping provider → kernel catalogue
+// Asks, the end of a turn and errors carry bookkeeping and are handled by the session manager
+// A finished tool call carries the name that the caller noted when it started, empty when unknown
+export function translate(
+  event: AgentEvent,
+  turn: TurnRef | null,
+  lookups: Lookups = UNKNOWN,
+): KernelEvent | null {
+  return apply(event.type, event, { ...lookups, turn })
 }
 ```
 (`tool.completed`/`tool.failed` carry `name: ''` here; the SessionManager fills the name from its `tool_calls` bookkeeping before publishing.)
 
 `packages/kernel/src/sessions/session-manager.ts`:
 ```ts
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import type { AgentSession, ExternalSessionRef, WorkspaceHandle } from '@bytebureau/plugin-api'
-import type { AgentEvent, EmployeeSpec, PromptInput, SessionStatus, Usage } from '@bytebureau/protocol'
-import { Context, Effect, Fiber, Layer, Stream } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { AskService } from '../asks/ask-service.js'
-import { ConfigError, ProviderError, SessionError, StoreError, WorkspaceError } from '../errors.js'
-import { EventLog } from '../events/event-log.js'
-import { nowIso, uuidv7 } from '../ids.js'
-import { kernelLogger } from '../logging/logging.js'
-import { PluginHost } from '../plugins/plugin-host.js'
-import { allowlistEnv } from '../process/env-allowlist.js'
-import { ProjectRegistry, type Project } from '../projects/project-registry.js'
-import { UsageService } from '../usage/usage-service.js'
-import { WorkspaceManager } from '../workspace/workspace-manager.js'
-import { transition, type SessionEvent } from './state-machine.js'
-import { translate } from './translate.js'
-import type { CreateSessionInput, Session, Turn } from './types.js'
+import { Context, Effect, Layer } from 'effect'
+import { collectDeps, type SessionRequirements } from './session-collect.js'
+import type { SessionDeps } from './session-deps.js'
+import { makeCreate } from './session-create.js'
+import { makeComplete, makeInterrupt, makeResume, makeStop } from './session-end.js'
+import { dispose, releaseFibers } from './session-live.js'
+import { makePrompt } from './session-prompt.js'
+import { listSessions, loadSession } from './session-records.js'
+import type { SessionManagerShape } from './session-shape.js'
 
-export interface SessionManagerShape {
-  create(input: CreateSessionInput): Effect.Effect<Session, SessionError | WorkspaceError | ConfigError | StoreError>
-  prompt(sessionId: string, input: PromptInput): Effect.Effect<Turn, SessionError | ProviderError | StoreError>
-  interrupt(sessionId: string): Effect.Effect<void, SessionError>
-  stop(sessionId: string): Effect.Effect<void, SessionError | StoreError>
-  complete(sessionId: string): Effect.Effect<void, SessionError | StoreError>
-  resume(sessionId: string): Effect.Effect<Session, SessionError | StoreError>
-  list(): Effect.Effect<readonly Session[], StoreError>
-  get(id: string): Effect.Effect<Session | undefined, StoreError>
-}
+export type { SessionManagerShape } from './session-shape.js'
 
-export class SessionManager extends Context.Service<SessionManager, SessionManagerShape>()('bb/SessionManager') {}
+export class SessionManager extends Context.Service<SessionManager, SessionManagerShape>()(
+  'bb/SessionManager',
+) {}
 
-interface Row {
-  readonly id: string
-  readonly project_id: string
-  readonly title: string
-  readonly employee_json: string
-  readonly provider_id: string
-  readonly profile_id: string | null
-  readonly workspace_json: string
-  readonly external_ref: string | null
-  readonly status: SessionStatus
-  readonly created_at: string
-  readonly started_at: string | null
-  readonly ended_at: string | null
-}
+// Releasing the layer lets every provider session go, so no agent outlives the kernel
+// The agents are closed before the pumps are interrupted: the events of an agent end when it closes, and a pump waits for them
+const closeAll = (deps: SessionDeps): Effect.Effect<void> =>
+  Effect.forEach(deps.live.all(), (live) => dispose(deps, live), { discard: true }).pipe(
+    Effect.andThen(releaseFibers(deps.scope)),
+  )
 
-interface Live {
-  readonly agent: AgentSession
-  readonly pump: Fiber.Fiber<void, never>
-  readonly controller: AbortController
-  turn: { id: string; index: number } | null
-  readonly tools: Map<string, string>
-}
-
-const fromRow = (row: Row): Session => ({
-  id: row.id,
-  projectId: row.project_id,
-  title: row.title,
-  employee: JSON.parse(row.employee_json) as EmployeeSpec,
-  providerId: row.provider_id,
-  profileId: row.profile_id,
-  workspace: row.workspace_json === '{}' ? null : (JSON.parse(row.workspace_json) as WorkspaceHandle),
-  externalRef: row.external_ref === null ? null : (JSON.parse(row.external_ref) as ExternalSessionRef),
-  status: row.status,
-  createdAt: row.created_at,
-  startedAt: row.started_at,
-  endedAt: row.ended_at,
-})
-
-function employeeOf(project: Project, employeeId: string | undefined, providerOverride: string | undefined): Effect.Effect<EmployeeSpec, SessionError> {
-  const id = employeeId ?? project.config.defaults?.employee ?? 'developer'
-  const config = project.config.employees[id]
-  if (config === undefined) {
-    return Effect.fail(new SessionError({ code: 'employee_missing', reason: `employee "${id}" is not defined in bytebureau.json` }))
-  }
-  const promptFile = config.prompt === undefined ? null : path.resolve(project.path, config.prompt)
-  const systemPrompt = config.systemPrompt ?? (promptFile === null ? '' : Effect.runSync(Effect.try(() => readFileSync(promptFile, 'utf8')).pipe(Effect.orElseSucceed(() => ''))))
-  return Effect.succeed({
-    id,
-    name: config.name,
-    provider: providerOverride ?? config.provider,
-    model: config.model,
-    effort: config.effort ?? null,
-    systemPrompt,
-    tools: config.tools ?? { allow: [], deny: [] },
-    permissionMode: config.permissionMode,
-    skills: config.skills ?? [],
-    ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }),
-    askTimeout: config.askTimeout ?? '30m',
-    appearance: config.appearance ?? {},
-  })
-}
-
-const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-  const log = yield* EventLog
-  const projects = yield* ProjectRegistry
-  const workspaces = yield* WorkspaceManager
-  const host = yield* PluginHost
-  const asks = yield* AskService
-  const usage = yield* UsageService
-  const logger = kernelLogger(['bb', 'core', 'sessions'])
-  const live = new Map<string, Live>()
-  const extraEnv = new Map<string, Readonly<Record<string, string>>>()
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> => Effect.mapError(effect, (cause) => new StoreError({ cause }))
-
-  const load = (id: string) => wrap(Effect.map(sql<Row>`SELECT * FROM sessions WHERE id = ${id}`, (rows) => (rows[0] === undefined ? undefined : fromRow(rows[0]))))
-  const require = (id: string) => Effect.flatMap(load(id), (session) => (session === undefined ? Effect.fail(new SessionError({ code: 'not_found', reason: `session ${id} does not exist` })) : Effect.succeed(session)))
-
-  const setStatus = (session: Session, event: SessionEvent, payload: Record<string, unknown> = {}, type?: string): Effect.Effect<Session, SessionError | StoreError> =>
-    Effect.gen(function* () {
-      const next = transition(session.status, event)
-      if (next === null) {
-        return yield* new SessionError({ code: 'invalid_transition', reason: `cannot ${event} a ${session.status} session` })
-      }
-      const ended = next === 'completed' || next === 'stopped' || next === 'errored' ? nowIso() : null
-      yield* wrap(sql`UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${next === 'running' ? nowIso() : null}), ended_at = ${ended} WHERE id = ${session.id}`)
-      const eventType = type ?? ({ provisioning: 'session.provisioning', ready: 'session.ready', running: 'session.running', waiting_for_human: 'session.waiting', paused_usage_limit: 'session.paused', completed: 'session.completed', stopped: 'session.stopped', errored: 'session.errored', created: 'session.created' } as const)[next]
-      yield* log.publish({ type: eventType as never, sessionId: session.id, projectId: session.projectId, payload: { status: next, ...payload } as never })
-      return { ...session, status: next, endedAt: ended }
-    })
-
-  const finishTurn = (session: Session, state: Live, status: 'completed' | 'interrupted' | 'errored', stopReason: string | null, turnUsage: Usage | null): Effect.Effect<void, StoreError> =>
-    Effect.gen(function* () {
-      const turn = state.turn
-      if (turn === null) {
-        return
-      }
-      state.turn = null
-      yield* wrap(sql`UPDATE turns SET status = ${status}, stop_reason = ${stopReason}, usage_json = ${turnUsage === null ? null : JSON.stringify(turnUsage)}, ended_at = ${nowIso()} WHERE id = ${turn.id}`)
-      const payload = { turnId: turn.id, index: turn.index, status }
-      yield* log.publish(status === 'completed' ? { type: 'turn.completed', sessionId: session.id, turnId: turn.id, payload: { ...payload, stopReason: stopReason ?? 'end_turn', usage: turnUsage ?? { inputTokens: 0, outputTokens: 0 } } } : { type: 'turn.interrupted', sessionId: session.id, turnId: turn.id, payload })
-    })
-
-  // One provider event → bookkeeping + kernel events; asks block until answered (the provider waits too)
-  const handle = (sessionId: string, state: Live, event: AgentEvent): Effect.Effect<void, never> =>
-    Effect.gen(function* () {
-      const session = yield* require(sessionId)
-      const turn = state.turn ?? { id: '', index: -1 }
-      switch (event.type) {
-        case 'tool.started': {
-          state.tools.set(event.id, event.name)
-          yield* wrap(sql`INSERT INTO tool_calls (id, session_id, turn_id, tool_name, kind, input_json, input_bytes, status, started_at) VALUES (${`${sessionId}:${event.id}`}, ${sessionId}, ${turn.id || null}, ${event.name}, ${event.kind}, ${JSON.stringify(event.input)}, ${JSON.stringify(event.input).length}, 'running', ${nowIso()})`)
-          break
-        }
-        case 'tool.completed':
-        case 'tool.failed': {
-          const failed = event.type === 'tool.failed'
-          yield* wrap(sql`UPDATE tool_calls SET status = ${failed ? 'failed' : 'completed'}, output_summary = ${failed ? event.error : event.outputSummary.slice(0, 32_768)}, output_bytes = ${failed ? 0 : event.bytes}, ended_at = ${nowIso()} WHERE id = ${`${sessionId}:${event.id}`}`)
-          const translated = translate(event, { turnId: turn.id, index: turn.index })
-          if (translated !== null) {
-            yield* log.publish({ ...translated, sessionId, turnId: turn.id, payload: { ...(translated.payload as object), name: state.tools.get(event.id) ?? '' } as never })
-          }
-          return
-        }
-        case 'message.completed': {
-          if (event.role === 'assistant') {
-            yield* wrap(sql`INSERT INTO messages (id, session_id, turn_id, role, content_json, created_at) VALUES (${uuidv7()}, ${sessionId}, ${turn.id || null}, 'assistant', ${JSON.stringify(event.content)}, ${nowIso()})`)
-          }
-          break
-        }
-        case 'ask.requested': {
-          const opened = yield* asks.open({ sessionId, turnId: turn.id || null, kind: event.ask.kind, title: event.ask.title, questions: event.ask.questions, ...(event.ask.toolCall === undefined ? {} : { toolCall: event.ask.toolCall }), permissionMode: session.employee.permissionMode, askTimeout: session.employee.askTimeout ?? '30m', workspacePath: session.workspace?.path ?? '', recommendationSource: event.ask.recommendationSource === 'agent' ? 'agent' : 'none' })
-          const waiting = yield* setStatus(session, 'ask', { askId: opened.id })
-          const answer = yield* asks.await(opened.id)
-          yield* Effect.tryPromise({ try: () => state.agent.answer(event.ask.id, answer), catch: (cause) => new ProviderError({ kind: 'protocol', reason: String(cause), retryable: false }) })
-          yield* setStatus(waiting, 'answer')
-          return
-        }
-        case 'ratelimit.updated': {
-          yield* usage.record(session.profileId, event.rateLimit)
-          break
-        }
-        case 'turn.completed': {
-          yield* finishTurn(session, state, event.stopReason === 'interrupted' ? 'interrupted' : 'completed', event.stopReason, event.usage)
-          const current = yield* require(sessionId)
-          if (current.status === 'running' || current.status === 'waiting_for_human') {
-            yield* setStatus(current, 'turn_done')
-          }
-          yield* workspaces.unlock(sessionId)
-          return
-        }
-        case 'session.error': {
-          yield* finishTurn(session, state, 'errored', event.kind, null)
-          yield* setStatus(session, 'crash', { kind: event.kind, message: event.message, retryable: event.retryable })
-          yield* workspaces.unlock(sessionId)
-          return
-        }
-        default: {
-          break
-        }
-      }
-      const translated = translate(event, { turnId: turn.id, index: turn.index })
-      if (translated !== null) {
-        yield* log.publish({ ...translated, sessionId, ...(turn.id === '' ? {} : { turnId: turn.id }) })
-      }
-    }).pipe(Effect.catch((cause) => Effect.sync(() => logger.error('event handling failed', { sessionId, type: event.type, cause: String(cause) }))))
-
-  const attach = (session: Session): Effect.Effect<Live, SessionError | ProviderError> =>
-    Effect.gen(function* () {
-      const existing = live.get(session.id)
-      if (existing !== undefined) {
-        return existing
-      }
-      const provider = host.agentProvider(session.providerId)
-      if (provider === undefined) {
-        return yield* new SessionError({ code: 'provider_missing', reason: `provider "${session.providerId}" is not available; available: ${host.agentProviders().map((candidate) => candidate.id).join(', ')}` })
-      }
-      if (session.workspace === null) {
-        return yield* new SessionError({ code: 'invalid_transition', reason: 'session has no workspace' })
-      }
-      const controller = new AbortController()
-      const env = { ...allowlistEnv(process.env), ...allowlistEnv(extraEnv.get(session.id) ?? {}), BYTEBUREAU_SESSION_ID: session.id }
-      const agent = yield* Effect.tryPromise({
-        try: () => provider.createSession({ sessionId: session.id, workspace: { path: session.workspace!.path }, employee: session.employee, profile: { id: session.profileId ?? 'default', providerId: session.providerId, kind: 'login' }, ...(session.externalRef === null ? {} : { resume: session.externalRef }), env, signal: controller.signal, logger: kernelLogger(['bb', 'agent', session.providerId]) }),
-        catch: (cause) => new ProviderError({ kind: 'crash', reason: String(cause), retryable: true }),
-      })
-      const state: Live = { agent, pump: undefined as never, controller, turn: null, tools: new Map() }
-      const pump = yield* Effect.forkDetach(Stream.fromAsyncIterable(agent.events(), (cause) => new ProviderError({ kind: 'protocol', reason: String(cause), retryable: false })).pipe(Stream.runForEach((event) => handle(session.id, state, event)), Effect.ignore))
-      const attached: Live = { ...state, pump }
-      live.set(session.id, attached)
-      return attached
-    })
-
-  const create: SessionManagerShape['create'] = (input) =>
-    Effect.gen(function* () {
-      const project = yield* projects.get(input.projectId)
-      if (project === undefined) {
-        return yield* new SessionError({ code: 'not_found', reason: `project ${input.projectId} is not registered` })
-      }
-      const employee = yield* employeeOf(project, input.employeeId, input.providerId)
-      const provider = host.agentProvider(employee.provider)
-      if (provider === undefined) {
-        return yield* new SessionError({ code: 'provider_missing', reason: `provider "${employee.provider}" is not available; available: ${host.agentProviders().map((candidate) => candidate.id).join(', ')}` })
-      }
-      const runtimeId = project.config.workspace?.runtime ?? 'local'
-      const runtime = host.workspaceRuntimes().find((candidate) => candidate.id === runtimeId)
-      if (employee.permissionMode === 'yolo' && runtime?.isolation === 'none') {
-        return yield* new SessionError({ code: 'yolo_refused', reason: `permission mode "yolo" is refused on the "${runtimeId}" runtime (isolation: none); container runtimes enable it later` })
-      }
-      const id = uuidv7()
-      const createdAt = nowIso()
-      const employeeJson = JSON.stringify(employee)
-      if (input.env !== undefined) {
-        extraEnv.set(id, input.env)
-      }
-      yield* wrap(sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES (${id}, ${project.id}, ${input.title}, ${employeeJson}, ${employee.provider}, ${input.profileId ?? null}, '{}', 'created', ${createdAt})`)
-      const created: Session = { id, projectId: project.id, title: input.title, employee, providerId: employee.provider, profileId: input.profileId ?? null, workspace: null, externalRef: null, status: 'created', createdAt, startedAt: null, endedAt: null }
-      yield* log.publish({ type: 'session.created', sessionId: id, projectId: project.id, payload: { status: 'created', title: input.title, employeeId: employee.id, providerId: employee.provider } })
-      const provisioning = yield* setStatus(created, 'provision')
-      const workspace = yield* workspaces.provision({ sessionId: id, project, title: input.title, baseBranch: input.branch ?? project.config.defaults?.branch ?? project.defaultBranch, runtimeId })
-      const ready = yield* setStatus({ ...provisioning, workspace }, 'provisioned')
-      return ready
-    })
-
-  const prompt: SessionManagerShape['prompt'] = (sessionId, input) =>
-    Effect.gen(function* () {
-      const session = yield* require(sessionId)
-      const state = yield* attach(session)
-      const running = yield* setStatus(session, 'prompt')
-      const count = yield* wrap(Effect.map(sql<{ readonly n: number }>`SELECT count(*) AS n FROM turns WHERE session_id = ${sessionId}`, (rows) => rows[0]?.n ?? 0))
-      const turn: Turn = { id: uuidv7(), sessionId, index: count, prompt: input, status: 'running', stopReason: null, usage: null, startedAt: nowIso(), endedAt: null }
-      yield* wrap(sql`INSERT INTO turns (id, session_id, idx, prompt_json, status, started_at) VALUES (${turn.id}, ${sessionId}, ${turn.index}, ${JSON.stringify(input)}, 'running', ${turn.startedAt})`)
-      yield* wrap(sql`INSERT INTO messages (id, session_id, turn_id, role, content_json, created_at) VALUES (${uuidv7()}, ${sessionId}, ${turn.id}, 'user', ${JSON.stringify([{ type: 'text', text: input.text }])}, ${turn.startedAt})`)
-      state.turn = { id: turn.id, index: turn.index }
-      yield* workspaces.lock(sessionId)
-      yield* log.publish({ type: 'message.user', sessionId, turnId: turn.id, payload: { text: input.text } })
-      const sent = yield* host.hooks.run('prompt.beforeSend', { sessionId, input }, (value) => Effect.succeed(value))
-      yield* Effect.forkDetach(Effect.tryPromise(() => state.agent.prompt(sent.input)).pipe(Effect.ignore))
-      return { ...turn, status: running.status === 'running' ? 'running' : turn.status }
-    })
-
-  const stop: SessionManagerShape['stop'] = (sessionId) =>
-    Effect.gen(function* () {
-      const session = yield* require(sessionId)
-      const state = live.get(sessionId)
-      if (state !== undefined) {
-        yield* Effect.tryPromise(() => state.agent.interrupt()).pipe(Effect.ignore)
-        yield* finishTurn(session, state, 'interrupted', 'stopped', null)
-        yield* Effect.tryPromise(() => state.agent.close()).pipe(Effect.ignore)
-        state.controller.abort()
-        live.delete(sessionId)
-      }
-      for (const pending of yield* asks.pending(sessionId)) {
-        yield* asks.cancel(pending.id)
-      }
-      yield* workspaces.unlock(sessionId)
-      yield* setStatus(yield* require(sessionId), 'stop')
-    })
-
+const make = Effect.gen(function* makeSessionManager() {
+  const deps = yield* collectDeps
+  yield* Effect.addFinalizer(() => closeAll(deps))
   return SessionManager.of({
-    create,
-    prompt,
-    interrupt: (sessionId) => {
-      const state = live.get(sessionId)
-      return state === undefined ? Effect.fail(new SessionError({ code: 'not_found', reason: `session ${sessionId} is not running` })) : Effect.tryPromise(() => state.agent.interrupt()).pipe(Effect.ignore)
-    },
-    stop,
-    complete: (sessionId) =>
-      Effect.gen(function* () {
-        const session = yield* require(sessionId)
-        const state = live.get(sessionId)
-        if (state !== undefined) {
-          yield* Effect.tryPromise(() => state.agent.close()).pipe(Effect.ignore)
-          live.delete(sessionId)
-        }
-        yield* workspaces.unlock(sessionId)
-        yield* setStatus(session, 'complete')
-      }),
-    resume: (sessionId) => Effect.flatMap(require(sessionId), (session) => setStatus(session, 'resume', {}, 'session.resumed')),
-    list: () => wrap(Effect.map(sql<Row>`SELECT * FROM sessions ORDER BY created_at DESC`, (rows) => rows.map(fromRow))),
-    get: load,
+    create: makeCreate(deps),
+    prompt: makePrompt(deps),
+    interrupt: makeInterrupt(deps),
+    stop: makeStop(deps),
+    complete: makeComplete(deps),
+    resume: makeResume(deps),
+    list: () => listSessions(deps.sql),
+    get: (id) => loadSession(deps.sql, id),
   })
 })
 
-export const SessionManagerLive: Layer.Layer<SessionManager, never, SqlClient.SqlClient | EventLog | ProjectRegistry | WorkspaceManager | PluginHost | AskService | UsageService> = Layer.effect(SessionManager, make)
+export const SessionManagerLive: Layer.Layer<SessionManager, never, SessionRequirements> =
+  Layer.effect(SessionManager, make)
 ```
-Implementation notes for the executor: (1) the `ask.requested` branch blocks the pump fiber until the answer arrives — the provider is waiting as well, so nothing is lost; (2) `setStatus` publishes the catalogue event matching the new status; the `as never` casts isolate the generic `KernelEvent` typing — replace them with a typed helper if `KernelEvent<T>` narrows cleanly; (3) `extraEnv` holds per-session `BYTEBUREAU_*` variables given at `create` (the allowlist filters them) for the lifetime of the process; (4) the running turn must be marked `interrupted` and `session.stopped` published in that order (the test asserts it); (5) `Effect.forkDetach` keeps the pump alive beyond the caller's scope; it ends when the provider's event iterator ends (`close()`), and `stop`/`complete` call `close()`.
+Verified in Effect 4.0.0: `Effect.repeat(effect, { until })`, `Stream.takeUntil`, `Stream.fromAsyncIterable`, `Effect.forkIn`, `Effect.catch`; `Effect.yieldNow` is a value. The shipped tests wait on the event log and on latches instead of polling under the `TestClock`.
 
 Add to `index.ts`: `export { SessionManager, SessionManagerLive, type SessionManagerShape } from './sessions/session-manager.js'`, `export { transition, SESSION_EVENTS, type SessionEvent } from './sessions/state-machine.js'`, `export type { Session, Turn, CreateSessionInput } from './sessions/types.js'`, `export { UsageService, UsageServiceLive, type SessionUsage, type UsageSnapshot } from './usage/usage-service.js'`, `export { FakeAgentProvider } from './testing/fake-agent-provider.js'`, `export { fakeAgentPlugin } from './testing/fake-agent-plugin.js'`.
 
