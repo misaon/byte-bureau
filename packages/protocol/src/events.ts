@@ -119,9 +119,12 @@ export const EPHEMERAL_EVENT_TYPES = [
   'heartbeat',
 ] as const
 
+const isKernelEventType = (type: string): type is KernelEventType =>
+  Object.hasOwn(KernelEventSchemas, type)
+
 export const KERNEL_EVENT_TYPES: readonly KernelEventType[] = Object.keys(
   KernelEventSchemas,
-).filter((key): key is KernelEventType => Object.hasOwn(KernelEventSchemas, key))
+).filter((key) => isKernelEventType(key))
 
 export type KernelEventType = keyof typeof KernelEventSchemas
 export type KernelEventPayload<EventType extends KernelEventType> =
@@ -139,4 +142,23 @@ export interface KernelEvent<EventType extends KernelEventType = KernelEventType
 /** True for live-only event types: fanned out to subscribers, never persisted */
 export function isEphemeral(type: string): boolean {
   return (EPHEMERAL_EVENT_TYPES as readonly string[]).includes(type)
+}
+
+/**
+ * Decodes the payload of an event against the schema of its type.
+ * A type narrowed to a literal gives the typed payload; any other string is checked at run time.
+ * Throws when the type is not in the catalogue or the payload does not fit its schema.
+ * Fields the schema does not know are ignored, so a newer kernel can add to a payload without breaking an older reader.
+ */
+export function decodeEventPayload<EventType extends KernelEventType>(
+  type: EventType,
+  payload: unknown,
+): KernelEventPayload<EventType>
+/** Decodes the payload of an event whose type is only known as a string. */
+export function decodeEventPayload(type: string, payload: unknown): unknown
+export function decodeEventPayload(type: string, payload: unknown): unknown {
+  if (!isKernelEventType(type)) {
+    throw new Error(`unknown kernel event type: ${type}`)
+  }
+  return Schema.decodeUnknownSync(KernelEventSchemas[type])(payload, { errors: 'all' })
 }
