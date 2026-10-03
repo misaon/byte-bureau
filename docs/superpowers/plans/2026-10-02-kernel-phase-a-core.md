@@ -8512,12 +8512,14 @@ git commit -m "feat(workspace-local): add the git worktree workspace runtime plu
 ### Task 10: `WorkspaceManager` service — slugs, locks, retain and prune over the runtime port
 
 **Files:**
-- Create: `packages/kernel/src/workspace/slug.ts`, `packages/kernel/src/workspace/runtimes.ts`, `packages/kernel/src/workspace/workspace-manager.ts`, `packages/kernel/src/workspace/slug.test.ts`, `packages/kernel/src/workspace/workspace-manager.test.ts`, `packages/kernel/src/testing/node-spawner.ts` (kernel copy of Task 9's helper)
-- Modify: `packages/kernel/src/index.ts`
+- Create: `packages/kernel/src/workspace/slug.ts`, `packages/kernel/src/workspace/runtimes.ts`, `packages/kernel/src/workspace/workspace-records.ts`, `packages/kernel/src/workspace/workspace-provision.ts`, `packages/kernel/src/workspace/workspace-prune.ts`, `packages/kernel/src/workspace/workspace-manager.ts`, `packages/kernel/src/workspace/workspace-manager-fixtures.ts`, `packages/kernel/src/workspace/workspace-session-fixtures.ts`, the tests `slug.test.ts`, `runtimes.test.ts`, `workspace-manager.test.ts`, `workspace-list.test.ts`, `workspace-prune.test.ts`, and `packages/kernel/src/testing/node-spawner.ts` (verbatim copy of the Task 9 helper)
+- Modify: `packages/kernel/src/index.ts`, `packages/kernel/package.json` (`@bytebureau/workspace-local` as a runtime dependency) + `bun.lock`, `packages/kernel/src/errors.ts` (`toStoreError`), `packages/kernel/src/testing/temp-repo.ts` (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`)
 
 **Interfaces:**
 - Consumes: `WorkspaceRuntime`, `WorkspaceHandle`, `WorkspaceStatus` (Task 2); `LocalWorkspaceRuntime` (Task 9, in tests); `SqlClient`, `EventLog`, `Project`; Effect `Clock.currentTimeMillis` (TestClock in tests).
 - Produces: `WorkspaceRuntimes` service `{ get(id: string): WorkspaceRuntime | undefined; list(): readonly WorkspaceRuntime[] }` (Task 11 provides it from loaded plugins; tests provide it directly), `WorkspaceManager` service `{ provision(input: ProvisionInput): Effect<WorkspaceHandle, WorkspaceError | StoreError>; status(handle): Effect<WorkspaceStatus, WorkspaceError>; destroy(handle, options?): Effect<void, WorkspaceError | StoreError>; lock(sessionId): Effect<void>; unlock(sessionId): Effect<void>; list(projectId?): Effect<readonly WorkspaceInfo[], StoreError>; prune(projectId?): Effect<PruneReport, StoreError> }`, `WorkspaceManagerLive: Layer<WorkspaceManager, never, SqlClient | EventLog | WorkspaceRuntimes>`, `branchSlug(title: string, sessionId: string): string`, `ProvisionInput { sessionId; project: Project; title: string; baseBranch: string; runtimeId: string }`, `WorkspaceInfo { sessionId; projectId; path; branch; baseRef; sessionStatus; exists: boolean }`, `PruneReport { removed: readonly string[]; retained: readonly { path: string; reason: string }[] }`.
+
+Semantics (as shipped): the handle is stored on the session row (`workspace_json`) and decoded with a schema (a corrupt row is a `StoreError` naming the session); `destroy` checks the in-memory per-process lock set, then the runtime: with `force` it skips its own `status()` pre-check and delegates (the runtime still refuses a git-locked worktree), without `force` a dirty worktree is retained (`workspace.retained`, reason `uncommitted changes`) and a failing `status()` (base ref gone) retains with reason `status unavailable`; `prune` handles terminal sessions older than `workspace.retainDays` (default 7) in `created_at, id` order, skips worktrees whose path no longer exists, retains dirty or ahead ones with their reasons, keeps a missing or unreadable `ended_at`, and reports a path as removed only when `destroy` succeeded; the plugin serialises same-name provisioning itself, so the manager has no provisioning lock; `rows()` narrows with `sql.and`. Known limits (final fix wave): prune treats a pushed or squash-merged branch as unmerged (`ahead` is counted against `baseRef` only); `s-<short id>` takes the first 8 hex characters of the UUIDv7, which is the timestamp.
 
 - [ ] **Step 1: Failing tests**
 
@@ -8526,112 +8528,820 @@ git commit -m "feat(workspace-local): add the git worktree workspace runtime plu
 import { describe, expect, it } from 'vitest'
 import { branchSlug } from './slug.js'
 
+const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000001'
+
 describe(branchSlug, () => {
   it('kebab-cases the title, strips diacritics and caps the length', () => {
-    expect(branchSlug('Create src/hello.ts exporting hello()', 's')).toBe('bb/create-src-hello-ts-exporting-hello')
+    expect(branchSlug('Create src/hello.ts exporting hello()', 's')).toBe(
+      'bb/create-src-hello-ts-exporting-hello',
+    )
     expect(branchSlug('Přidat českou podporu!', 's')).toBe('bb/pridat-ceskou-podporu')
     expect(branchSlug('a'.repeat(80), 's')).toBe(`bb/${'a'.repeat(40)}`)
   })
 
   it('falls back to the short session id when nothing is left', () => {
-    expect(branchSlug('???', '0192f0c8-7b2e-7c3d-9a4b-000000000001')).toBe('bb/s-0192f0c8')
+    expect(branchSlug('???', SESSION_ID)).toBe('bb/s-0192f0c8')
+  })
+
+  it('falls back for an empty title, for symbols and for marks without a letter', () => {
+    expect(branchSlug('', SESSION_ID)).toBe('bb/s-0192f0c8')
+    expect(branchSlug('🎉 ✨', SESSION_ID)).toBe('bb/s-0192f0c8')
+    expect(branchSlug('́́', SESSION_ID)).toBe('bb/s-0192f0c8')
+  })
+
+  it('does not end on the dash that the cut leaves behind', () => {
+    expect(branchSlug(`${'a'.repeat(39)} b`, 's')).toBe(`bb/${'a'.repeat(39)}`)
+  })
+
+  it('keeps digits and collapses every run of other characters into one dash', () => {
+    expect(branchSlug('  Fix #42 --  the   build_  ', 's')).toBe('bb/fix-42-the-build')
   })
 })
 ```
 `packages/kernel/src/workspace/workspace-manager.test.ts`:
 ```ts
-import { writeFileSync } from 'node:fs'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { LocalWorkspaceRuntime } from '@bytebureau/workspace-local'
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { TestClock } from 'effect/testing'
-import { ConfigLive } from '../config/config.js'
-import { EventLog, EventLogLive } from '../events/event-log.js'
-import { kernelLogger } from '../logging/logging.js'
-import { ProjectRegistry, ProjectRegistryLive } from '../projects/project-registry.js'
-import { StoreTest } from '../store/store-test.js'
-import { nodeSpawner } from '../testing/node-spawner.js'
-import { createTempRepo, git } from '../testing/temp-repo.js'
-import { WorkspaceRuntimes } from './runtimes.js'
-import { WorkspaceManager, WorkspaceManagerLive } from './workspace-manager.js'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import type { Project } from '../projects/project-registry.js'
+import { git } from '../testing/temp-repo.js'
+import { TestLayer } from './workspace-manager-fixtures.js'
+import { WorkspaceManager } from './workspace-manager.js'
+import {
+  codeOf,
+  eventsOf,
+  provisionSession,
+  registerRepo,
+  storedWorkspaceOf,
+} from './workspace-session-fixtures.js'
 
-const runtime = new LocalWorkspaceRuntime(nodeSpawner, kernelLogger(['bb', 'test']))
-const TestLayer = Layer.mergeAll(WorkspaceManagerLive, ProjectRegistryLive).pipe(
-  Layer.provideMerge(Layer.mergeAll(EventLogLive, ConfigLive(mkdtempSync(path.join(tmpdir(), 'bb-home-'))), Layer.succeed(WorkspaceRuntimes, WorkspaceRuntimes.of({ get: (id) => (id === 'local' ? runtime : undefined), list: () => [runtime] })))),
-  Layer.provideMerge(StoreTest),
-)
+const PROVISIONING = 'provisioning'
 
-const insertSession = (sql: SqlClient.SqlClient, id: string, projectId: string, status: string, endedAt: string | null) =>
-  sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at, ended_at) VALUES (${id}, ${projectId}, 't', '{}', 'fake', '{}', ${status}, '2026-10-02T00:00:00.000Z', ${endedAt})`
+it.layer(TestLayer)('WorkspaceManager provision', (suite) => {
+  suite.effect(
+    'provisions on bb/<slug>, records the handle on the session and emits workspace.provisioned',
+    () =>
+      Effect.gen(function* provisionsWorkspace() {
+        const { repo, project } = yield* registerRepo()
+        const seed = { id: 'session-1', status: PROVISIONING }
+        const handle = yield* provisionSession(project, seed, { title: 'Add hello' })
+        assert.strictEqual(handle.branch, 'bb/add-hello')
+        assert.strictEqual(handle.path, path.join(repo, '.bytebureau', 'worktrees', 'session-1'))
+        const payload = {
+          path: handle.path,
+          branch: handle.branch,
+          baseRef: 'main',
+          runtimeId: 'local',
+        }
+        const announced = [{ type: 'workspace.provisioned', projectId: project.id, payload }]
+        assert.deepStrictEqual(yield* eventsOf('session-1'), announced)
+        assert.deepStrictEqual(yield* storedWorkspaceOf('session-1'), handle)
+      }),
+  )
 
-layer(TestLayer)('WorkspaceManager', (it) => {
-  it.effect('provisions on bb/<slug>, records the handle on the session and emits workspace.provisioned', () =>
-    Effect.gen(function* () {
-      const repo = createTempRepo()
-      const project = yield* (yield* ProjectRegistry).register(repo)
-      const sql = yield* SqlClient.SqlClient
-      yield* insertSession(sql, 'sess-1', project.id, 'provisioning', null)
-      const manager = yield* WorkspaceManager
-      const handle = yield* manager.provision({ sessionId: 'sess-1', project, title: 'Add hello', baseBranch: 'main', runtimeId: 'local' })
-      assert.strictEqual(handle.branch, 'bb/add-hello')
-      assert.strictEqual(handle.path, path.join(repo, '.bytebureau', 'worktrees', 'sess-1'))
-      const events = yield* (yield* EventLog).read({ sessionId: 'sess-1' }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type), ['workspace.provisioned'])
-      const rows = yield* sql<{ readonly workspace_json: string }>`SELECT workspace_json FROM sessions WHERE id = 'sess-1'`
-      assert.strictEqual((JSON.parse(rows[0]?.workspace_json ?? '{}') as { branch: string }).branch, 'bb/add-hello')
+  suite.effect('fails for a runtime nobody provides and leaves the session and the log alone', () =>
+    Effect.gen(function* refusesUnknownRuntime() {
+      const { project } = yield* registerRepo()
+      const seed = { id: 'session-2', status: PROVISIONING }
+      const error = yield* Effect.flip(provisionSession(project, seed, { runtimeId: 'nobody' }))
+      assert.strictEqual(codeOf(error), 'runtime_missing')
+      assert.deepStrictEqual(yield* eventsOf('session-2'), [])
+      assert.deepStrictEqual(yield* storedWorkspaceOf('session-2'), {})
     }),
   )
 
-  it.effect('refuses to destroy a locked workspace, retains a dirty one and removes a clean one', () =>
-    Effect.gen(function* () {
-      const repo = createTempRepo()
-      const project = yield* (yield* ProjectRegistry).register(repo)
-      const sql = yield* SqlClient.SqlClient
-      yield* insertSession(sql, 'sess-2', project.id, 'running', null)
-      const manager = yield* WorkspaceManager
-      const handle = yield* manager.provision({ sessionId: 'sess-2', project, title: 'x', baseBranch: 'main', runtimeId: 'local' })
-      yield* manager.lock('sess-2')
-      const locked = yield* Effect.result(manager.destroy(handle))
-      assert.strictEqual(locked._tag, 'Failure')
-      yield* manager.unlock('sess-2')
-      writeFileSync(path.join(handle.path, 'dirty.txt'), 'x')
-      yield* manager.destroy(handle)
-      const events = yield* (yield* EventLog).read({ sessionId: 'sess-2', types: ['workspace.retained', 'workspace.destroyed'] }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type), ['workspace.retained'])
-      yield* manager.destroy(handle, { force: true })
-      const after = yield* (yield* EventLog).read({ sessionId: 'sess-2', types: ['workspace.destroyed'] }, { from: 0 })
-      assert.strictEqual(after.length, 1)
-    }),
-  )
-
-  it.effect('prunes only terminal, pushed-or-merged, old worktrees and explains the rest', () =>
-    Effect.gen(function* () {
-      const repo = createTempRepo()
-      const project = yield* (yield* ProjectRegistry).register(repo)
-      const sql = yield* SqlClient.SqlClient
-      yield* insertSession(sql, 'old-clean', project.id, 'completed', '2026-09-01T00:00:00.000Z')
-      yield* insertSession(sql, 'old-ahead', project.id, 'completed', '2026-09-01T00:00:00.000Z')
-      yield* insertSession(sql, 'fresh', project.id, 'completed', '2026-10-02T00:00:00.000Z')
-      yield* insertSession(sql, 'live', project.id, 'running', null)
-      const manager = yield* WorkspaceManager
-      for (const id of ['old-clean', 'old-ahead', 'fresh', 'live']) {
-        yield* manager.provision({ sessionId: id, project, title: id, baseBranch: 'main', runtimeId: 'local' })
-      }
-      const ahead = path.join(repo, '.bytebureau', 'worktrees', 'old-ahead')
-      writeFileSync(path.join(ahead, 'work.txt'), 'x')
-      git(ahead, 'add', 'work.txt')
-      git(ahead, 'commit', '-q', '-m', 'unmerged work')
-      yield* TestClock.setTime(Date.UTC(2026, 9, 3))
-      const report = yield* manager.prune(project.id)
-      assert.deepStrictEqual(report.removed, [path.join(repo, '.bytebureau', 'worktrees', 'old-clean')])
-      assert.deepStrictEqual(report.retained.map((entry) => path.basename(entry.path)).sort(), ['fresh', 'live', 'old-ahead'])
+  suite.effect('passes a failure of the runtime on with its code and records nothing', () =>
+    Effect.gen(function* relaysRuntimeFailure() {
+      const { project } = yield* registerRepo()
+      const missing = { ...project, path: path.join(project.path, 'missing') }
+      const error = yield* Effect.flip(
+        provisionSession(missing, { id: 'session-3', status: PROVISIONING }),
+      )
+      assert.strictEqual(codeOf(error), 'not_a_repository')
+      assert.deepStrictEqual(yield* eventsOf('session-3'), [])
     }),
   )
 })
+
+it.layer(TestLayer)('WorkspaceManager provision together', (suite) => {
+  suite.effect('keeps the branches of sessions that share a title and start together apart', () =>
+    Effect.gen(function* provisionsTogether() {
+      const { project } = yield* registerRepo()
+      const title = { title: 'Same task' }
+      const [first, second] = yield* Effect.all(
+        [
+          provisionSession(project, { id: 'twin-1', status: PROVISIONING }, title),
+          provisionSession(project, { id: 'twin-2', status: PROVISIONING }, title),
+        ],
+        { concurrency: 'unbounded' },
+      )
+      assert.deepStrictEqual([first.branch, second.branch].toSorted(), [
+        'bb/same-task',
+        'bb/same-task-2',
+      ])
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager provision of ignored files', (suite) => {
+  suite.effect('copies the files the project configuration lists into the worktree', () =>
+    Effect.gen(function* copiesListedFiles() {
+      const { repo, project } = yield* registerRepo({ copyIgnored: ['local.cfg'] })
+      writeFileSync(path.join(repo, 'local.cfg'), 'a')
+      writeFileSync(path.join(repo, '.env'), 'b')
+      const handle = yield* provisionSession(project, { id: 'session-4', status: PROVISIONING })
+      assert.isTrue(existsSync(path.join(handle.path, 'local.cfg')))
+      assert.isFalse(existsSync(path.join(handle.path, '.env')))
+    }),
+  )
+
+  suite.effect('copies nothing when the configuration has no workspace section or no list', () =>
+    Effect.gen(function* copiesNothing() {
+      const { repo, project } = yield* registerRepo()
+      writeFileSync(path.join(repo, '.env'), 'b')
+      const bare: Project = {
+        ...project,
+        config: { version: 1, project: { name: 'bare' }, employees: {} },
+      }
+      const unlisted: Project = {
+        ...bare,
+        config: { ...bare.config, workspace: { runtime: 'local' } },
+      }
+      const first = yield* provisionSession(bare, { id: 'session-5', status: PROVISIONING })
+      const second = yield* provisionSession(unlisted, { id: 'session-6', status: PROVISIONING })
+      assert.isFalse(existsSync(path.join(first.path, '.env')))
+      assert.isFalse(existsSync(path.join(second.path, '.env')))
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
+  suite.effect('refuses to destroy a locked workspace until it is unlocked', () =>
+    Effect.gen(function* refusesLockedWorkspace() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-7', status: 'running' })
+      yield* manager.lock('session-7')
+      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      assert.strictEqual(codeOf(refused), 'locked')
+      yield* manager.unlock('session-7')
+      yield* manager.destroy(handle)
+      assert.isFalse(existsSync(handle.path))
+    }),
+  )
+
+  suite.effect('retains a workspace with uncommitted changes and destroys it when forced', () =>
+    Effect.gen(function* retainsDirtyWorkspace() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-8', status: 'completed' })
+      writeFileSync(path.join(handle.path, 'dirty.txt'), 'x')
+      yield* manager.destroy(handle)
+      assert.isTrue(existsSync(handle.path))
+      yield* manager.destroy(handle, { force: true })
+      assert.isFalse(existsSync(handle.path))
+      const later = (yield* eventsOf('session-8')).slice(1)
+      assert.deepStrictEqual(later, [
+        {
+          type: 'workspace.retained',
+          payload: { path: handle.path, reason: 'uncommitted changes' },
+        },
+        { type: 'workspace.destroyed', payload: { path: handle.path } },
+      ])
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
+  suite.effect('retains a workspace whose status is unavailable and destroys it when forced', () =>
+    Effect.gen(function* retainsWithoutStatus() {
+      const { repo, project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-11', status: 'completed' })
+      git(repo, 'branch', '-m', 'main', 'trunk')
+      yield* manager.destroy(handle)
+      assert.isTrue(existsSync(handle.path))
+      yield* manager.destroy(handle, { force: true })
+      assert.isFalse(existsSync(handle.path))
+      const later = (yield* eventsOf('session-11')).slice(1)
+      assert.deepStrictEqual(later, [
+        {
+          type: 'workspace.retained',
+          payload: { path: handle.path, reason: 'status unavailable' },
+        },
+        { type: 'workspace.destroyed', payload: { path: handle.path } },
+      ])
+    }),
+  )
+
+  suite.effect('leaves a worktree that git has locked in place, even when forced', () =>
+    Effect.gen(function* keepsPinnedWorktree() {
+      const { repo, project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-12', status: 'completed' })
+      git(repo, 'worktree', 'lock', handle.path)
+      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      assert.strictEqual(codeOf(refused), 'locked')
+      assert.isTrue(existsSync(handle.path))
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager status', (suite) => {
+  suite.effect('reports what the runtime knows about the workspace', () =>
+    Effect.gen(function* reportsStatus() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-9', status: 'running' })
+      writeFileSync(path.join(handle.path, 'draft.txt'), 'x')
+      const expected = { dirty: true, ahead: 0, behind: 0, locked: false, branch: 'bb/session-9' }
+      assert.deepStrictEqual(yield* manager.status(handle), expected)
+    }),
+  )
+
+  suite.effect('refuses a handle of a runtime nobody provides', () =>
+    Effect.gen(function* refusesStrayHandle() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-10', status: 'running' })
+      const stray = { ...handle, runtimeId: 'nobody' }
+      const statusError = yield* Effect.flip(manager.status(stray))
+      const destroyError = yield* Effect.flip(manager.destroy(stray))
+      const forcedError = yield* Effect.flip(manager.destroy(stray, { force: true }))
+      const codes = [statusError, destroyError, forcedError].map((error) => codeOf(error))
+      assert.deepStrictEqual(codes, ['runtime_missing', 'runtime_missing', 'runtime_missing'])
+      assert.isTrue(existsSync(handle.path))
+    }),
+  )
+})
+```
+`packages/kernel/src/workspace/workspace-list.test.ts`:
+```ts
+import { existsSync } from 'node:fs'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { TestClock } from 'effect/testing'
+import { StoreError } from '../errors.js'
+import { TestLayer } from './workspace-manager-fixtures.js'
+import { WorkspaceManager } from './workspace-manager.js'
+import { provisionSession, registerRepo, seedSession } from './workspace-session-fixtures.js'
+
+const ENDED = { status: 'completed', endedAt: '2026-09-01T00:00:00.000Z' } as const
+
+it.layer(TestLayer)('WorkspaceManager list', (suite) => {
+  suite.effect(
+    'lists the workspaces of a project in session order, flagging a missing directory',
+    () =>
+      Effect.gen(function* listsWorkspaces() {
+        const { project } = yield* registerRepo()
+        const manager = yield* WorkspaceManager
+        const live = yield* provisionSession(project, { id: 'live', status: 'running' })
+        const gone = yield* provisionSession(project, { id: 'gone', ...ENDED })
+        yield* seedSession(project.id, { id: 'bare', status: 'created' })
+        yield* manager.destroy(gone, { force: true })
+        const shared = { projectId: project.id, baseRef: 'main' }
+        assert.deepStrictEqual(yield* manager.list(project.id), [
+          {
+            ...shared,
+            sessionId: 'gone',
+            path: gone.path,
+            branch: 'bb/gone',
+            sessionStatus: 'completed',
+            exists: false,
+          },
+          {
+            ...shared,
+            sessionId: 'live',
+            path: live.path,
+            branch: 'bb/live',
+            sessionStatus: 'running',
+            exists: true,
+          },
+        ])
+      }),
+  )
+
+  suite.effect('lists nothing for a project without workspaces', () =>
+    Effect.gen(function* listsNothing() {
+      const { project } = yield* registerRepo()
+      yield* seedSession(project.id, { id: 'unprovisioned', status: 'created' })
+      assert.deepStrictEqual(yield* (yield* WorkspaceManager).list(project.id), [])
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager list across projects', (suite) => {
+  suite.effect('lists every project when none is named', () =>
+    Effect.gen(function* listsEveryProject() {
+      const first = yield* registerRepo()
+      const second = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      yield* provisionSession(first.project, { id: 'first-live', status: 'running' })
+      yield* provisionSession(second.project, { id: 'second-live', status: 'running' })
+      const everything = yield* manager.list()
+      const ofSecond = yield* manager.list(second.project.id)
+      assert.deepStrictEqual(
+        everything.map((info) => info.sessionId),
+        ['first-live', 'second-live'],
+      )
+      assert.deepStrictEqual(
+        ofSecond.map((info) => info.sessionId),
+        ['second-live'],
+      )
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager records', (suite) => {
+  suite.effect('fails with a store error naming the session when its record is not JSON', () =>
+    Effect.gen(function* refusesTextThatIsNotJson() {
+      const { project } = yield* registerRepo()
+      yield* seedSession(project.id, { id: 'not-json', status: 'running', workspace: 'not json' })
+      const error = yield* Effect.flip((yield* WorkspaceManager).list(project.id))
+      assert.instanceOf(error, StoreError)
+      assert.include(String(error.cause), 'not-json')
+    }),
+  )
+
+  suite.effect('fails with a store error naming the session when its record is not a handle', () =>
+    Effect.gen(function* refusesWrongShape() {
+      const { project } = yield* registerRepo()
+      yield* seedSession(project.id, {
+        id: 'wrong-shape',
+        status: 'running',
+        workspace: '{"id":1}',
+      })
+      const error = yield* Effect.flip((yield* WorkspaceManager).list(project.id))
+      assert.instanceOf(error, StoreError)
+      assert.include(String(error.cause), 'wrong-shape')
+    }),
+  )
+
+  suite.effect('prunes nothing while a record cannot be read', () =>
+    Effect.gen(function* prunesNothingFromCorruptStore() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const clean = yield* provisionSession(project, { id: 'clean', ...ENDED })
+      yield* seedSession(project.id, { id: 'corrupt', ...ENDED, workspace: '[]' })
+      yield* TestClock.setTime(Date.UTC(2026, 9, 3))
+      const error = yield* Effect.flip(manager.prune(project.id))
+      assert.instanceOf(error, StoreError)
+      assert.isTrue(existsSync(clean.path))
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager store', (suite) => {
+  suite.effect('fails with a store error when the store cannot answer', () =>
+    Effect.gen(function* failsWithoutStore() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      yield* (yield* SqlClient.SqlClient)`DROP TABLE sessions`
+      const listing = yield* Effect.flip(manager.list(project.id))
+      const pruning = yield* Effect.flip(manager.prune(project.id))
+      assert.deepStrictEqual(
+        [listing, pruning].map((error) => error instanceof StoreError),
+        [true, true],
+      )
+    }),
+  )
+})
+```
+`packages/kernel/src/workspace/workspace-prune.test.ts`:
+```ts
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { TestClock } from 'effect/testing'
+import { git } from '../testing/temp-repo.js'
+import { TestLayer } from './workspace-manager-fixtures.js'
+import { WorkspaceManager, type PruneReport } from './workspace-manager.js'
+import {
+  commitUnmerged,
+  provisionSession,
+  registerRepo,
+  seedSession,
+} from './workspace-session-fixtures.js'
+
+// The clock of a test starts at the epoch; the sessions below ended days or weeks before this day
+const TODAY = Date.UTC(2026, 9, 3)
+const ENDED = { status: 'completed', endedAt: '2026-09-01T00:00:00.000Z' } as const
+
+interface Summary {
+  readonly removed: readonly string[]
+  readonly retained: Readonly<Record<string, string>>
+}
+
+// Names stand for the paths, so the expectations do not depend on the temporary directories
+const summarize = (report: PruneReport): Summary => ({
+  removed: report.removed.map((removed) => path.basename(removed)),
+  retained: Object.fromEntries(
+    report.retained.map((entry) => [path.basename(entry.path), entry.reason]),
+  ),
+})
+
+it.layer(TestLayer)('WorkspaceManager prune', (suite) => {
+  suite.effect('prunes only terminal, pushed-or-merged, old worktrees and explains the rest', () =>
+    Effect.gen(function* prunesOldWorkspaces() {
+      const { project } = yield* registerRepo()
+      yield* provisionSession(project, { id: 'old-clean', ...ENDED })
+      const ahead = yield* provisionSession(project, { id: 'old-ahead', ...ENDED })
+      const yesterday = { status: 'completed', endedAt: '2026-10-02T00:00:00.000Z' }
+      yield* provisionSession(project, { id: 'fresh', ...yesterday })
+      yield* provisionSession(project, { id: 'live', status: 'running' })
+      commitUnmerged(ahead)
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      assert.deepStrictEqual(summarize(report), {
+        removed: ['old-clean'],
+        retained: {
+          fresh: 'younger than 7 days',
+          live: 'session is running',
+          'old-ahead': 'commits not merged or pushed',
+        },
+      })
+    }),
+  )
+
+  suite.effect('removes the worktree it reports and keeps the others on disk', () =>
+    Effect.gen(function* removesReportedWorktree() {
+      const { project } = yield* registerRepo()
+      const clean = yield* provisionSession(project, { id: 'gone-clean', ...ENDED })
+      const draft = yield* provisionSession(project, { id: 'kept-draft', ...ENDED })
+      writeFileSync(path.join(draft.path, 'draft.txt'), 'x')
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      assert.deepStrictEqual(report.removed, [clean.path])
+      assert.deepStrictEqual(report.retained, [{ path: draft.path, reason: 'uncommitted changes' }])
+      assert.deepStrictEqual([existsSync(clean.path), existsSync(draft.path)], [false, true])
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune explanations', (suite) => {
+  suite.effect('retains a worktree whose base ref no longer resolves as status unavailable', () =>
+    Effect.gen(function* retainsWithoutStatus() {
+      const { repo, project } = yield* registerRepo()
+      git(repo, 'branch', 'topic')
+      const handle = yield* provisionSession(
+        project,
+        { id: 'orphan', ...ENDED },
+        { baseBranch: 'topic' },
+      )
+      git(repo, 'branch', '-D', 'topic')
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      assert.deepStrictEqual(report.removed, [])
+      assert.deepStrictEqual(report.retained, [{ path: handle.path, reason: 'status unavailable' }])
+    }),
+  )
+
+  suite.effect('retains the worktree of a session the manager has locked', () =>
+    Effect.gen(function* retainsLockedSession() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const held = yield* provisionSession(project, { id: 'held', ...ENDED })
+      yield* manager.lock('held')
+      yield* TestClock.setTime(TODAY)
+      const report = yield* manager.prune(project.id)
+      const reason = 'session held is running'
+      assert.deepStrictEqual(report, { removed: [], retained: [{ path: held.path, reason }] })
+    }),
+  )
+
+  suite.effect('retains a worktree that git has locked', () =>
+    Effect.gen(function* retainsPinnedWorktree() {
+      const { repo, project } = yield* registerRepo()
+      const pinned = yield* provisionSession(project, { id: 'pinned', ...ENDED })
+      git(repo, 'worktree', 'lock', pinned.path)
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      const { removed, retained } = summarize(report)
+      assert.deepStrictEqual(removed, [])
+      assert.match(retained['pinned'] ?? '', /locked/u)
+      assert.isTrue(existsSync(pinned.path))
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune retention', (suite) => {
+  suite.effect(
+    'keeps a worktree until the retention of the project has passed, to the second',
+    () =>
+      Effect.gen(function* keepsUntilRetentionEnds() {
+        const { project } = yield* registerRepo()
+        const due = { status: 'completed', endedAt: '2026-09-26T00:00:00.000Z' }
+        const almost = { status: 'completed', endedAt: '2026-09-26T00:00:01.000Z' }
+        yield* provisionSession(project, { id: 'due', ...due })
+        yield* provisionSession(project, { id: 'almost', ...almost })
+        yield* TestClock.setTime(TODAY)
+        const report = yield* (yield* WorkspaceManager).prune(project.id)
+        const expected = { removed: ['due'], retained: { almost: 'younger than 7 days' } }
+        assert.deepStrictEqual(summarize(report), expected)
+      }),
+  )
+
+  suite.effect('takes the retention from the workspace section of the project configuration', () =>
+    Effect.gen(function* honoursRetainDays() {
+      const { project } = yield* registerRepo({ retainDays: 60 })
+      yield* provisionSession(project, { id: 'month-old', ...ENDED })
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      const expected = { removed: [], retained: { 'month-old': 'younger than 60 days' } }
+      assert.deepStrictEqual(summarize(report), expected)
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune statuses', (suite) => {
+  suite.effect('treats completed, stopped and errored sessions as over, and no other', () =>
+    Effect.gen(function* prunesTerminalSessions() {
+      const { project } = yield* registerRepo()
+      for (const status of ['completed', 'stopped', 'errored', 'paused_usage_limit']) {
+        yield* provisionSession(project, { id: status, status, endedAt: ENDED.endedAt })
+      }
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      assert.deepStrictEqual(summarize(report), {
+        removed: ['completed', 'errored', 'stopped'],
+        retained: { paused_usage_limit: 'session is paused_usage_limit' },
+      })
+    }),
+  )
+
+  suite.effect('keeps a terminal session whose end time is missing or unreadable', () =>
+    Effect.gen(function* keepsWithoutEndTime() {
+      const { project } = yield* registerRepo()
+      yield* provisionSession(project, { id: 'no-end', status: 'completed' })
+      yield* provisionSession(project, { id: 'bad-end', status: 'errored', endedAt: 'long ago' })
+      yield* TestClock.setTime(TODAY)
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      const reason = 'younger than 7 days'
+      const expected = { removed: [], retained: { 'no-end': reason, 'bad-end': reason } }
+      assert.deepStrictEqual(summarize(report), expected)
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune of worktrees that are gone', (suite) => {
+  suite.effect('says nothing of a worktree that is gone, pruned earlier or deleted by hand', () =>
+    Effect.gen(function* skipsGoneWorktrees() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const pruned = yield* provisionSession(project, { id: 'pruned', ...ENDED })
+      const deleted = yield* provisionSession(project, { id: 'deleted', ...ENDED })
+      rmSync(deleted.path, { recursive: true, force: true })
+      yield* TestClock.setTime(TODAY)
+      const first = yield* manager.prune(project.id)
+      const second = yield* manager.prune(project.id)
+      assert.deepStrictEqual(first, { removed: [pruned.path], retained: [] })
+      assert.deepStrictEqual(second, { removed: [], retained: [] })
+    }),
+  )
+
+  suite.effect('keeps listing a pruned worktree, flagged as missing', () =>
+    Effect.gen(function* listsPrunedWorktree() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const pruned = yield* provisionSession(project, { id: 'listed', ...ENDED })
+      yield* TestClock.setTime(TODAY)
+      yield* manager.prune(project.id)
+      const listed = yield* manager.list(project.id)
+      assert.deepStrictEqual(
+        listed.map((info) => [info.path, info.exists]),
+        [[pruned.path, false]],
+      )
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune scope', (suite) => {
+  suite.effect('reports nothing for a project whose sessions have no workspace', () =>
+    Effect.gen(function* prunesNothing() {
+      const { project } = yield* registerRepo()
+      yield* seedSession(project.id, { id: 'unprovisioned', ...ENDED })
+      const report = yield* (yield* WorkspaceManager).prune(project.id)
+      assert.deepStrictEqual(report, { removed: [], retained: [] })
+    }),
+  )
+
+  suite.effect('prunes the project it is asked for, and every project when it is not asked', () =>
+    Effect.gen(function* prunesWhichProjects() {
+      const first = yield* registerRepo()
+      const second = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const one = yield* provisionSession(first.project, { id: 'first-old', ...ENDED })
+      const two = yield* provisionSession(second.project, { id: 'second-old', ...ENDED })
+      yield* TestClock.setTime(TODAY)
+      yield* manager.prune(first.project.id)
+      assert.deepStrictEqual([existsSync(one.path), existsSync(two.path)], [false, true])
+      assert.include((yield* manager.prune()).removed, two.path)
+    }),
+  )
+})
+```
+`packages/kernel/src/workspace/runtimes.test.ts`:
+```ts
+import type { WorkspaceRuntime } from '@bytebureau/plugin-api'
+import { WorkspaceError as PluginWorkspaceError } from '@bytebureau/workspace-local'
+import { assert, describe, expect, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import type { WorkspaceError } from '../errors.js'
+import { runtimeFor, toWorkspaceError, type WorkspaceRuntimesShape } from './runtimes.js'
+
+const known = new Map<string, WorkspaceRuntime>()
+const empty: WorkspaceRuntimesShape = {
+  get: (id) => known.get(id),
+  list: () => [...known.values()],
+}
+
+// Equality of errors in chai looks at the name, the message and the code, and a tagged error has no message
+const fieldsOf = (error: WorkspaceError): readonly string[] => [error.code, error.reason]
+
+describe(toWorkspaceError, () => {
+  it('keeps the code and the message of an error a runtime throws', () => {
+    const thrown = new PluginWorkspaceError('dirty', 'worktree has uncommitted changes')
+    expect(fieldsOf(toWorkspaceError(thrown))).toStrictEqual([
+      'dirty',
+      'worktree has uncommitted changes',
+    ])
+  })
+
+  it('takes any other failure for a failed git run', () => {
+    const fromError = toWorkspaceError(new Error('boom'))
+    const fromText = toWorkspaceError('plain text')
+    expect(fieldsOf(fromError)).toStrictEqual(['git_failed', 'boom'])
+    expect(fieldsOf(fromText)).toStrictEqual(['git_failed', 'plain text'])
+  })
+})
+
+it.effect('fails with runtime_missing for an id no runtime has', () =>
+  Effect.gen(function* refusesUnknownRuntime() {
+    const error = yield* Effect.flip(runtimeFor(empty, 'nobody'))
+    assert.deepStrictEqual(fieldsOf(error), [
+      'runtime_missing',
+      'workspace runtime "nobody" is not available',
+    ])
+  }),
+)
+```
+`packages/kernel/src/workspace/workspace-manager-fixtures.ts` (shared fixtures):
+```ts
+import { LocalWorkspaceRuntime } from '@bytebureau/workspace-local'
+import { Layer } from 'effect'
+import { kernelLogger } from '../logging/logging.js'
+import { TestLayer as RegistryLayer } from '../projects/project-registry-fixtures.js'
+import { nodeSpawner } from '../testing/node-spawner.js'
+import { WorkspaceRuntimes } from './runtimes.js'
+import { WorkspaceManagerLive } from './workspace-manager.js'
+
+const local = new LocalWorkspaceRuntime(nodeSpawner, kernelLogger(['bb', 'test']))
+
+const runtimes = Layer.succeed(
+  WorkspaceRuntimes,
+  WorkspaceRuntimes.of({
+    get: (id) => (id === local.id ? local : undefined),
+    list: () => [local],
+  }),
+)
+
+// The manager over the real local runtime, with the project registry, the event log and an in-memory store beside it
+export const TestLayer = WorkspaceManagerLive.pipe(
+  Layer.provideMerge(runtimes),
+  Layer.provideMerge(RegistryLayer),
+)
+```
+`packages/kernel/src/workspace/workspace-session-fixtures.ts` (session rows for the tests):
+```ts
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+import type { WorkspaceHandle } from '@bytebureau/plugin-api'
+import { Effect, type Cause } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { toStoreError, WorkspaceError, type ConfigError, type StoreError } from '../errors.js'
+import { EventLog } from '../events/event-log.js'
+import { ProjectRegistry, type Project } from '../projects/project-registry.js'
+import { createTempRepo, git } from '../testing/temp-repo.js'
+import { WorkspaceManager } from './workspace-manager.js'
+
+export interface RegisteredRepo {
+  readonly repo: string
+  readonly project: Project
+}
+
+// A fixture repository registered as a project, its project file carrying the given workspace section
+export const registerRepo = (
+  workspace: Record<string, unknown> = {},
+): Effect.Effect<RegisteredRepo, WorkspaceError | ConfigError | StoreError, ProjectRegistry> =>
+  Effect.gen(function* registersRepo() {
+    const repo = createTempRepo()
+    const config = { version: 1, project: { name: 'fixture' }, workspace, employees: {} }
+    writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify(config))
+    const registry = yield* ProjectRegistry
+    return { repo, project: yield* registry.register(repo) }
+  })
+
+export interface SessionSeed {
+  readonly id: string
+  readonly status: string
+  readonly endedAt?: string | undefined
+  readonly workspace?: string | undefined
+}
+
+// A session row; without a workspace record it carries the empty one a new session starts with
+export const seedSession = (
+  projectId: string,
+  seed: SessionSeed,
+): Effect.Effect<void, StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* seedsSession() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at, ended_at)
+      VALUES (${seed.id}, ${projectId}, 'fixture', '{}', 'fake', ${seed.workspace ?? '{}'}, ${seed.status}, '2026-10-02T00:00:00.000Z', ${seed.endedAt ?? null})`.pipe(
+      Effect.mapError(toStoreError),
+    )
+  })
+
+export interface ProvisionOptions {
+  readonly title?: string
+  readonly baseBranch?: string
+  readonly runtimeId?: string
+}
+
+// A session row and its workspace; the title, and so the branch, default to the id
+export const provisionSession = (
+  project: Project,
+  seed: SessionSeed,
+  options: ProvisionOptions = {},
+): Effect.Effect<
+  WorkspaceHandle,
+  WorkspaceError | StoreError,
+  SqlClient.SqlClient | WorkspaceManager
+> =>
+  Effect.gen(function* provisionsSession() {
+    yield* seedSession(project.id, seed)
+    const manager = yield* WorkspaceManager
+    return yield* manager.provision({
+      sessionId: seed.id,
+      project,
+      title: options.title ?? seed.id,
+      baseBranch: options.baseBranch ?? 'main',
+      runtimeId: options.runtimeId ?? 'local',
+    })
+  })
+
+// A commit on the session branch that nothing has merged
+export function commitUnmerged(handle: WorkspaceHandle): void {
+  writeFileSync(path.join(handle.path, 'work.txt'), 'x')
+  git(handle.path, 'add', 'work.txt')
+  git(handle.path, 'commit', '-q', '-m', 'unmerged work')
+}
+
+// The code of a workspace error, the word store for any other failure of the manager
+export const codeOf = (error: WorkspaceError | StoreError): string =>
+  error instanceof WorkspaceError ? error.code : 'store'
+
+// The workspace record of a session as the row holds it
+export const storedWorkspaceOf = (
+  sessionId: string,
+): Effect.Effect<unknown, StoreError | Cause.NoSuchElementError, SqlClient.SqlClient> =>
+  Effect.gen(function* readsWorkspace() {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<{
+      readonly workspace_json: string
+    }>`SELECT workspace_json FROM sessions WHERE id = ${sessionId}`.pipe(
+      Effect.mapError(toStoreError),
+    )
+    const row = yield* Effect.fromNullishOr(rows[0])
+    const stored: unknown = JSON.parse(row.workspace_json)
+    return stored
+  })
+
+export interface SeenEvent {
+  readonly type: string
+  readonly projectId?: string
+  readonly payload: unknown
+}
+
+// The project id is left out of an event that has none, so an expectation need not spell out a missing one
+const seen = (event: SeenEvent): SeenEvent => ({
+  type: event.type,
+  ...(event.projectId === undefined ? {} : { projectId: event.projectId }),
+  payload: event.payload,
+})
+
+// What the event log holds for a session, oldest first
+export const eventsOf = (
+  sessionId: string,
+): Effect.Effect<readonly SeenEvent[], StoreError, EventLog> =>
+  Effect.gen(function* readsEvents() {
+    const log = yield* EventLog
+    const events = yield* log.read({ sessionId }, { from: 0 })
+    return events.map((event) => seen(event))
+  })
 ```
 (`import { writeFileSync, mkdtempSync } from 'node:fs'` as one import; shown split only for readability.)
 
@@ -8641,6 +9351,8 @@ layer(TestLayer)('WorkspaceManager', (it) => {
 ```ts
 const MAX = 40
 
+// A git branch name for a session: bb/<kebab-case title>, or bb/s-<short session id> when the title has no letters or digits
+// The first replacement drops the combining diacritical marks, U+0300 to U+036F, that NFD splits off the letters
 export function branchSlug(title: string, sessionId: string): string {
   const slug = title
     .normalize('NFD')
@@ -8655,35 +9367,87 @@ export function branchSlug(title: string, sessionId: string): string {
 ```
 `packages/kernel/src/workspace/runtimes.ts`:
 ```ts
-import type { WorkspaceRuntime } from '@bytebureau/plugin-api'
-import { Context } from 'effect'
+import type {
+  WorkspaceHandle,
+  WorkspaceRuntime,
+  WorkspaceSpec,
+  WorkspaceStatus,
+} from '@bytebureau/plugin-api'
+import { Context, Effect } from 'effect'
+import { WorkspaceError } from '../errors.js'
 
 export interface WorkspaceRuntimesShape {
-  get(id: string): WorkspaceRuntime | undefined
-  list(): readonly WorkspaceRuntime[]
+  readonly get: (id: string) => WorkspaceRuntime | undefined
+  readonly list: () => readonly WorkspaceRuntime[]
 }
 
-export class WorkspaceRuntimes extends Context.Service<WorkspaceRuntimes, WorkspaceRuntimesShape>()('bb/WorkspaceRuntimes') {}
+export class WorkspaceRuntimes extends Context.Service<WorkspaceRuntimes, WorkspaceRuntimesShape>()(
+  'bb/WorkspaceRuntimes',
+) {}
+
+// The plugin's WorkspaceError carries a code; any other failure counts as a failed git run
+const hasCode = (cause: unknown): cause is Error & { readonly code: string } =>
+  cause instanceof Error && 'code' in cause && typeof cause.code === 'string'
+
+export const toWorkspaceError = (cause: unknown): WorkspaceError => {
+  if (hasCode(cause)) {
+    return new WorkspaceError({ code: cause.code, reason: cause.message })
+  }
+  const reason = cause instanceof Error ? cause.message : String(cause)
+  return new WorkspaceError({ code: 'git_failed', reason })
+}
+
+export const runtimeFor = (
+  runtimes: WorkspaceRuntimesShape,
+  id: string,
+): Effect.Effect<WorkspaceRuntime, WorkspaceError> => {
+  const runtime = runtimes.get(id)
+  if (runtime === undefined) {
+    const reason = `workspace runtime "${id}" is not available`
+    return Effect.fail(new WorkspaceError({ code: 'runtime_missing', reason }))
+  }
+  return Effect.succeed(runtime)
+}
+
+// The runtime port speaks promises and throws; the kernel speaks typed failures
+const attempt = <Value>(call: () => Promise<Value>): Effect.Effect<Value, WorkspaceError> =>
+  Effect.tryPromise({ try: call, catch: toWorkspaceError })
+
+export const provisionOn = (
+  runtime: WorkspaceRuntime,
+  spec: WorkspaceSpec,
+): Effect.Effect<WorkspaceHandle, WorkspaceError> =>
+  attempt(async () => {
+    const handle = await runtime.provision(spec)
+    return handle
+  })
+
+export const statusOn = (
+  runtime: WorkspaceRuntime,
+  handle: WorkspaceHandle,
+): Effect.Effect<WorkspaceStatus, WorkspaceError> =>
+  attempt(async () => {
+    const status = await runtime.status(handle)
+    return status
+  })
+
+export const destroyOn = (
+  runtime: WorkspaceRuntime,
+  handle: WorkspaceHandle,
+  options: { readonly force?: boolean },
+): Effect.Effect<void, WorkspaceError> =>
+  attempt(async () => {
+    await runtime.destroy(handle, options)
+  })
 ```
-`packages/kernel/src/workspace/workspace-manager.ts`:
+`packages/kernel/src/workspace/workspace-records.ts`:
 ```ts
 import { existsSync } from 'node:fs'
-import type { WorkspaceHandle, WorkspaceStatus } from '@bytebureau/plugin-api'
-import { Clock, Context, Effect, Layer } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { StoreError, WorkspaceError } from '../errors.js'
-import { EventLog } from '../events/event-log.js'
-import type { Project } from '../projects/project-registry.js'
-import { WorkspaceRuntimes } from './runtimes.js'
-import { branchSlug } from './slug.js'
+import type { WorkspaceHandle } from '@bytebureau/plugin-api'
+import { Effect, Schema } from 'effect'
+import type { SqlClient, Statement } from 'effect/sql'
+import { StoreError, toStoreError } from '../errors.js'
 
-export interface ProvisionInput {
-  readonly sessionId: string
-  readonly project: Project
-  readonly title: string
-  readonly baseBranch: string
-  readonly runtimeId: string
-}
 export interface WorkspaceInfo {
   readonly sessionId: string
   readonly projectId: string
@@ -8693,26 +9457,19 @@ export interface WorkspaceInfo {
   readonly sessionStatus: string
   readonly exists: boolean
 }
-export interface PruneReport {
-  readonly removed: readonly string[]
-  readonly retained: readonly { readonly path: string; readonly reason: string }[]
-}
-export interface WorkspaceManagerShape {
-  provision(input: ProvisionInput): Effect.Effect<WorkspaceHandle, WorkspaceError | StoreError>
-  status(handle: WorkspaceHandle): Effect.Effect<WorkspaceStatus, WorkspaceError>
-  destroy(handle: WorkspaceHandle, options?: { readonly force?: boolean }): Effect.Effect<void, WorkspaceError | StoreError>
-  lock(sessionId: string): Effect.Effect<void>
-  unlock(sessionId: string): Effect.Effect<void>
-  list(projectId?: string): Effect.Effect<readonly WorkspaceInfo[], StoreError>
-  prune(projectId?: string): Effect.Effect<PruneReport, StoreError>
+
+// A session with a provisioned workspace, and what the retention policy needs to know about it
+export interface Workspace {
+  readonly sessionId: string
+  readonly projectId: string
+  readonly sessionStatus: string
+  readonly endedAt: string | null
+  readonly retainDays: number
+  readonly handle: WorkspaceHandle
+  readonly exists: boolean
 }
 
-export class WorkspaceManager extends Context.Service<WorkspaceManager, WorkspaceManagerShape>()('bb/WorkspaceManager') {}
-
-const TERMINAL = new Set(['completed', 'stopped', 'errored'])
-const DAY_MS = 86_400_000
-
-interface SessionRow {
+interface Row {
   readonly id: string
   readonly project_id: string
   readonly status: string
@@ -8721,132 +9478,416 @@ interface SessionRow {
   readonly retain_days: number
 }
 
-const asWorkspaceError = (cause: unknown): WorkspaceError =>
-  cause instanceof Error && 'code' in cause
-    ? new WorkspaceError({ code: String((cause as { code: unknown }).code), reason: cause.message })
-    : new WorkspaceError({ code: 'git_failed', reason: cause instanceof Error ? cause.message : String(cause) })
+// The handle a runtime returned, as the session row keeps it
+const StoredHandle = Schema.Struct({
+  id: Schema.String,
+  runtimeId: Schema.String,
+  path: Schema.String,
+  branch: Schema.String,
+  baseRef: Schema.String,
+})
 
-const make = Effect.gen(function* () {
+const decodeHandle = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredHandle))
+
+const unreadable =
+  (sessionId: string): ((cause: unknown) => StoreError) =>
+  (cause) =>
+    new StoreError({
+      cause: new Error(`the workspace record of session ${sessionId} is unreadable`, { cause }),
+    })
+
+// A record that does not fit the handle is a failure of the store, not a defect
+const toWorkspace = (row: Row): Effect.Effect<Workspace, StoreError> =>
+  decodeHandle(row.workspace_json).pipe(
+    Effect.map((handle) => ({
+      sessionId: row.id,
+      projectId: row.project_id,
+      sessionStatus: row.status,
+      endedAt: row.ended_at,
+      retainDays: row.retain_days,
+      handle,
+      exists: existsSync(handle.path),
+    })),
+    Effect.mapError(unreadable(row.id)),
+  )
+
+// A session without a workspace carries '{}'; a named project narrows the query itself
+const conditions = (
+  sql: SqlClient.SqlClient,
+  projectId: string | undefined,
+): readonly Statement.Fragment[] => [
+  sql`sessions.workspace_json != '{}'`,
+  ...(projectId === undefined ? [] : [sql`sessions.project_id = ${projectId}`]),
+]
+
+// The merged project snapshot normally holds retainDays; without it a worktree stays seven days
+const selectRows = (
+  sql: SqlClient.SqlClient,
+  projectId: string | undefined,
+): Effect.Effect<readonly Row[], StoreError> =>
+  sql<Row>`
+    SELECT sessions.id, sessions.project_id, sessions.status, sessions.ended_at, sessions.workspace_json,
+      COALESCE(json_extract(projects.config_json, '$.workspace.retainDays'), 7) AS retain_days
+    FROM sessions JOIN projects ON projects.id = sessions.project_id
+    WHERE ${sql.and(conditions(sql, projectId))}
+    ORDER BY sessions.created_at, sessions.id`.pipe(Effect.mapError(toStoreError))
+
+export const loadWorkspaces = (
+  sql: SqlClient.SqlClient,
+  projectId: string | undefined,
+): Effect.Effect<readonly Workspace[], StoreError> =>
+  selectRows(sql, projectId).pipe(
+    Effect.flatMap((rows) => Effect.all(rows.map((row) => toWorkspace(row)))),
+  )
+
+export const saveHandle = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+  handle: WorkspaceHandle,
+): Effect.Effect<void, StoreError> =>
+  sql`UPDATE sessions SET workspace_json = ${JSON.stringify(handle)} WHERE id = ${sessionId}`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
+  )
+
+const infoOf = ({ handle, ...workspace }: Workspace): WorkspaceInfo => ({
+  sessionId: workspace.sessionId,
+  projectId: workspace.projectId,
+  path: handle.path,
+  branch: handle.branch,
+  baseRef: handle.baseRef,
+  sessionStatus: workspace.sessionStatus,
+  exists: workspace.exists,
+})
+
+export const listWorkspaces = (
+  sql: SqlClient.SqlClient,
+  projectId: string | undefined,
+): Effect.Effect<readonly WorkspaceInfo[], StoreError> =>
+  loadWorkspaces(sql, projectId).pipe(
+    Effect.map((workspaces) => workspaces.map((workspace) => infoOf(workspace))),
+  )
+```
+`packages/kernel/src/workspace/workspace-provision.ts`:
+```ts
+import type { WorkspaceHandle, WorkspaceSpec } from '@bytebureau/plugin-api'
+import { Effect } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { StoreError, WorkspaceError } from '../errors.js'
+import type { EventLogShape } from '../events/event-log.js'
+import { kernelLogger } from '../logging/logging.js'
+import type { Project } from '../projects/project-registry.js'
+import { provisionOn, runtimeFor, type WorkspaceRuntimesShape } from './runtimes.js'
+import { branchSlug } from './slug.js'
+import { saveHandle } from './workspace-records.js'
+
+export interface ProvisionInput {
+  readonly sessionId: string
+  readonly project: Project
+  readonly title: string
+  readonly baseBranch: string
+  readonly runtimeId: string
+}
+
+const workspaceLogger = kernelLogger(['bb', 'workspace'])
+
+// Both the workspace section and its list are optional in a project's configuration
+const copyIgnoredOf = ({ config }: Project): readonly string[] => {
+  const { workspace } = config
+  return workspace === undefined ? [] : (workspace.copyIgnored ?? [])
+}
+
+const specOf = (input: ProvisionInput): WorkspaceSpec => ({
+  sessionId: input.sessionId,
+  projectPath: input.project.path,
+  baseBranch: input.baseBranch,
+  branch: branchSlug(input.title, input.sessionId),
+  copyIgnored: copyIgnoredOf(input.project),
+  logger: workspaceLogger,
+})
+
+const announce = (
+  log: EventLogShape,
+  input: ProvisionInput,
+  handle: WorkspaceHandle,
+): Effect.Effect<void, StoreError> =>
+  Effect.asVoid(
+    log.publish({
+      type: 'workspace.provisioned',
+      sessionId: input.sessionId,
+      projectId: input.project.id,
+      payload: {
+        path: handle.path,
+        branch: handle.branch,
+        baseRef: handle.baseRef,
+        runtimeId: handle.runtimeId,
+      },
+    }),
+  )
+
+// The runtime makes the worktree, the session row keeps the handle, the event log announces it
+export const makeProvision =
+  (
+    sql: SqlClient.SqlClient,
+    log: EventLogShape,
+    runtimes: WorkspaceRuntimesShape,
+  ): ((input: ProvisionInput) => Effect.Effect<WorkspaceHandle, WorkspaceError | StoreError>) =>
+  (input) =>
+    Effect.gen(function* provisionWorkspace() {
+      const runtime = yield* runtimeFor(runtimes, input.runtimeId)
+      const handle = yield* provisionOn(runtime, specOf(input))
+      yield* saveHandle(sql, input.sessionId, handle)
+      yield* announce(log, input, handle)
+      return handle
+    })
+```
+`packages/kernel/src/workspace/workspace-prune.ts`:
+```ts
+import type { WorkspaceHandle, WorkspaceStatus } from '@bytebureau/plugin-api'
+import { Clock, Effect } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { StoreError, WorkspaceError } from '../errors.js'
+import { loadWorkspaces, type Workspace } from './workspace-records.js'
+
+export interface PruneReport {
+  readonly removed: readonly string[]
+  readonly retained: readonly { readonly path: string; readonly reason: string }[]
+}
+
+// What pruning asks of the manager it belongs to
+interface Actions {
+  readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
+  readonly destroy: (
+    handle: WorkspaceHandle,
+    options: { readonly force: boolean },
+  ) => Effect.Effect<void, WorkspaceError | StoreError>
+}
+
+type Verdict =
+  | { readonly outcome: 'removed'; readonly path: string }
+  | { readonly outcome: 'retained'; readonly path: string; readonly reason: string }
+
+const TERMINAL = new Set(['completed', 'stopped', 'errored'])
+const DAY_MS = 86_400_000
+
+const removed = (path: string): Verdict => ({ outcome: 'removed', path })
+const retained = (path: string, reason: string): Verdict => ({ outcome: 'retained', path, reason })
+
+// Reasons are sentences: a user reads them in the report of `workspaces prune`
+
+// A session without a readable end time has not been over for any length of time
+const endedLongAgo = (workspace: Workspace, now: number): boolean =>
+  workspace.endedAt !== null && now - Date.parse(workspace.endedAt) >= workspace.retainDays * DAY_MS
+
+// What the session record says: the session may still continue, or it ended too recently
+const staleReason = (workspace: Workspace, now: number): string | undefined => {
+  if (!TERMINAL.has(workspace.sessionStatus)) {
+    return `session is ${workspace.sessionStatus}`
+  }
+  return endedLongAgo(workspace, now) ? undefined : `younger than ${workspace.retainDays} days`
+}
+
+// What git says: work that is saved nowhere else
+const unsavedReason = (current: WorkspaceStatus): string | undefined => {
+  if (current.dirty) {
+    return 'uncommitted changes'
+  }
+  return current.ahead > 0 ? 'commits not merged or pushed' : undefined
+}
+
+// A worktree the runtime refuses to remove stays, with the runtime's reason
+const removeOrKeep = (
+  actions: Actions,
+  handle: WorkspaceHandle,
+): Effect.Effect<Verdict, StoreError> =>
+  actions.destroy(handle, { force: false }).pipe(
+    Effect.as(removed(handle.path)),
+    Effect.catchTag('WorkspaceError', (failure) =>
+      Effect.succeed(retained(handle.path, failure.reason)),
+    ),
+  )
+
+const pruneOne = (
+  actions: Actions,
+  workspace: Workspace,
+  now: number,
+): Effect.Effect<Verdict, StoreError> =>
+  Effect.gen(function* pruneWorkspace() {
+    const { handle } = workspace
+    const stale = staleReason(workspace, now)
+    if (stale !== undefined) {
+      return retained(handle.path, stale)
+    }
+    const unsaved = yield* actions.status(handle).pipe(
+      Effect.match({
+        onFailure: () => 'status unavailable',
+        onSuccess: (current) => unsavedReason(current),
+      }),
+    )
+    if (unsaved !== undefined) {
+      return retained(handle.path, unsaved)
+    }
+    return yield* removeOrKeep(actions, handle)
+  })
+
+const reportOf = (verdicts: readonly Verdict[]): PruneReport => ({
+  removed: verdicts.flatMap((verdict) => (verdict.outcome === 'removed' ? [verdict.path] : [])),
+  retained: verdicts.flatMap((verdict) =>
+    verdict.outcome === 'retained' ? [{ path: verdict.path, reason: verdict.reason }] : [],
+  ),
+})
+
+// A worktree that is already gone has nothing left to prune, and no line in the report
+const present = (workspaces: readonly Workspace[]): readonly Workspace[] =>
+  workspaces.filter((workspace) => workspace.exists)
+
+// One worktree at a time, so a prune never runs several git commands at once
+export const makePrune =
+  (
+    sql: SqlClient.SqlClient,
+    actions: Actions,
+  ): ((projectId?: string) => Effect.Effect<PruneReport, StoreError>) =>
+  (projectId) =>
+    Effect.gen(function* pruneWorkspaces() {
+      const now = yield* Clock.currentTimeMillis
+      const workspaces = yield* loadWorkspaces(sql, projectId)
+      const verdicts = yield* Effect.forEach(
+        present(workspaces),
+        (workspace) => pruneOne(actions, workspace, now),
+        { concurrency: 1 },
+      )
+      return reportOf(verdicts)
+    })
+```
+`packages/kernel/src/workspace/workspace-manager.ts`:
+```ts
+import type { WorkspaceHandle, WorkspaceRuntime, WorkspaceStatus } from '@bytebureau/plugin-api'
+import { Context, Effect, Layer } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { WorkspaceError, type StoreError } from '../errors.js'
+import { EventLog, type EventLogShape } from '../events/event-log.js'
+import {
+  destroyOn,
+  runtimeFor,
+  statusOn,
+  WorkspaceRuntimes,
+  type WorkspaceRuntimesShape,
+} from './runtimes.js'
+import { makeProvision, type ProvisionInput } from './workspace-provision.js'
+import { makePrune, type PruneReport } from './workspace-prune.js'
+import { listWorkspaces, type WorkspaceInfo } from './workspace-records.js'
+
+export type { ProvisionInput } from './workspace-provision.js'
+export type { PruneReport } from './workspace-prune.js'
+export type { WorkspaceInfo } from './workspace-records.js'
+
+export interface WorkspaceManagerShape {
+  readonly provision: (
+    input: ProvisionInput,
+  ) => Effect.Effect<WorkspaceHandle, WorkspaceError | StoreError>
+  readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
+  readonly destroy: (
+    handle: WorkspaceHandle,
+    options?: { readonly force?: boolean },
+  ) => Effect.Effect<void, WorkspaceError | StoreError>
+  readonly lock: (sessionId: string) => Effect.Effect<void>
+  readonly unlock: (sessionId: string) => Effect.Effect<void>
+  readonly list: (projectId?: string) => Effect.Effect<readonly WorkspaceInfo[], StoreError>
+  readonly prune: (projectId?: string) => Effect.Effect<PruneReport, StoreError>
+}
+
+export class WorkspaceManager extends Context.Service<WorkspaceManager, WorkspaceManagerShape>()(
+  'bb/WorkspaceManager',
+) {}
+
+const makeStatus =
+  (runtimes: WorkspaceRuntimesShape): WorkspaceManagerShape['status'] =>
+  (handle) =>
+    runtimeFor(runtimes, handle.runtimeId).pipe(
+      Effect.flatMap((runtime) => statusOn(runtime, handle)),
+    )
+
+// A running session keeps its worktree, whatever force says
+const refuseLocked = (
+  locks: ReadonlySet<string>,
+  handle: WorkspaceHandle,
+): Effect.Effect<void, WorkspaceError> =>
+  locks.has(handle.id)
+    ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${handle.id} is running` }))
+    : Effect.void
+
+// Without force a worktree goes only when its status says that nothing in it is lost
+const keepReason = (
+  runtime: WorkspaceRuntime,
+  handle: WorkspaceHandle,
+): Effect.Effect<string | undefined> =>
+  statusOn(runtime, handle).pipe(
+    Effect.match({
+      onFailure: () => 'status unavailable',
+      onSuccess: (current) => (current.dirty ? 'uncommitted changes' : undefined),
+    }),
+  )
+
+// A kept worktree is announced with its reason; force skips the status and the runtime still refuses a locked worktree
+const makeDestroy =
+  (
+    log: EventLogShape,
+    runtimes: WorkspaceRuntimesShape,
+    locks: ReadonlySet<string>,
+  ): WorkspaceManagerShape['destroy'] =>
+  (handle, options = {}) =>
+    Effect.gen(function* destroyWorkspace() {
+      yield* refuseLocked(locks, handle)
+      const runtime = yield* runtimeFor(runtimes, handle.runtimeId)
+      const reason = options.force === true ? undefined : yield* keepReason(runtime, handle)
+      if (reason !== undefined) {
+        yield* log.publish({
+          type: 'workspace.retained',
+          sessionId: handle.id,
+          payload: { path: handle.path, reason },
+        })
+        return
+      }
+      yield* destroyOn(runtime, handle, options)
+      yield* log.publish({
+        type: 'workspace.destroyed',
+        sessionId: handle.id,
+        payload: { path: handle.path },
+      })
+    })
+
+const make = Effect.gen(function* makeWorkspaceManager() {
   const sql = yield* SqlClient.SqlClient
   const log = yield* EventLog
   const runtimes = yield* WorkspaceRuntimes
+  // Sessions that are running; the set lives as long as the layer
   const locks = new Set<string>()
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> =>
-    Effect.mapError(effect, (cause) => new StoreError({ cause }))
-
-  const runtimeFor = (id: string) => {
-    const runtime = runtimes.get(id)
-    return runtime === undefined
-      ? Effect.fail(new WorkspaceError({ code: 'runtime_missing', reason: `workspace runtime "${id}" is not available` }))
-      : Effect.succeed(runtime)
-  }
-
-  const provision: WorkspaceManagerShape['provision'] = (input) =>
-    Effect.gen(function* () {
-      const runtime = yield* runtimeFor(input.runtimeId)
-      const handle = yield* Effect.tryPromise({
-        try: () =>
-          runtime.provision({
-            sessionId: input.sessionId,
-            projectPath: input.project.path,
-            baseBranch: input.baseBranch,
-            branch: branchSlug(input.title, input.sessionId),
-            copyIgnored: input.project.config.workspace?.copyIgnored ?? [],
-            logger: { category: ['bb', 'workspace'], debug() {}, info() {}, warn() {}, error() {}, child() { return this } },
-          }),
-        catch: asWorkspaceError,
-      })
-      yield* wrap(sql`UPDATE sessions SET workspace_json = ${JSON.stringify(handle)} WHERE id = ${input.sessionId}`)
-      yield* log.publish({ type: 'workspace.provisioned', sessionId: input.sessionId, projectId: input.project.id, payload: { path: handle.path, branch: handle.branch, baseRef: handle.baseRef, runtimeId: handle.runtimeId } })
-      return handle
-    })
-
-  const status: WorkspaceManagerShape['status'] = (handle) =>
-    Effect.flatMap(runtimeFor(handle.runtimeId), (runtime) => Effect.tryPromise({ try: () => runtime.status(handle), catch: asWorkspaceError }))
-
-  const destroy: WorkspaceManagerShape['destroy'] = (handle, options = {}) =>
-    Effect.gen(function* () {
-      if (locks.has(handle.id)) {
-        return yield* new WorkspaceError({ code: 'locked', reason: `session ${handle.id} is running` })
-      }
-      const runtime = yield* runtimeFor(handle.runtimeId)
-      const current = yield* status(handle)
-      if (current.dirty && options.force !== true) {
-        yield* log.publish({ type: 'workspace.retained', sessionId: handle.id, payload: { path: handle.path, reason: 'uncommitted changes' } })
-        return
-      }
-      yield* Effect.tryPromise({ try: () => runtime.destroy(handle, options), catch: asWorkspaceError })
-      yield* log.publish({ type: 'workspace.destroyed', sessionId: handle.id, payload: { path: handle.path } })
-    })
-
-  const rows = (projectId: string | undefined) =>
-    wrap(sql<SessionRow>`SELECT s.id, s.project_id, s.status, s.ended_at, s.workspace_json,
-        COALESCE(json_extract(p.config_json, '$.workspace.retainDays'), 7) AS retain_days
-      FROM sessions s JOIN projects p ON p.id = s.project_id
-      WHERE (${projectId ?? null} IS NULL OR s.project_id = ${projectId ?? null}) AND s.workspace_json != '{}'`)
-
-  const toHandle = (row: SessionRow): WorkspaceHandle => JSON.parse(row.workspace_json) as WorkspaceHandle
-
-  const list: WorkspaceManagerShape['list'] = (projectId) =>
-    Effect.map(rows(projectId), (sessions) =>
-      sessions.map((row) => {
-        const handle = toHandle(row)
-        return { sessionId: row.id, projectId: row.project_id, path: handle.path, branch: handle.branch, baseRef: handle.baseRef, sessionStatus: row.status, exists: existsSync(handle.path) }
-      }),
-    )
-
-  // Keep reasons explicit: a user reads them in `workspaces prune`
-  const pruneOne = (row: SessionRow, now: number): Effect.Effect<{ removed: string | null; reason: string | null }> =>
-    Effect.gen(function* () {
-      const handle = toHandle(row)
-      if (!TERMINAL.has(row.status)) {
-        return { removed: null, reason: `session is ${row.status}` }
-      }
-      const age = row.ended_at === null ? 0 : now - Date.parse(row.ended_at)
-      if (age < row.retain_days * DAY_MS) {
-        return { removed: null, reason: `younger than ${row.retain_days} days` }
-      }
-      const current = yield* status(handle).pipe(Effect.orElseSucceed(() => undefined))
-      if (current === undefined) {
-        return { removed: null, reason: 'status unavailable' }
-      }
-      if (current.ahead > 0 || current.dirty) {
-        return { removed: null, reason: current.dirty ? 'uncommitted changes' : 'commits not merged or pushed' }
-      }
-      yield* destroy(handle, { force: false }).pipe(Effect.ignore)
-      return { removed: handle.path, reason: null }
-    })
-
-  const prune: WorkspaceManagerShape['prune'] = (projectId) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis
-      const removed: string[] = []
-      const retained: { path: string; reason: string }[] = []
-      for (const row of yield* rows(projectId)) {
-        const outcome = yield* pruneOne(row, now)
-        if (outcome.removed !== null) {
-          removed.push(outcome.removed)
-        } else {
-          retained.push({ path: toHandle(row).path, reason: outcome.reason ?? 'kept' })
-        }
-      }
-      return { removed, retained }
-    })
-
+  const status = makeStatus(runtimes)
+  const destroy = makeDestroy(log, runtimes, locks)
   return WorkspaceManager.of({
-    provision,
+    provision: makeProvision(sql, log, runtimes),
     status,
     destroy,
-    lock: (sessionId) => Effect.sync(() => { locks.add(sessionId) }),
-    unlock: (sessionId) => Effect.sync(() => { locks.delete(sessionId) }),
-    list,
-    prune,
+    lock: (sessionId) =>
+      Effect.sync(() => {
+        locks.add(sessionId)
+      }),
+    unlock: (sessionId) =>
+      Effect.sync(() => {
+        locks.delete(sessionId)
+      }),
+    list: (projectId) => listWorkspaces(sql, projectId),
+    prune: makePrune(sql, { status, destroy }),
   })
 })
 
-export const WorkspaceManagerLive: Layer.Layer<WorkspaceManager, never, SqlClient.SqlClient | EventLog | WorkspaceRuntimes> = Layer.effect(WorkspaceManager, make)
+export const WorkspaceManagerLive: Layer.Layer<
+  WorkspaceManager,
+  never,
+  SqlClient.SqlClient | EventLog | WorkspaceRuntimes
+> = Layer.effect(WorkspaceManager, make)
 ```
-Replace the inline no-op logger in `provision` with `kernelLogger(['bb', 'workspace'])` from Task 4 (shown inline only to keep the snippet self-contained; `kernelLogger` returns the plugin-api `Logger`). `WorkspaceError.code` is typed `string` in the kernel so plugin codes pass through. `packages/kernel/src/testing/node-spawner.ts` is the same helper as Task 9's.
+`provision` passes `kernelLogger(['bb', 'workspace'])` to the runtime; `WorkspaceError.code` is typed `string` in the kernel so plugin codes pass through (a type guard, not a cast, reads them); `packages/kernel/src/testing/node-spawner.ts` is the Task 9 helper verbatim.
 
 Add to `index.ts`: `export { WorkspaceManager, WorkspaceManagerLive, type ProvisionInput, type WorkspaceInfo, type PruneReport, type WorkspaceManagerShape } from './workspace/workspace-manager.js'`, `export { WorkspaceRuntimes, type WorkspaceRuntimesShape } from './workspace/runtimes.js'`, `export { branchSlug } from './workspace/slug.js'`.
 
