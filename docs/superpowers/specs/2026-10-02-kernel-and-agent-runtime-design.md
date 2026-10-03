@@ -237,7 +237,7 @@ Generated from the OpenAPI document; `subscribeEvents({ since, filter })` return
 ## 13. Security
 
 - Loopback-only server with a bearer token; LAN exposure opt-in; token file mode 0600; no secrets in events, logs, API responses or diagnostic bundles.
-- Child processes receive an explicit environment allowlist (`PATH`, `HOME`, `LANG`/`LC_*`, `TMPDIR`, `TERM`, profile variables, `TRACEPARENT`, `BYTEBUREAU_*`, plus `providers.<id>.passEnv` entries) — never the full daemon environment.
+- Child processes receive an explicit environment allowlist (`PATH`, `HOME`, `LANG`/`LC_*`, `TMPDIR`, `TERM`, `SSH_AUTH_SOCK` (amended in Phase A: git, ssh and Claude Code need the agent socket for SSH remotes), profile variables, `TRACEPARENT`, `BYTEBUREAU_*`, plus `providers.<id>.passEnv` entries) — never the full daemon environment.
 - ACP file-system and terminal methods are confined to the workspace path; symlink escapes are resolved and rejected.
 - Plugins are trusted in-process code in SP1; the manifest's `capabilities` are displayed in `bytebureau plugins ls` and recorded; third-party plugin installation prints the declared capabilities and asks for confirmation.
 - `yolo` permission mode is refused on `isolation: 'none'` runtimes.

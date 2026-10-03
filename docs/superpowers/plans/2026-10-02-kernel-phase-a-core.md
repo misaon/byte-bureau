@@ -22,7 +22,7 @@
 - Worktrees: `<project>/.bytebureau/worktrees/<sessionId>` on branch `bb/<slug>` (`slug` = kebab-case session title or `s-<short id>`, collisions get `-2`, `-3`, …) from `origin/<branch>` when the remote exists, otherwise the local branch; fetch throttled to once per 60 s per project; never operate on the main checkout; refuse to provision when the project path is itself a ByteBureau worktree.
 - Ask contract: exactly one `recommended: true` option per question; `recommendationSource ∈ agent | policy | none`; `supervised` employees wait indefinitely; `autonomous` employees auto-proceed with the recommended option after `askTimeout` (default `30m`) for `question` asks only; permission asks never auto-allow — on timeout the kernel answers `deny` with "nobody available to approve; do not retry"; answers record `answered_via`.
 - `yolo` permission mode is refused on a runtime with `isolation: 'none'` (the message names the runtime and says containers enable it later).
-- Child processes get an explicit environment allowlist (`PATH`, `HOME`, `LANG`/`LC_*`, `TMPDIR`, `TERM`, profile variables, `TRACEPARENT`, `BYTEBUREAU_*`, `providers.<id>.passEnv`), never the full daemon environment; graceful termination SIGINT → SIGTERM after 5 s → SIGKILL after 10 s.
+- Child processes get an explicit environment allowlist (`PATH`, `HOME`, `LANG`/`LC_*`, `TMPDIR`, `TERM`, `SSH_AUTH_SOCK`, profile variables, `TRACEPARENT`, `BYTEBUREAU_*`, `providers.<id>.passEnv`), never the full daemon environment; graceful termination SIGINT → SIGTERM after 5 s → SIGKILL after 10 s.
 - Config precedence: CLI flags > `BYTEBUREAU_*` environment > `<project>/bytebureau.local.json` > `<project>/bytebureau.json` (or `.jsonc`) > `~/.bytebureau/config.json` > defaults; unknown keys are errors; validation errors name the file and the JSON pointer.
 - CLI: `run` exits 0 on completion, 3 when stopped, 4 on provider error; non-TTY or `--json` output is NDJSON; the recommended option is preselected in interactive asks and chosen by `--yes`.
 - Logging categories `bb.core`, `bb.config`, `bb.store`, `bb.events`, `bb.plugin.<name>`, `bb.agent.<provider>`, `bb.workspace`, `bb.supervisor`, `bb.cli`; no secrets in events, logs or output (redaction of the listed field names and patterns, canary tests).
@@ -6610,12 +6610,14 @@ git commit -m "feat(kernel): supervise child processes with an env allowlist, li
 ### Task 9: `plugins/workspace-local` — git worktree runtime (first-party plugin)
 
 **Files:**
-- Create: `plugins/workspace-local/package.json`, `plugins/workspace-local/tsconfig.json`, `plugins/workspace-local/vitest.config.ts`, `plugins/workspace-local/src/plugin.ts`, `plugins/workspace-local/src/local-runtime.ts`, `plugins/workspace-local/src/git.ts`, `plugins/workspace-local/src/status-parser.ts`, `plugins/workspace-local/src/testing/node-spawner.ts`, `plugins/workspace-local/src/testing/temp-repo.ts`, `plugins/workspace-local/src/local-runtime.test.ts`, `plugins/workspace-local/src/status-parser.test.ts`
-- Modify: `vitest.config.ts` (project), `knip.ts` (workspace), `commitlint.config.ts` (nothing — `plugins/*` directories are already scope names)
+- Create: `plugins/workspace-local/package.json`, `plugins/workspace-local/tsconfig.json`, `plugins/workspace-local/vitest.config.ts`, `plugins/workspace-local/src/plugin.ts`, `plugins/workspace-local/src/errors.ts`, `plugins/workspace-local/src/local-runtime.ts`, `plugins/workspace-local/src/worktree-files.ts`, `plugins/workspace-local/src/keyed-queue.ts`, `plugins/workspace-local/src/git.ts`, `plugins/workspace-local/src/status-parser.ts`, `plugins/workspace-local/src/testing/node-spawner.ts`, `plugins/workspace-local/src/testing/temp-repo.ts`, `plugins/workspace-local/src/testing/fixtures.ts`, and the tests `local-runtime.test.ts`, `local-runtime-lifecycle.test.ts`, `provision-base.test.ts`, `provision-files.test.ts`, `worktree-files.test.ts`, `keyed-queue.test.ts`, `status-parser.test.ts`, `plugin.test.ts`, `testing/node-spawner.test.ts` (the lint caps split the brief's runtime and suite)
+- Modify: `vitest.config.ts` (project + coverage include `plugins/*/src/**/*.ts`, exclude `**/testing/**`), `knip.ts` (workspace, no `entry` — knip flags it as redundant), `.github/workflows/semantic-pr.yml` (`workspace-local` scope), `cspell-words.txt`, `bun.lock`; `commitlint.config.ts` needs nothing (`plugins/*` directories are already scope names); the root `lint:long-tail` script now lints `plugins/` too
 
 **Interfaces:**
 - Consumes: `WorkspaceRuntime`, `WorkspaceSpec`, `WorkspaceHandle`, `WorkspaceStatus`, `ExecSpec`, `ExecHandle`, `ProcessSpawner`, `Logger`, `PluginContext`, `definePlugin` from `@bytebureau/plugin-api` (Task 2).
-- Produces: `localWorkspacePlugin` (the `Plugin` the kernel bundles), `LocalWorkspaceRuntime` (class, `id: 'local'`, `isolation: 'none'`), `createGit(spawn, logger)` returning the typed git wrapper, `parseStatusV2(text)` (dirty flag and branch; ahead/behind come from `git rev-list --left-right --count <base>...HEAD` because `# branch.ab` appears only with an upstream); error classes `WorkspaceError` with `code ∈ 'not_a_repository' | 'is_bytebureau_worktree' | 'git_too_old' | 'locked' | 'dirty' | 'git_failed'`.
+- Produces: `localWorkspacePlugin` (the `Plugin` the kernel bundles), `LocalWorkspaceRuntime` (class, `id: 'local'`, `isolation: 'none'`), `createGit(spawn, logger)` returning the typed git wrapper (`must` throws `WorkspaceError('git_failed')`; there is no `GitError`), `parseStatusV2(text)` (dirty flag and branch; ahead/behind come from `git rev-list --left-right --count <base>...HEAD` because `# branch.ab` appears only with an upstream), `WorkspaceError` (in `src/errors.ts`) with `code ∈ 'not_a_repository' | 'is_bytebureau_worktree' | 'git_too_old' | 'locked' | 'dirty' | 'git_failed' | 'fs_failed'`.
+
+Semantics (as shipped): the session marker `.bytebureau-session.json` is excluded from git together with `.bytebureau/` (otherwise every fresh worktree is dirty); the exclude file comes from `git rev-parse --path-format=absolute --git-path info/exclude` (a project that is itself a linked worktree keeps it in the common directory); "pick a free branch name + `worktree add --no-track`" is serialised per toplevel through `keyed-queue.ts`, so same-name fan-outs get `-2`, `-3`, … (local refs only — a branch that exists only on `origin` is not a collision); `status()` runs `git status --porcelain=v2 --branch --untracked-files=normal` (the user's `status.showUntrackedFiles` cannot hide agent files) and fails `git_failed` when the base ref no longer resolves, while `destroy()` checks only dirty and lock state so a worktree whose base is gone can still be removed with `force`; `copyIgnored` entries are confined to regular files inside the project after `realpathSync` (links outside are skipped with a warning); a failure after `worktree add` rolls back (`worktree remove --force`, `branch -D`) and file-system errors are `fs_failed`; a missing project directory is `not_a_repository`; a toplevel at `…/.bytebureau/worktrees/<id>` counts as a ByteBureau worktree even without the marker; provisioning warnings go to `WorkspaceSpec.logger`. The test spawner maps abort and start failures into `exited` like the kernel's supervisor and runs git with `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`; it drops the output of a process that exited before anyone started reading, so tests read streams at once.
 
 - [ ] **Step 1: Package manifests**
 
@@ -6625,23 +6627,43 @@ git commit -m "feat(kernel): supervise child processes with an env allowlist, li
   "name": "@bytebureau/workspace-local",
   "version": "0.0.0",
   "private": true,
-  "license": "FSL-1.1-MIT",
   "description": "ByteBureau workspace runtime: one git worktree per session on the host",
+  "license": "FSL-1.1-MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./src/plugin.ts", "default": "./src/plugin.ts" },
-    "./plugin": { "types": "./src/plugin.ts", "default": "./src/plugin.ts" }
+    ".": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bytebureau/plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
   },
   "bytebureau": {
     "name": "workspace-local",
     "hostApi": "^0",
     "kind": "in-process",
-    "capabilities": ["fs:read", "fs:write", "process"],
-    "contributes": { "workspaceRuntimes": ["local"] }
-  },
-  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
-  "dependencies": { "@bytebureau/plugin-api": "workspace:*" },
-  "devDependencies": { "@bytebureau/tsconfig": "workspace:*" }
+    "capabilities": [
+      "fs:read",
+      "fs:write",
+      "process"
+    ],
+    "contributes": {
+      "workspaceRuntimes": [
+        "local"
+      ]
+    }
+  }
 }
 ```
 `plugins/workspace-local/tsconfig.json` (extends `effect.json` for the same reason as plugin-api: it imports plugin-api sources):
@@ -6677,17 +6699,40 @@ const dirty = `${clean}1 .M N... 100644 100644 100644 abc def src/hello.ts
 ? notes.txt
 `
 
+const renamed = `${clean}2 R. N... 100644 100644 100644 abc def R100 new.ts\told.ts
+`
+const unmerged = `${clean}u UU N... 100644 100644 100644 100644 abc def ghi conflict.ts
+`
+const ignored = `${clean}! build/output.log
+`
+
 describe(parseStatusV2, () => {
   it('reads branch name and ahead/behind from the headers', () => {
-    expect(parseStatusV2(clean)).toEqual({ dirty: false, ahead: 2, behind: 1, branch: 'bb/add-hello' })
+    expect(parseStatusV2(clean)).toStrictEqual({
+      dirty: false,
+      ahead: 2,
+      behind: 1,
+      branch: 'bb/add-hello',
+    })
   })
 
   it('reports dirty when any change or untracked entry is present', () => {
     expect(parseStatusV2(dirty).dirty).toBe(true)
   })
 
+  it.each([
+    ['a renamed file', renamed],
+    ['an unmerged file', unmerged],
+  ])('reports %s as dirty', (_name, text) => {
+    expect(parseStatusV2(text).dirty).toBe(true)
+  })
+
+  it('counts an ignored entry as clean', () => {
+    expect(parseStatusV2(ignored).dirty).toBe(false)
+  })
+
   it('tolerates a detached head and a missing upstream', () => {
-    expect(parseStatusV2('# branch.oid abc\n# branch.head (detached)\n')).toEqual({
+    expect(parseStatusV2('# branch.oid abc\n# branch.head (detached)\n')).toStrictEqual({
       dirty: false,
       ahead: 0,
       behind: 0,
@@ -6709,32 +6754,134 @@ export interface ParsedStatus {
   readonly branch: string
 }
 
-const AHEAD_BEHIND = /^# branch\.ab \+(\d+) -(\d+)$/u
+const BRANCH_HEAD = '# branch.head '
+const AHEAD_BEHIND = /^# branch\.ab \+(?<ahead>\d+) -(?<behind>\d+)$/u
 
 function readHeader(line: string, status: { ahead: number; behind: number; branch: string }): void {
-  if (line.startsWith('# branch.head ')) {
-    status.branch = line.slice('# branch.head '.length)
+  if (line.startsWith(BRANCH_HEAD)) {
+    status.branch = line.slice(BRANCH_HEAD.length)
     return
   }
   const match = AHEAD_BEHIND.exec(line)
-  if (match !== null) {
-    status.ahead = Number(match[1])
-    status.behind = Number(match[2])
+  if (match !== null && match.groups !== undefined) {
+    status.ahead = Number(match.groups['ahead'])
+    status.behind = Number(match.groups['behind'])
   }
 }
 
-// Output of `git status --porcelain=v2 --branch`: `#` headers, then one entry per change
+// Output of `git status --porcelain=v2 --branch`: `#` headers, then one entry per change; `!` entries are ignored files
 export function parseStatusV2(text: string): ParsedStatus {
   const status = { dirty: false, ahead: 0, behind: 0, branch: '' }
   for (const line of text.split('\n')) {
     if (line.startsWith('#')) {
       readHeader(line, status)
-    } else if (line.trim() !== '') {
+    } else if (line.trim() !== '' && !line.startsWith('! ')) {
       status.dirty = true
     }
   }
   return status
 }
+```
+`plugins/workspace-local/src/errors.ts`:
+```ts
+export type WorkspaceErrorCode =
+  | 'not_a_repository'
+  | 'is_bytebureau_worktree'
+  | 'git_too_old'
+  | 'locked'
+  | 'dirty'
+  | 'git_failed'
+  | 'fs_failed'
+
+export class WorkspaceError extends Error {
+  public readonly code: WorkspaceErrorCode
+
+  public constructor(code: WorkspaceErrorCode, message: string) {
+    super(message)
+    this.name = 'WorkspaceError'
+    this.code = code
+  }
+}
+```
+`plugins/workspace-local/src/keyed-queue.ts`:
+```ts
+type Enqueue = <Result>(key: string, work: () => Promise<Result>) => Promise<Result>
+
+async function afterwards<Result>(
+  before: Promise<unknown>,
+  work: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    await before
+  } catch {
+    // The caller of the earlier work gets to see how it went wrong
+  }
+  return work()
+}
+
+// A queue per key: the work of one key runs one piece after the other, in the order it came; other keys go their own way
+export function createKeyedQueue(): Enqueue {
+  const turns = new Map<string, Promise<unknown>>()
+  return async (key, work) => {
+    const mine = afterwards(turns.get(key) ?? Promise.resolve(), work)
+    turns.set(key, mine)
+    const result = await mine
+    return result
+  }
+}
+```
+`plugins/workspace-local/src/keyed-queue.test.ts`:
+```ts
+import { setImmediate as nextTurn } from 'node:timers/promises'
+import { describe, expect, it } from 'vitest'
+import { createKeyedQueue } from './keyed-queue.js'
+
+// Work that logs when it starts and when it ends, with a turn of the event loop in between
+function logging(log: string[], name: string): () => Promise<string> {
+  return async () => {
+    log.push(`${name} starts`)
+    await nextTurn()
+    log.push(`${name} ends`)
+    return name
+  }
+}
+
+async function failing(): Promise<string> {
+  await nextTurn()
+  throw new Error('boom')
+}
+
+describe(createKeyedQueue, () => {
+  it('runs the work of one key one after the other, in the order it came', async () => {
+    expect.hasAssertions()
+    const enqueue = createKeyedQueue()
+    const log: string[] = []
+    const results = await Promise.all([
+      enqueue('k', logging(log, 'a')),
+      enqueue('k', logging(log, 'b')),
+      enqueue('k', logging(log, 'c')),
+    ])
+    expect(results).toStrictEqual(['a', 'b', 'c'])
+    expect(log).toStrictEqual(['a starts', 'a ends', 'b starts', 'b ends', 'c starts', 'c ends'])
+  })
+
+  it('lets the work of different keys overlap', async () => {
+    expect.hasAssertions()
+    const enqueue = createKeyedQueue()
+    const log: string[] = []
+    await Promise.all([enqueue('one', logging(log, 'a')), enqueue('two', logging(log, 'b'))])
+    expect(log).toStrictEqual(['a starts', 'b starts', 'a ends', 'b ends'])
+  })
+
+  it('goes on with the next work after work that failed', async () => {
+    expect.hasAssertions()
+    const enqueue = createKeyedQueue()
+    const first = enqueue('k', failing)
+    const second = enqueue('k', logging([], 'b'))
+    await expect(first).rejects.toThrow('boom')
+    await expect(second).resolves.toBe('b')
+  })
+})
 ```
 Run: `bunx vitest run --project workspace-local` → PASS (3 tests).
 
@@ -6742,41 +6889,93 @@ Run: `bunx vitest run --project workspace-local` → PASS (3 tests).
 
 `plugins/workspace-local/src/testing/node-spawner.ts` (used by tests under Node; the kernel supplies the real spawner in production):
 ```ts
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import { createInterface } from 'node:readline'
+import { Readable } from 'node:stream'
 import type { ExecHandle, ExecSpec, ProcessSpawner } from '@bytebureau/plugin-api'
+
+type Exit = Awaited<ExecHandle['exited']>
+
+// A contributor's global git configuration must not reach the git that a test runs
+const ISOLATED_GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } as const
 
 async function* lines(stream: NodeJS.ReadableStream | null): AsyncIterable<string> {
   if (stream === null) {
     return
   }
-  for await (const line of createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY })) {
+  for await (const line of createInterface({
+    input: stream,
+    crlfDelay: Number.POSITIVE_INFINITY,
+  })) {
     yield line
   }
 }
 
+interface Watched {
+  readonly started: Promise<unknown>
+  readonly closed: Promise<unknown>
+  readonly failures: readonly Error[]
+}
+
+// The events of a child as plain ones: events.once rejects on an 'error' event, but here a command that cannot start is a result
+function watch(child: ChildProcess): Watched {
+  const events = new EventTarget()
+  const failures: Error[] = []
+  const started = once(events, 'started')
+  const closed = once(events, 'closed')
+  child.once('spawn', () => {
+    events.dispatchEvent(new Event('started'))
+  })
+  child.on('error', (error) => {
+    failures.push(error)
+    events.dispatchEvent(new Event('started'))
+  })
+  child.on('close', () => {
+    events.dispatchEvent(new Event('closed'))
+  })
+  return { started, closed, failures }
+}
+
+async function exitOf(child: ChildProcess, closed: Promise<unknown>): Promise<Exit> {
+  await closed
+  // A command that could not start never had a process; the kernel reports that as exit -1
+  if (child.pid === undefined) {
+    return { code: -1, signal: null }
+  }
+  return { code: child.exitCode, signal: child.signalCode }
+}
+
+// The reasons a command could not start, one per line, as a stream of its own
+function reasonsOf(failures: readonly Error[]): Readable {
+  return Readable.from(failures.map((failure) => `${failure.message}\n`))
+}
+
+function handleOf(child: ChildProcess, watched: Watched): ExecHandle {
+  const running = child.pid !== undefined
+  return {
+    pid: child.pid ?? -1,
+    stdout: running ? lines(child.stdout) : lines(null),
+    stderr: running ? lines(child.stderr) : lines(reasonsOf(watched.failures)),
+    exited: exitOf(child, watched.closed),
+    kill(signal = 'SIGTERM') {
+      child.kill(signal)
+    },
+  }
+}
+
+// Read the lines right after spawning: node drops the output of a process that has exited before anybody reads it
 export const nodeSpawner: ProcessSpawner = {
-  spawn(spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle> {
+  async spawn(spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle> {
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
-      env: { ...process.env, ...spec.env },
+      env: { ...process.env, ...ISOLATED_GIT, ...spec.env },
       signal: spec.signal,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
-      child.on('close', (code, signal) => {
-        resolve({ code, signal })
-      })
-    })
-    return Promise.resolve({
-      pid: child.pid ?? -1,
-      stdout: lines(child.stdout),
-      stderr: lines(child.stderr),
-      exited,
-      kill(signal = 'SIGTERM') {
-        child.kill(signal)
-      },
-    })
+    const watched = watch(child)
+    await watched.started
+    return handleOf(child, watched)
   },
 }
 ```
@@ -6784,9 +6983,10 @@ export const nodeSpawner: ProcessSpawner = {
 `plugins/workspace-local/src/testing/temp-repo.ts`:
 ```ts
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { onTestFinished } from 'vitest'
 
 const GIT_ENV = {
   ...process.env,
@@ -6794,129 +6994,1015 @@ const GIT_ENV = {
   GIT_AUTHOR_EMAIL: 'test@example.com',
   GIT_COMMITTER_NAME: 'Test',
   GIT_COMMITTER_EMAIL: 'test@example.com',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
 }
 
 export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim()
 }
 
+// Symlinks are resolved, as git reports paths: on macOS the temporary directory sits behind /var -> /private/var
+// The directory is removed when the running test has finished
+export function tempDir(prefix: string): string {
+  const created = mkdtempSync(path.join(tmpdir(), prefix))
+  const dir = realpathSync(created)
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+function addOrigin(dir: string): void {
+  const remote = tempDir('bb-remote-')
+  git(remote, 'init', '-q', '--bare', '-b', 'main')
+  git(dir, 'remote', 'add', 'origin', remote)
+  git(dir, 'push', '-q', '-u', 'origin', 'main')
+}
+
 // A repository with one commit on `main` and an optional bare "origin" remote
 export function createTempRepo(options: { readonly withRemote?: boolean } = {}): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'bb-repo-'))
+  const dir = tempDir('bb-repo-')
   git(dir, 'init', '-q', '-b', 'main')
   writeFileSync(path.join(dir, 'README.md'), '# fixture\n')
   git(dir, 'add', 'README.md')
   git(dir, 'commit', '-q', '-m', 'initial')
   if (options.withRemote === true) {
-    const remote = mkdtempSync(path.join(tmpdir(), 'bb-remote-'))
-    git(remote, 'init', '-q', '--bare', '-b', 'main')
-    git(dir, 'remote', 'add', 'origin', remote)
-    git(dir, 'push', '-q', '-u', 'origin', 'main')
+    addOrigin(dir)
   }
   return dir
 }
+```
+`plugins/workspace-local/src/testing/fixtures.ts` (shared fixtures):
+```ts
+import { readFileSync } from 'node:fs'
+import type {
+  Logger,
+  LogLevel,
+  PluginContext,
+  PluginRegistration,
+  ProcessSpawner,
+  WorkspaceRuntime,
+  WorkspaceSpec,
+} from '@bytebureau/plugin-api'
+import { LocalWorkspaceRuntime } from '../local-runtime.js'
+import { nodeSpawner } from './node-spawner.js'
+
+export const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000001'
+
+export interface LogEntry {
+  readonly level: LogLevel
+  readonly message: string
+}
+
+// A logger that keeps what it is told, for the tests that look at warnings
+export function recordingLogger(): { readonly logger: Logger; readonly entries: LogEntry[] } {
+  const entries: LogEntry[] = []
+  const at =
+    (level: LogLevel): Logger['debug'] =>
+    (message) => {
+      entries.push({ level, message })
+    }
+  const logger: Logger = {
+    category: ['test'],
+    debug: at('debug'),
+    info: at('info'),
+    warn: at('warn'),
+    error: at('error'),
+    child: () => logger,
+  }
+  return { logger, entries }
+}
+
+export function workspaceSpec(
+  projectPath: string,
+  overrides: Partial<WorkspaceSpec> = {},
+): WorkspaceSpec {
+  return {
+    sessionId: SESSION_ID,
+    projectPath,
+    baseBranch: 'main',
+    branch: 'bb/add-hello',
+    copyIgnored: ['.env'],
+    logger: recordingLogger().logger,
+    ...overrides,
+  }
+}
+
+export function createRuntime(
+  spawner: ProcessSpawner = nodeSpawner,
+  logger: Logger = recordingLogger().logger,
+): LocalWorkspaceRuntime {
+  return new LocalWorkspaceRuntime(spawner, logger)
+}
+
+export interface SpawnCall {
+  readonly args: readonly string[]
+  readonly env: Readonly<Record<string, string>>
+}
+
+// Records the arguments and the environment of every spawn, then runs the process for real
+export function spySpawner(): { readonly spawner: ProcessSpawner; readonly calls: SpawnCall[] } {
+  const calls: SpawnCall[] = []
+  const spawner: ProcessSpawner = {
+    async spawn(spec) {
+      calls.push({ args: [...spec.args], env: { ...spec.env } })
+      const child = await nodeSpawner.spawn(spec)
+      return child
+    },
+  }
+  return { spawner, calls }
+}
+
+// A spawner that runs a Node script, chosen by the arguments, in place of every command
+export function scriptedSpawner(scriptFor: (args: readonly string[]) => string): ProcessSpawner {
+  return {
+    async spawn(spec) {
+      const args = ['-e', scriptFor(spec.args)]
+      const child = await nodeSpawner.spawn({ ...spec, command: process.execPath, args })
+      return child
+    },
+  }
+}
+
+// A spawner that fails the git commands that start with one of the phrases, such as 'branch -D', and runs the rest for real
+export function failingSpawner(...phrases: readonly string[]): ProcessSpawner {
+  return {
+    async spawn(spec) {
+      const fails = phrases.includes(spec.args.slice(0, 2).join(' '))
+      const failure = { ...spec, command: process.execPath, args: ['-e', 'process.exit(1)'] }
+      const child = await nodeSpawner.spawn(fails ? failure : spec)
+      return child
+    },
+  }
+}
+
+// A spawner whose git reports one version and fails every other command
+export function versionSpawner(version: string): ProcessSpawner {
+  return scriptedSpawner((args) =>
+    args[0] === '--version' ? `console.log('git version ${version}')` : 'process.exit(128)',
+  )
+}
+
+const unused = (): never => {
+  throw new Error('a workspace runtime does not use this part of the plugin context')
+}
+
+// Only the process spawner and the logger are real; the rest fails loudly when somebody reaches for it
+export function pluginContext(spawner: ProcessSpawner): PluginContext {
+  return {
+    config: undefined,
+    project: null,
+    logger: recordingLogger().logger,
+    events: { publish: unused, subscribe: unused },
+    secrets: { get: unused, set: unused, delete: unused },
+    kv: { get: unused, set: unused, delete: unused },
+    process: spawner,
+    http: fetch,
+    signal: new AbortController().signal,
+  }
+}
+
+export function soleRuntime(registration: PluginRegistration): WorkspaceRuntime {
+  const [runtime, ...others] = registration.workspaceRuntimes ?? []
+  if (runtime === undefined || others.length > 0) {
+    throw new Error('expected the plugin to register exactly one workspace runtime')
+  }
+  return runtime
+}
+
+// Every line a stream yields
+export async function readLines(stream: AsyncIterable<string>): Promise<string[]> {
+  const lines: string[] = []
+  for await (const line of stream) {
+    lines.push(line)
+  }
+  return lines
+}
+
+export function readJson(file: string): unknown {
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+```
+`plugins/workspace-local/src/testing/node-spawner.test.ts`:
+```ts
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { readLines } from './fixtures.js'
+import { nodeSpawner } from './node-spawner.js'
+import { tempDir } from './temp-repo.js'
+
+const node = process.execPath
+const cwd = process.cwd()
+
+describe('node spawner', () => {
+  it('runs a command and reports its lines and its exit code', async () => {
+    expect.hasAssertions()
+    const script = "console.log('out'); console.error('err'); process.exit(3)"
+    const child = await nodeSpawner.spawn({ command: node, args: ['-e', script], cwd })
+    const [stdout, stderr, exit] = await Promise.all([
+      readLines(child.stdout),
+      readLines(child.stderr),
+      child.exited,
+    ])
+    expect({ stdout, stderr, exit }).toStrictEqual({
+      stdout: ['out'],
+      stderr: ['err'],
+      exit: { code: 3, signal: null },
+    })
+  })
+
+  it('reports a command that cannot start as exit -1 with the reason on stderr', async () => {
+    expect.hasAssertions()
+    const child = await nodeSpawner.spawn({ command: 'bb-no-such-command', args: [], cwd })
+    const [stdout, stderr, exit] = await Promise.all([
+      readLines(child.stdout),
+      readLines(child.stderr),
+      child.exited,
+    ])
+    expect(exit).toStrictEqual({ code: -1, signal: null })
+    expect(stdout).toStrictEqual([])
+    expect(stderr).toStrictEqual(['spawn bb-no-such-command ENOENT'])
+  })
+
+  it('reports a working directory that does not exist the same way', async () => {
+    expect.hasAssertions()
+    const missing = path.join(tempDir('bb-cwd-'), 'missing')
+    const child = await nodeSpawner.spawn({ command: node, args: ['-e', '1'], cwd: missing })
+    await expect(child.exited).resolves.toStrictEqual({ code: -1, signal: null })
+    await expect(readLines(child.stderr)).resolves.toHaveLength(1)
+  })
+})
+
+describe('node spawner process control', () => {
+  it('reports a process that was aborted as killed by SIGTERM', async () => {
+    expect.hasAssertions()
+    const controller = new AbortController()
+    const args = ['-e', 'setInterval(() => {}, 1000)']
+    const child = await nodeSpawner.spawn({ command: node, args, cwd, signal: controller.signal })
+    controller.abort()
+    await expect(child.exited).resolves.toStrictEqual({ code: null, signal: 'SIGTERM' })
+  })
+
+  it('hides the global git configuration, unless the spec says otherwise', async () => {
+    expect.hasAssertions()
+    const args = [
+      '-e',
+      'console.log(process.env.GIT_CONFIG_GLOBAL, process.env.GIT_CONFIG_NOSYSTEM)',
+    ]
+    const plain = await nodeSpawner.spawn({ command: node, args, cwd })
+    await expect(readLines(plain.stdout)).resolves.toStrictEqual(['/dev/null 1'])
+    const env = { GIT_CONFIG_GLOBAL: 'x' }
+    const custom = await nodeSpawner.spawn({ command: node, args, cwd, env })
+    await expect(readLines(custom.stdout)).resolves.toStrictEqual(['x 1'])
+  })
+})
 ```
 
 - [ ] **Step 5: Failing runtime tests**
 
 `plugins/workspace-local/src/local-runtime.test.ts`:
 ```ts
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import type { Logger, WorkspaceSpec } from '@bytebureau/plugin-api'
-import { beforeEach, describe, expect, it } from 'vitest'
-import { LocalWorkspaceRuntime, WorkspaceError } from './local-runtime.js'
-import { nodeSpawner } from './testing/node-spawner.js'
-import { createTempRepo, git } from './testing/temp-repo.js'
+import type { WorkspaceSpec } from '@bytebureau/plugin-api'
+import { describe, expect, it } from 'vitest'
+import { LocalWorkspaceRuntime } from './local-runtime.js'
+import { SESSION_ID, createRuntime, readJson, workspaceSpec } from './testing/fixtures.js'
+import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
-const silent: Logger = {
-  category: ['test'],
-  debug() {},
-  info() {},
-  warn() {},
-  error() {},
-  child() {
-    return silent
-  },
-}
+const worktreeOf = (repo: string): string => path.join(repo, '.bytebureau', 'worktrees', SESSION_ID)
 
-function spec(projectPath: string, overrides: Partial<WorkspaceSpec> = {}): WorkspaceSpec {
-  return {
-    sessionId: '0192f0c8-7b2e-7c3d-9a4b-000000000001',
-    projectPath,
-    baseBranch: 'main',
-    branch: 'bb/add-hello',
-    copyIgnored: ['.env'],
-    logger: silent,
-    ...overrides,
-  }
-}
+// Every session asks for the same branch name
+const sameBranch = (sessionId: string, projectPath: string): WorkspaceSpec =>
+  workspaceSpec(projectPath, { sessionId, branch: 'bb/x' })
 
 describe(LocalWorkspaceRuntime, () => {
-  let runtime: LocalWorkspaceRuntime
-
-  beforeEach(() => {
-    runtime = new LocalWorkspaceRuntime(nodeSpawner, silent)
-  })
-
   it('provisions a worktree on the requested branch from the local base branch', async () => {
+    expect.hasAssertions()
     const repo = createTempRepo()
-    const handle = await runtime.provision(spec(repo))
-    expect(handle.path).toBe(path.join(repo, '.bytebureau', 'worktrees', spec(repo).sessionId))
+    const exclude = path.join(repo, '.git', 'info', 'exclude')
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.path).toBe(worktreeOf(repo))
     expect(git(handle.path, 'branch', '--show-current')).toBe('bb/add-hello')
     expect(handle.baseRef).toBe('main')
-    expect(readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('.bytebureau/')
-    expect(JSON.parse(readFileSync(path.join(handle.path, '.bytebureau-session.json'), 'utf8'))).toMatchObject({
-      sessionId: spec(repo).sessionId,
+    expect(readFileSync(exclude, 'utf8')).toContain('.bytebureau/')
+    expect(readJson(path.join(handle.path, '.bytebureau-session.json'))).toMatchObject({
+      sessionId: SESSION_ID,
     })
   })
 
-  it('uses origin/<branch> when a remote exists and copies ignored files', async () => {
-    const repo = createTempRepo({ withRemote: true })
-    writeFileSync(path.join(repo, '.env'), 'SECRET=1\n')
-    const handle = await runtime.provision(spec(repo))
-    expect(handle.baseRef).toBe('origin/main')
-    expect(readFileSync(path.join(handle.path, '.env'), 'utf8')).toBe('SECRET=1\n')
-  })
-
-  it('suffixes the branch when it already exists', async () => {
+  it('describes the worktree in the handle it returns', async () => {
+    expect.hasAssertions()
     const repo = createTempRepo()
-    git(repo, 'branch', 'bb/add-hello')
-    const handle = await runtime.provision(spec(repo))
-    expect(handle.branch).toBe('bb/add-hello-2')
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle).toStrictEqual({
+      id: SESSION_ID,
+      runtimeId: 'local',
+      path: worktreeOf(repo),
+      branch: 'bb/add-hello',
+      baseRef: 'main',
+    })
   })
 
   it('never touches a dirty main checkout', async () => {
+    expect.hasAssertions()
     const repo = createTempRepo()
     writeFileSync(path.join(repo, 'README.md'), '# changed\n')
     writeFileSync(path.join(repo, 'scratch.txt'), 'x\n')
-    await runtime.provision(spec(repo))
-    expect(git(repo, 'status', '--porcelain')).toBe(' M README.md\n?? scratch.txt')
+    await createRuntime().provision(workspaceSpec(repo))
+    expect(git(repo, 'status', '--porcelain')).toBe('M README.md\n?? scratch.txt')
     expect(readFileSync(path.join(repo, 'README.md'), 'utf8')).toBe('# changed\n')
+    expect(git(repo, 'branch', '--show-current')).toBe('main')
   })
+})
 
+describe('project checks', () => {
   it('refuses a directory that is not a repository and one that is a ByteBureau worktree', async () => {
-    const repo = createTempRepo()
-    const handle = await runtime.provision(spec(repo))
-    await expect(runtime.provision(spec(path.dirname(repo)))).rejects.toMatchObject({ code: 'not_a_repository' })
-    await expect(runtime.provision(spec(handle.path))).rejects.toMatchObject({ code: 'is_bytebureau_worktree' })
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    const plain = tempDir('bb-plain-')
+    await expect(runtime.provision(workspaceSpec(plain))).rejects.toMatchObject({
+      code: 'not_a_repository',
+    })
+    await expect(runtime.provision(workspaceSpec(handle.path))).rejects.toMatchObject({
+      code: 'is_bytebureau_worktree',
+    })
   })
 
-  it('reports status, refuses to destroy a dirty worktree without force, then removes it', async () => {
+  it('provisions at the repository toplevel when the project path lies inside it', async () => {
+    expect.hasAssertions()
     const repo = createTempRepo()
-    const handle = await runtime.provision(spec(repo))
-    writeFileSync(path.join(handle.path, 'new.txt'), 'hi\n')
-    expect(await runtime.status(handle)).toMatchObject({ dirty: true, locked: false, branch: 'bb/add-hello' })
-    await expect(runtime.destroy(handle)).rejects.toBeInstanceOf(WorkspaceError)
-    await runtime.destroy(handle, { force: true })
-    expect(existsSync(handle.path)).toBe(false)
+    const inside = path.join(repo, 'src', 'deep')
+    mkdirSync(inside, { recursive: true })
+    const handle = await createRuntime().provision(workspaceSpec(inside))
+    expect(handle.path).toBe(worktreeOf(repo))
+    expect(git(handle.path, 'rev-parse', '--show-toplevel')).toBe(handle.path)
+  })
+})
+
+describe('project paths', () => {
+  it('refuses a project path that is not a directory', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const missing = workspaceSpec(path.join(tempDir('bb-plain-'), 'missing'))
+    const file = workspaceSpec(path.join(repo, 'README.md'))
+    await expect(createRuntime().provision(missing)).rejects.toMatchObject({
+      code: 'not_a_repository',
+    })
+    await expect(createRuntime().provision(file)).rejects.toMatchObject({
+      code: 'not_a_repository',
+    })
+  })
+
+  it('refuses a repository that holds a session marker', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
+    await expect(createRuntime().provision(workspaceSpec(repo))).rejects.toMatchObject({
+      code: 'is_bytebureau_worktree',
+    })
+  })
+
+  it('still knows a ByteBureau worktree whose marker was deleted', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    rmSync(path.join(handle.path, '.bytebureau-session.json'))
+    await expect(runtime.provision(workspaceSpec(handle.path))).rejects.toMatchObject({
+      code: 'is_bytebureau_worktree',
+    })
+  })
+})
+
+describe('branch names', () => {
+  it('suffixes the branch when it already exists', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    git(repo, 'branch', 'bb/add-hello')
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.branch).toBe('bb/add-hello-2')
+  })
+
+  it('counts up past every suffix that is taken', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    git(repo, 'branch', 'bb/add-hello')
+    git(repo, 'branch', 'bb/add-hello-2')
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.branch).toBe('bb/add-hello-3')
+    expect(git(handle.path, 'branch', '--show-current')).toBe('bb/add-hello-3')
+  })
+
+  it('gives sessions that start at once a name each, however they name the project', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const inside = path.join(repo, 'src')
+    mkdirSync(inside)
+    const runtime = createRuntime()
+    const handles = await Promise.all([
+      runtime.provision(sameBranch('a', repo)),
+      runtime.provision(sameBranch('b', inside)),
+      runtime.provision(sameBranch('c', repo)),
+    ])
+    expect(handles.map((handle) => handle.branch).toSorted()).toStrictEqual([
+      'bb/x',
+      'bb/x-2',
+      'bb/x-3',
+    ])
+    expect(handles.map((handle) => existsSync(handle.path))).toStrictEqual([true, true, true])
+  })
+})
+```
+`plugins/workspace-local/src/local-runtime-lifecycle.test.ts`:
+```ts
+import { existsSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import type { WorkspaceHandle } from '@bytebureau/plugin-api'
+import { describe, expect, it } from 'vitest'
+import { WorkspaceError } from './errors.js'
+import type { LocalWorkspaceRuntime } from './local-runtime.js'
+import { createRuntime, readLines, scriptedSpawner, workspaceSpec } from './testing/fixtures.js'
+import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
+
+// A provisioned worktree that holds an uncommitted file
+async function dirtyWorktree(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
+  const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+  writeFileSync(path.join(handle.path, 'new.txt'), 'hi\n')
+  return handle
+}
+
+describe('status', () => {
+  it('reports a fresh worktree as clean', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    await expect(runtime.status(handle)).resolves.toStrictEqual({
+      dirty: false,
+      ahead: 0,
+      behind: 0,
+      locked: false,
+      branch: 'bb/add-hello',
+    })
+  })
+
+  it('counts the commits ahead of and behind the base ref', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    git(handle.path, 'commit', '--allow-empty', '-q', '-m', 'work')
+    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream one')
+    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream two')
+    await expect(runtime.status(handle)).resolves.toMatchObject({
+      dirty: false,
+      ahead: 1,
+      behind: 2,
+    })
+  })
+
+  it('reports uncommitted changes', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await dirtyWorktree(runtime)
+    await expect(runtime.status(handle)).resolves.toMatchObject({ dirty: true, locked: false })
+  })
+})
+
+describe('locks', () => {
+  it('reports a lock for the locked worktree only', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const locked = await runtime.provision(workspaceSpec(repo))
+    const other = await runtime.provision(
+      workspaceSpec(repo, { sessionId: 'other', branch: 'bb/o' }),
+    )
+    git(repo, 'worktree', 'lock', locked.path)
+    await expect(runtime.status(other)).resolves.toMatchObject({ locked: false })
+    await expect(runtime.status(locked)).resolves.toMatchObject({ locked: true })
   })
 
   it('refuses to destroy a locked worktree even with force', async () => {
+    expect.hasAssertions()
     const repo = createTempRepo()
-    const handle = await runtime.provision(spec(repo))
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
     git(repo, 'worktree', 'lock', handle.path)
     await expect(runtime.destroy(handle, { force: true })).rejects.toMatchObject({ code: 'locked' })
+    expect(existsSync(handle.path)).toBe(true)
+  })
+})
+
+describe('git failures', () => {
+  it('reports a git failure as a workspace error', async () => {
+    expect.hasAssertions()
+    const gone = {
+      id: 's',
+      runtimeId: 'local',
+      path: tempDir('bb-plain-'),
+      branch: 'x',
+      baseRef: 'main',
+    }
+    const failure = createRuntime().status(gone)
+    await expect(failure).rejects.toBeInstanceOf(WorkspaceError)
+    await expect(failure).rejects.toMatchObject({ code: 'git_failed' })
+  })
+
+  it('reports a git that died from a signal as a failure', async () => {
+    expect.hasAssertions()
+    const handle = await createRuntime().provision(workspaceSpec(createTempRepo()))
+    const killed = scriptedSpawner(() => "process.kill(process.pid, 'SIGKILL')")
+    await expect(createRuntime(killed).status(handle)).rejects.toMatchObject({ code: 'git_failed' })
+  })
+})
+
+describe('destroy', () => {
+  it('removes a clean worktree without force and keeps its branch', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    await runtime.destroy(handle)
+    expect(existsSync(handle.path)).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('bb/add-hello')
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(handle.path)
+  })
+
+  it('refuses to destroy a dirty worktree without force, then removes it with force', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await dirtyWorktree(runtime)
+    const refusal = runtime.destroy(handle)
+    await expect(refusal).rejects.toBeInstanceOf(WorkspaceError)
+    await expect(refusal).rejects.toMatchObject({ code: 'dirty' })
+    expect(existsSync(path.join(handle.path, 'new.txt'))).toBe(true)
+    await runtime.destroy(handle, { force: true })
+    expect(existsSync(handle.path)).toBe(false)
+  })
+})
+
+// A provisioned worktree whose base branch has been renamed away
+async function withoutBaseRef(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
+  const repo = createTempRepo()
+  const handle = await runtime.provision(workspaceSpec(repo))
+  git(repo, 'branch', '-m', 'main', 'trunk')
+  return handle
+}
+
+describe('without its base ref', () => {
+  it.each([[{}], [{ force: true }]])('destroys the worktree with %j', async (options) => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await runtime.destroy(handle, options)
+    expect(existsSync(handle.path)).toBe(false)
+  })
+
+  it('cannot say how far it is from the base, as git_failed', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await withoutBaseRef(runtime)
+    await expect(runtime.status(handle)).rejects.toMatchObject({ code: 'git_failed' })
+  })
+})
+
+describe('git configuration', () => {
+  it('sees untracked files whatever status.showUntrackedFiles says', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    git(repo, 'config', 'status.showUntrackedFiles', 'no')
+    writeFileSync(path.join(handle.path, 'agent.txt'), 'work\n')
+    expect(git(handle.path, 'status', '--porcelain')).toBe('')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ dirty: true })
+    await expect(runtime.destroy(handle)).rejects.toMatchObject({ code: 'dirty' })
+    expect(existsSync(path.join(handle.path, 'agent.txt'))).toBe(true)
+  })
+})
+
+describe('exec', () => {
+  it('runs a command in the worktree', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(createTempRepo()))
+    const args = ['rev-parse', '--show-toplevel']
+    const child = await runtime.exec(handle, { command: 'git', args })
+    await expect(readLines(child.stdout)).resolves.toStrictEqual([handle.path])
+    await expect(child.exited).resolves.toStrictEqual({ code: 0, signal: null })
+  })
+})
+```
+`plugins/workspace-local/src/provision-base.test.ts`:
+```ts
+import path from 'node:path'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import {
+  createRuntime,
+  recordingLogger,
+  scriptedSpawner,
+  spySpawner,
+  versionSpawner,
+  workspaceSpec,
+  type SpawnCall,
+} from './testing/fixtures.js'
+import { nodeSpawner } from './testing/node-spawner.js'
+import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
+
+const fetches = (calls: readonly SpawnCall[]): readonly SpawnCall[] =>
+  calls.filter((call) => call.args[0] === 'fetch')
+
+// Pushes one commit to origin from a second clone and returns its id
+function pushFromElsewhere(repo: string): string {
+  const clone = path.join(tempDir('bb-clone-'), 'work')
+  git(repo, 'clone', '-q', git(repo, 'remote', 'get-url', 'origin'), clone)
+  git(clone, 'commit', '--allow-empty', '-q', '-m', 'from elsewhere')
+  git(clone, 'push', '-q', 'origin', 'main')
+  return git(clone, 'rev-parse', 'HEAD')
+}
+
+describe('base ref', () => {
+  it('starts from the freshly fetched origin/<branch> when a remote exists', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const pushed = pushFromElsewhere(repo)
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.baseRef).toBe('origin/main')
+    expect(git(handle.path, 'rev-parse', 'HEAD')).toBe(pushed)
+    expect(git(repo, 'rev-parse', 'main')).not.toBe(pushed)
+  })
+
+  it('falls back to the local branch when the remote does not have it', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    git(repo, 'branch', 'develop')
+    const spec = workspaceSpec(repo, { baseBranch: 'develop' })
+    const handle = await createRuntime().provision(spec)
+    expect(handle.baseRef).toBe('develop')
+  })
+})
+
+describe('new branch', () => {
+  it('has no upstream, so a push does not aim at the base branch', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(handle.baseRef).toBe('origin/main')
+    expect(git(repo, 'for-each-ref', '--format=%(upstream)', 'refs/heads/bb/add-hello')).toBe('')
+  })
+})
+
+describe('git environment', () => {
+  it('runs every git command without a terminal prompt', async () => {
+    expect.hasAssertions()
+    const { spawner, calls } = spySpawner()
+    const spec = workspaceSpec(createTempRepo({ withRemote: true }))
+    await createRuntime(spawner).provision(spec)
+    expect(fetches(calls)).toHaveLength(1)
+    expect(calls.filter((call) => call.env['GIT_TERMINAL_PROMPT'] !== '0')).toStrictEqual([])
+  })
+})
+
+describe('fetching', () => {
+  it('fetches once per minute and project', async () => {
+    expect.hasAssertions()
+    const first = createTempRepo({ withRemote: true })
+    const second = createTempRepo({ withRemote: true })
+    const { spawner, calls } = spySpawner()
+    const runtime = createRuntime(spawner)
+    await runtime.provision(workspaceSpec(first, { sessionId: 'one', branch: 'bb/one' }))
+    await runtime.provision(workspaceSpec(first, { sessionId: 'two', branch: 'bb/two' }))
+    await runtime.provision(workspaceSpec(second))
+    expect(fetches(calls)).toHaveLength(2)
+  })
+
+  it('fetches again once a minute has passed', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const repo = createTempRepo({ withRemote: true })
+    const { spawner, calls } = spySpawner()
+    const runtime = createRuntime(spawner)
+    await runtime.provision(workspaceSpec(repo, { sessionId: 'one', branch: 'bb/one' }))
+    vi.setSystemTime(Date.now() + 61_000)
+    await runtime.provision(workspaceSpec(repo, { sessionId: 'two', branch: 'bb/two' }))
+    expect(fetches(calls)).toHaveLength(2)
+  })
+
+  it('goes on with the last known refs and tells the session when the fetch fails', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    git(repo, 'remote', 'set-url', 'origin', path.join(tempDir('bb-gone-'), 'missing'))
+    const session = recordingLogger()
+    const daemon = recordingLogger()
+    const spec = workspaceSpec(repo, { logger: session.logger })
+    const handle = await createRuntime(nodeSpawner, daemon.logger).provision(spec)
+    expect(handle.baseRef).toBe('origin/main')
+    expect(session.entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+    expect(daemon.entries.filter((entry) => entry.level === 'warn')).toStrictEqual([])
+  })
+})
+
+describe('git version', () => {
+  it('treats a git that fails to run as too old', async () => {
+    expect.hasAssertions()
+    const runtime = createRuntime(scriptedSpawner(() => 'process.exit(127)'))
+    const failure = runtime.provision(workspaceSpec(tempDir('bb-plain-')))
+    await expect(failure).rejects.toMatchObject({ code: 'git_too_old' })
+  })
+
+  it.each([
+    ['1.9.9', 'git_too_old'],
+    ['2.39.5', 'git_too_old'],
+    ['unknown', 'git_too_old'],
+    ['2.40.0', 'not_a_repository'],
+    ['3.1.0', 'not_a_repository'],
+  ])('with git %s, provisioning fails with %s', async (version, code) => {
+    expect.hasAssertions()
+    const runtime = createRuntime(versionSpawner(version))
+    const failure = runtime.provision(workspaceSpec(tempDir('bb-plain-')))
+    await expect(failure).rejects.toMatchObject({ code })
+  })
+})
+```
+`plugins/workspace-local/src/provision-files.test.ts`:
+```ts
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import {
+  SESSION_ID,
+  createRuntime,
+  failingSpawner,
+  readJson,
+  recordingLogger,
+  workspaceSpec,
+} from './testing/fixtures.js'
+import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
+
+// A repository that ignores what a worktree is meant to receive, committed like a real project's
+function repoIgnoring(...patterns: string[]): string {
+  const repo = createTempRepo()
+  writeFileSync(path.join(repo, '.gitignore'), `${patterns.join('\n')}\n`)
+  git(repo, 'add', '.gitignore')
+  git(repo, 'commit', '-q', '-m', 'ignore')
+  return repo
+}
+
+// An ignored .env and an ignored file in a subdirectory
+function repoWithIgnoredFiles(): string {
+  const repo = repoIgnoring('.env', 'config/')
+  mkdirSync(path.join(repo, 'config'))
+  writeFileSync(path.join(repo, '.env'), 'SECRET=1\n')
+  writeFileSync(path.join(repo, 'config', 'local.env'), 'MODE=dev\n')
+  return repo
+}
+
+// A temporary directory outside any project, with a secret file in it
+function outsideWithSecret(): { readonly dir: string; readonly secret: string } {
+  const dir = tempDir('bb-outside-')
+  const secret = path.join(dir, 'secret.txt')
+  writeFileSync(secret, 'secret\n')
+  return { dir, secret }
+}
+
+// Entries that point out of the project by relative and by absolute path, and one that is a directory
+function escapingEntries(repo: string): { outside: string; copyIgnored: string[] } {
+  const { dir, secret } = outsideWithSecret()
+  mkdirSync(path.join(repo, 'config'))
+  const relative = path.join('..', path.basename(dir), path.basename(secret))
+  return { outside: dir, copyIgnored: [relative, secret, 'config'] }
+}
+
+// A project with links to something outside it, a link to something inside it and a plain file
+function repoWithLinks(): string {
+  const repo = createTempRepo()
+  const { dir, secret } = outsideWithSecret()
+  symlinkSync(secret, path.join(repo, 'leak.env'))
+  symlinkSync(dir, path.join(repo, 'linked'))
+  mkdirSync(path.join(repo, 'config'))
+  writeFileSync(path.join(repo, 'config', 'shared.env'), 'SHARED=1\n')
+  symlinkSync(path.join('config', 'shared.env'), path.join(repo, '.env'))
+  return repo
+}
+
+// The base branch holds a directory where the main checkout keeps a file
+function repoWithClashingBase(): string {
+  const repo = createTempRepo()
+  git(repo, 'checkout', '-q', '-b', 'clash')
+  mkdirSync(path.join(repo, 'scratch'))
+  writeFileSync(path.join(repo, 'scratch', 'tracked.txt'), 'x\n')
+  git(repo, 'add', 'scratch')
+  git(repo, 'commit', '-q', '-m', 'directory')
+  git(repo, 'checkout', '-q', 'main')
+  writeFileSync(path.join(repo, 'scratch'), 'a file\n')
+  return repo
+}
+
+describe('copying ignored files', () => {
+  it('copies listed files, also from subdirectories, and skips the missing ones', async () => {
+    expect.hasAssertions()
+    const copyIgnored = ['.env', 'config/local.env', 'missing.txt']
+    const spec = workspaceSpec(repoWithIgnoredFiles(), { copyIgnored })
+    const handle = await createRuntime().provision(spec)
+    expect(readFileSync(path.join(handle.path, '.env'), 'utf8')).toBe('SECRET=1\n')
+    expect(readFileSync(path.join(handle.path, 'config', 'local.env'), 'utf8')).toBe('MODE=dev\n')
+    expect(existsSync(path.join(handle.path, 'missing.txt'))).toBe(false)
+    expect(git(handle.path, 'status', '--porcelain')).toBe('')
+  })
+
+  it('leaves out what is not a file inside the project and says so', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const { outside, copyIgnored } = escapingEntries(repo)
+    const { logger, entries } = recordingLogger()
+    const handle = await createRuntime().provision(workspaceSpec(repo, { copyIgnored, logger }))
+    const beside = path.join(handle.path, '..', path.basename(outside))
+    expect(existsSync(beside)).toBe(false)
+    expect(existsSync(path.join(handle.path, 'config'))).toBe(false)
+    expect(existsSync(path.join(handle.path, outside))).toBe(false)
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(3)
+  })
+})
+
+describe('symlinked entries', () => {
+  it('skips a link that leads out of the project, also through a linked directory', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const copyIgnored = ['leak.env', 'linked/secret.txt']
+    const spec = workspaceSpec(repoWithLinks(), { copyIgnored, logger })
+    const handle = await createRuntime().provision(spec)
+    expect(existsSync(path.join(handle.path, 'leak.env'))).toBe(false)
+    expect(existsSync(path.join(handle.path, 'linked'))).toBe(false)
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(2)
+  })
+
+  it('copies the content of a link that stays inside the project to the path of the entry', async () => {
+    expect.hasAssertions()
+    const spec = workspaceSpec(repoWithLinks(), { copyIgnored: ['.env'] })
+    const handle = await createRuntime().provision(spec)
+    expect(readFileSync(path.join(handle.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+    expect(existsSync(path.join(handle.path, 'config'))).toBe(false)
+  })
+
+  it('skips an entry that runs through a file without a warning', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const spec = workspaceSpec(createTempRepo(), { copyIgnored: ['README.md/x'], logger })
+    await expect(createRuntime().provision(spec)).resolves.toMatchObject({ branch: 'bb/add-hello' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toStrictEqual([])
+  })
+})
+
+describe('a provision that fails halfway', () => {
+  it('takes back the worktree and the branch and reports the file system error', async () => {
+    expect.hasAssertions()
+    const repo = repoWithClashingBase()
+    const spec = workspaceSpec(repo, { baseBranch: 'clash', copyIgnored: ['scratch'] })
+    await expect(createRuntime().provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(existsSync(path.join(repo, '.bytebureau', 'worktrees', SESSION_ID))).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('')
+    expect(git(repo, 'worktree', 'list')).not.toContain('.bytebureau')
+  })
+
+  it('reports the original error and says so when it cannot take the worktree back', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const runtime = createRuntime(failingSpawner('worktree remove', 'branch -D'))
+    const spec = workspaceSpec(repoWithClashingBase(), {
+      baseBranch: 'clash',
+      copyIgnored: ['scratch'],
+      logger,
+    })
+    await expect(runtime.provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+  })
+
+  it('creates nothing when the exclude list cannot be updated', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const exclude = path.join(repo, '.git', 'info', 'exclude')
+    rmSync(exclude)
+    mkdirSync(exclude)
+    await expect(createRuntime().provision(workspaceSpec(repo))).rejects.toMatchObject({
+      code: 'fs_failed',
+    })
+    expect(existsSync(path.join(repo, '.bytebureau'))).toBe(false)
+    expect(git(repo, 'branch', '--list', 'bb/add-hello')).toBe('')
+  })
+})
+
+describe('session marker', () => {
+  it('records the session in a file at the worktree root', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const handle = await createRuntime().provision(workspaceSpec(repo))
+    expect(readJson(path.join(handle.path, '.bytebureau-session.json'))).toStrictEqual({
+      sessionId: SESSION_ID,
+      projectPath: repo,
+      branch: 'bb/add-hello',
+      baseRef: 'main',
+    })
+  })
+})
+
+describe('exclude list', () => {
+  it('lists the worktrees and the marker once and keeps the entries already there', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const exclude = path.join(repo, '.git', 'info', 'exclude')
+    writeFileSync(exclude, '*.log')
+    const runtime = createRuntime()
+    await runtime.provision(workspaceSpec(repo, { sessionId: 'one', branch: 'bb/one' }))
+    await runtime.provision(workspaceSpec(repo, { sessionId: 'two', branch: 'bb/two' }))
+    expect(readFileSync(exclude, 'utf8')).toBe('*.log\n.bytebureau/\n.bytebureau-session.json\n')
+    expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('creates the exclude list when the repository has none', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    rmSync(path.join(repo, '.git', 'info'), { recursive: true })
+    await createRuntime().provision(workspaceSpec(repo))
+    const exclude = readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')
+    expect(exclude).toBe('.bytebureau/\n.bytebureau-session.json\n')
+  })
+
+  it('goes into the main repository when the project is itself a linked worktree', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const linked = path.join(tempDir('bb-linked-'), 'checkout')
+    git(repo, 'worktree', 'add', '-q', linked, '-b', 'feature')
+    const handle = await createRuntime().provision(workspaceSpec(linked))
+    expect(handle.path).toBe(path.join(linked, '.bytebureau', 'worktrees', SESSION_ID))
+    expect(readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain(
+      '.bytebureau/',
+    )
+    expect(git(linked, 'status', '--porcelain')).toBe('')
+  })
+})
+```
+`plugins/workspace-local/src/worktree-files.test.ts`:
+```ts
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { recordingLogger } from './testing/fixtures.js'
+import { createTempRepo, tempDir } from './testing/temp-repo.js'
+import { copyIgnoredFiles, onDisk } from './worktree-files.js'
+
+describe(copyIgnoredFiles, () => {
+  it('judges an entry by the real path of a project that is reached through a link', () => {
+    const repo = createTempRepo()
+    writeFileSync(path.join(repo, '.env'), 'SECRET=1\n')
+    const link = path.join(tempDir('bb-link-'), 'project')
+    symlinkSync(repo, link)
+    const worktreePath = tempDir('bb-worktree-')
+    copyIgnoredFiles({ projectPath: link, worktreePath }, ['.env'], recordingLogger().logger)
+    expect(readFileSync(path.join(worktreePath, '.env'), 'utf8')).toBe('SECRET=1\n')
+  })
+})
+
+// Throws whatever it is given, which is not always an Error
+function fail(value: unknown): never {
+  throw value
+}
+
+describe(onDisk, () => {
+  it.each([
+    ['an error by its message', new Error('EISDIR: nope'), 'copying failed: EISDIR: nope'],
+    ['anything else by its text', 'plain text', 'copying failed: plain text'],
+  ])('reports %s', (_name, thrown, message) => {
+    expect(() => {
+      onDisk('copying', () => fail(thrown))
+    }).toThrow(message)
+  })
+})
+```
+`plugins/workspace-local/src/plugin.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import pkg from '../package.json' with { type: 'json' }
+import { localWorkspacePlugin } from './plugin.js'
+import { pluginContext, soleRuntime, spySpawner, workspaceSpec } from './testing/fixtures.js'
+import { createTempRepo } from './testing/temp-repo.js'
+
+describe('workspace-local plugin', () => {
+  it('declares in its manifest what its package declares', () => {
+    expect(localWorkspacePlugin.manifest).toMatchObject(pkg.bytebureau)
+  })
+
+  it('registers the local runtime on the process spawner of its context', async () => {
+    expect.hasAssertions()
+    const { spawner, calls } = spySpawner()
+    const runtime = soleRuntime(await localWorkspacePlugin.setup(pluginContext(spawner)))
+    expect(runtime).toMatchObject({ id: 'local', isolation: 'none' })
+    await runtime.provision(workspaceSpec(createTempRepo()))
+    expect(calls.length).toBeGreaterThan(0)
   })
 })
 ```
@@ -6927,8 +8013,12 @@ Run: `bunx vitest run --project workspace-local` → FAIL (`./local-runtime.js` 
 `plugins/workspace-local/src/git.ts`:
 ```ts
 import type { ExecHandle, Logger, ProcessSpawner } from '@bytebureau/plugin-api'
+import { WorkspaceError } from './errors.js'
 
-export interface GitResult {
+const BRANCHES = 'refs/heads/'
+const VERSION = /(?<major>\d+)\.(?<minor>\d+)/u
+
+interface GitResult {
   readonly code: number
   readonly stdout: string
   readonly stderr: string
@@ -6943,47 +8033,67 @@ async function collect(stream: AsyncIterable<string>): Promise<string> {
 }
 
 async function settle(handle: ExecHandle): Promise<GitResult> {
-  const [stdout, stderr, exit] = await Promise.all([collect(handle.stdout), collect(handle.stderr), handle.exited])
+  const [stdout, stderr, exit] = await Promise.all([
+    collect(handle.stdout),
+    collect(handle.stderr),
+    handle.exited,
+  ])
   return { code: exit.code ?? -1, stdout, stderr }
 }
 
-export interface Git {
-  run(cwd: string, args: readonly string[]): Promise<GitResult>
-  must(cwd: string, args: readonly string[]): Promise<string>
-  version(cwd: string): Promise<string>
-  toplevel(cwd: string): Promise<string | null>
-  hasRemote(cwd: string, name: string): Promise<boolean>
-  refExists(cwd: string, ref: string): Promise<boolean>
-  worktreeLocked(cwd: string, worktreePath: string): Promise<boolean>
+// The major and minor number of `git --version`; [0, 0] when the output holds no version
+function parseVersion(text: string): readonly [number, number] {
+  const match = VERSION.exec(text)
+  if (match === null || match.groups === undefined) {
+    return [0, 0]
+  }
+  return [Number(match.groups['major']), Number(match.groups['minor'])]
 }
 
-export class GitError extends Error {
-  constructor(
-    readonly args: readonly string[],
-    readonly result: GitResult,
-  ) {
-    super(`git ${args.join(' ')} failed (${result.code}): ${result.stderr.trim()}`)
-    this.name = 'GitError'
-  }
+// `git worktree list --porcelain`: one block per worktree, the first line names its path
+function isLocked(listing: string, worktreePath: string): boolean {
+  const block = listing
+    .split('\n\n')
+    .find((entry) => entry.split('\n').includes(`worktree ${worktreePath}`))
+  return block !== undefined && block.split('\n').some((line) => line.startsWith('locked'))
+}
+
+export interface Git {
+  readonly run: (cwd: string, args: readonly string[]) => Promise<GitResult>
+  readonly must: (cwd: string, args: readonly string[]) => Promise<string>
+  readonly version: (cwd: string) => Promise<readonly [number, number]>
+  readonly toplevel: (cwd: string) => Promise<string | null>
+  readonly hasRemote: (cwd: string, name: string) => Promise<boolean>
+  readonly refExists: (cwd: string, ref: string) => Promise<boolean>
+  readonly localBranches: (cwd: string, prefix: string) => Promise<readonly string[]>
+  readonly worktreeLocked: (cwd: string, worktreePath: string) => Promise<boolean>
 }
 
 export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
   const run: Git['run'] = async (cwd, args) => {
     logger.debug('git', { cwd, args })
-    const handle = await spawn.spawn({ command: 'git', args, cwd, env: { GIT_TERMINAL_PROMPT: '0' } })
+    const handle = await spawn.spawn({
+      command: 'git',
+      args,
+      cwd,
+      env: { GIT_TERMINAL_PROMPT: '0' },
+    })
     return settle(handle)
   }
   const must: Git['must'] = async (cwd, args) => {
     const result = await run(cwd, args)
     if (result.code !== 0) {
-      throw new GitError(args, result)
+      const reason = `git ${args.join(' ')} failed (${result.code}): ${result.stderr.trim()}`
+      throw new WorkspaceError('git_failed', reason)
     }
     return result.stdout.trim()
   }
   return {
     run,
     must,
-    version: (cwd) => must(cwd, ['--version']),
+    async version(cwd) {
+      return parseVersion(await must(cwd, ['--version']))
+    },
     async toplevel(cwd) {
       const result = await run(cwd, ['rev-parse', '--show-toplevel'])
       return result.code === 0 ? result.stdout.trim() : null
@@ -6996,11 +8106,126 @@ export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
       const result = await run(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
       return result.code === 0
     },
-    async worktreeLocked(cwd, worktreePath) {
-      const listing = await must(cwd, ['worktree', 'list', '--porcelain'])
-      const block = listing.split('\n\n').find((entry) => entry.includes(`worktree ${worktreePath}`))
-      return block !== undefined && block.split('\n').some((line) => line.startsWith('locked'))
+    async localBranches(cwd, prefix) {
+      const refs = await must(cwd, ['for-each-ref', '--format=%(refname)', `${BRANCHES}${prefix}*`])
+      return refs
+        .split('\n')
+        .filter((ref) => ref !== '')
+        .map((ref) => ref.slice(BRANCHES.length))
     },
+    async worktreeLocked(cwd, worktreePath) {
+      return isLocked(await must(cwd, ['worktree', 'list', '--porcelain']), worktreePath)
+    },
+  }
+}
+```
+`plugins/workspace-local/src/worktree-files.ts`:
+```ts
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import path from 'node:path'
+import type { Logger } from '@bytebureau/plugin-api'
+import { WorkspaceError } from './errors.js'
+
+const SESSION_MARKER = '.bytebureau-session.json'
+// Worktrees live below .bytebureau/ and carry a marker file; git must report neither as untracked
+const EXCLUDED = ['.bytebureau/', SESSION_MARKER]
+const PLACED = /[\\/]\.bytebureau[\\/]worktrees[\\/][^\\/]+$/u
+
+interface SessionRecord {
+  readonly sessionId: string
+  readonly projectPath: string
+  readonly branch: string
+  readonly baseRef: string
+}
+
+interface Roots {
+  readonly projectPath: string
+  readonly worktreePath: string
+}
+
+export function isDirectory(directory: string): boolean {
+  return existsSync(directory) && statSync(directory).isDirectory()
+}
+
+// A session worktree has the marker, or sits where provision puts it: deleting the marker does not make it a project
+export function isSessionWorktree(directory: string): boolean {
+  return PLACED.test(directory) || existsSync(path.join(directory, SESSION_MARKER))
+}
+
+export function writeSessionMarker(worktreePath: string, record: SessionRecord): void {
+  writeFileSync(path.join(worktreePath, SESSION_MARKER), `${JSON.stringify(record, null, 2)}\n`)
+}
+
+// File system failures come out as workspace errors, like git's
+export function onDisk(what: string, work: () => void): void {
+  try {
+    work()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new WorkspaceError('fs_failed', `${what} failed: ${reason}`)
+  }
+}
+
+// Adds what is missing to the exclude file and keeps what is there
+export function ensureExcluded(excludeFile: string): void {
+  const current = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : ''
+  const listed = new Set(current.split('\n'))
+  const missing = EXCLUDED.filter((line) => !listed.has(line))
+  if (missing.length > 0) {
+    mkdirSync(path.dirname(excludeFile), { recursive: true })
+    const separator = current === '' || current.endsWith('\n') ? '' : '\n'
+    appendFileSync(excludeFile, `${separator}${missing.join('\n')}\n`)
+  }
+}
+
+type Entry = 'copy' | 'missing' | 'not a file' | 'outside the project'
+
+// A path that climbs out of the project, or names the project itself, is not an entry of it
+function isInside(relative: string): boolean {
+  const climbs = relative === '..' || relative.startsWith(`..${path.sep}`)
+  return relative !== '' && !climbs && !path.isAbsolute(relative)
+}
+
+// Links are followed: what an entry resolves to has to lie inside the project as well
+function classify(root: string, source: string, relative: string): Entry {
+  if (!isInside(relative)) {
+    return 'outside the project'
+  }
+  if (!existsSync(source)) {
+    return 'missing'
+  }
+  if (!isInside(path.relative(realpathSync(root), realpathSync(source)))) {
+    return 'outside the project'
+  }
+  return statSync(source).isFile() ? 'copy' : 'not a file'
+}
+
+function copyOne(roots: Roots, file: string, logger: Logger): void {
+  const source = path.resolve(roots.projectPath, file)
+  const relative = path.relative(roots.projectPath, source)
+  const entry = classify(roots.projectPath, source, relative)
+  if (entry === 'copy') {
+    const target = path.join(roots.worktreePath, relative)
+    mkdirSync(path.dirname(target), { recursive: true })
+    copyFileSync(source, target)
+  } else if (entry !== 'missing') {
+    logger.warn('skipping a copyIgnored entry', { file, reason: entry })
+  }
+}
+
+// Files the project keeps out of git, such as .env, go from the main checkout into the worktree
+export function copyIgnoredFiles(roots: Roots, files: readonly string[], logger: Logger): void {
+  for (const file of files) {
+    copyOne(roots, file, logger)
   }
 }
 ```
@@ -7009,7 +8234,6 @@ export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
 
 `plugins/workspace-local/src/local-runtime.ts`:
 ```ts
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import type {
   ExecHandle,
@@ -7021,139 +8245,171 @@ import type {
   WorkspaceSpec,
   WorkspaceStatus,
 } from '@bytebureau/plugin-api'
+import { WorkspaceError } from './errors.js'
 import { createGit, type Git } from './git.js'
+import { createKeyedQueue } from './keyed-queue.js'
 import { parseStatusV2 } from './status-parser.js'
-
-export type WorkspaceErrorCode =
-  | 'not_a_repository'
-  | 'is_bytebureau_worktree'
-  | 'git_too_old'
-  | 'locked'
-  | 'dirty'
-  | 'git_failed'
-
-export class WorkspaceError extends Error {
-  constructor(
-    readonly code: WorkspaceErrorCode,
-    message: string,
-  ) {
-    super(message)
-    this.name = 'WorkspaceError'
-  }
-}
+import {
+  copyIgnoredFiles,
+  ensureExcluded,
+  isDirectory,
+  isSessionWorktree,
+  onDisk,
+  writeSessionMarker,
+} from './worktree-files.js'
 
 const MIN_GIT = [2, 40] as const
 const FETCH_INTERVAL_MS = 60_000
-const SESSION_MARKER = '.bytebureau-session.json'
-const EXCLUDE_LINE = '.bytebureau/'
+// Untracked files count whatever status.showUntrackedFiles says
+const STATUS = ['status', '--porcelain=v2', '--branch', '--untracked-files=normal']
 
-function parseVersion(text: string): readonly [number, number] {
-  const match = /(\d+)\.(\d+)/u.exec(text)
-  return match === null ? [0, 0] : [Number(match[1]), Number(match[2])]
+interface Placement {
+  readonly projectPath: string
+  readonly worktreePath: string
+  readonly baseRef: string
+}
+
+interface WorktreeState {
+  readonly dirty: boolean
+  readonly branch: string
+  readonly locked: boolean
 }
 
 function versionTooOld([major, minor]: readonly [number, number]): boolean {
   return major < MIN_GIT[0] || (major === MIN_GIT[0] && minor < MIN_GIT[1])
 }
 
-function ensureExcluded(projectPath: string): void {
-  const exclude = path.join(projectPath, '.git', 'info', 'exclude')
-  const current = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
-  if (!current.split('\n').includes(EXCLUDE_LINE)) {
-    mkdirSync(path.dirname(exclude), { recursive: true })
-    writeFileSync(exclude, `${current}${current.endsWith('\n') || current === '' ? '' : '\n'}${EXCLUDE_LINE}\n`)
-  }
+// Worktrees sit in <project>/.bytebureau/worktrees/<session>, three levels below the main checkout
+function worktreePathOf(projectPath: string, sessionId: string): string {
+  return path.join(projectPath, '.bytebureau', 'worktrees', sessionId)
 }
 
-function copyIgnoredFiles(projectPath: string, worktreePath: string, files: readonly string[]): void {
-  for (const file of files) {
-    const source = path.join(projectPath, file)
-    if (existsSync(source)) {
-      mkdirSync(path.dirname(path.join(worktreePath, file)), { recursive: true })
-      copyFileSync(source, path.join(worktreePath, file))
-    }
+function mainCheckoutOf(worktreePath: string): string {
+  return path.resolve(worktreePath, '..', '..', '..')
+}
+
+// The first of wanted, wanted-2, wanted-3, ... that no existing branch carries
+function firstFree(wanted: string, taken: ReadonlySet<string>): string {
+  let candidate = wanted
+  for (let suffix = 2; taken.has(candidate); suffix += 1) {
+    candidate = `${wanted}-${suffix}`
   }
+  return candidate
 }
 
 export class LocalWorkspaceRuntime implements WorkspaceRuntime {
-  readonly id = 'local'
-  readonly isolation = 'none'
+  public readonly id = 'local'
+  public readonly isolation = 'none'
+  private readonly spawner: ProcessSpawner
   private readonly git: Git
   private readonly lastFetch = new Map<string, number>()
+  private readonly enqueue = createKeyedQueue()
 
-  constructor(
-    private readonly spawner: ProcessSpawner,
-    private readonly logger: Logger,
-  ) {
+  public constructor(spawner: ProcessSpawner, logger: Logger) {
+    this.spawner = spawner
     this.git = createGit(spawner, logger.child('git'))
   }
 
-  async provision(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
+  public async provision(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
     const projectPath = await this.checkProject(spec.projectPath)
-    const baseRef = await this.resolveBaseRef(projectPath, spec.baseBranch)
-    const branch = await this.freeBranch(projectPath, spec.branch)
-    const worktreePath = path.join(projectPath, '.bytebureau', 'worktrees', spec.sessionId)
-    mkdirSync(path.dirname(worktreePath), { recursive: true })
-    await this.git.must(projectPath, ['worktree', 'add', worktreePath, '-b', branch, baseRef])
-    copyIgnoredFiles(projectPath, worktreePath, spec.copyIgnored)
-    writeFileSync(
-      path.join(worktreePath, SESSION_MARKER),
-      `${JSON.stringify({ sessionId: spec.sessionId, projectPath, branch, baseRef }, null, 2)}\n`,
-    )
-    ensureExcluded(projectPath)
-    return { id: spec.sessionId, runtimeId: this.id, path: worktreePath, branch, baseRef }
+    await this.excludeFromGit(projectPath)
+    const baseRef = await this.resolveBaseRef(projectPath, spec)
+    const place = {
+      projectPath,
+      worktreePath: worktreePathOf(projectPath, spec.sessionId),
+      baseRef,
+    }
+    const branch = await this.enqueue(projectPath, async () => {
+      const added = await this.addWorktree(place, spec.branch)
+      return added
+    })
+    await this.populate(place, branch, spec)
+    return { id: spec.sessionId, runtimeId: this.id, path: place.worktreePath, branch, baseRef }
   }
 
-  exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle> {
-    return this.spawner.spawn({ ...spec, cwd: handle.path })
+  public async exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle> {
+    const child = await this.spawner.spawn({ ...spec, cwd: handle.path })
+    return child
   }
 
-  async status(handle: WorkspaceHandle): Promise<WorkspaceStatus> {
-    const text = await this.git.must(handle.path, ['status', '--porcelain=v2', '--branch'])
-    const parsed = parseStatusV2(text)
+  public async status(handle: WorkspaceHandle): Promise<WorkspaceStatus> {
+    const state = await this.worktreeState(handle)
     // `# branch.ab` exists only with an upstream; count against the base ref instead
-    const counts = await this.git.must(handle.path, ['rev-list', '--left-right', '--count', `${handle.baseRef}...HEAD`])
+    const range = `${handle.baseRef}...HEAD`
+    const counts = await this.git.must(handle.path, ['rev-list', '--left-right', '--count', range])
     const [behind = '0', ahead = '0'] = counts.split('\t')
-    const locked = await this.git.worktreeLocked(handle.path, handle.path)
-    return { dirty: parsed.dirty, branch: parsed.branch, ahead: Number(ahead), behind: Number(behind), locked }
+    return { ...state, ahead: Number(ahead), behind: Number(behind) }
   }
 
-  async destroy(handle: WorkspaceHandle, options: { readonly force?: boolean } = {}): Promise<void> {
-    const status = await this.status(handle)
-    if (status.locked) {
+  public async destroy(
+    handle: WorkspaceHandle,
+    options: { readonly force?: boolean } = {},
+  ): Promise<void> {
+    const state = await this.worktreeState(handle)
+    if (state.locked) {
       throw new WorkspaceError('locked', `worktree ${handle.path} is locked`)
     }
-    if (status.dirty && options.force !== true) {
+    if (state.dirty && options.force !== true) {
       throw new WorkspaceError('dirty', `worktree ${handle.path} has uncommitted changes`)
     }
     const args = ['worktree', 'remove', ...(options.force === true ? ['--force'] : []), handle.path]
-    await this.git.must(path.dirname(path.dirname(path.dirname(handle.path))), args)
+    await this.git.must(mainCheckoutOf(handle.path), args)
+  }
+
+  // What destroy needs to know, which unlike ahead and behind does not depend on the base ref
+  private async worktreeState(handle: WorkspaceHandle): Promise<WorktreeState> {
+    const parsed = parseStatusV2(await this.git.must(handle.path, STATUS))
+    const locked = await this.git.worktreeLocked(handle.path, handle.path)
+    return { dirty: parsed.dirty, branch: parsed.branch, locked }
   }
 
   private async checkProject(projectPath: string): Promise<string> {
-    const version = parseVersion(await this.git.version(projectPath).catch(() => '0.0'))
-    if (versionTooOld(version)) {
-      throw new WorkspaceError('git_too_old', `git ${version.join('.')} found, 2.40 or newer is required`)
+    if (!isDirectory(projectPath)) {
+      throw new WorkspaceError('not_a_repository', `${projectPath} is not a directory`)
     }
+    await this.requireRecentGit(projectPath)
     const toplevel = await this.git.toplevel(projectPath)
     if (toplevel === null) {
       throw new WorkspaceError('not_a_repository', `${projectPath} is not inside a git repository`)
     }
-    if (existsSync(path.join(toplevel, SESSION_MARKER))) {
-      throw new WorkspaceError('is_bytebureau_worktree', `${toplevel} is a ByteBureau session worktree`)
+    if (isSessionWorktree(toplevel)) {
+      throw new WorkspaceError(
+        'is_bytebureau_worktree',
+        `${toplevel} is a ByteBureau session worktree`,
+      )
     }
     return toplevel
   }
 
-  private async resolveBaseRef(projectPath: string, baseBranch: string): Promise<string> {
-    if (!(await this.git.hasRemote(projectPath, 'origin'))) {
-      return baseBranch
+  // A git that cannot say which version it is counts as too old
+  private async requireRecentGit(cwd: string): Promise<void> {
+    const version = await this.gitVersion(cwd)
+    if (versionTooOld(version)) {
+      throw new WorkspaceError(
+        'git_too_old',
+        `git ${version.join('.')} found, ${MIN_GIT.join('.')} or newer is required`,
+      )
     }
-    await this.fetchThrottled(projectPath)
-    return (await this.git.refExists(projectPath, `origin/${baseBranch}`)) ? `origin/${baseBranch}` : baseBranch
   }
 
-  private async fetchThrottled(projectPath: string): Promise<void> {
+  private async gitVersion(cwd: string): Promise<readonly [number, number]> {
+    try {
+      return await this.git.version(cwd)
+    } catch {
+      return [0, 0]
+    }
+  }
+
+  private async resolveBaseRef(projectPath: string, spec: WorkspaceSpec): Promise<string> {
+    if (!(await this.git.hasRemote(projectPath, 'origin'))) {
+      return spec.baseBranch
+    }
+    await this.fetchThrottled(projectPath, spec.logger)
+    const remoteRef = `origin/${spec.baseBranch}`
+    return (await this.git.refExists(projectPath, remoteRef)) ? remoteRef : spec.baseBranch
+  }
+
+  private async fetchThrottled(projectPath: string, logger: Logger): Promise<void> {
     const last = this.lastFetch.get(projectPath) ?? 0
     if (Date.now() - last < FETCH_INTERVAL_MS) {
       return
@@ -7161,27 +8417,72 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
     this.lastFetch.set(projectPath, Date.now())
     const result = await this.git.run(projectPath, ['fetch', '--quiet', 'origin'])
     if (result.code !== 0) {
-      this.logger.warn('git fetch failed; continuing with the last known refs', { stderr: result.stderr })
+      logger.warn('git fetch failed; continuing with the last known refs', {
+        stderr: result.stderr,
+      })
     }
   }
 
+  // Nobody else may take the branch name between picking it and adding the worktree
+  private async addWorktree(place: Placement, wanted: string): Promise<string> {
+    const branch = await this.freeBranch(place.projectPath, wanted)
+    const args = ['worktree', 'add', '--no-track', place.worktreePath, '-b', branch, place.baseRef]
+    await this.git.must(place.projectPath, args)
+    return branch
+  }
+
+  // The exclude file belongs to the repository, so a project that is itself a linked worktree shares its main one
+  private async excludeFromGit(projectPath: string): Promise<void> {
+    const args = ['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude']
+    const excludeFile = await this.git.must(projectPath, args)
+    onDisk('updating the exclude list', () => {
+      ensureExcluded(excludeFile)
+    })
+  }
+
   private async freeBranch(projectPath: string, wanted: string): Promise<string> {
-    let candidate = wanted
-    for (let suffix = 2; await this.git.refExists(projectPath, `refs/heads/${candidate}`); suffix += 1) {
-      candidate = `${wanted}-${suffix}`
+    return firstFree(wanted, new Set(await this.git.localBranches(projectPath, wanted)))
+  }
+
+  // A failure here leaves no half-made worktree behind
+  private async populate(place: Placement, branch: string, spec: WorkspaceSpec): Promise<void> {
+    const { projectPath, baseRef } = place
+    try {
+      onDisk('preparing the worktree files', () => {
+        copyIgnoredFiles(place, spec.copyIgnored, spec.logger)
+        writeSessionMarker(place.worktreePath, {
+          sessionId: spec.sessionId,
+          projectPath,
+          branch,
+          baseRef,
+        })
+      })
+    } catch (error) {
+      await this.discard(place, branch, spec.logger)
+      throw error
     }
-    return candidate
+  }
+
+  private async discard(place: Placement, branch: string, logger: Logger): Promise<void> {
+    const remove = ['worktree', 'remove', '--force', place.worktreePath]
+    const removed = await this.git.run(place.projectPath, remove)
+    const deleted = await this.git.run(place.projectPath, ['branch', '-D', branch])
+    if (removed.code !== 0 || deleted.code !== 0) {
+      const leftover = { worktree: place.worktreePath, branch }
+      logger.warn('could not take back a provision that failed', leftover)
+    }
   }
 }
 ```
-The `for` loop with `await` in its condition is the one place `no-await-in-loop` must stay enabled-but-satisfied: oxlint's rule inspects loop bodies, not conditions; if the installed oxlint flags it, rewrite as a `while (true)` with an explicit `break` guarded by a `MAX_SUFFIX = 99` constant and note it in the report.
+`no-await-in-loop` fires on an await in a `for` condition too; the shipped `freeBranch` lists local branches once (`for-each-ref`) and loops synchronously over that set, with no cap.
 
 `plugins/workspace-local/src/plugin.ts`:
 ```ts
 import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
 import { LocalWorkspaceRuntime } from './local-runtime.js'
 
-export { LocalWorkspaceRuntime, WorkspaceError, type WorkspaceErrorCode } from './local-runtime.js'
+export { WorkspaceError, type WorkspaceErrorCode } from './errors.js'
+export { LocalWorkspaceRuntime } from './local-runtime.js'
 
 export const localWorkspacePlugin: Plugin = definePlugin({
   manifest: {
@@ -7201,7 +8502,7 @@ export const localWorkspacePlugin: Plugin = definePlugin({
 
 - [ ] **Step 8: Run the tests and the gates, then commit**
 
-Run: `bunx vitest run --project workspace-local` → PASS (10 tests). `vitest.config.ts`: add `'plugins/workspace-local'` to `projects`; `knip.ts`: add `'plugins/workspace-local': { entry: ['src/plugin.ts'], project: ['src/**/*.ts'] }`; `.github/workflows/semantic-pr.yml`: add `workspace-local` to `scopes`; the coverage `include` gains `'plugins/*/src/**/*.ts'` (exclude `**/testing/**`). Run `bun install && bun run check` → green (dependency-cruiser confirms the plugin imports only `@bytebureau/plugin-api` and Node built-ins).
+Run: `bunx vitest run --project workspace-local` → PASS (69 tests as shipped). `vitest.config.ts`: add `'plugins/workspace-local'` to `projects`, `'plugins/*/src/**/*.ts'` to the coverage `include` and `'**/testing/**'` to `exclude`; `knip.ts`: add `'plugins/workspace-local': { project: ['src/**/*.ts'] }`; `.github/workflows/semantic-pr.yml`: add `workspace-local` to `scopes`. Run `bun install && bun run check` → green (dependency-cruiser confirms the plugin imports only `@bytebureau/plugin-api` and Node built-ins).
 
 ```bash
 git add plugins/workspace-local vitest.config.ts knip.ts bun.lock
