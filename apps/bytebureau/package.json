@@ -14,6 +14,8 @@
   },
   "dependencies": {
     "@bytebureau/i18n": "workspace:*",
+    "@bytebureau/kernel": "workspace:*",
+    "@bytebureau/protocol": "workspace:*",
     "@clack/prompts": "1.8.1",
     "citty": "0.2.2",
     "picocolors": "1.1.1"

@@ -72,6 +72,88 @@ describe(run, () => {
   })
 })
 
+// The tagged errors of the kernel are Errors with an empty message
+function typed(name: string, fields: Readonly<Record<string, unknown>>): Error {
+  return Object.assign(new Error('placeholder'), { name, message: '' }, fields)
+}
+
+describe('run with the typed errors of the kernel', () => {
+  it('prints the name, the reason and the code of an error with an empty message', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const error = typed('WorkspaceError', {
+      code: 'not_a_repository',
+      reason: '/tmp/x is not inside a git repository',
+    })
+    await expect(run(failingWith(error), [])).resolves.toBe(2)
+    expect(output.error).toHaveBeenCalledWith(
+      'WorkspaceError: /tmp/x is not inside a git repository (not_a_repository)',
+    )
+  })
+
+  it('names the file and the JSON pointer of a configuration error', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const error = typed('ConfigError', {
+      file: '/repo/bytebureau.json',
+      pointer: '/employees/developer/model',
+      reason: 'Expected a string',
+    })
+    await expect(run(failingWith(error), [])).resolves.toBe(2)
+    expect(output.error).toHaveBeenCalledWith(
+      'ConfigError: Expected a string (/repo/bytebureau.json/employees/developer/model)',
+    )
+  })
+
+  it('names the file alone when a configuration error has no pointer', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const error = typed('ConfigError', { file: '/repo/bytebureau.json', reason: 'both exist' })
+    await run(failingWith(error), [])
+    expect(output.error).toHaveBeenCalledWith('ConfigError: both exist (/repo/bytebureau.json)')
+  })
+})
+
+describe('run with the typed errors of the kernel that name a cause or a kind', () => {
+  it('prints the cause of a store error, and the kind of a provider error', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const store = typed('StoreError', { cause: new Error('FOREIGN KEY constraint failed') })
+    const provider = typed('ProviderError', { kind: 'auth', reason: 'not logged in' })
+    await run(failingWith(store), [])
+    await run(failingWith(provider), [])
+    expect(output.error).toHaveBeenNthCalledWith(1, 'StoreError: FOREIGN KEY constraint failed')
+    expect(output.error).toHaveBeenNthCalledWith(2, 'ProviderError: not logged in (auth)')
+  })
+
+  it('digs through the causes, whatever kind of value the innermost one is', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const inner = typed('SqlError', { cause: 'disk full' })
+    await run(failingWith(typed('StoreError', { cause: inner })), [])
+    expect(output.error).toHaveBeenCalledWith('StoreError: SqlError: disk full')
+  })
+
+  it('adds what the errors behind a store error say, without telling the same twice', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const sqlite = new Error('FOREIGN KEY constraint failed')
+    const inner = new Error('Failed to execute statement', { cause: sqlite })
+    const sql = new Error('Failed to execute statement', { cause: inner })
+    await run(failingWith(typed('StoreError', { cause: sql })), [])
+    expect(output.error).toHaveBeenCalledWith(
+      'StoreError: Failed to execute statement: FOREIGN KEY constraint failed',
+    )
+  })
+
+  it('prints the bare name of an error that has neither a message nor any fields', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    await run(failingWith(typed('AskError', {})), [])
+    expect(output.error).toHaveBeenCalledWith('AskError')
+  })
+})
+
 describe('run built-in flags', () => {
   it('prints the usage of the named subcommand for --help', async () => {
     expect.hasAssertions()

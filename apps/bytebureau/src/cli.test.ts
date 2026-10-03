@@ -1,55 +1,50 @@
-import { execFileSync, spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { runCli } from './testing/run-cli.js'
 
-const cwd = fileURLToPath(new URL('..', import.meta.url))
-const baseEnv = {
-  PATH: process.env['PATH'] ?? '',
-  HOME: process.env['HOME'] ?? '',
-  LANG: 'en_US.UTF-8',
-}
 const ESCAPE = '\u001B'
 
-function run(
-  args: string[],
-  env: Record<string, string> = {},
-): { stdout: string; stderr: string; status: number } {
-  const result = spawnSync('bun', ['run', 'src/main.ts', ...args], {
-    cwd,
-    env: { ...baseEnv, ...env },
-    encoding: 'utf8',
-  })
-  return { stdout: result.stdout, stderr: result.stderr, status: result.status ?? -1 }
-}
-
 describe('bytebureau CLI', () => {
-  it('prints a semantic version', () => {
-    const stdout = execFileSync('bun', ['run', 'src/main.ts', '--version'], {
-      cwd,
-      env: baseEnv,
-      encoding: 'utf8',
-    })
+  it('prints a semantic version', async () => {
+    expect.hasAssertions()
+    const { stdout, code } = await runCli(['--version'])
+    expect(code).toBe(0)
     expect(stdout).toMatch(/\d+\.\d+\.\d+/u)
   })
 
-  it('lists the hello command in help', () => {
-    const { stdout, status } = run(['--help'])
-    expect(status).toBe(0)
+  it('lists the hello command in help', async () => {
+    expect.hasAssertions()
+    const { stdout, code } = await runCli(['--help'])
+    expect(code).toBe(0)
     expect(stdout).toContain('hello')
   })
 
-  it('greets in Czech when --lang cs is passed', () => {
-    const { stdout, status } = run(['hello', 'Ondřej', '--lang', 'cs'])
-    expect(status).toBe(0)
+  it('lists the kernel commands in help', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['--help'])
+    expect(stdout).toContain('run')
+    expect(stdout).toContain('config')
+    expect(stdout).toContain('projects')
+    expect(stdout).toContain('workspaces')
+  })
+})
+
+describe('bytebureau hello', () => {
+  it('greets in Czech when --lang cs is passed', async () => {
+    expect.hasAssertions()
+    const { stdout, code } = await runCli(['hello', 'Ondřej', '--lang', 'cs'])
+    expect(code).toBe(0)
     expect(stdout.trim()).toBe('Ahoj, Ondřej! ByteBureau je připraveno.')
   })
 
-  it('greets anonymously in English by default', () => {
-    expect(run(['hello']).stdout.trim()).toBe('Hello! ByteBureau is ready.')
+  it('greets anonymously in English by default', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['hello'])
+    expect(stdout.trim()).toBe('Hello! ByteBureau is ready.')
   })
 
-  it('emits JSON without ANSI codes even when FORCE_COLOR is set', () => {
-    const { stdout } = run(['hello', 'Ondřej', '--json'], { FORCE_COLOR: '1' })
+  it('emits JSON without ANSI codes even when FORCE_COLOR is set', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['hello', 'Ondřej', '--json'], { FORCE_COLOR: '1' })
     expect(stdout).not.toContain(ESCAPE)
     expect(JSON.parse(stdout)).toStrictEqual({
       command: 'hello',
@@ -57,14 +52,17 @@ describe('bytebureau CLI', () => {
     })
   })
 
-  it('falls back to English with a warning for an unsupported language', () => {
-    const { stdout, stderr, status } = run(['hello', '--lang', 'de'])
-    expect(status).toBe(0)
+  it('falls back to English with a warning for an unsupported language', async () => {
+    expect.hasAssertions()
+    const { stdout, stderr, code } = await runCli(['hello', '--lang', 'de'])
+    expect(code).toBe(0)
     expect(stdout.trim()).toBe('Hello! ByteBureau is ready.')
     expect(stderr).toContain('Unsupported language "de"')
   })
 
-  it('exits with code 1 for an unknown command', () => {
-    expect(run(['nonsense']).status).toBe(1)
+  it('exits with code 1 for an unknown command', async () => {
+    expect.hasAssertions()
+    const { code } = await runCli(['nonsense'])
+    expect(code).toBe(1)
   })
 })
