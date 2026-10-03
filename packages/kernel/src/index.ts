@@ -56,3 +56,13 @@ export {
 } from './workspace/workspace-manager.js'
 export { WorkspaceRuntimes, type WorkspaceRuntimesShape } from './workspace/runtimes.js'
 export { branchSlug } from './workspace/slug.js'
+export {
+  PluginHost,
+  PluginHostLive,
+  type PluginHostShape,
+  type PluginHostOptions,
+  type PluginStatus,
+} from './plugins/plugin-host.js'
+export { HookBus } from './plugins/hooks.js'
+export { BUNDLED_PLUGINS, HOST_API_VERSION } from './plugins/bundled.js'
+export { InMemorySecretStore } from './secrets/in-memory-secret-store.js'
