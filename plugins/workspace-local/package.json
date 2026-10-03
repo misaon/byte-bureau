@@ -1,0 +1,42 @@
+{
+  "name": "@bytebureau/workspace-local",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau workspace runtime: one git worktree per session on the host",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bytebureau/plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  },
+  "bytebureau": {
+    "name": "workspace-local",
+    "hostApi": "^0",
+    "kind": "in-process",
+    "capabilities": [
+      "fs:read",
+      "fs:write",
+      "process"
+    ],
+    "contributes": {
+      "workspaceRuntimes": [
+        "local"
+      ]
+    }
+  }
+}

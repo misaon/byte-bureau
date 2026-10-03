@@ -43,6 +43,7 @@ jobs:
             plugin-api
             protocol
             tsconfig
+            workspace-local
             cli
             deps
             release
