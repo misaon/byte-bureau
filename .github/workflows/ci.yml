@@ -99,11 +99,12 @@ jobs:
           BIN=(dist/bytebureau-*-linux-x64)
           [ "${#BIN[@]}" -eq 1 ]
           REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME=$(mktemp -d) "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
-          grep -q '"type":"session.completed"' events.ndjson
-          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
+          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries-linux
@@ -138,11 +139,12 @@ jobs:
           [ "${#BIN[@]}" -eq 1 ]
           chmod +x "${BIN[0]}"
           REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME=$(mktemp -d) "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
-          grep -q '"type":"session.completed"' events.ndjson
-          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
+          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
 
   smoke-macos:
     name: smoke-macos
@@ -169,11 +171,12 @@ jobs:
           BIN=(dist/bytebureau-*-darwin-arm64)
           [ "${#BIN[@]}" -eq 1 ]
           REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME=$(mktemp -d) "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
-          grep -q '"type":"session.completed"' events.ndjson
-          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
+          test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
 
   docs-build:
     name: docs-build
