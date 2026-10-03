@@ -4,7 +4,7 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { IDLE, withEnv } from '../process/supervisor-fixtures.js'
 import { linesOf, nodeExec, resolved } from './plugin-call-fixtures.js'
-import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
+import { hostOver, loadedHost, probe, startHost } from './plugin-fixtures.js'
 import type { PluginHost } from './plugin-host.js'
 
 const spawner = probe('spawner')
@@ -61,6 +61,19 @@ it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
       }),
     )
 
+    suite.effect('sets no timer for a timeout that is not positive', () =>
+      Effect.gen(function* ignoresNonPositiveTimeout() {
+        const script = 'setTimeout(() => process.exit(0), 50)'
+        const zero = yield* spawn(script, { timeoutMs: 0 })
+        const negative = yield* spawn(script, { timeoutMs: -1 })
+        const exits = [yield* resolved(zero.exited), yield* resolved(negative.exited)]
+        assert.deepStrictEqual(exits, [
+          { code: 0, signal: null },
+          { code: 0, signal: null },
+        ])
+      }),
+    )
+
     suite.effect('leaves a command alone that ends before its timeout', () =>
       Effect.gen(function* leavesQuickCommand() {
         const handle = yield* spawn('process.exit(0)', { timeoutMs: 60_000 })
@@ -103,4 +116,18 @@ it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
       }),
     )
   },
+)
+
+const orphan = probe('orphan')
+
+it.live(
+  'ends a command of a plugin when the host shuts down, though the plugin gave no signal',
+  () =>
+    Effect.gen(function* endsWithHost() {
+      const { host, stop } = yield* startHost({ extraPlugins: [orphan.plugin] })
+      yield* host.load()
+      const handle = yield* resolved(orphan.context().process.spawn(nodeExec(IDLE)))
+      yield* stop
+      assert.deepStrictEqual(yield* resolved(handle.exited), { code: null, signal: 'SIGINT' })
+    }),
 )

@@ -32,7 +32,7 @@ export interface ProjectInfo {
 
 export interface PluginEvents {
   publish(event: KernelEvent): Promise<void>
-  // Events arrive as the log stores them, with seq, id and timestamp
+  /** Events published from the moment the subscription opens, as the log stores them, with seq, id and timestamp; history is not replayed. */
   subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
@@ -91,10 +91,15 @@ export interface PromptSendInput {
 }
 
 export interface Hooks {
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'session.beforeCreate': Hook<SessionCreateInput, SessionCreateInput>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'agent.beforeSpawn': Hook<AgentSpawnInput, AgentSpawnResult>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'ask.beforeOpen': Hook<AskOpenInput, AskOpenResult>
+  /** Invoked for every prompt before the agent receives it; what it returns is what the agent gets, while the turn records what the caller said. */
   readonly 'prompt.beforeSend': Hook<PromptSendInput, PromptSendInput>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'event.beforePublish': Hook<KernelEvent, void>
 }
 

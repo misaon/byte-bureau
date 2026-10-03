@@ -5,7 +5,7 @@ import { PluginError } from '../errors.js'
 import { kernelLogger } from '../logging/logging.js'
 import { HookBus } from './hooks.js'
 import type { ContextDeps } from './plugin-context.js'
-import { setUpPlugin } from './plugin-setup.js'
+import { identityOf, setUpPlugin, shapeProblem, type Identity } from './plugin-setup.js'
 import { PortRegistry, portsOf } from './port-registry.js'
 import { reasonOf } from './reason.js'
 
@@ -59,28 +59,37 @@ export class PluginLoader {
     return Effect.result(this.admit(plugin)).pipe(
       Effect.flatMap((outcome) =>
         Result.isFailure(outcome)
-          ? this.refuse(plugin, outcome.failure)
+          ? this.refuse(identityOf(plugin), outcome.failure)
           : this.accept(plugin, outcome.success),
       ),
     )
   }
 
+  // Nothing is read of the plugin until the admission runs, so a plugin of any shape is refused and never kills the load
   private admit(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
-    const { name } = plugin.manifest
-    if (this.loaded.some((entry) => entry.name === name)) {
-      const reason = `a plugin named ${name} is already loaded`
-      return Effect.fail(new PluginError({ plugin: name, reason }))
-    }
-    return this.setUp(plugin).pipe(
-      Effect.flatMap((registration) => this.register(plugin, registration)),
-    )
+    return Effect.suspend(() => {
+      const { name } = identityOf(plugin)
+      const problem = shapeProblem(plugin)
+      if (problem !== undefined) {
+        return Effect.fail(new PluginError({ plugin: name, reason: problem }))
+      }
+      if (this.loaded.some((entry) => entry.name === name)) {
+        const reason = `a plugin named ${name} is already loaded`
+        return Effect.fail(new PluginError({ plugin: name, reason }))
+      }
+      return this.setUp(plugin).pipe(
+        Effect.flatMap((registration) => this.register(plugin, registration)),
+      )
+    })
   }
 
+  // The configuration of the plugin is its own entry, never an inherited property such as constructor
   private setUp(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
     const { name } = plugin.manifest
+    const config = Object.hasOwn(this.configs, name) ? this.configs[name] : undefined
     return Effect.tryPromise({
       try: async () => {
-        const registration = await setUpPlugin(plugin, this.configs[name], this.deps)
+        const registration = await setUpPlugin(plugin, config, this.deps)
         return registration
       },
       catch: (failure) => new PluginError({ plugin: name, reason: reasonOf(failure) }),
@@ -110,8 +119,7 @@ export class PluginLoader {
     return this.announce({ type: 'plugin.loaded', payload: { name, version, ports } })
   }
 
-  private refuse(plugin: Plugin, failure: PluginError): Effect.Effect<void> {
-    const { name, version } = plugin.manifest
+  private refuse({ name, version }: Identity, failure: PluginError): Effect.Effect<void> {
     const { reason } = failure
     this.statuses.push({ name, version, state: 'failed', reason, ports: [] })
     this.logger.warn('plugin failed', { plugin: name, reason })

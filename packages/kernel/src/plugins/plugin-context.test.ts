@@ -1,9 +1,10 @@
-import type { PluginEvents } from '@bytebureau/plugin-api'
+import type { EventEnvelope, PluginEvents } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Fiber } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { flush } from '../sessions/session-helper-fixtures.js'
 import { rejected, resolved, takeFrom } from './plugin-call-fixtures.js'
 import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
 
@@ -91,6 +92,15 @@ it.layer(hostOver({ extraPlugins, secrets: store }))('plugin context secrets', (
   )
 })
 
+// A subscription to everything of the session sub-1 and one to its warnings, taking two and one
+const listenTo = (
+  events: PluginEvents,
+): Effect.Effect<readonly [readonly EventEnvelope[], readonly EventEnvelope[]]> => {
+  const whole = events.subscribe({ sessionId: 'sub-1' })
+  const typed = events.subscribe({ types: ['session.warning'], sessionId: 'sub-1' })
+  return Effect.all([takeFrom(whole, 2), takeFrom(typed, 1)], { concurrency: 2 })
+}
+
 // Two events in one session, one of them a warning, and one in another session
 const seed = (events: PluginEvents): Effect.Effect<void> =>
   Effect.gen(function* seedsEvents() {
@@ -124,22 +134,21 @@ it.layer(hostOver({ extraPlugins }))('plugin context events', (suite) => {
     Effect.gen(function* deliversEnvelopes() {
       yield* loadedHost
       const { events } = alpha.context()
-      yield* seed(events)
-      const whole = yield* takeFrom(events.subscribe({ sessionId: 'sub-1' }), 2)
-      const typed = yield* takeFrom(
-        events.subscribe({ types: ['session.warning'], sessionId: 'sub-1' }),
-        1,
-      )
+      const listening = yield* Effect.forkChild(listenTo(events))
+      yield* Effect.andThen(flush, seed(events))
+      const [wholeEvents, typedEvents] = yield* Fiber.join(listening)
       assert.deepStrictEqual(
-        whole.map((envelope) => envelope.type),
+        wholeEvents.map((envelope) => envelope.type),
         [USER, 'session.warning'],
       )
       assert.deepStrictEqual(
-        typed.map((envelope) => envelope.payload),
+        typedEvents.map((envelope) => envelope.payload),
         [{ kind: 'k', message: 'm' }],
       )
       assert.isTrue(
-        whole.every((envelope) => envelope.seq > 0 && envelope.id !== '' && envelope.ts !== ''),
+        wholeEvents.every(
+          (envelope) => envelope.seq > 0 && envelope.id !== '' && envelope.ts !== '',
+        ),
       )
     }),
   )

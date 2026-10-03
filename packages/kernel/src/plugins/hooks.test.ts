@@ -177,3 +177,17 @@ it.effect('does not run a terminal again that has failed while a hook waited for
     assert.deepStrictEqual(calls, ['terminal'])
   }),
 )
+
+it.effect('passes a terminal defect through the hooks that passed on without blaming them', () =>
+  Effect.gen(function* passesDefectOn() {
+    const records = yield* warnings
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('a', SEND, passOn)
+    bus.register('b', SEND, passOn)
+    const exit = yield* Effect.exit(
+      bus.run(SEND, prompt('x'), () => Effect.die(new Error('terminal died'))),
+    )
+    assert.isTrue(Exit.hasDies(exit))
+    assert.deepStrictEqual(records, [])
+  }),
+)

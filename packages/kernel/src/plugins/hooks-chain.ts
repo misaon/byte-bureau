@@ -52,17 +52,23 @@ export class HookChain<Input, Output> {
     return this.attempt(entry, current, (value) => this.from(index + 1, value, terminal))
   }
 
+  // A failure that came from further down the chain is not the hook's own, so it is passed on and never reported as one
   private attempt(
     entry: Entry<Input, Output>,
     current: Input,
     rest: Rest<Input, Output>,
   ): Effect.Effect<Output> {
     const passedOn: Promise<Output>[] = []
+    const downstreamFailed = { value: false }
     const next = async (value: Input): Promise<Output> => {
       const downstream = Effect.runPromise(rest(value))
       passedOn.push(downstream)
-      const result = await downstream
-      return result
+      try {
+        return await downstream
+      } catch (error) {
+        downstreamFailed.value = true
+        throw error
+      }
     }
     const call = Effect.tryPromise({
       try: async () => {
@@ -73,7 +79,9 @@ export class HookChain<Input, Output> {
     })
     return Effect.matchEffect(call, {
       onFailure: (failure) => {
-        this.report(entry, failure)
+        if (!downstreamFailed.value) {
+          this.report(entry, failure)
+        }
         return resumed(passedOn.at(-1), () => rest(current))
       },
       onSuccess: (result) => Effect.succeed(result),

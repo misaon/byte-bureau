@@ -3,6 +3,8 @@ import { HOST_API_VERSION } from './bundled.js'
 import { createPluginContext, type ContextDeps } from './plugin-context.js'
 import { satisfiesMajor } from './semver-major.js'
 
+export { identityOf, shapeProblem, type Identity } from './plugin-shape.js'
+
 type Path = readonly (PropertyKey | { readonly key: PropertyKey })[] | undefined
 
 // Dotted keys of an issue, a nested one too; the empty text for an issue about the whole config

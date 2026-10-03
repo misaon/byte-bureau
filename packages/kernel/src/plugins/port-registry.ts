@@ -43,10 +43,15 @@ export class PortRegistry {
     return this.runtimes.get(id)
   }
 
+  // A port another plugin holds, or one the registration offers twice, cannot be taken
   private heldPorts(registration: PluginRegistration): readonly string[] {
-    return identified(registration).flatMap((port) => {
+    const ports = identified(registration)
+    return ports.flatMap((port, index) => {
       const owner = this.owners.get(port)
-      return owner === undefined ? [] : [`${port} is already provided by plugin ${owner}`]
+      if (owner !== undefined) {
+        return [`${port} is already provided by plugin ${owner}`]
+      }
+      return ports.indexOf(port) === index ? [] : [`${port} is offered twice by one registration`]
     })
   }
 
