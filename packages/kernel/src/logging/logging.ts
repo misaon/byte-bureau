@@ -1,4 +1,3 @@
-import { inspect } from 'node:util'
 import {
   ansiColorFormatter,
   configure,
@@ -78,28 +77,42 @@ function sinks(options: LoggingOptions): Record<string, Sink> {
   return result
 }
 
+// Keyed by category so a repeated or bb-rooted selection replaces an entry; negations come last and win
+function categoryConfigs(options: LoggingOptions, sinkIds: string[]): CategoryConfig[] {
+  const { enabled, silenced } = parseDebug(options.debug) ?? NO_DEBUG
+  const configs = new Map<string, CategoryConfig>([
+    ['bb', { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) }],
+  ])
+  for (const category of enabled) {
+    configs.set(category.join('.'), {
+      category,
+      sinks: sinkIds,
+      parentSinks: 'override',
+      lowestLevel: 'debug',
+    })
+  }
+  for (const category of silenced) {
+    configs.set(category.join('.'), {
+      category,
+      sinks: [],
+      parentSinks: 'override',
+      lowestLevel: 'fatal',
+    })
+  }
+  // The kernel configures the meta logger itself
+  configs.delete('logtape.meta')
+  return [...configs.values()]
+}
+
 export async function configureLogging(options: LoggingOptions): Promise<void> {
   const allSinks = sinks(options)
-  const sinkIds = Object.keys(allSinks)
-  const { enabled, silenced } = parseDebug(options.debug) ?? NO_DEBUG
   await configure({
     reset: true,
     sinks: allSinks,
     loggers: [
+      // Without an explicit entry LogTape gives the meta logger a default console sink that skips the redaction
       { category: ['logtape', 'meta'], sinks: ['console'], lowestLevel: 'warning' },
-      { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) },
-      ...enabled.map((category): CategoryConfig => ({
-        category,
-        sinks: sinkIds,
-        parentSinks: 'override',
-        lowestLevel: 'debug',
-      })),
-      ...silenced.map((category): CategoryConfig => ({
-        category,
-        sinks: [],
-        parentSinks: 'override',
-        lowestLevel: 'fatal',
-      })),
+      ...categoryConfigs(options, Object.keys(allSinks)),
     ],
   })
 }
@@ -119,11 +132,25 @@ const levelMap: Record<EffectLogLevel.LogLevel, LogLevel | undefined> = {
   None: undefined,
 }
 
-const asText = (part: unknown): string =>
-  typeof part === 'string' ? part : inspect(part, { depth: 3 })
-
 const toParts = (message: unknown): readonly unknown[] =>
   Array.isArray(message) ? message : [message]
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+// Parts that are not strings become properties, so the field redaction sees them: one plain object is merged, the rest go under `parts`
+function partProperties(parts: readonly unknown[]): Record<string, unknown> {
+  const [only] = parts
+  if (parts.length === 1 && isPlainRecord(only)) {
+    return only
+  }
+  return parts.length > 0 ? { parts } : {}
+}
 
 // A bridged record carries one literal message part that is never a placeholder; the raw template's braces are escaped
 const literalMessage = (text: string): Pick<LogRecord, 'message' | 'rawMessage'> => ({
@@ -131,17 +158,19 @@ const literalMessage = (text: string): Pick<LogRecord, 'message' | 'rawMessage'>
   rawMessage: text.replaceAll('{', '{{').replaceAll('}', '}}'),
 })
 
-// Effect logger → LogTape: the category annotation picks the logger, the other annotations become properties
+// Effect logger → LogTape: the category annotation picks the logger, the other annotations and the non-string parts become properties
 export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((options) => {
   const level = levelMap[options.logLevel]
   if (level === undefined) {
     return
   }
   const { category, ...annotations } = options.fiber.getRef(References.CurrentLogAnnotations)
-  const text = toParts(options.message)
-    .map((part) => asText(part))
-    .join(' ')
-  const properties: Record<string, unknown> = { ...annotations }
+  const parts = toParts(options.message)
+  const text = parts.filter((part) => typeof part === 'string').join(' ')
+  const properties: Record<string, unknown> = {
+    ...annotations,
+    ...partProperties(parts.filter((part) => typeof part !== 'string')),
+  }
   if (options.cause.reasons.length > 0) {
     properties['cause'] = Cause.pretty(options.cause)
   }

@@ -30,7 +30,7 @@ export const AskError = Data.TaggedError('AskError')<{
 export type AskError = InstanceType<typeof AskError>
 
 export const PluginError = Data.TaggedError('PluginError')<{
-  readonly name: string
+  readonly plugin: string
   readonly reason: string
 }>
 export type PluginError = InstanceType<typeof PluginError>

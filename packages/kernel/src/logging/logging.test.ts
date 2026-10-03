@@ -93,6 +93,20 @@ async function failingSinkRun(): Promise<{
   }
 }
 
+async function debugDelivery(debug: string): Promise<readonly unknown[]> {
+  const seen = await captured(
+    { level: 'info', json: true, debug },
+    Effect.sync(() => {
+      getLogger(['bb', 'core']).debug('core debug')
+      getLogger(['bb', 'core']).info('core info')
+      getLogger(['bb', 'store']).debug('store debug')
+      getLogger(['bb', 'store']).info('store info')
+      getLogger(['bb', 'agent']).debug('agent debug')
+    }),
+  )
+  return seen.map((entry) => entry.message[0])
+}
+
 describe('effect bridge', () => {
   it('routes Effect logs into LogTape categories with annotations as properties', async () => {
     expect.hasAssertions()
@@ -108,14 +122,49 @@ describe('effect bridge', () => {
     expect(seen.map((entry) => entry.properties)).toMatchObject([{ sessionId: 's1' }])
   })
 
-  it('keeps an Effect log message literal, in bb.core without a category annotation', async () => {
+  it('keeps string parts literal and merges one object part into the properties, in bb.core by default', async () => {
     expect.hasAssertions()
     const seen = await captured(
       { level: 'info', json: true },
       Effect.logInfo('literal {name} }} {{x}}', { count: 1 }),
     )
-    expect(seen.map((entry) => [entry.category.join('.'), entry.message[0]])).toStrictEqual([
-      ['bb.core', 'literal {name} }} {{x}} { count: 1 }'],
+    expect(
+      seen.map((entry) => [entry.category.join('.'), entry.message[0], entry.properties]),
+    ).toStrictEqual([['bb.core', 'literal {name} }} {{x}}', { count: 1 }]])
+  })
+})
+
+describe('effect message parts', () => {
+  it('puts object parts through the field redaction, leaving no canary in text or properties', async () => {
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'info', json: true },
+      Effect.logInfo('x', {
+        password: 'hunter2-canary',
+        nested: { authorization: 'Bearer canary' },
+      }),
+    )
+    expect(JSON.stringify(seen)).not.toContain('canary')
+    expect(seen.map((entry) => [entry.message, entry.properties])).toStrictEqual([
+      [['x'], { nested: {} }],
+    ])
+  })
+
+  it('stores several, non-object and Error parts under parts, redacted like any property', async () => {
+    expect.hasAssertions()
+    const logging = Effect.all(
+      [
+        Effect.logInfo('a', 'b', { token: 'canary', keep: 1 }, 7),
+        Effect.logInfo('count', 5),
+        Effect.logError('failed', new Error('boom')),
+      ],
+      { discard: true },
+    )
+    const seen = await captured({ level: 'info', json: true }, logging)
+    expect(seen.map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
+      ['a b', { parts: [{ keep: 1 }, 7] }],
+      ['count', { parts: [5] }],
+      ['failed', { parts: [new Error('boom')] }],
     ])
   })
 })
@@ -197,6 +246,22 @@ describe(configureLogging, () => {
       expect(output).not.toContain('canary')
       expect(output).not.toContain('field-only-value')
     }
+  })
+})
+
+describe('debug selections', () => {
+  const everything = ['core debug', 'core info', 'store debug', 'store info', 'agent debug']
+
+  it.each<[string, readonly string[]]>([
+    ['', everything],
+    ['true', everything],
+    ['bb,!bb.store', ['core debug', 'core info', 'agent debug']],
+    ['bb.agent,!bb.agent', ['core info', 'store info']],
+    ['bb.agent,bb.agent,!bb.store,!bb.store', ['core info', 'agent debug']],
+    ['logtape.meta', ['core info', 'store info']],
+  ])('--debug %j delivers %j', async (debug, delivered) => {
+    expect.hasAssertions()
+    await expect(debugDelivery(debug)).resolves.toStrictEqual(delivered)
   })
 })
 

@@ -81,6 +81,21 @@ describe(redactText, () => {
     }
     expect(text).toContain('[REDACTED]')
   })
+
+  it('keeps a jsonl line valid: URL credentials never span quotes or JSON punctuation', () => {
+    const format = redactText(jsonLinesFormatter)
+    const line = format(
+      record(
+        { plugin: '@bytebureau/demo' },
+        'fetch http://user:pw@example.com/x then http://localhost:3000',
+      ),
+    )
+    expect(line).not.toContain('user:pw')
+    expect(JSON.parse(line)).toMatchObject({
+      message: 'fetch http://[REDACTED]@example.com/x then http://localhost:3000',
+      properties: { plugin: '@bytebureau/demo' },
+    })
+  })
 })
 
 describe('the redacted field list', () => {

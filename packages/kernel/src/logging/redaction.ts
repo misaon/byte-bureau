@@ -26,7 +26,7 @@ export const SECRET_PATTERNS: readonly RedactionPattern[] = [
     replacement,
   },
   {
-    pattern: /(?<scheme>https?:\/\/)[^\s/@:]+:[^\s/@]+@/gu,
+    pattern: /(?<scheme>https?:\/\/)[^\s/@:"'\\]+:[^\s/@"'\\]+@/gu,
     replacement: `$<scheme>${replacement}@`,
   },
 ]
