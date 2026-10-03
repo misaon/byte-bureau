@@ -70,6 +70,29 @@ async function sinkOutputs(): Promise<readonly string[]> {
   }
 }
 
+async function failingSinkRun(): Promise<{
+  readonly delivered: readonly unknown[]
+  readonly reported: readonly string[]
+}> {
+  const capture = vi.fn<(record: LogRecord) => void>().mockImplementationOnce(() => {
+    throw new Error('sink boom')
+  })
+  const error = vi.spyOn(console, 'error').mockReturnValue()
+  try {
+    await configureLogging({ level: 'info', json: true, capture })
+    const logger = kernelLogger(['bb', 'sinks'])
+    logger.info('first')
+    logger.info('second')
+    return {
+      delivered: capture.mock.calls.map(([entry]) => entry.message[0]),
+      reported: error.mock.calls.map((call) => String(call[0])),
+    }
+  } finally {
+    await resetLogging()
+    error.mockRestore()
+  }
+}
+
 describe('effect bridge', () => {
   it('routes Effect logs into LogTape categories with annotations as properties', async () => {
     expect.hasAssertions()
@@ -150,6 +173,18 @@ describe(configureLogging, () => {
       }),
     )
     expect(seen.map((entry) => entry.message[0])).toStrictEqual(['agent detail'])
+  })
+
+  it('reports a throwing sink on the console and keeps delivering to it', async () => {
+    expect.hasAssertions()
+    const { delivered, reported } = await failingSinkRun()
+    expect(delivered).toStrictEqual(['first', 'second'])
+    expect(reported).toHaveLength(1)
+    expect(JSON.parse(reported.join(''))).toMatchObject({
+      level: 'FATAL',
+      logger: 'logtape.meta',
+      properties: { error: { message: 'sink boom' } },
+    })
   })
 
   it('redacts secrets in the console and file output', async () => {

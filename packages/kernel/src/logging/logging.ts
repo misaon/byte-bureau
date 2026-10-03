@@ -86,7 +86,7 @@ export async function configureLogging(options: LoggingOptions): Promise<void> {
     reset: true,
     sinks: allSinks,
     loggers: [
-      { category: ['logtape', 'meta'], sinks: [], lowestLevel: 'warning' },
+      { category: ['logtape', 'meta'], sinks: ['console'], lowestLevel: 'warning' },
       { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) },
       ...enabled.map((category): CategoryConfig => ({
         category,

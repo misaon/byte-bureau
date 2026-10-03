@@ -101,6 +101,26 @@ describe('the redacted field list', () => {
     sink(record(properties))
     expect(seen.flatMap((entry) => Object.keys(entry.properties))).toStrictEqual(ORDINARY_NAMES)
   })
+
+  it('keeps token counters and deletes token credentials', () => {
+    const seen: LogRecord[] = []
+    const sink = redactFields((entry) => {
+      seen.push(entry)
+    })
+    sink(
+      record({
+        inputTokens: 10,
+        outputTokens: 4,
+        maxTokens: 100,
+        accessToken: 'x',
+        api_token: 'y',
+        TOKEN: 'z',
+      }),
+    )
+    expect(seen.map((entry) => entry.properties)).toStrictEqual([
+      { inputTokens: 10, outputTokens: 4, maxTokens: 100 },
+    ])
+  })
 })
 
 describe('the secret pattern list', () => {

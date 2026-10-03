@@ -5,7 +5,7 @@ export const REDACTED_FIELDS: readonly RegExp[] = [
   /^authorization$/iu,
   /^cookie$/iu,
   /pass(?:word|phrase)?$/iu,
-  /token/iu,
+  /token$/iu,
   /api[_-]?key/iu,
   /secret/iu,
   /private[_-]?key/iu,
