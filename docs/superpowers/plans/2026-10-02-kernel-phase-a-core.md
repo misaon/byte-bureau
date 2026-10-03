@@ -1351,14 +1351,22 @@ Why Effect SQL and not Drizzle at runtime (ADR-0010, written in Task 16): Drizzl
   "name": "@bytebureau/kernel",
   "version": "0.0.0",
   "private": true,
-  "license": "FSL-1.1-MIT",
   "description": "ByteBureau kernel: Effect services for sessions, workspaces, asks, events and plugins",
+  "license": "FSL-1.1-MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./src/index.ts", "default": "./src/index.ts" },
-    "./bun": { "types": "./src/bun.ts", "default": "./src/bun.ts" }
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./bun": {
+      "types": "./src/bun.ts",
+      "default": "./src/bun.ts"
+    }
   },
-  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
   "dependencies": {
     "@bytebureau/plugin-api": "workspace:*",
     "@bytebureau/protocol": "workspace:*",
@@ -1396,7 +1404,7 @@ export default defineProject({
   test: {
     name: 'kernel',
     include: ['src/**/*.test.ts'],
-    // node:sqlite is release-candidate stability on Node 24; the warning is noise in test output
+    // The node:sqlite module is release-candidate stability on Node 24; its warning is noise in test output
     execArgv: ['--disable-warning=ExperimentalWarning'],
     testTimeout: 20_000,
   },
@@ -1408,15 +1416,28 @@ If `execArgv` is rejected by the installed Vitest 5 config types, use `poolOptio
 
 `packages/kernel/src/store/migrate.test.ts`:
 ```ts
-import { assert, it, layer } from '@effect/vitest'
-import { Effect } from 'effect'
+import { assert, it } from '@effect/vitest'
+import { Effect, Result } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { MIGRATIONS, runMigrations } from './migrate.js'
 import { StoreTest } from './store-test.js'
 
-layer(StoreTest)('Store', (it) => {
-  it.effect('applies every migration once and records them', () =>
-    Effect.gen(function* () {
+const SP1_TABLES = [
+  'projects',
+  'profiles',
+  'sessions',
+  'turns',
+  'messages',
+  'tool_calls',
+  'asks',
+  'events',
+  'usage_snapshots',
+  'plugin_kv',
+]
+
+it.layer(StoreTest)('Store', (suite) => {
+  suite.effect('applies every migration once and records them', () =>
+    Effect.gen(function* recordsMigrations() {
       const sql = yield* SqlClient.SqlClient
       const applied = yield* sql<{ readonly id: string }>`SELECT id FROM bb_migrations ORDER BY id`
       assert.deepStrictEqual(
@@ -1424,23 +1445,35 @@ layer(StoreTest)('Store', (it) => {
         MIGRATIONS.map((migration) => migration.id),
       )
       yield* runMigrations
-      const again = yield* sql<{ readonly n: number }>`SELECT count(*) AS n FROM bb_migrations`
-      assert.strictEqual(again[0]?.n, MIGRATIONS.length)
+      const again = yield* sql<{
+        readonly total: number
+      }>`SELECT count(*) AS total FROM bb_migrations`
+      assert.deepStrictEqual(
+        again.map((row) => row.total),
+        [MIGRATIONS.length],
+      )
     }),
   )
 
-  it.effect('creates the SP1 tables with foreign keys enforced', () =>
-    Effect.gen(function* () {
+  suite.effect('creates the SP1 tables with foreign keys enforced', () =>
+    Effect.gen(function* enforcesForeignKeys() {
       const sql = yield* SqlClient.SqlClient
-      const tables = yield* sql<{ readonly name: string }>`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`
+      const tables = yield* sql<{
+        readonly name: string
+      }>`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`
       const names = tables.map((row) => row.name)
-      for (const expected of ['projects', 'profiles', 'sessions', 'turns', 'messages', 'tool_calls', 'asks', 'events', 'usage_snapshots', 'plugin_kv']) {
+      for (const expected of SP1_TABLES) {
         assert.include(names, expected)
       }
       const fk = yield* sql<{ readonly foreign_keys: number }>`PRAGMA foreign_keys`
-      assert.strictEqual(fk[0]?.foreign_keys, 1)
-      const orphan = yield* Effect.result(sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES ('s', 'missing', 't', '{}', 'fake', NULL, '{}', 'created', '2026-10-02T00:00:00.000Z')`)
-      assert.strictEqual(orphan._tag, 'Failure')
+      assert.deepStrictEqual(
+        fk.map((row) => row.foreign_keys),
+        [1],
+      )
+      const orphan = yield* Effect.result(
+        sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES ('s', 'missing', 't', '{}', 'fake', NULL, '{}', 'created', '2026-10-02T00:00:00.000Z')`,
+      )
+      assert.isTrue(Result.isFailure(orphan))
     }),
   )
 })
@@ -1584,7 +1617,7 @@ import { Effect } from 'effect'
 import { SqlClient, type SqlError } from 'effect/sql'
 import { MIGRATIONS, type Migration } from './migrations.js'
 
-export { MIGRATIONS }
+export { MIGRATIONS } from './migrations.js'
 
 function statements(migration: Migration): readonly string[] {
   return migration.sql
@@ -1593,9 +1626,12 @@ function statements(migration: Migration): readonly string[] {
     .filter((statement) => statement !== '')
 }
 
-const applyOne = (sql: SqlClient.SqlClient, migration: Migration): Effect.Effect<void, SqlError.SqlError> =>
+const applyOne = (
+  sql: SqlClient.SqlClient,
+  migration: Migration,
+): Effect.Effect<void, SqlError.SqlError> =>
   sql.withTransaction(
-    Effect.gen(function* () {
+    Effect.gen(function* applyMigration() {
       for (const statement of statements(migration)) {
         yield* sql.unsafe(statement)
       }
@@ -1604,17 +1640,18 @@ const applyOne = (sql: SqlClient.SqlClient, migration: Migration): Effect.Effect
   )
 
 // Idempotent: every migration runs once, inside its own transaction, in array order
-export const runMigrations: Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-  yield* sql`CREATE TABLE IF NOT EXISTS bb_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`
-  const applied = yield* sql<{ readonly id: string }>`SELECT id FROM bb_migrations`
-  const done = new Set(applied.map((row) => row.id))
-  for (const migration of MIGRATIONS) {
-    if (!done.has(migration.id)) {
-      yield* applyOne(sql, migration)
+export const runMigrations: Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> =
+  Effect.gen(function* runPending() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TABLE IF NOT EXISTS bb_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`
+    const applied = yield* sql<{ readonly id: string }>`SELECT id FROM bb_migrations`
+    const done = new Set(applied.map((row) => row.id))
+    for (const migration of MIGRATIONS) {
+      if (!done.has(migration.id)) {
+        yield* applyOne(sql, migration)
+      }
     }
-  }
-})
+  })
 ```
 (`sql.unsafe(statement)` executes a raw string — verify the method name in `effect/sql/SqlClient` d.ts; the fact sheet confirms the tagged form; `unsafe` is the documented raw-string entry point of `SqlClient`. If absent, use `sql.unsafe` → `Statement.unsafe`.)
 
@@ -1624,11 +1661,13 @@ import { Effect } from 'effect'
 import { SqlClient, type SqlError } from 'effect/sql'
 
 // The sqlite layers set journal_mode=WAL and busy_timeout themselves; these are the remaining spec pragmas
-export const applyPragmas: Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-  yield* sql`PRAGMA foreign_keys = ON`
-  yield* sql`PRAGMA synchronous = NORMAL`
-})
+export const applyPragmas: Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> = Effect.gen(
+  function* setPragmas() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`PRAGMA foreign_keys = ON`
+    yield* sql`PRAGMA synchronous = NORMAL`
+  },
+)
 ```
 `packages/kernel/src/store/store-live.ts` (Bun only; imported solely through `src/bun.ts`):
 ```ts
@@ -1641,6 +1680,7 @@ import { applyPragmas } from './pragmas.js'
 export const StoreLive = (filename: string): Layer.Layer<SqlClient.SqlClient> =>
   Layer.effectDiscard(Effect.andThen(applyPragmas, runMigrations)).pipe(
     Layer.provideMerge(SqliteClient.layer({ filename, busyTimeout: 5000 })),
+    Layer.orDie,
   )
 ```
 `packages/kernel/src/store/store-test.ts`:
@@ -1653,7 +1693,7 @@ import { applyPragmas } from './pragmas.js'
 
 export const StoreTest: Layer.Layer<SqlClient.SqlClient> = Layer.effectDiscard(
   Effect.andThen(applyPragmas, runMigrations),
-).pipe(Layer.provideMerge(SqliteClient.layer({ filename: ':memory:' })))
+).pipe(Layer.provideMerge(SqliteClient.layer({ filename: ':memory:' })), Layer.orDie)
 ```
 `Layer.provideMerge` keeps `SqlClient` in the output while `Layer.effectDiscard` runs the pragmas and migrations once per layer build (verified semantics in the fact sheet §1.4). `SqliteClient.layer` may require `Scope` handling (`Layer.effect` already scopes); if the layer's error channel is `ConfigError`, map it with `Layer.orDie`.
 
