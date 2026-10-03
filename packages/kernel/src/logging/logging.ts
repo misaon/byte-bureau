@@ -12,7 +12,7 @@ import {
 } from '@logtape/logtape'
 import { getRotatingFileSink } from '@logtape/file'
 import type { Logger as PluginLogger } from '@bytebureau/plugin-api'
-import { Cause, Logger, References, type Layer, type LogLevel as EffectLogLevel } from 'effect'
+import { Cause, Layer, Logger, References, type LogLevel as EffectLogLevel } from 'effect'
 import { redactFields, redactText } from './redaction.js'
 
 export type KernelLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
@@ -23,6 +23,20 @@ export interface LoggingOptions {
   readonly debug?: string | undefined
   readonly file?: string | undefined
   readonly capture?: ((record: LogRecord) => void) | undefined
+}
+
+// A level that is missing or unknown is info, so a mistyped flag never silences the kernel
+export function parseLogLevel(level: string | undefined): KernelLogLevel {
+  if (
+    level === 'trace' ||
+    level === 'debug' ||
+    level === 'info' ||
+    level === 'warn' ||
+    level === 'error'
+  ) {
+    return level
+  }
+  return 'info'
 }
 
 const toLogTape = (level: KernelLogLevel): LogLevel => (level === 'warn' ? 'warning' : level)
@@ -183,6 +197,18 @@ export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((option
 })
 
 export const EffectLoggerLive: Layer.Layer<never> = Logger.layer([effectToLogTape])
+
+const effectLevels: Record<KernelLogLevel, EffectLogLevel.LogLevel> = {
+  trace: 'Trace',
+  debug: 'Debug',
+  info: 'Info',
+  warn: 'Warn',
+  error: 'Error',
+}
+
+// Effect drops a record below its minimum level before any logger sees it, so the kernel's level has to reach it too
+export const EffectLogLevelLive = (level: KernelLogLevel): Layer.Layer<never> =>
+  Layer.succeed(References.MinimumLogLevel, effectLevels[level])
 
 export function kernelLogger(category: readonly string[]): PluginLogger {
   const logger = getLogger(category)

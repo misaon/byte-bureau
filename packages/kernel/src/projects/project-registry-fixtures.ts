@@ -10,7 +10,7 @@ import { createTempRepo, git } from '../testing/temp-repo.js'
 import { ProjectRegistryLive, type ProjectRegistryShape } from './project-registry.js'
 
 // An empty home directory for the user configuration, removed when the layer is released
-const emptyHome = Effect.acquireRelease(
+export const emptyHome = Effect.acquireRelease(
   Effect.sync(() => mkdtempSync(path.join(tmpdir(), 'bb-home-'))),
   (home) =>
     Effect.sync(() => {

@@ -145,9 +145,11 @@ const makeSubscribe =
       }),
     )
 
+// Releasing the layer shuts the hub down, which ends the subscriptions that wait on it as if the stream had run out
 const make = Effect.gen(function* makeEventLog() {
   const sql = yield* SqlClient.SqlClient
   const hub = yield* PubSub.unbounded<EventEnvelope>()
+  yield* Effect.addFinalizer(() => PubSub.shutdown(hub))
   const read = makeRead(sql)
   return EventLog.of({ publish: makePublish(sql, hub), subscribe: makeSubscribe(read, hub), read })
 })

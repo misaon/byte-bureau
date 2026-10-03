@@ -1,12 +1,12 @@
 import type { Hooks } from '@bytebureau/plugin-api'
 import type { Layer } from 'effect'
+import type { UsageLayer } from '../kernel-foundation.js'
 import {
   scriptedPlugin,
   scriptedProvider,
   type Behaviour,
   type Scripted,
 } from '../testing/scripted-provider.js'
-import type { UsageServiceLive } from '../usage/usage-service.js'
 import { withPlugins } from './session-layers.js'
 import type { SessionServices } from './session-services.js'
 
@@ -20,7 +20,7 @@ export interface Driven {
 export const driven = (
   behaviour: Behaviour = {},
   hooks: Partial<Hooks> = {},
-  usage?: typeof UsageServiceLive,
+  usage?: UsageLayer,
 ): Driven => {
   const scripted = scriptedProvider('scripted', behaviour)
   return { scripted, layer: withPlugins([scriptedPlugin(scripted, hooks)], usage) }

@@ -1,6 +1,6 @@
 import type { EventEnvelope, KernelEvent } from '@bytebureau/protocol'
 import { assert, describe, expect, it } from '@effect/vitest'
-import { Effect, Fiber, Latch, Layer, Stream } from 'effect'
+import { Context, Effect, Exit, Fiber, Latch, Layer, Scope, Stream } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { StoreError } from '../errors.js'
 import { StoreTest } from '../store/store-test.js'
@@ -248,6 +248,17 @@ it.layer(TestLayer)('EventLog live delivery', (suite) => {
     }),
   )
 })
+
+// The fiber waits on the hub with nothing to deliver; shutting the hub down ends it normally, not by interruption
+it.effect('ends the subscriptions that wait for events when the layer is released', () =>
+  Effect.gen(function* endsParkedSubscription() {
+    const scope = yield* Scope.make()
+    const context = yield* Layer.buildWithScope(TestLayer, scope)
+    const parked = yield* collect(Context.get(context, EventLog), { sessionId: 's13' }, 1)
+    yield* Scope.close(scope, Exit.void)
+    assert.deepStrictEqual(yield* Fiber.join(parked), [])
+  }),
+)
 
 it.effect('reports a failing statement as a StoreError from publish, read and subscribe', () =>
   Effect.gen(function* failsWithStoreError() {
