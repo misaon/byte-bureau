@@ -25,7 +25,7 @@
 - Child processes get an explicit environment allowlist (`PATH`, `HOME`, `LANG`/`LC_*`, `TMPDIR`, `TERM`, `SSH_AUTH_SOCK`, profile variables, `TRACEPARENT`, `BYTEBUREAU_*`, `providers.<id>.passEnv`), never the full daemon environment; graceful termination SIGINT → SIGTERM after 5 s → SIGKILL after 10 s.
 - Config precedence: CLI flags > `BYTEBUREAU_*` environment > `<project>/bytebureau.local.json` > `<project>/bytebureau.json` (or `.jsonc`) > `~/.bytebureau/config.json` > defaults; unknown keys are errors; validation errors name the file and the JSON pointer.
 - CLI: `run` exits 0 on completion, 3 when stopped, 4 on provider error; non-TTY or `--json` output is NDJSON; the recommended option is preselected in interactive asks and chosen by `--yes`.
-- Logging categories `bb.core`, `bb.config`, `bb.store`, `bb.events`, `bb.plugin.<name>`, `bb.agent.<provider>`, `bb.workspace`, `bb.supervisor`, `bb.cli`; no secrets in events, logs or output (redaction of the listed field names and patterns, canary tests).
+- Logging categories `bb.core`, `bb.config`, `bb.store`, `bb.events`, `bb.plugin.<name>`, `bb.agent.<provider>`, `bb.workspace`, `bb.supervisor`, `bb.asks`, `bb.cli`; no secrets in events, logs or output (redaction of the listed field names and patterns, canary tests).
 - Tests run under Node (Vitest 5) with an in-memory SQLite database, Effect `TestClock`, the fake `AgentProvider` and a temp-dir git repository; no real agent is ever spawned in CI.
 - SP0 gates stay green on a fresh clone: `bun run check` (oxlint every category at error and type-aware, oxfmt, cspell en+cs, markdownlint, ls-lint, knip, dependency-cruiser, typecheck, Vitest with 80 % line/branch coverage over `packages/*/src`, ESLint long tail), `bun run lint:actions` when workflows change; exact dependency pins; Conventional Commits; comments only where needed and short; everything in English; the project is "fair source", never "open source".
 
@@ -12092,14 +12092,16 @@ git commit -m "feat(kernel): host in-process plugins with manifest checks, ports
 ### Task 12: `AskService` — questions and permissions with a recommended option, timeouts by policy
 
 **Files:**
-- Create: `packages/kernel/src/asks/policy.ts`, `packages/kernel/src/asks/ask-service.ts`, `packages/kernel/src/asks/policy.test.ts`, `packages/kernel/src/asks/ask-service.test.ts`
+- Create: `packages/kernel/src/asks/policy.ts`, `packages/kernel/src/asks/ask-build.ts`, `packages/kernel/src/asks/ask-records.ts`, `packages/kernel/src/asks/ask-events.ts`, `packages/kernel/src/asks/ask-settle.ts`, `packages/kernel/src/asks/ask-waiters.ts`, `packages/kernel/src/asks/ask-open.ts`, `packages/kernel/src/asks/ask-service.ts`, fixtures `ask-fixtures.ts`, `ask-log-fixtures.ts`, `ask-open-fixtures.ts`, `ask-service-fixtures.ts`, and the tests `policy`, `policy-paths`, `ask-build`, `ask-build-recommendation`, `ask-records`, `ask-waiters`, `ask-open`, `ask-service`, `ask-service-lifecycle`, `ask-service-timeout`, `ask-service-recommendation`, `ask-service-failure`, `ask-service-open-failure`, `ask-service-log`, `ask-service-close` (the lint caps split the brief's two source files)
 - Modify: `packages/kernel/src/index.ts`
 
 **Interfaces:**
 - Consumes: `Ask`, `AskRecord`, `AskAnswer`, `AskQuestion`, `AskOption`, `AnsweredVia`, `PermissionMode` (Task 1); `SqlClient`, `EventLog`, `uuidv7`, `nowIso`, `AskError`; Effect `Deferred`, `Effect.sleep` (TestClock-driven in tests), `Clock`.
-- Produces: `AskService` service `{ open(input: OpenAskInput): Effect<AskRecord, StoreError>; answer(askId, answer, via): Effect<AskRecord, AskError | StoreError>; cancel(askId): Effect<void, StoreError>; pending(sessionId?): Effect<readonly AskRecord[], StoreError>; await(askId): Effect<AskAnswer, AskError> }`, `AskServiceLive: Layer<AskService, never, SqlClient | EventLog>`, `OpenAskInput { sessionId; turnId: string | null; kind; title; questions: readonly AskQuestion[]; toolCall?; permissionMode: PermissionMode; askTimeout: string; workspacePath: string; recommendationSource?: 'agent' | 'none' }`, `recommendForPermission(toolCall, workspacePath, permissionMode): { optionIds: readonly string[]; recommended: 'allow' | 'deny' | null; ruleId: string | null }`, `parseDuration('30m') → ms`, `DENY_ON_TIMEOUT_MESSAGE = 'nobody available to approve; do not retry'`.
+- Produces: `AskService` service `{ open(input: OpenAskInput): Effect<AskRecord, StoreError>; answer(askId, answer, via): Effect<AskRecord, AskError | StoreError>; cancel(askId): Effect<void, StoreError>; pending(sessionId?): Effect<readonly AskRecord[], StoreError>; await(askId): Effect<AskAnswer, AskError> }`, `AskServiceLive: Layer<AskService, never, SqlClient | EventLog>`, `OpenAskInput { sessionId; turnId: string | null; kind; title; questions: readonly AskQuestion[]; toolCall?; permissionMode: PermissionMode; askTimeout: string; workspacePath: string; recommendationSource?: 'agent' | 'none' }`, `recommendForPermission(toolCall, workspacePath, permissionMode): PermissionRecommendation { recommended: 'allow' | 'deny' | null; ruleId: string | null }`, `parseDuration('30m') → ms`, `DENY_ON_TIMEOUT_MESSAGE = 'nobody available to approve; do not retry'`.
 
 Policy (spec §8.4): `supervised` → `onTimeout: 'wait'`; `autonomous` + `question` → `'recommended'` after `askTimeout`; `autonomous` + `permission` → `'deny'` after `askTimeout` with the message above. Permission questions always have the two options `allow` and `deny`; the recommendation comes from the rules in `policy.ts` with `recommendationSource: 'policy'` and evidence `{ kind: 'rule', ref: <rule id> }`; when no rule matches, no option is recommended, `recommendationSource: 'none'`, and a `bb.asks` warning is logged.
+
+As shipped: the `read-only-command` rule recommends `allow` only for a whole simple command (no `|`, `;`, `&&`, `||`, lone `&`, redirections, `$(…)`, backticks, `(`, newline or `\r`; `find` is not read-only) and the deny rules run first; the workspace rules resolve the path with `path.posix` against the workspace and require strict containment (symlinks cannot be caught lexically), with `SECRETS` run on the resolved path too; a recommendation counts only when every question has exactly one recommended option — otherwise `recommendationSource: 'none'` with a warning (kind and tool name, never the title), and an autonomous or yolo question ask with source `none` waits with no deadline and no timer (the kernel never fabricates an answer); a permission ask without a `toolCall` still gets `allow`/`deny` with no recommendation; answer, cancel and timeout settle with one atomic `UPDATE … WHERE status = 'pending' RETURNING *` (an answer racing the timer wins); the waiter stays available after settle; the expiry timer is forked into the layer's scope, waits behind a latch until `ask.requested` is announced and `open` is uninterruptible from the insert on; a layer finalizer fails parked waiters; a timeout settles as `answered` via `timeout` (`AskStatus.expired` is unused). Known limits (final fix wave): flags of listed read-only commands are trusted (`git branch -D`, `rg --pre`, `git diff --output=`) and `cat .env` is `allow` because `secrets-path` reads only `file_path`/`path`; `askTimeout` is unvalidated in the protocol; answers are not validated against the options.
 
 - [ ] **Step 1: Failing tests**
 
@@ -12127,8 +12129,169 @@ describe(recommendForPermission, () => {
   })
 
   it('does not treat network tools as deny-worthy for autonomous employees', () => {
-    expect(recommendForPermission({ name: 'WebFetch', input: { url: 'https://x' } }, ws, 'autonomous').recommended).toBeNull()
+    expect(
+      recommendForPermission({ name: 'WebFetch', input: { url: 'https://x' } }, ws, 'autonomous')
+        .recommended,
+    ).toBeNull()
   })
+
+  it('treats a yolo employee like an autonomous one', () => {
+    const toolCall = { name: 'WebSearch', input: { query: 'effect' } }
+    expect(recommendForPermission(toolCall, ws, 'yolo').recommended).toBeNull()
+  })
+})
+
+const ruleOf = (name: string, input: unknown): string | null =>
+  recommendForPermission({ name, input }, ws, 'supervised').ruleId
+
+describe('recommendForPermission deny rules', () => {
+  it.each([['git push -f origin main'], ['git push origin +main']])(
+    'denies the force push %s',
+    (command) => {
+      expect(ruleOf('Bash', { command })).toBe('force-push')
+    },
+  )
+
+  it('leaves an ordinary push to nobody', () => {
+    expect(ruleOf('Bash', { command: 'git push origin main' })).toBeNull()
+  })
+
+  it.each([
+    [`${ws}/.env.local`],
+    [`${ws}/certs/server.pem`],
+    [`${ws}/.npmrc`],
+    ['/home/me/.netrc'],
+    ['/home/me/id_rsa'],
+    ['/home/me/id_ed25519'],
+    ['/home/me/.ssh/config'],
+  ])('denies the secrets path %s', (filePath) => {
+    expect(ruleOf('Read', { file_path: filePath })).toBe('secrets-path')
+  })
+
+  it.each([[`${ws}/src/environment.ts`], [`${ws}/docs/pem.md`], [`${ws}/.envelope/a.txt`]])(
+    'does not mistake %s for a secret',
+    (filePath) => {
+      expect(ruleOf('Write', { file_path: filePath })).toBe('in-workspace-edit')
+    },
+  )
+
+  it('leaves a recursive removal inside the workspace to nobody', () => {
+    expect(ruleOf('Bash', { command: `rm -rf ${ws}/build` })).toBeNull()
+  })
+})
+
+describe('recommendForPermission allow rules', () => {
+  it('reads the path field when a tool has no file_path', () => {
+    expect(ruleOf('Read', { path: `${ws}/src/a.ts` })).toBe('in-workspace-read')
+  })
+
+  it('does not count a sibling of the workspace as part of it', () => {
+    expect(ruleOf('Write', { file_path: `${ws}-copy/a.ts` })).toBeNull()
+  })
+
+  it('lets a deny rule win over an allow rule that matches too', () => {
+    expect(ruleOf('Read', { file_path: `${ws}/.env` })).toBe('secrets-path')
+  })
+})
+
+const shell = (command: string): ReturnType<typeof recommendForPermission> =>
+  recommendForPermission({ name: 'Bash', input: { command } }, ws, 'supervised')
+
+const ALLOWED = { recommended: 'allow', ruleId: 'read-only-command' }
+const NOTHING = { recommended: null, ruleId: null }
+
+describe('recommendForPermission read-only commands', () => {
+  it.each([['git status'], ['git log --oneline -5'], ['rg foo src'], ['cat README.md']])(
+    'allows the whole command %s',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+
+  it.each([
+    ['ls'],
+    ['ls -la src'],
+    ['pwd'],
+    ['echo hello world'],
+    ['head -n 5 src/a.ts'],
+    ['tail -n 20 build.log'],
+    ['wc -l src/a.ts'],
+    ['grep -rn foo src'],
+    ['git diff HEAD~1'],
+    ['git show HEAD'],
+    ['git branch --list'],
+    ['git rev-parse HEAD'],
+  ])('allows %s as one of the read-only commands', (command) => {
+    expect(shell(command)).toStrictEqual(ALLOWED)
+  })
+
+  it.each([['cat\tREADME.md'], ['git status '], ['ls  -la']])(
+    'takes the space around its arguments: %j',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+
+  it('takes the commands of the list by their whole name only', () => {
+    expect(shell('lsof -i')).toStrictEqual(NOTHING)
+    expect(shell('ls.sh')).toStrictEqual(NOTHING)
+    expect(shell('catalog x')).toStrictEqual(NOTHING)
+    expect(shell('git statusbar')).toStrictEqual(NOTHING)
+  })
+
+  it('does not take a command that merely follows an assignment or a git option', () => {
+    expect(shell('ls=1 touch f')).toStrictEqual(NOTHING)
+    expect(shell('git -c core.pager=less log')).toStrictEqual(NOTHING)
+  })
+})
+
+describe('recommendForPermission commands that do more than read', () => {
+  it.each([
+    ['find . -delete'],
+    ['find . -name foo'],
+    ['echo x > f'],
+    ['echo x >> f'],
+    ['cat < f'],
+    ['cat f | sh'],
+    ['ls ; touch f'],
+    ['ls && touch f'],
+    ['ls || touch f'],
+    ['ls & touch f'],
+    ['ls $(cat x)'],
+    ['ls `cat x`'],
+    ['cat <(ls)'],
+    ['ls =(cat x)'],
+  ])('recommends nothing for %s', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it.each([
+    ['ls\ntouch f'],
+    ['ls -la\ntouch f'],
+    ['ls -la\r\ntouch f'],
+    ['cat a.txt\rtouch f'],
+    ['git status\n'],
+    ['git status -s\n'],
+  ])('recommends nothing for a line break anywhere: %j', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it('leaves a list that holds a removal to the deny rule before it', () => {
+    expect(shell('git status; rm -rf /')).toStrictEqual({
+      recommended: 'deny',
+      ruleId: 'rm-outside-workspace',
+    })
+  })
+})
+
+describe('recommendForPermission input', () => {
+  it.each([['text'], [null], [42], [{ command: 7 }], [{ file_path: null }]])(
+    'finds no rule in the input %o',
+    (input) => {
+      const result = recommendForPermission({ name: 'Mystery', input }, ws, 'supervised')
+      expect(result).toStrictEqual({ recommended: null, ruleId: null })
+    },
+  )
 })
 
 describe(parseDuration, () => {
@@ -12137,154 +12300,2033 @@ describe(parseDuration, () => {
     expect(parseDuration('45s')).toBe(45_000)
     expect(parseDuration('2h')).toBe(7_200_000)
   })
+
+  it('reads milliseconds and zero', () => {
+    expect(parseDuration('250ms')).toBe(250)
+    expect(parseDuration('0s')).toBe(0)
+  })
+
+  it('ignores the space around and inside a duration', () => {
+    expect(parseDuration(' 30m ')).toBe(1_800_000)
+    expect(parseDuration('30 m')).toBe(1_800_000)
+  })
+
+  it.each([['1x'], [''], ['m'], ['30'], ['-5m'], ['1.5h'], ['30min'], ['1d']])(
+    'refuses %j',
+    (text) => {
+      expect(() => parseDuration(text)).toThrow(`invalid duration: ${text}`)
+    },
+  )
 })
 ```
 `packages/kernel/src/asks/ask-service.test.ts`:
 ```ts
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Fiber, Layer } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { TestClock } from 'effect/testing'
-import { EventLog, EventLogLive } from '../events/event-log.js'
-import { StoreTest } from '../store/store-test.js'
-import { AskService, AskServiceLive, DENY_ON_TIMEOUT_MESSAGE } from './ask-service.js'
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber } from 'effect'
+import { askOf, request } from './ask-fixtures.js'
+import { AskService } from './ask-service.js'
+import { eventsOf, rowOf, seedSession, seedTurn, TestLayer } from './ask-service-fixtures.js'
 
-const TestLayer = AskServiceLive.pipe(Layer.provideMerge(EventLogLive), Layer.provideMerge(StoreTest))
-const question = { id: 'q1', header: 'Approach', prompt: 'Which?', multiSelect: false, allowOther: true, options: [
-  { id: 'a', label: 'A', recommended: true, evidence: [{ kind: 'test' as const, ref: 'cli.test.ts' }] },
-  { id: 'b', label: 'B', recommended: false, evidence: [] },
-] }
-const seedSession = (id: string) => Effect.flatMap(SqlClient.SqlClient, (sql) => sql`INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES ('p', 'p', '/p', 'main', '{}', 't', 't') ON CONFLICT DO NOTHING`.pipe(Effect.andThen(sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at) VALUES (${id}, 'p', 't', '{}', 'fake', '{}', 'running', 't')`)))
-
-layer(TestLayer)('AskService', (it) => {
-  it.effect('opens a question, waits for the answer and records how it was answered', () =>
-    Effect.gen(function* () {
-      yield* seedSession('s1')
+it.layer(TestLayer)('AskService open', (suite) => {
+  suite.effect('opens a question that waits for a human and keeps the recommendation', () =>
+    Effect.gen(function* opensQuestion() {
+      yield* seedSession('open-1')
       const asks = yield* AskService
-      const ask = yield* asks.open({ sessionId: 's1', turnId: null, kind: 'question', title: 'Choose', questions: [question], permissionMode: 'supervised', askTimeout: '30m', workspacePath: '/ws', recommendationSource: 'agent' })
+      const ask = yield* asks.open(request('open-1'))
       assert.strictEqual(ask.recommendationSource, 'agent')
-      assert.strictEqual(ask.policy.onTimeout, 'wait')
-      const waiting = yield* Effect.forkChild(asks.await(ask.id))
-      yield* asks.answer(ask.id, { selected: ['b'] }, 'cli')
-      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['b'] })
-      const [record] = yield* asks.pending('s1')
-      assert.strictEqual(record, undefined)
-      const events = yield* (yield* EventLog).read({ sessionId: 's1' }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type), ['ask.requested', 'ask.answered'])
-      const failed = yield* Effect.result(asks.answer(ask.id, { selected: ['a'] }, 'cli'))
-      assert.strictEqual(failed._tag, 'Failure')
+      assert.deepStrictEqual(ask.policy, { onTimeout: 'wait', timeout: '30m' })
+      assert.strictEqual(ask.deadlineAt, null)
+      assert.deepStrictEqual(
+        [ask.status, ask.answer, ask.answeredAt, ask.answeredVia],
+        ['pending', null, null, null],
+      )
     }),
   )
 
-  it.effect('autonomous question asks auto-proceed with the recommended option after the timeout', () =>
-    Effect.gen(function* () {
-      yield* seedSession('s2')
+  suite.effect('stores the ask and announces it on the turn it belongs to', () =>
+    Effect.gen(function* storesAsk() {
+      yield* seedSession('open-2')
+      yield* seedTurn('open-2', 'turn-1')
       const asks = yield* AskService
-      const ask = yield* asks.open({ sessionId: 's2', turnId: null, kind: 'question', title: 'Choose', questions: [question], permissionMode: 'autonomous', askTimeout: '30m', workspacePath: '/ws', recommendationSource: 'agent' })
-      const waiting = yield* Effect.forkChild(asks.await(ask.id))
-      yield* TestClock.adjust('30 minutes')
-      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['a'] })
-      const events = yield* (yield* EventLog).read({ sessionId: 's2', types: ['ask.expired', 'ask.answered'] }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => [event.type, (event.payload as { answeredVia?: string; fallback?: string }).answeredVia ?? (event.payload as { fallback?: string }).fallback]), [['ask.expired', 'recommended'], ['ask.answered', 'timeout']])
-    }),
-  )
-
-  it.effect('permission asks never auto-allow: autonomous ones are denied on timeout with the documented message', () =>
-    Effect.gen(function* () {
-      yield* seedSession('s3')
-      const asks = yield* AskService
-      const ask = yield* asks.open({ sessionId: 's3', turnId: 't1', kind: 'permission', title: 'Run git status', questions: [], toolCall: { name: 'Bash', input: { command: 'git status' } }, permissionMode: 'autonomous', askTimeout: '5m', workspacePath: '/ws' })
-      assert.strictEqual(ask.recommendationSource, 'policy')
-      assert.deepStrictEqual(ask.questions[0]?.options.map((option) => [option.id, option.recommended]), [['allow', true], ['deny', false]])
-      const waiting = yield* Effect.forkChild(asks.await(ask.id))
-      yield* TestClock.adjust('5 minutes')
-      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['deny'], otherText: DENY_ON_TIMEOUT_MESSAGE })
-    }),
-  )
-
-  it.effect('supervised asks wait indefinitely', () =>
-    Effect.gen(function* () {
-      yield* seedSession('s4')
-      const asks = yield* AskService
-      const ask = yield* asks.open({ sessionId: 's4', turnId: null, kind: 'permission', title: 'x', questions: [], toolCall: { name: 'Mystery', input: {} }, permissionMode: 'supervised', askTimeout: '1m', workspacePath: '/ws' })
-      assert.strictEqual(ask.recommendationSource, 'none')
-      yield* TestClock.adjust('10 hours')
-      assert.strictEqual((yield* asks.pending('s4')).length, 1)
+      const ask = yield* asks.open(request('open-2', { turnId: 'turn-1' }))
+      const row = yield* rowOf(ask.id)
+      assert.deepStrictEqual(
+        [row.session_id, row.turn_id, row.kind, row.status, row.recommendation_source],
+        ['open-2', 'turn-1', 'question', 'pending', 'agent'],
+      )
+      assert.deepStrictEqual(yield* eventsOf('open-2'), [
+        { type: 'ask.requested', turnId: 'turn-1', payload: { ask: askOf(ask) } },
+      ])
     }),
   )
 })
+
+it.layer(TestLayer)('AskService open a permission', (suite) => {
+  suite.effect('offers allow and deny, recommending neither, when there is no tool call', () =>
+    Effect.gen(function* offersTwoOptions() {
+      yield* seedSession('open-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('open-3', { kind: 'permission' }))
+      const options = ask.questions.flatMap((entry) => entry.options)
+      assert.deepStrictEqual(
+        options.map((option) => [option.id, option.recommended]),
+        [
+          ['allow', false],
+          ['deny', false],
+        ],
+      )
+      assert.deepStrictEqual(
+        [ask.recommendationSource, (yield* rowOf(ask.id)).recommendation_source],
+        ['none', 'none'],
+      )
+    }),
+  )
+
+  suite.effect('recommends nothing for a shell command that does more than read', () =>
+    Effect.gen(function* recommendsNothing() {
+      yield* seedSession('open-4')
+      const asks = yield* AskService
+      const toolCall = { name: 'Bash', input: { command: 'cat f | sh' } }
+      const ask = yield* asks.open(
+        request('open-4', { kind: 'permission', questions: [], toolCall }),
+      )
+      const options = ask.questions.flatMap((entry) => entry.options)
+      assert.deepStrictEqual(
+        options.map((option) => [option.id, option.recommended]),
+        [
+          ['allow', false],
+          ['deny', false],
+        ],
+      )
+      assert.deepStrictEqual(
+        [ask.recommendationSource, (yield* rowOf(ask.id)).recommendation_source],
+        ['none', 'none'],
+      )
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService answer', (suite) => {
+  suite.effect('hands the answer to the caller that waits for it', () =>
+    Effect.gen(function* handsAnswer() {
+      yield* seedSession('answer-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('answer-1'))
+      const waiting = yield* Effect.forkChild(asks.await(ask.id))
+      yield* asks.answer(ask.id, { selected: ['b'] }, 'cli')
+      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['b'] })
+    }),
+  )
+
+  suite.effect('returns the answered record and keeps it off the pending list', () =>
+    Effect.gen(function* returnsRecord() {
+      yield* seedSession('answer-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('answer-2'))
+      const answer = { selected: ['b'], otherText: 'because', remember: 'session' } as const
+      const record = yield* asks.answer(ask.id, answer, 'api')
+      assert.deepStrictEqual(
+        [record.id, record.status, record.answer, record.answeredVia],
+        [ask.id, 'answered', answer, 'api'],
+      )
+      assert.deepStrictEqual(yield* asks.pending('answer-2'), [])
+      assert.strictEqual((yield* rowOf(ask.id)).answer_json, JSON.stringify(answer))
+    }),
+  )
+
+  suite.effect('announces the request and then the answer', () =>
+    Effect.gen(function* announcesAnswer() {
+      yield* seedSession('answer-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('answer-3'))
+      yield* asks.answer(ask.id, { selected: ['a'] }, 'cli')
+      const answered = { askId: ask.id, answer: { selected: ['a'] }, answeredVia: 'cli' }
+      assert.deepStrictEqual(yield* eventsOf('answer-3'), [
+        { type: 'ask.requested', payload: { ask: askOf(ask) } },
+        { type: 'ask.answered', payload: answered },
+      ])
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/policy-paths.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import { recommendForPermission, type PermissionRecommendation } from './policy.js'
+
+const ws = '/repo/.bytebureau/worktrees/s1'
+
+const NOTHING: PermissionRecommendation = { recommended: null, ruleId: null }
+
+const touching = (name: string, filePath: string, workspace = ws): PermissionRecommendation =>
+  recommendForPermission({ name, input: { file_path: filePath } }, workspace, 'supervised')
+
+describe('recommendForPermission paths that leave the workspace', () => {
+  it.each([
+    ['Write', `${ws}/../../../etc/passwd`],
+    ['Read', `${ws}/../../../etc/hosts`],
+    ['Write', `${ws}/../../../../etc/passwd`],
+    ['Read', `${ws}/../../../../etc/hosts`],
+    ['Write', `${ws}/../s2/a.ts`],
+    ['Write', '../x.txt'],
+    ['Read', 'src/../../x.txt'],
+  ])('recommends nothing for %s of %s', (name, filePath) => {
+    expect(touching(name, filePath)).toStrictEqual(NOTHING)
+  })
+
+  it.each([[ws], [`${ws}/`], [`${ws}/.`], [`${ws}/src/..`]])(
+    'recommends nothing for the workspace itself, written %s',
+    (filePath) => {
+      expect(touching('Write', filePath)).toStrictEqual(NOTHING)
+    },
+  )
+})
+
+describe('recommendForPermission paths inside the workspace', () => {
+  it.each([
+    ['Write', `${ws}/src/../src/a.ts`, 'in-workspace-edit'],
+    ['Read', `${ws}/src/../src/a.ts`, 'in-workspace-read'],
+    ['Write', 'src/a.ts', 'in-workspace-edit'],
+    ['Read', 'src/a.ts', 'in-workspace-read'],
+    ['Read', './src/a.ts', 'in-workspace-read'],
+    ['Write', `${ws}//src/./a.ts`, 'in-workspace-edit'],
+  ])('allows %s of %s once it is resolved', (name, filePath, ruleId) => {
+    expect(touching(name, filePath)).toStrictEqual({ recommended: 'allow', ruleId })
+  })
+
+  it('resolves against a workspace that was written with a trailing slash', () => {
+    expect(touching('Write', 'src/a.ts', `${ws}/`)).toStrictEqual({
+      recommended: 'allow',
+      ruleId: 'in-workspace-edit',
+    })
+  })
+})
+
+describe('recommendForPermission secrets behind a resolved path', () => {
+  it('denies a secret outside the workspace that a traversal reaches', () => {
+    expect(touching('Read', `${ws}/../other/.env`)).toStrictEqual({
+      recommended: 'deny',
+      ruleId: 'secrets-path',
+    })
+  })
+
+  it.each([
+    [`${ws}/key.pem/.`],
+    [`${ws}/certs/server.pem/`],
+    [`${ws}/.env/`],
+    [`${ws}/.npmrc/.`],
+    [`${ws}/src/../.env.local`],
+    ['src/../.env'],
+  ])('denies the secret %s once the path is resolved', (filePath) => {
+    expect(touching('Read', filePath).ruleId).toBe('secrets-path')
+  })
+})
+
+describe('recommendForPermission without a workspace', () => {
+  it.each([
+    ['Write', '/etc/passwd'],
+    ['Read', '/etc/hosts'],
+    ['Write', 'src/a.ts'],
+  ])('counts nothing as inside it: %s of %s', (name, filePath) => {
+    expect(touching(name, filePath, '')).toStrictEqual(NOTHING)
+  })
+
+  it('still denies a secret and a recursive removal', () => {
+    const removal = { name: 'Bash', input: { command: 'rm -rf /' } }
+    expect(touching('Read', '/home/me/.env', '').ruleId).toBe('secrets-path')
+    expect(recommendForPermission(removal, '', 'supervised').ruleId).toBe('rm-outside-workspace')
+  })
+})
+```
+`packages/kernel/src/asks/ask-build.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import {
+  buildAsk,
+  DENY_ON_TIMEOUT_MESSAGE,
+  recommendedAnswer,
+  timeoutAnswer,
+  timeoutMs,
+  type OpenAskInput,
+} from './ask-build.js'
+import { asking, option, question, request } from './ask-fixtures.js'
+
+const build = (overrides: Partial<OpenAskInput> = {}): ReturnType<typeof buildAsk> =>
+  buildAsk(request('s1', overrides))
+
+const statusCall = { name: 'Bash', input: { command: 'git status' } }
+
+describe(buildAsk, () => {
+  it.each([
+    ['supervised', 'question', 'wait'],
+    ['supervised', 'permission', 'wait'],
+    ['autonomous', 'question', 'recommended'],
+    ['autonomous', 'permission', 'deny'],
+    ['yolo', 'question', 'recommended'],
+    ['yolo', 'permission', 'deny'],
+  ] as const)('%s employee, %s ask: the policy is %s', (permissionMode, kind, onTimeout) => {
+    const { policy } = build({ permissionMode, kind })
+    expect(policy).toStrictEqual({ onTimeout, timeout: '30m' })
+  })
+
+  it('puts the deadline one timeout after creation and none on an ask that waits', () => {
+    const timed = build({ permissionMode: 'autonomous' })
+    const expected = new Date(Date.parse(timed.createdAt) + 1_800_000).toISOString()
+    expect(timed.deadlineAt).toBe(expected)
+    expect(build().deadlineAt).toBeNull()
+  })
+
+  it('starts out pending with an id of its own and the turn it was given', () => {
+    const first = build({ turnId: 't1' })
+    expect(first).toMatchObject({
+      sessionId: 's1',
+      turnId: 't1',
+      status: 'pending',
+      title: 'Choose',
+    })
+    expect(build().id).not.toBe(first.id)
+  })
+
+  it('keeps the recommendation of the agent, or none when no option carries one', () => {
+    const bare = asking('q1', [option('a', false), option('b', false)])
+    expect(build().recommendationSource).toBe('agent')
+    expect(build({ recommendationSource: 'none' }).recommendationSource).toBe('none')
+    expect(build({ questions: [bare] }).recommendationSource).toBe('none')
+  })
+
+  it('assumes the agent made the recommendation when nobody says who did', () => {
+    expect(build({ recommendationSource: undefined }).recommendationSource).toBe('agent')
+  })
+})
+
+describe('buildAsk for a permission', () => {
+  it('derives the options of a permission ask from the rules, whatever questions came along', () => {
+    const ask = build({ kind: 'permission', toolCall: statusCall })
+    expect(ask.recommendationSource).toBe('policy')
+    expect(ask.questions).toStrictEqual([
+      {
+        id: 'permission',
+        header: 'Permission',
+        prompt: 'Bash: allow this tool call?',
+        options: [
+          {
+            id: 'allow',
+            label: 'Allow',
+            recommended: true,
+            evidence: [{ kind: 'rule', ref: 'read-only-command' }],
+          },
+          { id: 'deny', label: 'Deny', recommended: false, evidence: [] },
+        ],
+        multiSelect: false,
+        allowOther: false,
+      },
+    ])
+  })
+
+  it.each([[{ name: 'Mystery', input: {} }], [{ name: 'Bash', input: { command: 'cat f | sh' } }]])(
+    'recommends nothing for the tool call %o',
+    (toolCall) => {
+      const ask = build({ kind: 'permission', toolCall })
+      const options = ask.questions.flatMap((entry) => entry.options)
+      expect(ask.recommendationSource).toBe('none')
+      expect(options.map((entry) => [entry.id, entry.recommended])).toStrictEqual([
+        ['allow', false],
+        ['deny', false],
+      ])
+    },
+  )
+})
+
+describe('buildAsk for a permission without a tool call', () => {
+  it('offers allow and deny for a permission ask without a tool call, recommending neither', () => {
+    const ask = build({ kind: 'permission', questions: [question], recommendationSource: 'agent' })
+    expect(ask.recommendationSource).toBe('none')
+    expect(ask.questions).toStrictEqual([
+      {
+        id: 'permission',
+        header: 'Permission',
+        prompt: 'Allow this?',
+        options: [
+          { id: 'allow', label: 'Allow', recommended: false, evidence: [] },
+          { id: 'deny', label: 'Deny', recommended: false, evidence: [] },
+        ],
+        multiSelect: false,
+        allowOther: false,
+      },
+    ])
+    expect(ask).not.toHaveProperty('toolCall')
+  })
+
+  it('carries the tool call of a question ask without reading it', () => {
+    const ask = build({ toolCall: statusCall })
+    expect(ask.toolCall).toStrictEqual(statusCall)
+    expect(ask.questions).toStrictEqual([question])
+  })
+})
+
+describe(timeoutMs, () => {
+  it('is the timeout of a policy that acts and none for one that waits', () => {
+    expect(timeoutMs({ onTimeout: 'recommended', timeout: '5m' })).toBe(300_000)
+    expect(timeoutMs({ onTimeout: 'wait', timeout: 'whenever' })).toBeNull()
+  })
+
+  it('refuses a timeout it cannot read when the policy acts', () => {
+    expect(() => build({ permissionMode: 'autonomous', askTimeout: '1x' })).toThrow(
+      'invalid duration: 1x',
+    )
+  })
+
+  it('never reads the timeout of an ask that waits', () => {
+    const ask = build({ permissionMode: 'supervised', askTimeout: 'whenever' })
+    expect(ask.policy).toStrictEqual({ onTimeout: 'wait', timeout: 'whenever' })
+  })
+})
+
+describe(recommendedAnswer, () => {
+  it('picks the recommended option of every question, in order', () => {
+    const second = asking('q2', [option('x', false), option('y', true)])
+    expect(recommendedAnswer(build({ questions: [question, second] }))).toStrictEqual({
+      selected: ['a', 'y'],
+    })
+  })
+
+  it('refuses a question without a recommended option instead of inventing an answer', () => {
+    const bare = asking('q2', [option('x', false)])
+    expect(() => recommendedAnswer(build({ questions: [question, bare] }))).toThrow(
+      'question q2 has no recommended option',
+    )
+  })
+})
+
+describe(timeoutAnswer, () => {
+  it('denies with the documented message when the policy denies', () => {
+    const ask = build({ permissionMode: 'autonomous', kind: 'permission', toolCall: statusCall })
+    expect(timeoutAnswer(ask)).toStrictEqual({
+      selected: ['deny'],
+      otherText: DENY_ON_TIMEOUT_MESSAGE,
+    })
+    expect(DENY_ON_TIMEOUT_MESSAGE).toBe('nobody available to approve; do not retry')
+  })
+
+  it('answers with the recommended options when the policy recommends', () => {
+    expect(timeoutAnswer(build({ permissionMode: 'autonomous' }))).toStrictEqual({
+      selected: ['a'],
+    })
+  })
+})
+```
+`packages/kernel/src/asks/ask-build-recommendation.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import { buildAsk, unrecommendedQuestions, type OpenAskInput } from './ask-build.js'
+import { asking, option, question, request } from './ask-fixtures.js'
+
+const build = (overrides: Partial<OpenAskInput> = {}): ReturnType<typeof buildAsk> =>
+  buildAsk(request('s1', overrides))
+
+const recommended = asking('q2', [option('x', false), option('y', true)])
+const unmarked = asking('q2', [option('x', false), option('y', false)])
+const twice = asking('q3', [option('a', true), option('b', true)])
+
+describe('buildAsk and the recommendation of the agent', () => {
+  it('takes a recommendation to be one recommended option in every question', () => {
+    const ask = build({ questions: [question, recommended] })
+    expect(ask.recommendationSource).toBe('agent')
+  })
+
+  it.each([
+    { label: 'one of two questions without a recommended option', questions: [question, unmarked] },
+    { label: 'no recommended option at all', questions: [unmarked] },
+    { label: 'two recommended options in one question', questions: [twice] },
+    { label: 'one recommended and one doubled question', questions: [question, twice] },
+    { label: 'no question', questions: [] },
+  ])('counts it for nothing with $label', ({ questions }) => {
+    expect(build({ questions }).recommendationSource).toBe('none')
+  })
+})
+
+describe('buildAsk and an employee that works on its own', () => {
+  it.each(['autonomous', 'yolo'] as const)(
+    'makes a %s employee wait for a question that is not fully recommended',
+    (permissionMode) => {
+      const ask = build({ permissionMode, questions: [question, unmarked] })
+      expect(ask.policy).toStrictEqual({ onTimeout: 'wait', timeout: '30m' })
+      expect(ask.deadlineAt).toBeNull()
+    },
+  )
+
+  it.each(['autonomous', 'yolo'] as const)(
+    'lets a %s employee proceed once every question is recommended',
+    (permissionMode) => {
+      const ask = build({ permissionMode, questions: [question, recommended] })
+      expect(ask.policy).toStrictEqual({ onTimeout: 'recommended', timeout: '30m' })
+      expect(ask.deadlineAt).not.toBeNull()
+    },
+  )
+
+  it('makes it wait when the recommendation is declared to be none', () => {
+    const ask = build({ permissionMode: 'autonomous', recommendationSource: 'none' })
+    expect(ask.policy.onTimeout).toBe('wait')
+  })
+
+  it('never reads the timeout of a question it will wait for', () => {
+    const ask = build({ permissionMode: 'autonomous', questions: [unmarked], askTimeout: '1x' })
+    expect(ask.policy).toStrictEqual({ onTimeout: 'wait', timeout: '1x' })
+  })
+
+  it('keeps the denial of a permission that nothing recommends', () => {
+    const toolCall = { name: 'Mystery', input: {} }
+    const ask = build({ permissionMode: 'autonomous', kind: 'permission', toolCall })
+    expect(ask.recommendationSource).toBe('none')
+    expect(ask.policy).toStrictEqual({ onTimeout: 'deny', timeout: '30m' })
+  })
+})
+
+describe(unrecommendedQuestions, () => {
+  it('names the questions without exactly one recommended option', () => {
+    const ask = build({ questions: [question, unmarked, twice] })
+    expect(unrecommendedQuestions(ask)).toStrictEqual(['q2', 'q3'])
+  })
+
+  it('names nothing when every question is recommended', () => {
+    expect(unrecommendedQuestions(build({ questions: [question, recommended] }))).toStrictEqual([])
+  })
+
+  it('names the question of a permission that no rule recommends anything for', () => {
+    const toolCall = { name: 'Mystery', input: {} }
+    expect(unrecommendedQuestions(build({ kind: 'permission', toolCall }))).toStrictEqual([
+      'permission',
+    ])
+  })
+})
+```
+`packages/kernel/src/asks/ask-records.test.ts`:
+```ts
+import type { Ask } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { StoreError } from '../errors.js'
+import { StoreTest } from '../store/store-test.js'
+import { buildAsk } from './ask-build.js'
+import { request } from './ask-fixtures.js'
+import { claimAnswer, claimCancel, insertAsk, listPending, loadAsk } from './ask-records.js'
+import { seedSession } from './ask-service-fixtures.js'
+
+const answered = {
+  answer: { selected: ['b'] },
+  via: 'cli',
+  answeredAt: '2026-10-03T00:00:00.000Z',
+} as const
+
+interface Stored {
+  readonly sql: SqlClient.SqlClient
+  readonly ask: Ask
+}
+
+// A pending ask of a seeded session, stored
+const stored = (sessionId: string): Effect.Effect<Stored, StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* storesAsk() {
+    yield* seedSession(sessionId)
+    const sql = yield* SqlClient.SqlClient
+    const ask = buildAsk(request(sessionId))
+    yield* insertAsk(sql, ask)
+    return { sql, ask }
+  })
+
+it.layer(StoreTest)('ask records', (suite) => {
+  suite.effect('read back as the ask they were stored as, nothing answered yet', () =>
+    Effect.gen(function* readsBack() {
+      const { sql, ask } = yield* stored('rec-1')
+      const record = yield* loadAsk(sql, ask.id)
+      assert.deepStrictEqual(record, { ...ask, answer: null, answeredAt: null, answeredVia: null })
+      assert.strictEqual(yield* loadAsk(sql, 'nobody'), undefined)
+    }),
+  )
+
+  suite.effect('are answered by the first claim only', () =>
+    Effect.gen(function* claimsOnce() {
+      const { sql, ask } = yield* stored('rec-2')
+      const first = yield* claimAnswer(sql, ask.id, answered)
+      const second = yield* claimAnswer(sql, ask.id, { ...answered, via: 'api' })
+      assert.deepStrictEqual(first, {
+        ...ask,
+        status: 'answered',
+        answer: answered.answer,
+        answeredAt: answered.answeredAt,
+        answeredVia: 'cli',
+      })
+      assert.strictEqual(second, undefined)
+      assert.deepStrictEqual(yield* loadAsk(sql, ask.id), first)
+    }),
+  )
+})
+
+it.layer(StoreTest)('ask records cancelled', (suite) => {
+  suite.effect('are cancelled by the first claim only, and an answer cannot follow', () =>
+    Effect.gen(function* cancelsOnce() {
+      const { sql, ask } = yield* stored('rec-3')
+      const cancelled = yield* claimCancel(sql, ask.id)
+      assert.deepStrictEqual(cancelled, {
+        ...ask,
+        status: 'cancelled',
+        answer: null,
+        answeredAt: null,
+        answeredVia: null,
+      })
+      assert.strictEqual(yield* claimCancel(sql, ask.id), undefined)
+      assert.strictEqual(yield* claimAnswer(sql, ask.id, answered), undefined)
+    }),
+  )
+
+  suite.effect('cannot be cancelled once answered, or claimed when unknown', () =>
+    Effect.gen(function* refusesLateCancel() {
+      const { sql, ask } = yield* stored('rec-4')
+      yield* claimAnswer(sql, ask.id, answered)
+      assert.strictEqual(yield* claimCancel(sql, ask.id), undefined)
+      assert.strictEqual(yield* claimCancel(sql, 'nobody'), undefined)
+      assert.strictEqual(yield* claimAnswer(sql, 'nobody', answered), undefined)
+    }),
+  )
+})
+
+const ids = (records: readonly { readonly id: string }[]): readonly string[] =>
+  records.map((record) => record.id)
+
+it.layer(StoreTest)('ask records listing', (suite) => {
+  suite.effect('lists the pending ones by creation time, the id deciding between equals', () =>
+    Effect.gen(function* listsOldestFirst() {
+      const { sql, ask } = yield* stored('rec-5')
+      yield* seedSession('rec-6')
+      const at = (id: string, createdAt: string, sessionId = 'rec-5'): Ask => ({
+        ...ask,
+        id,
+        sessionId,
+        createdAt,
+      })
+      yield* Effect.all([
+        insertAsk(sql, at('b', '2026-10-03T00:00:02.000Z')),
+        insertAsk(sql, at('c', '2026-10-03T00:00:01.000Z')),
+        insertAsk(sql, at('a', '2026-10-03T00:00:02.000Z')),
+        insertAsk(sql, at('d', '2026-10-03T00:00:03.000Z', 'rec-6')),
+      ])
+      yield* claimAnswer(sql, ask.id, answered)
+      assert.deepStrictEqual(ids(yield* listPending(sql)), ['c', 'a', 'b', 'd'])
+      assert.deepStrictEqual(ids(yield* listPending(sql, 'rec-6')), ['d'])
+    }),
+  )
+
+  suite.effect('fail as a store error when a row does not fit the protocol', () =>
+    Effect.gen(function* failsOnUnreadableRow() {
+      const { sql, ask } = yield* stored('rec-7')
+      const second = buildAsk(request('rec-7'))
+      yield* insertAsk(sql, second)
+      yield* sql`UPDATE asks SET payload_json = 'not json' WHERE id = ${ask.id}`
+      yield* sql`UPDATE asks SET answered_via = 'pigeon' WHERE id = ${second.id}`
+      assert.instanceOf(yield* Effect.flip(loadAsk(sql, ask.id)), StoreError)
+      assert.instanceOf(yield* Effect.flip(loadAsk(sql, second.id)), StoreError)
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-waiters.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Exit } from 'effect'
+import { awaitAnswer, closeWaiters, park, wake, type Waiters } from './ask-waiters.js'
+
+it.effect('looks for the waiter when the wait is run, not when it is built', () =>
+  Effect.gen(function* looksLate() {
+    const waiters: Waiters = new Map()
+    const waiting = awaitAnswer(waiters, 'ask-1')
+    yield* park(waiters, 'ask-1')
+    yield* wake(waiters, 'ask-1', Exit.succeed({ selected: ['x'] }))
+    assert.deepStrictEqual(yield* waiting, { selected: ['x'] })
+  }),
+)
+
+it.effect('fails a wait nobody parked a waiter for', () =>
+  Effect.gen(function* failsStranger() {
+    const error = yield* Effect.flip(awaitAnswer(new Map(), 'nobody'))
+    assert.deepStrictEqual(
+      [error.code, error.reason],
+      ['not_found', 'ask nobody was not opened by this process'],
+    )
+  }),
+)
+
+it.effect('fails every waiter that is not done when the service closes and keeps the others', () =>
+  Effect.gen(function* closesWaiters() {
+    const waiters: Waiters = new Map()
+    yield* Effect.all([park(waiters, 'done'), park(waiters, 'open')])
+    yield* wake(waiters, 'done', Exit.succeed({ selected: ['x'] }))
+    yield* closeWaiters(waiters)
+    assert.deepStrictEqual(yield* awaitAnswer(waiters, 'done'), { selected: ['x'] })
+    const error = yield* Effect.flip(awaitAnswer(waiters, 'open'))
+    assert.deepStrictEqual([error.code, error.reason], ['not_pending', 'service closed'])
+  }),
+)
+```
+`packages/kernel/src/asks/ask-open.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Latch } from 'effect'
+import { TestClock } from 'effect/testing'
+import { StoreError } from '../errors.js'
+import { request } from './ask-fixtures.js'
+import { announce, armTimer } from './ask-open.js'
+import { parkedAsk } from './ask-open-fixtures.js'
+import { codeOf, flush, rowOf, TestLayer } from './ask-service-fixtures.js'
+import { awaitAnswer } from './ask-waiters.js'
+
+const TIMEOUT = '30 minutes'
+
+const autonomous = { permissionMode: 'autonomous' } as const
+
+it.layer(TestLayer)('armTimer', (suite) => {
+  suite.effect('expires the ask at its deadline once the request is announced', () =>
+    Effect.gen(function* expiresAtDeadline() {
+      const { deps, ask } = yield* parkedAsk(request('arm-1', autonomous))
+      yield* armTimer(deps, ask, yield* Latch.make(true))
+      yield* TestClock.adjust(TIMEOUT)
+      assert.deepStrictEqual(yield* awaitAnswer(deps.waiters, ask.id), { selected: ['a'] })
+    }),
+  )
+
+  suite.effect('leaves the ask alone once the timer was disarmed', () =>
+    Effect.gen(function* leavesDisarmed() {
+      const { deps, ask } = yield* parkedAsk(request('arm-2', autonomous))
+      const disarm = yield* armTimer(deps, ask, yield* Latch.make(true))
+      yield* disarm
+      yield* TestClock.adjust(TIMEOUT)
+      yield* flush
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'pending')
+    }),
+  )
+
+  suite.effect('holds the expiry back until the request is announced', () =>
+    Effect.gen(function* holdsBack() {
+      const { deps, ask } = yield* parkedAsk(request('arm-3', autonomous))
+      const announced = yield* Latch.make()
+      yield* armTimer(deps, ask, announced)
+      yield* TestClock.adjust(TIMEOUT)
+      yield* flush
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'pending')
+      yield* announced.open
+      yield* awaitAnswer(deps.waiters, ask.id)
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'answered')
+    }),
+  )
+
+  suite.effect('has no timer for an ask that waits, and nothing to disarm', () =>
+    Effect.gen(function* hasNoTimer() {
+      const { deps, ask } = yield* parkedAsk(request('arm-4'))
+      const disarm = yield* armTimer(deps, ask, yield* Latch.make(true))
+      yield* disarm
+      yield* TestClock.adjust('10 hours')
+      yield* flush
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'pending')
+    }),
+  )
+})
+
+const failing = (): Effect.Effect<never, StoreError> =>
+  Effect.fail(new StoreError({ cause: 'the log is full' }))
+
+it.layer(TestLayer)('announce', (suite) => {
+  suite.effect('stops the timer and cancels the ask when the request cannot be announced', () =>
+    Effect.gen(function* withdrawsOnFailure() {
+      const { deps, ask } = yield* parkedAsk(request('announce-1', autonomous))
+      const calls: string[] = []
+      const disarm = Effect.sync(() => {
+        calls.push('disarmed')
+      })
+      const deaf = { ...deps, log: { ...deps.log, publish: failing } }
+      const error = yield* Effect.flip(announce(deaf, ask, disarm))
+      assert.deepStrictEqual([codeOf(error), calls], ['store', ['disarmed']])
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'cancelled')
+    }),
+  )
+
+  suite.effect('leaves the timer and the ask alone once the request is announced', () =>
+    Effect.gen(function* keepsTimer() {
+      const { deps, ask } = yield* parkedAsk(request('announce-2', autonomous))
+      const calls: string[] = []
+      const disarm = Effect.sync(() => {
+        calls.push('disarmed')
+      })
+      yield* announce(deps, ask, disarm)
+      assert.deepStrictEqual(calls, [])
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'pending')
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-lifecycle.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber } from 'effect'
+import { SqlClient } from 'effect/sql'
+import type { StoreError } from '../errors.js'
+import { buildAsk } from './ask-build.js'
+import { askOf, request } from './ask-fixtures.js'
+import { insertAsk } from './ask-records.js'
+import { AskService, type AskServiceShape } from './ask-service.js'
+import {
+  codeOf,
+  eventsOf,
+  reasonOf,
+  rowOf,
+  seedSession,
+  seedTurn,
+  TestLayer,
+} from './ask-service-fixtures.js'
+
+it.layer(TestLayer)('AskService refusals', (suite) => {
+  suite.effect('refuses a second answer and keeps the first', () =>
+    Effect.gen(function* refusesSecondAnswer() {
+      yield* seedSession('refuse-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('refuse-1'))
+      yield* asks.answer(ask.id, { selected: ['b'] }, 'cli')
+      const error = yield* Effect.flip(asks.answer(ask.id, { selected: ['a'] }, 'api'))
+      assert.strictEqual(codeOf(error), 'not_pending')
+      assert.strictEqual((yield* rowOf(ask.id)).answered_via, 'cli')
+      assert.strictEqual((yield* eventsOf('refuse-1')).length, 2)
+    }),
+  )
+
+  suite.effect('refuses an answer for an ask nobody opened', () =>
+    Effect.gen(function* refusesUnknownAsk() {
+      const asks = yield* AskService
+      const error = yield* Effect.flip(asks.answer('nobody', { selected: ['a'] }, 'cli'))
+      assert.strictEqual(codeOf(error), 'not_found')
+    }),
+  )
+
+  suite.effect('lets a caller that waits only after the answer still have it', () =>
+    Effect.gen(function* answersBeforeWait() {
+      yield* seedSession('refuse-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('refuse-2'))
+      yield* asks.answer(ask.id, { selected: ['b'] }, 'api')
+      assert.deepStrictEqual(yield* asks.await(ask.id), { selected: ['b'] })
+      assert.deepStrictEqual(yield* asks.await(ask.id), { selected: ['b'] })
+    }),
+  )
+
+  suite.effect('fails the wait for an ask this process never opened', () =>
+    Effect.gen(function* waitsForStranger() {
+      const asks = yield* AskService
+      const error = yield* Effect.flip(asks.await('nobody'))
+      assert.strictEqual(codeOf(error), 'not_found')
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService cancel', (suite) => {
+  suite.effect('fails the caller that waits and announces the cancellation', () =>
+    Effect.gen(function* cancelsWaitedAsk() {
+      yield* seedSession('cancel-1')
+      yield* seedTurn('cancel-1', 'turn-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('cancel-1', { turnId: 'turn-1' }))
+      const waiting = yield* Effect.forkChild(Effect.flip(asks.await(ask.id)))
+      yield* asks.cancel(ask.id)
+      assert.strictEqual(codeOf(yield* Fiber.join(waiting)), 'not_pending')
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'cancelled')
+      assert.deepStrictEqual(yield* eventsOf('cancel-1'), [
+        { type: 'ask.requested', turnId: 'turn-1', payload: { ask: askOf(ask) } },
+        { type: 'ask.cancelled', turnId: 'turn-1', payload: { askId: ask.id } },
+      ])
+    }),
+  )
+
+  suite.effect('takes a cancelled ask off the pending list and refuses its answer', () =>
+    Effect.gen(function* refusesCancelledAsk() {
+      yield* seedSession('cancel-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('cancel-2'))
+      yield* asks.cancel(ask.id)
+      assert.deepStrictEqual(yield* asks.pending('cancel-2'), [])
+      const error = yield* Effect.flip(asks.answer(ask.id, { selected: ['a'] }, 'cli'))
+      assert.strictEqual(codeOf(error), 'not_pending')
+      assert.strictEqual(reasonOf(error), `ask ${ask.id} is cancelled`)
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService late cancel', (suite) => {
+  suite.effect('fails a wait that starts after the cancellation', () =>
+    Effect.gen(function* waitsAfterCancel() {
+      yield* seedSession('cancel-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('cancel-3'))
+      yield* asks.cancel(ask.id)
+      const error = yield* Effect.flip(asks.await(ask.id))
+      assert.strictEqual(codeOf(error), 'not_pending')
+    }),
+  )
+
+  suite.effect('cancels nothing that is answered, cancelled already or unknown', () =>
+    Effect.gen(function* cancelsNothing() {
+      yield* seedSession('cancel-4')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('cancel-4'))
+      yield* asks.answer(ask.id, { selected: ['a'] }, 'cli')
+      yield* Effect.all([asks.cancel(ask.id), asks.cancel(ask.id), asks.cancel('nobody')])
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'answered')
+      assert.strictEqual((yield* eventsOf('cancel-4')).length, 2)
+    }),
+  )
+})
+
+const idsPending = (
+  asks: AskServiceShape,
+  sessionId?: string,
+): Effect.Effect<readonly string[], StoreError> =>
+  Effect.map(asks.pending(sessionId), (records) => records.map((record) => record.id))
+
+// Alone in its layer, so that the list of every pending ask is the one this test made
+it.layer(TestLayer)('AskService pending order', (suite) => {
+  suite.effect('lists the pending asks oldest first and narrows them by session', () =>
+    Effect.gen(function* listsPending() {
+      yield* Effect.all([seedSession('list-1'), seedSession('list-2')])
+      const asks = yield* AskService
+      const first = yield* asks.open(request('list-1', { title: 'first' }))
+      const second = yield* asks.open(request('list-2', { title: 'second' }))
+      const third = yield* asks.open(request('list-1', { title: 'third' }))
+      assert.deepStrictEqual(yield* idsPending(asks), [first.id, second.id, third.id])
+      assert.deepStrictEqual(yield* idsPending(asks, 'list-1'), [first.id, third.id])
+      assert.deepStrictEqual(yield* idsPending(asks, 'list-2'), [second.id])
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService pending', (suite) => {
+  suite.effect('leaves an answered ask out of the list', () =>
+    Effect.gen(function* dropsAnswered() {
+      yield* seedSession('list-3')
+      const asks = yield* AskService
+      const first = yield* asks.open(request('list-3'))
+      const second = yield* asks.open(request('list-3'))
+      yield* asks.answer(first.id, { selected: ['a'] }, 'cli')
+      assert.deepStrictEqual(yield* idsPending(asks, 'list-3'), [second.id])
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService after a restart', (suite) => {
+  suite.effect('answers an ask a former process left pending but cannot be waited for', () =>
+    Effect.gen(function* answersLeftover() {
+      yield* seedSession('left-1')
+      const sql = yield* SqlClient.SqlClient
+      const ask = buildAsk(request('left-1'))
+      yield* insertAsk(sql, ask)
+      const asks = yield* AskService
+      assert.deepStrictEqual(yield* idsPending(asks, 'left-1'), [ask.id])
+      const error = yield* Effect.flip(asks.await(ask.id))
+      assert.strictEqual(codeOf(error), 'not_found')
+      yield* asks.answer(ask.id, { selected: ['a'] }, 'api')
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'answered')
+    }),
+  )
+
+  suite.effect('cancels such an ask as well', () =>
+    Effect.gen(function* cancelsLeftover() {
+      yield* seedSession('left-2')
+      const sql = yield* SqlClient.SqlClient
+      const ask = buildAsk(request('left-2'))
+      yield* insertAsk(sql, ask)
+      const asks = yield* AskService
+      yield* asks.cancel(ask.id)
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'cancelled')
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-timeout.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber } from 'effect'
+import { TestClock } from 'effect/testing'
+import { askOf, request } from './ask-fixtures.js'
+import { AskService, DENY_ON_TIMEOUT_MESSAGE } from './ask-service.js'
+import {
+  atSystemTime,
+  codeOf,
+  eventsOf,
+  flush,
+  reasonOf,
+  rowOf,
+  seedSession,
+  seedTurn,
+  TestLayer,
+} from './ask-service-fixtures.js'
+
+const autonomous = { permissionMode: 'autonomous' } as const
+
+const TIMEOUT = '30 minutes'
+
+const denial = { selected: ['deny'], otherText: DENY_ON_TIMEOUT_MESSAGE }
+
+// A permission ask for a tool call the rules know, of an employee that works on its own
+const permission = (sessionId: string): ReturnType<typeof request> =>
+  request(sessionId, {
+    ...autonomous,
+    kind: 'permission',
+    questions: [],
+    toolCall: { name: 'Bash', input: { command: 'git status' } },
+    askTimeout: '5m',
+  })
+
+it.layer(TestLayer)('AskService question timeout', (suite) => {
+  suite.effect('proceeds with the recommended option once the timeout has passed', () =>
+    Effect.gen(function* proceedsWithRecommended() {
+      yield* seedSession('timeout-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timeout-1', autonomous))
+      assert.strictEqual(ask.policy.onTimeout, 'recommended')
+      const waiting = yield* Effect.forkChild(asks.await(ask.id))
+      yield* TestClock.adjust(TIMEOUT)
+      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['a'] })
+      assert.strictEqual((yield* rowOf(ask.id)).answered_via, 'timeout')
+    }),
+  )
+
+  suite.effect('announces the expiry with its fallback before the answer it produced', () =>
+    Effect.gen(function* announcesExpiry() {
+      yield* seedSession('timeout-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timeout-2', autonomous))
+      yield* TestClock.adjust(TIMEOUT)
+      yield* asks.await(ask.id)
+      const answered = { askId: ask.id, answer: { selected: ['a'] }, answeredVia: 'timeout' }
+      assert.deepStrictEqual(yield* eventsOf('timeout-2'), [
+        { type: 'ask.requested', payload: { ask: askOf(ask) } },
+        { type: 'ask.expired', payload: { askId: ask.id, fallback: 'recommended' } },
+        { type: 'ask.answered', payload: answered },
+      ])
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService deadline', (suite) => {
+  suite.effect('sets the deadline one timeout after the ask was created', () =>
+    Effect.gen(function* setsDeadline() {
+      yield* seedSession('timeout-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timeout-3', { ...autonomous, askTimeout: '90s' }))
+      const expected = new Date(Date.parse(ask.createdAt) + 90_000).toISOString()
+      assert.strictEqual(ask.deadlineAt, expected)
+      assert.strictEqual((yield* rowOf(ask.id)).deadline_at, expected)
+    }),
+  )
+
+  suite.effect('expires every ask at its own deadline', () =>
+    Effect.gen(function* expiresInTurn() {
+      yield* seedSession('timeout-4')
+      const asks = yield* AskService
+      const soon = yield* asks.open(request('timeout-4', { ...autonomous, askTimeout: '5m' }))
+      const late = yield* asks.open(request('timeout-4', { ...autonomous, askTimeout: '30m' }))
+      yield* TestClock.adjust('5 minutes')
+      yield* asks.await(soon.id)
+      assert.strictEqual((yield* rowOf(late.id)).status, 'pending')
+      yield* TestClock.adjust('25 minutes')
+      assert.deepStrictEqual(yield* asks.await(late.id), { selected: ['a'] })
+    }),
+  )
+
+  suite.effect('stamps the answer with the time of the timeout, not of the opening', () =>
+    Effect.gen(function* stampsTimeout() {
+      yield* seedSession('timeout-5')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timeout-5', autonomous))
+      const later = Date.parse(ask.createdAt) + 1_800_000
+      const expiry = Effect.andThen(TestClock.adjust(TIMEOUT), asks.await(ask.id))
+      yield* atSystemTime(later, expiry)
+      assert.strictEqual((yield* rowOf(ask.id)).answered_at, new Date(later).toISOString())
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService permission timeout', (suite) => {
+  suite.effect('denies an autonomous permission ask with the documented message', () =>
+    Effect.gen(function* deniesOnTimeout() {
+      yield* seedSession('timeout-6')
+      yield* seedTurn('timeout-6', 'turn-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open({ ...permission('timeout-6'), turnId: 'turn-1' })
+      assert.deepStrictEqual([ask.recommendationSource, ask.policy.onTimeout], ['policy', 'deny'])
+      const waiting = yield* Effect.forkChild(asks.await(ask.id))
+      yield* TestClock.adjust('5 minutes')
+      assert.deepStrictEqual(yield* Fiber.join(waiting), denial)
+    }),
+  )
+
+  suite.effect('offers allow and deny with the recommendation of the rules', () =>
+    Effect.gen(function* offersTwoOptions() {
+      yield* seedSession('timeout-7')
+      const asks = yield* AskService
+      const ask = yield* asks.open(permission('timeout-7'))
+      const options = ask.questions.flatMap((entry) => entry.options)
+      assert.deepStrictEqual(
+        options.map((option) => [option.id, option.recommended]),
+        [
+          ['allow', true],
+          ['deny', false],
+        ],
+      )
+    }),
+  )
+
+  suite.effect('denies a permission ask that has no tool call just the same', () =>
+    Effect.gen(function* deniesWithoutToolCall() {
+      yield* seedSession('timeout-8')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timeout-8', { ...autonomous, kind: 'permission' }))
+      yield* TestClock.adjust(TIMEOUT)
+      assert.deepStrictEqual(yield* asks.await(ask.id), denial)
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService denial', (suite) => {
+  suite.effect(
+    'announces the denial as an expiry with the deny fallback and then as the answer',
+    () =>
+      Effect.gen(function* announcesDenial() {
+        yield* seedSession('denial-1')
+        const asks = yield* AskService
+        const ask = yield* asks.open(permission('denial-1'))
+        yield* TestClock.adjust('5 minutes')
+        yield* asks.await(ask.id)
+        const answered = { askId: ask.id, answer: denial, answeredVia: 'timeout' }
+        assert.deepStrictEqual(yield* eventsOf('denial-1'), [
+          { type: 'ask.requested', payload: { ask: askOf(ask) } },
+          { type: 'ask.expired', payload: { askId: ask.id, fallback: 'deny' } },
+          { type: 'ask.answered', payload: answered },
+        ])
+      }),
+  )
+
+  suite.effect('denies a permission that no rule recommends anything for just the same', () =>
+    Effect.gen(function* deniesUnrecommended() {
+      yield* seedSession('denial-2')
+      const asks = yield* AskService
+      const toolCall = { name: 'Mystery', input: {} }
+      const ask = yield* asks.open({ ...permission('denial-2'), toolCall })
+      assert.deepStrictEqual([ask.recommendationSource, ask.policy.onTimeout], ['none', 'deny'])
+      yield* TestClock.adjust('5 minutes')
+      assert.deepStrictEqual(yield* asks.await(ask.id), denial)
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService supervised timeout', (suite) => {
+  suite.effect('waits indefinitely, a permission ask without a recommendation included', () =>
+    Effect.gen(function* waitsIndefinitely() {
+      yield* seedSession('timeout-9')
+      const asks = yield* AskService
+      const toolCall = { name: 'Mystery', input: {} }
+      const ask = yield* asks.open(
+        request('timeout-9', { kind: 'permission', questions: [], toolCall, askTimeout: '1m' }),
+      )
+      assert.strictEqual(ask.recommendationSource, 'none')
+      yield* TestClock.adjust('10 hours')
+      yield* flush
+      assert.strictEqual((yield* asks.pending('timeout-9')).length, 1)
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService timer', (suite) => {
+  suite.effect('leaves an ask a human answered in time alone', () =>
+    Effect.gen(function* keepsHumanAnswer() {
+      yield* seedSession('timer-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timer-1', autonomous))
+      yield* asks.answer(ask.id, { selected: ['b'] }, 'cli')
+      yield* TestClock.adjust(TIMEOUT)
+      yield* flush
+      const answered = { askId: ask.id, answer: { selected: ['b'] }, answeredVia: 'cli' }
+      assert.deepStrictEqual(yield* eventsOf('timer-1'), [
+        { type: 'ask.requested', payload: { ask: askOf(ask) } },
+        { type: 'ask.answered', payload: answered },
+      ])
+    }),
+  )
+
+  suite.effect('refuses a human answer that comes after the timeout answered', () =>
+    Effect.gen(function* refusesLateHuman() {
+      yield* seedSession('timer-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timer-3', autonomous))
+      yield* TestClock.adjust(TIMEOUT)
+      yield* asks.await(ask.id)
+      const error = yield* Effect.flip(asks.answer(ask.id, { selected: ['b'] }, 'cli'))
+      assert.deepStrictEqual(
+        [codeOf(error), reasonOf(error)],
+        ['not_pending', `ask ${ask.id} is answered`],
+      )
+      assert.strictEqual((yield* rowOf(ask.id)).answered_via, 'timeout')
+    }),
+  )
+
+  suite.effect('outlives the fiber that opened the ask', () =>
+    Effect.gen(function* outlivesOpener() {
+      yield* seedSession('timer-2')
+      const asks = yield* AskService
+      const opening = yield* Effect.forkChild(asks.open(request('timer-2', autonomous)))
+      const ask = yield* Fiber.join(opening)
+      yield* TestClock.adjust(TIMEOUT)
+      assert.deepStrictEqual(yield* asks.await(ask.id), { selected: ['a'] })
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-recommendation.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { TestClock } from 'effect/testing'
+import { askOf, asking, option, question, request } from './ask-fixtures.js'
+import { AskService } from './ask-service.js'
+import { eventsOf, flush, seedSession, TestLayer } from './ask-service-fixtures.js'
+
+const autonomous = { permissionMode: 'autonomous' } as const
+
+const recommended = asking('q2', [option('x', false), option('y', true)])
+const unmarked = asking('q2', [option('x', false), option('y', false)])
+const twice = asking('q3', [option('a', true), option('b', true)])
+
+it.layer(TestLayer)('AskService without a full recommendation', (suite) => {
+  suite.effect('waits for a human when only one of two questions is recommended', () =>
+    Effect.gen(function* waitsForPartialRecommendation() {
+      yield* seedSession('rec-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(
+        request('rec-1', { ...autonomous, questions: [question, unmarked] }),
+      )
+      assert.deepStrictEqual(
+        [ask.recommendationSource, ask.policy.onTimeout, ask.deadlineAt],
+        ['none', 'wait', null],
+      )
+      yield* TestClock.adjust('10 hours')
+      yield* flush
+      assert.strictEqual((yield* asks.pending('rec-1')).length, 1)
+    }),
+  )
+
+  suite.effect('waits for a human when no option is recommended', () =>
+    Effect.gen(function* waitsWithoutRecommendation() {
+      yield* seedSession('rec-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('rec-2', { ...autonomous, questions: [unmarked] }))
+      assert.deepStrictEqual([ask.recommendationSource, ask.policy.onTimeout], ['none', 'wait'])
+      yield* TestClock.adjust('10 hours')
+      yield* flush
+      assert.deepStrictEqual(yield* eventsOf('rec-2'), [
+        { type: 'ask.requested', payload: { ask: askOf(ask) } },
+      ])
+    }),
+  )
+
+  suite.effect('waits for a human when a question has two recommended options', () =>
+    Effect.gen(function* waitsForDoubledRecommendation() {
+      yield* seedSession('rec-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('rec-3', { permissionMode: 'yolo', questions: [twice] }))
+      assert.deepStrictEqual([ask.recommendationSource, ask.policy.onTimeout], ['none', 'wait'])
+      yield* TestClock.adjust('10 hours')
+      yield* flush
+      assert.strictEqual((yield* asks.pending('rec-3')).length, 1)
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService with a full recommendation', (suite) => {
+  suite.effect('answers every question with its recommended option once the timeout is over', () =>
+    Effect.gen(function* answersEveryQuestion() {
+      yield* seedSession('rec-4')
+      const asks = yield* AskService
+      const ask = yield* asks.open(
+        request('rec-4', { ...autonomous, questions: [question, recommended] }),
+      )
+      yield* TestClock.adjust('30 minutes')
+      assert.deepStrictEqual(yield* asks.await(ask.id), { selected: ['a', 'y'] })
+      const answered = { askId: ask.id, answer: { selected: ['a', 'y'] }, answeredVia: 'timeout' }
+      assert.deepStrictEqual(yield* eventsOf('rec-4'), [
+        { type: 'ask.requested', payload: { ask: askOf(ask) } },
+        { type: 'ask.expired', payload: { askId: ask.id, fallback: 'recommended' } },
+        { type: 'ask.answered', payload: answered },
+      ])
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-failure.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber, Layer } from 'effect'
+import { StoreTest } from '../store/store-test.js'
+import { request } from './ask-fixtures.js'
+import { AskService, AskServiceLive } from './ask-service.js'
+import { codeOf, refusingLog, rowOf, seedSession } from './ask-service-fixtures.js'
+
+// An event log that records everything but how an ask ended
+const ForgetfulLayer = AskServiceLive.pipe(
+  Layer.provideMerge(refusingLog(['ask.answered', 'ask.cancelled'])),
+  Layer.provideMerge(StoreTest),
+)
+
+it.layer(ForgetfulLayer)('AskService with a log that fails', (suite) => {
+  suite.effect('still hands an answer the log could not record to the caller that waits', () =>
+    Effect.gen(function* answersDespiteLog() {
+      yield* seedSession('fail-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('fail-1'))
+      const waiting = yield* Effect.forkChild(asks.await(ask.id))
+      const error = yield* Effect.flip(asks.answer(ask.id, { selected: ['b'] }, 'cli'))
+      assert.strictEqual(codeOf(error), 'store')
+      assert.deepStrictEqual(yield* Fiber.join(waiting), { selected: ['b'] })
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'answered')
+    }),
+  )
+
+  suite.effect('still fails the caller that waits when the cancellation was not recorded', () =>
+    Effect.gen(function* cancelsDespiteLog() {
+      yield* seedSession('fail-2')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('fail-2'))
+      const waiting = yield* Effect.forkChild(Effect.flip(asks.await(ask.id)))
+      const error = yield* Effect.flip(asks.cancel(ask.id))
+      assert.strictEqual(codeOf(error), 'store')
+      assert.strictEqual(codeOf(yield* Fiber.join(waiting)), 'not_pending')
+      assert.strictEqual((yield* rowOf(ask.id)).status, 'cancelled')
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-open-failure.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber, Latch, Layer } from 'effect'
+import { TestClock } from 'effect/testing'
+import { StoreTest } from '../store/store-test.js'
+import { request } from './ask-fixtures.js'
+import { AskService, AskServiceLive, type AskServiceShape } from './ask-service.js'
+import {
+  askIdsOf,
+  codeOf,
+  eventsOf,
+  flush,
+  holdingLog,
+  ownService,
+  refusingLog,
+  rowOf,
+  seedSession,
+} from './ask-service-fixtures.js'
+
+// An event log that cannot announce a request
+const DeafLayer = AskServiceLive.pipe(
+  Layer.provideMerge(refusingLog(['ask.requested'])),
+  Layer.provideMerge(StoreTest),
+)
+
+const autonomous = { permissionMode: 'autonomous' } as const
+
+it.layer(DeafLayer)('AskService with a log that cannot announce a request', (suite) => {
+  suite.effect('fails the open and leaves a cancelled ask behind, never a pending one', () =>
+    Effect.gen(function* withdrawsAsk() {
+      yield* seedSession('open-fail-1')
+      const asks = yield* AskService
+      const error = yield* Effect.flip(asks.open(request('open-fail-1', autonomous)))
+      const [askId = ''] = yield* askIdsOf('open-fail-1')
+      assert.strictEqual(codeOf(error), 'store')
+      assert.strictEqual((yield* rowOf(askId)).status, 'cancelled')
+      assert.deepStrictEqual(yield* asks.pending('open-fail-1'), [])
+    }),
+  )
+
+  suite.effect('fails the waiter it had parked and announces no cancellation either', () =>
+    Effect.gen(function* failsParkedWaiter() {
+      yield* seedSession('open-fail-2')
+      const asks = yield* AskService
+      yield* Effect.flip(asks.open(request('open-fail-2')))
+      const [askId = ''] = yield* askIdsOf('open-fail-2')
+      const error = yield* Effect.flip(asks.await(askId))
+      assert.strictEqual(codeOf(error), 'not_pending')
+      assert.deepStrictEqual(yield* eventsOf('open-fail-2'), [])
+    }),
+  )
+})
+
+// The fiber that opens an ask is interrupted while the announcement of the request is held, which is then let through
+const interruptedOpening = (
+  asks: AskServiceShape,
+  entered: Latch.Latch,
+  release: Latch.Latch,
+): Effect.Effect<void> =>
+  Effect.gen(function* interruptsOpening() {
+    const opening = yield* Effect.forkChild(asks.open(request('open-fail-3', autonomous)))
+    yield* entered.await
+    const interrupting = yield* Effect.forkChild(Fiber.interrupt(opening))
+    yield* release.open
+    yield* Fiber.join(interrupting)
+  })
+
+it.effect('finishes opening an ask whose fiber is interrupted halfway, timer armed', () =>
+  Effect.gen(function* finishesOpening() {
+    const entered = yield* Latch.make()
+    const release = yield* Latch.make()
+    const layer = AskServiceLive.pipe(
+      Layer.provideMerge(holdingLog(entered, release)),
+      Layer.provideMerge(StoreTest),
+    )
+    const { asks, context } = yield* ownService(layer)
+    yield* Effect.provide(seedSession('open-fail-3'), context)
+    yield* interruptedOpening(asks, entered, release)
+    yield* TestClock.adjust('30 minutes')
+    yield* flush
+    const [askId = ''] = yield* Effect.provide(askIdsOf('open-fail-3'), context)
+    assert.strictEqual((yield* Effect.provide(rowOf(askId), context)).status, 'answered')
+  }),
+)
+```
+`packages/kernel/src/asks/ask-service-log.test.ts`:
+```ts
+import type { LogRecord } from '@logtape/logtape'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { TestClock } from 'effect/testing'
+import { warnings } from '../plugins/log-fixtures.js'
+import { asking, option, question, request } from './ask-fixtures.js'
+import { logged } from './ask-log-fixtures.js'
+import { AskService } from './ask-service.js'
+import { dropAsks, flush, seedSession, TestLayer } from './ask-service-fixtures.js'
+
+const TIMEOUT = '30 minutes'
+
+const autonomous = { permissionMode: 'autonomous' } as const
+
+const unrecommended = asking('q2', [option('a', false)])
+const doubled = asking('q3', [option('a', true), option('b', true)])
+
+const shown = (records: readonly LogRecord[]): readonly unknown[] =>
+  records.map((record) => [
+    record.category.join('.'),
+    record.level,
+    record.message[0],
+    record.properties,
+  ])
+
+it.layer(TestLayer)('AskService logging', (suite) => {
+  suite.effect('warns once with the kind and the unrecommended questions of a question', () =>
+    Effect.gen(function* warnsWithoutRecommendation() {
+      const records = yield* warnings
+      yield* seedSession('log-1')
+      const asks = yield* AskService
+      const questions = [question, unrecommended, doubled]
+      const ask = yield* asks.open(request('log-1', { questions }))
+      assert.strictEqual(ask.recommendationSource, 'none')
+      const properties = { sessionId: 'log-1', kind: 'question', questions: ['q2', 'q3'] }
+      assert.deepStrictEqual(shown(records), [
+        ['bb.asks', 'warning', 'no recommendation available', properties],
+      ])
+    }),
+  )
+
+  suite.effect('warns with the name of the tool when no rule recommends anything for it', () =>
+    Effect.gen(function* warnsWithoutRule() {
+      const records = yield* warnings
+      yield* seedSession('log-2')
+      const asks = yield* AskService
+      const toolCall = { name: 'Mystery', input: {} }
+      yield* asks.open(request('log-2', { kind: 'permission', questions: [], toolCall }))
+      const properties = {
+        sessionId: 'log-2',
+        kind: 'permission',
+        toolName: 'Mystery',
+        questions: ['permission'],
+      }
+      assert.deepStrictEqual(shown(records), [
+        ['bb.asks', 'warning', 'no recommendation available', properties],
+      ])
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService logging of secrets and of silence', (suite) => {
+  suite.effect('leaves the title and the input of the tool out of the log', () =>
+    Effect.gen(function* keepsSecretsOut() {
+      const records = yield* warnings
+      yield* seedSession('log-3')
+      const asks = yield* AskService
+      const input = { command: 'curl -H "Authorization: sk-live-123"' }
+      const title = 'Run curl -H "Authorization: sk-live-123"'
+      const toolCall = { name: 'Mystery', input }
+      yield* asks.open(request('log-3', { kind: 'permission', title, toolCall }))
+      assert.strictEqual(records.length, 1)
+      assert.strictEqual(JSON.stringify(records).includes('sk-live-123'), false)
+    }),
+  )
+
+  suite.effect('stays quiet when every question is recommended', () =>
+    Effect.gen(function* staysQuiet() {
+      const records = yield* warnings
+      yield* seedSession('log-4')
+      const asks = yield* AskService
+      yield* asks.open(request('log-4'))
+      assert.deepStrictEqual(records, [])
+    }),
+  )
+})
+
+const failures = (records: readonly LogRecord[]): readonly unknown[] =>
+  records.map((record) => [
+    record.category.join('.'),
+    record.level,
+    record.message[0],
+    record.properties['askId'],
+  ])
+
+it.layer(TestLayer)('AskService failing timer', (suite) => {
+  suite.effect('logs an expiry the store could not record', () =>
+    Effect.gen(function* logsFailedExpiry() {
+      const records = yield* logged
+      yield* seedSession('log-5')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('log-5', autonomous))
+      yield* dropAsks
+      yield* TestClock.adjust(TIMEOUT)
+      yield* flush
+      const failure = ['bb.asks', 'error', 'an ask could not be expired', ask.id]
+      assert.deepStrictEqual(failures(records), [failure])
+    }),
+  )
+})
+```
+`packages/kernel/src/asks/ask-service-close.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Fiber } from 'effect'
+import { TestClock } from 'effect/testing'
+import { request } from './ask-fixtures.js'
+import { logged } from './ask-log-fixtures.js'
+import { codeOf, flush, ownService, reasonOf, seedSession } from './ask-service-fixtures.js'
+
+it.effect('leaves no timer running once its layer is released', () =>
+  Effect.gen(function* stopsTimers() {
+    const records = yield* logged
+    const { asks, context, close } = yield* ownService()
+    const opening = Effect.andThen(
+      seedSession('close-1'),
+      asks.open(request('close-1', { permissionMode: 'autonomous' })),
+    )
+    yield* Effect.provide(opening, context)
+    yield* close
+    yield* TestClock.adjust('30 minutes')
+    yield* flush
+    assert.deepStrictEqual(records, [])
+  }),
+)
+
+it.effect('fails a caller that still waits when its layer is released', () =>
+  Effect.gen(function* failsWaiters() {
+    const { asks, context, close } = yield* ownService()
+    yield* Effect.provide(seedSession('close-2'), context)
+    const ask = yield* asks.open(request('close-2'))
+    const waiting = yield* Effect.forkChild(Effect.flip(asks.await(ask.id)))
+    yield* flush
+    yield* close
+    const error = yield* Fiber.join(waiting)
+    assert.deepStrictEqual([codeOf(error), reasonOf(error)], ['not_pending', 'service closed'])
+    const late = yield* Effect.flip(asks.await(ask.id))
+    assert.strictEqual(codeOf(late), 'not_pending')
+  }),
+)
+
+it.effect('keeps the answer of an ask that was settled before its layer was released', () =>
+  Effect.gen(function* keepsAnswer() {
+    const { asks, context, close } = yield* ownService()
+    yield* Effect.provide(seedSession('close-3'), context)
+    const ask = yield* asks.open(request('close-3'))
+    yield* asks.answer(ask.id, { selected: ['b'] }, 'cli')
+    yield* close
+    assert.deepStrictEqual(yield* asks.await(ask.id), { selected: ['b'] })
+  }),
+)
+```
+`packages/kernel/src/asks/ask-fixtures.ts` (shared fixtures):
+```ts
+import { Ask, type AskOption, type AskQuestion } from '@bytebureau/protocol'
+import { Schema } from 'effect'
+import type { OpenAskInput } from './ask-build.js'
+
+// One option the agent recommends and one it does not
+export const question: AskQuestion = {
+  id: 'q1',
+  header: 'Approach',
+  prompt: 'Which?',
+  multiSelect: false,
+  allowOther: true,
+  options: [
+    { id: 'a', label: 'A', recommended: true, evidence: [{ kind: 'test', ref: 'cli.test.ts' }] },
+    { id: 'b', label: 'B', recommended: false, evidence: [] },
+  ],
+}
+
+// An option without evidence
+export const option = (id: string, recommended: boolean): AskOption => ({
+  id,
+  label: id,
+  recommended,
+  evidence: [],
+})
+
+// A question like the fixture one with other options
+export const asking = (id: string, options: readonly AskOption[]): AskQuestion => ({
+  ...question,
+  id,
+  options,
+})
+
+// A supervised question the agent has a recommendation for; a test overrides what it is about
+export const request = (
+  sessionId: string,
+  overrides: Partial<OpenAskInput> = {},
+): OpenAskInput => ({
+  sessionId,
+  turnId: null,
+  kind: 'question',
+  title: 'Choose',
+  questions: [question],
+  permissionMode: 'supervised',
+  askTimeout: '30m',
+  workspacePath: '/ws',
+  recommendationSource: 'agent',
+  ...overrides,
+})
+
+// The ask a record is made of: the record without what answering adds
+export const askOf = Schema.decodeUnknownSync(Ask)
+```
+`packages/kernel/src/asks/ask-log-fixtures.ts`:
+```ts
+import type { LogRecord } from '@logtape/logtape'
+import { Effect, type Scope } from 'effect'
+import { vi } from 'vitest'
+import { warnings } from '../plugins/log-fixtures.js'
+
+// The warnings fixture keeps console.warn quiet; an error record would reach console.error
+const quietErrors: Effect.Effect<void, never, Scope.Scope> = Effect.acquireRelease(
+  Effect.sync(() => vi.spyOn(globalThis.console, 'error').mockReturnValue()),
+  (spy) =>
+    Effect.sync(() => {
+      spy.mockRestore()
+    }),
+).pipe(Effect.asVoid)
+
+// Everything the asks log, errors included, until the scope of the test closes
+export const logged: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = Effect.andThen(
+  quietErrors,
+  warnings,
+)
+```
+`packages/kernel/src/asks/ask-open-fixtures.ts`:
+```ts
+import type { Ask } from '@bytebureau/protocol'
+import { Effect, type Scope } from 'effect'
+import { SqlClient } from 'effect/sql'
+import type { StoreError } from '../errors.js'
+import { EventLog } from '../events/event-log.js'
+import { buildAsk, type OpenAskInput } from './ask-build.js'
+import type { OpenDeps } from './ask-open.js'
+import { insertAsk } from './ask-records.js'
+import { seedSession } from './ask-service-fixtures.js'
+import { park } from './ask-waiters.js'
+
+export interface ParkedAsk {
+  readonly deps: OpenDeps
+  readonly ask: Ask
+}
+
+// An ask, stored and with its waiter parked, and the deps a timer needs
+export const parkedAsk = (
+  input: OpenAskInput,
+): Effect.Effect<ParkedAsk, StoreError, SqlClient.SqlClient | EventLog | Scope.Scope> =>
+  Effect.gen(function* parksAsk() {
+    yield* seedSession(input.sessionId)
+    const sql = yield* SqlClient.SqlClient
+    const log = yield* EventLog
+    const scope = yield* Effect.scope
+    const deps: OpenDeps = { sql, log, scope, waiters: new Map() }
+    const ask = buildAsk(input)
+    yield* insertAsk(sql, ask)
+    yield* park(deps.waiters, ask.id)
+    return { deps, ask }
+  })
+```
+`packages/kernel/src/asks/ask-service-fixtures.ts`:
+```ts
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { Context, Effect, Exit, Layer, Scope, type Latch } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { vi } from 'vitest'
+import { AskError, StoreError, toStoreError } from '../errors.js'
+import { EventLog, EventLogLive } from '../events/event-log.js'
+import { StoreTest } from '../store/store-test.js'
+import { AskService, AskServiceLive, type AskServiceShape } from './ask-service.js'
+
+// The service over the real event log and an in-memory store
+export const TestLayer = AskServiceLive.pipe(
+  Layer.provideMerge(EventLogLive),
+  Layer.provideMerge(StoreTest),
+)
+
+// The real event log, except that it cannot record the events of these types
+export const refusingLog = (
+  types: readonly string[],
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesRefusingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          types.includes(event.type)
+            ? Effect.fail(new StoreError({ cause: 'the log is full' }))
+            : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
+
+export interface OwnService {
+  readonly asks: AskServiceShape
+  readonly context: Context.Context<SqlClient.SqlClient>
+  readonly close: Effect.Effect<void>
+}
+
+// A service of its own, over a layer the test releases itself; the scope of the test releases it at the latest
+export const ownService = (
+  layer: Layer.Layer<AskService | EventLog | SqlClient.SqlClient> = TestLayer,
+): Effect.Effect<OwnService, never, Scope.Scope> =>
+  Effect.gen(function* buildsOwnService() {
+    const scope = yield* Effect.acquireRelease(Scope.make(), (own) => Scope.close(own, Exit.void))
+    const context = yield* Layer.buildWithScope(layer, scope)
+    return { asks: Context.get(context, AskService), context, close: Scope.close(scope, Exit.void) }
+  })
+
+// The real event log, except that announcing a request waits until the test lets it through
+export const holdingLog = (
+  entered: Latch.Latch,
+  release: Latch.Latch,
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesHoldingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          event.type === 'ask.requested'
+            ? Effect.andThen(Effect.andThen(entered.open, release.await), log.publish(event))
+            : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
+
+// A session row, and the project it needs, so asks can point at it
+export const seedSession = (id: string): Effect.Effect<void, StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* seedsSession() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at)
+      VALUES ('p', 'p', '/p', 'main', '{}', 't', 't') ON CONFLICT DO NOTHING`
+    yield* sql`
+      INSERT INTO sessions (id, project_id, title, employee_json, provider_id, workspace_json, status, created_at)
+      VALUES (${id}, 'p', 't', '{}', 'fake', '{}', 'running', 't')`
+  }).pipe(Effect.mapError(toStoreError))
+
+// A turn of a seeded session, for the asks that name one
+export const seedTurn = (
+  sessionId: string,
+  turnId: string,
+): Effect.Effect<void, StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* seedsTurn() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      INSERT INTO turns (id, session_id, idx, prompt_json, status, started_at)
+      VALUES (${turnId}, ${sessionId}, 0, '{}', 'running', 't')`
+  }).pipe(Effect.mapError(toStoreError))
+
+// The system clock stands at the instant while the effect runs; the test clock is not touched
+export const atSystemTime = <Value, Failure, Requirements>(
+  instant: number,
+  effect: Effect.Effect<Value, Failure, Requirements>,
+): Effect.Effect<Value, Failure, Requirements> =>
+  Effect.suspend(() => {
+    vi.setSystemTime(instant)
+    return effect
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        vi.useRealTimers()
+      }),
+    ),
+  )
+
+// A store that lost its asks table, for the failures that causes
+export const dropAsks: Effect.Effect<void, StoreError, SqlClient.SqlClient> = Effect.gen(
+  function* dropsAsks() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`DROP TABLE asks`
+  },
+).pipe(Effect.mapError(toStoreError))
+
+interface StoredAsk {
+  readonly session_id: string
+  readonly turn_id: string | null
+  readonly kind: string
+  readonly status: string
+  readonly recommendation_source: string
+  readonly deadline_at: string | null
+  readonly answer_json: string | null
+  readonly answered_at: string | null
+  readonly answered_via: string | null
+}
+
+// The row of an ask as the table holds it
+export const rowOf = (askId: string): Effect.Effect<StoredAsk, StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* readsRow() {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<StoredAsk>`
+      SELECT session_id, turn_id, kind, status, recommendation_source, deadline_at, answer_json, answered_at, answered_via
+      FROM asks WHERE id = ${askId}`
+    return yield* Effect.fromNullishOr(rows[0])
+  }).pipe(Effect.mapError(toStoreError))
+
+export interface SeenEvent {
+  readonly type: string
+  readonly turnId?: string
+  readonly payload: unknown
+}
+
+// A turn id is left out of an event that has none, so an expectation need not spell out a missing one
+const seen = (event: EventEnvelope): SeenEvent => ({
+  type: event.type,
+  ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+  payload: event.payload,
+})
+
+// What the event log holds for a session, oldest first
+export const eventsOf = (
+  sessionId: string,
+): Effect.Effect<readonly SeenEvent[], StoreError, EventLog> =>
+  Effect.gen(function* readsEvents() {
+    const log = yield* EventLog
+    const events = yield* log.read({ sessionId }, { from: 0 })
+    return events.map((event) => seen(event))
+  })
+
+// The code of an ask error, the word store for any other failure
+export const codeOf = (error: AskError | StoreError): string =>
+  error instanceof AskError ? error.code : 'store'
+
+// The reason of an ask error, nothing for any other failure
+export const reasonOf = (error: AskError | StoreError): string =>
+  error instanceof AskError ? error.reason : ''
+
+// The ids of the asks a session has, in the order of the table
+export const askIdsOf = (
+  sessionId: string,
+): Effect.Effect<readonly string[], StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* readsIds() {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<{
+      readonly id: string
+    }>`SELECT id FROM asks WHERE session_id = ${sessionId} ORDER BY created_at, id`
+    return rows.map((row) => row.id)
+  }).pipe(Effect.mapError(toStoreError))
+
+// Lets the fibers that are ready run; a timer that fired needs a few turns to finish its work
+export const flush: Effect.Effect<void> = Effect.forEach(
+  Array.from({ length: 20 }),
+  () => Effect.yieldNow,
+  { discard: true },
+)
 ```
 
 - [ ] **Step 2: Implementation**
 
 `packages/kernel/src/asks/policy.ts`:
 ```ts
+import path from 'node:path'
 import type { PermissionMode } from '@bytebureau/protocol'
+
+const { posix } = path
 
 export interface ToolCall {
   readonly name: string
   readonly input: unknown
 }
+
 export interface PermissionRecommendation {
   readonly recommended: 'allow' | 'deny' | null
   readonly ruleId: string | null
 }
 
-const READ_ONLY = /^(git (status|log|diff|show|branch|rev-parse)|ls|cat|head|tail|rg|grep|find|wc|pwd|echo)\b/u
-const SECRETS = /(^|\/)(\.env(\..*)?|.*\.pem|id_(rsa|ed25519)|\.npmrc|\.netrc)$|(^|\/)\.ssh\//u
+// The parts of a tool call the rules look at; the fields a tool lacks read as empty text
+interface Facts {
+  readonly name: string
+  readonly command: string
+  // The file as the tool names it, and the file it lands on once `.` and `..` are resolved
+  readonly filePath: string
+  readonly target: string
+  readonly workspacePath: string
+  // The workspace when it is an absolute path, else empty: nothing is inside a workspace that is not one
+  readonly root: string
+  readonly mode: PermissionMode
+}
+
+interface Rule {
+  readonly id: string
+  readonly verdict: 'allow' | 'deny'
+  readonly applies: (facts: Facts) => boolean
+}
+
+const FORCE_PUSH = /\bgit push\b.*(?:--force|-f\b|\+)/u
+const RECURSIVE_REMOVE = /\brm\s+-[a-z]*r[a-z]*f?\b/u
+// A listed command named in full: its word ends at a space or at the end of the command; find is not listed, its -delete and -exec remove and run
+const READ_ONLY =
+  /^(?:git (?:status|log|diff|show|branch|rev-parse)|ls|cat|head|tail|rg|grep|wc|pwd|echo)(?:[ \t]|$)/u
+// What makes a command more than one simple command, or more than a read: a pipe, a list, a background job, a redirection, a substitution (parentheses cover $(), <() and zsh =()) or a line break
+const SHELL_SYNTAX = /[|;&<>`(\n\r]/u
+// A .env file or one of its .env.* variants, a certificate, a private key, a credentials file, anything under .ssh
+const SECRETS =
+  /(?:^|\/)\.env(?:\.|$)|\.pem$|(?:^|\/)(?:id_(?:rsa|ed25519)|\.npmrc|\.netrc)$|(?:^|\/)\.ssh\//u
 const NETWORK_TOOLS = new Set(['WebFetch', 'WebSearch', 'curl', 'wget'])
 
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null
+
 const field = (input: unknown, key: string): string => {
-  const value = typeof input === 'object' && input !== null ? (input as Record<string, unknown>)[key] : undefined
+  const value = isRecord(input) ? input[key] : undefined
   return typeof value === 'string' ? value : ''
 }
 
-const inside = (filePath: string, workspacePath: string): boolean => filePath.startsWith(`${workspacePath}/`)
+// Read-only is a property of the whole command, not of its first word
+const isReadOnly = (command: string): boolean =>
+  READ_ONLY.test(command) && !SHELL_SYNTAX.test(command)
 
-// Rules evaluated top-down; the first match decides. Deny rules come first.
-export function recommendForPermission(toolCall: ToolCall, workspacePath: string, mode: PermissionMode): PermissionRecommendation {
-  const command = field(toolCall.input, 'command')
-  const filePath = field(toolCall.input, 'file_path') || field(toolCall.input, 'path')
-  if (/\bgit push\b.*(--force|-f\b|\+)/u.test(command)) {
-    return { recommended: 'deny', ruleId: 'force-push' }
-  }
-  if (/\brm\s+-[a-z]*r[a-z]*f?\b/u.test(command) && !command.includes(workspacePath)) {
-    return { recommended: 'deny', ruleId: 'rm-outside-workspace' }
-  }
-  if (filePath !== '' && SECRETS.test(filePath)) {
-    return { recommended: 'deny', ruleId: 'secrets-path' }
-  }
-  if (mode === 'supervised' && NETWORK_TOOLS.has(toolCall.name)) {
-    return { recommended: 'deny', ruleId: 'network-in-supervised' }
-  }
-  if (READ_ONLY.test(command)) {
-    return { recommended: 'allow', ruleId: 'read-only-command' }
-  }
-  if (filePath !== '' && inside(filePath, workspacePath)) {
-    return { recommended: 'allow', ruleId: toolCall.name === 'Read' ? 'in-workspace-read' : 'in-workspace-edit' }
-  }
-  return { recommended: null, ruleId: null }
+// Strictly under the root: neither the root itself nor a path that climbs out of it
+const isUnder = (root: string, target: string): boolean => {
+  const relation = posix.relative(root, target)
+  return relation !== '' && relation !== '..' && !relation.startsWith('../')
 }
+
+// The check is lexical: a symlink inside the workspace that points out of it cannot be told from a plain path, only the file system knows
+// With no absolute workspace nothing is inside it, whatever the path looks like
+const inWorkspace = ({ root, target }: Facts): boolean =>
+  root !== '' && target !== '' && isUnder(root, target)
+
+// Rules are evaluated top-down and the first match decides, so the deny rules come first
+const RULES: readonly Rule[] = [
+  { id: 'force-push', verdict: 'deny', applies: ({ command }) => FORCE_PUSH.test(command) },
+  {
+    id: 'rm-outside-workspace',
+    verdict: 'deny',
+    // Without a workspace every recursive removal is outside it
+    applies: ({ command, workspacePath }) =>
+      RECURSIVE_REMOVE.test(command) && (workspacePath === '' || !command.includes(workspacePath)),
+  },
+  {
+    id: 'secrets-path',
+    verdict: 'deny',
+    applies: ({ filePath, target }) => SECRETS.test(filePath) || SECRETS.test(target),
+  },
+  {
+    id: 'network-in-supervised',
+    verdict: 'deny',
+    applies: ({ mode, name }) => mode === 'supervised' && NETWORK_TOOLS.has(name),
+  },
+  { id: 'read-only-command', verdict: 'allow', applies: ({ command }) => isReadOnly(command) },
+  {
+    id: 'in-workspace-read',
+    verdict: 'allow',
+    applies: (facts) => facts.name === 'Read' && inWorkspace(facts),
+  },
+  { id: 'in-workspace-edit', verdict: 'allow', applies: inWorkspace },
+]
+
+export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
+
+// A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
+const resolveTarget = (filePath: string, workspacePath: string): string => {
+  if (filePath === '') {
+    return ''
+  }
+  return posix.isAbsolute(workspacePath)
+    ? posix.resolve(workspacePath, filePath)
+    : posix.normalize(filePath)
+}
+
+const factsOf = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): Facts => {
+  const filePath = field(toolCall.input, 'file_path') || field(toolCall.input, 'path')
+  return {
+    name: toolCall.name,
+    command: field(toolCall.input, 'command'),
+    filePath,
+    target: resolveTarget(filePath, workspacePath),
+    workspacePath,
+    root: posix.isAbsolute(workspacePath) ? workspacePath : '',
+    mode,
+  }
+}
+
+export function recommendForPermission(
+  toolCall: ToolCall,
+  workspacePath: string,
+  mode: PermissionMode,
+): PermissionRecommendation {
+  const facts = factsOf(toolCall, workspacePath, mode)
+  const rule = RULES.find((candidate) => candidate.applies(facts))
+  return rule === undefined ? NO_RECOMMENDATION : { recommended: rule.verdict, ruleId: rule.id }
+}
+
+const UNIT_MILLIS: ReadonlyMap<string, number> = new Map([
+  ['ms', 1],
+  ['s', 1000],
+  ['m', 60_000],
+  ['h', 3_600_000],
+])
+
+const DURATION = /^(?<amount>\d+)\s*(?<unit>ms|s|m|h)$/u
+
+type Parts = Readonly<Record<string, string | undefined>>
 
 export function parseDuration(text: string): number {
-  const match = /^(\d+)\s*(ms|s|m|h)$/u.exec(text.trim())
-  if (match === null) {
+  const match = DURATION.exec(text.trim())
+  const { amount, unit }: Parts = match === null ? {} : (match.groups ?? {})
+  const factor = unit === undefined ? undefined : UNIT_MILLIS.get(unit)
+  if (amount === undefined || factor === undefined) {
     throw new Error(`invalid duration: ${text}`)
   }
-  const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[match[2] as 'ms' | 's' | 'm' | 'h']
-  return Number(match[1]) * unit
+  return Number(amount) * factor
 }
 ```
-`packages/kernel/src/asks/ask-service.ts`:
+`packages/kernel/src/asks/ask-build.ts`:
 ```ts
-import type { AnsweredVia, Ask, AskAnswer, AskOption, AskQuestion, AskRecord, PermissionMode } from '@bytebureau/protocol'
-import { Context, Deferred, Effect, Layer } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { AskError, StoreError } from '../errors.js'
-import { EventLog } from '../events/event-log.js'
+import type { Ask, AskAnswer, AskOption, AskQuestion, PermissionMode } from '@bytebureau/protocol'
 import { nowIso, uuidv7 } from '../ids.js'
-import { kernelLogger } from '../logging/logging.js'
-import { parseDuration, recommendForPermission, type ToolCall } from './policy.js'
+import {
+  NO_RECOMMENDATION,
+  parseDuration,
+  recommendForPermission,
+  type ToolCall,
+} from './policy.js'
 
 export const DENY_ON_TIMEOUT_MESSAGE = 'nobody available to approve; do not retry'
 
@@ -12300,151 +14342,577 @@ export interface OpenAskInput {
   readonly workspacePath: string
   readonly recommendationSource?: 'agent' | 'none' | undefined
 }
-export interface AskServiceShape {
-  open(input: OpenAskInput): Effect.Effect<AskRecord, StoreError>
-  answer(askId: string, answer: AskAnswer, via: AnsweredVia): Effect.Effect<AskRecord, AskError | StoreError>
-  cancel(askId: string): Effect.Effect<void, StoreError>
-  pending(sessionId?: string): Effect.Effect<readonly AskRecord[], StoreError>
-  await(askId: string): Effect.Effect<AskAnswer, AskError>
+
+interface Questions {
+  readonly questions: readonly AskQuestion[]
+  readonly recommendationSource: Ask['recommendationSource']
 }
 
-export class AskService extends Context.Service<AskService, AskServiceShape>()('bb/AskService') {}
-
-interface Row {
-  readonly id: string
-  readonly payload_json: string
-  readonly status: string
-  readonly answer_json: string | null
-  readonly answered_at: string | null
-  readonly answered_via: string | null
-}
-
-const fromRow = (row: Row): AskRecord => ({
-  ...(JSON.parse(row.payload_json) as Ask),
-  status: row.status as AskRecord['status'],
-  answer: row.answer_json === null ? null : (JSON.parse(row.answer_json) as AskAnswer),
-  answeredAt: row.answered_at,
-  answeredVia: row.answered_via as AskRecord['answeredVia'],
-})
-
-const permissionQuestion = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): { question: AskQuestion; source: Ask['recommendationSource'] } => {
-  const { recommended, ruleId } = recommendForPermission(toolCall, workspacePath, mode)
+// A permission is always allow or deny; the rules recommend one of them for a tool call, or neither, and without a tool call there is nothing to judge
+const permissionQuestions = (input: OpenAskInput): Questions => {
+  const { toolCall } = input
+  const { recommended, ruleId } =
+    toolCall === undefined
+      ? NO_RECOMMENDATION
+      : recommendForPermission(toolCall, input.workspacePath, input.permissionMode)
   const option = (id: 'allow' | 'deny', label: string): AskOption => ({
     id,
     label,
     recommended: recommended === id,
     evidence: recommended === id && ruleId !== null ? [{ kind: 'rule', ref: ruleId }] : [],
   })
-  return {
-    question: { id: 'permission', header: 'Permission', prompt: `${toolCall.name}: allow this tool call?`, options: [option('allow', 'Allow'), option('deny', 'Deny')], multiSelect: false, allowOther: false },
-    source: recommended === null ? 'none' : 'policy',
+  const question: AskQuestion = {
+    id: 'permission',
+    header: 'Permission',
+    prompt: toolCall === undefined ? 'Allow this?' : `${toolCall.name}: allow this tool call?`,
+    options: [option('allow', 'Allow'), option('deny', 'Deny')],
+    multiSelect: false,
+    allowOther: false,
   }
+  return { questions: [question], recommendationSource: recommended === null ? 'none' : 'policy' }
 }
 
-const policyFor = (input: OpenAskInput): Ask['policy'] => {
+const recommendedCount = (question: AskQuestion): number =>
+  question.options.filter((option) => option.recommended).length
+
+// A recommendation is one recommended option in every question; a question with none or with two has no answer to take
+export const unrecommendedQuestions = (ask: Ask): readonly string[] =>
+  ask.questions
+    .filter((question) => recommendedCount(question) !== 1)
+    .map((question) => question.id)
+
+const hasRecommendation = (questions: readonly AskQuestion[]): boolean =>
+  questions.length > 0 && questions.every((question) => recommendedCount(question) === 1)
+
+// A permission always gets the questions the rules derive; any other ask keeps the ones it came with
+const questionsOf = (input: OpenAskInput): Questions => {
+  if (input.kind === 'permission') {
+    return permissionQuestions(input)
+  }
+  const source = hasRecommendation(input.questions)
+    ? (input.recommendationSource ?? 'agent')
+    : 'none'
+  return { questions: input.questions, recommendationSource: source }
+}
+
+// Supervised employees are waited for; so is a question nobody recommended an answer to, the kernel makes none up
+// The other asks get the fallback of their kind once the timeout is over: a question its recommendation, a permission a denial
+const policyFor = (input: OpenAskInput, source: Ask['recommendationSource']): Ask['policy'] => {
+  const timeout = input.askTimeout
   if (input.permissionMode === 'supervised') {
-    return { onTimeout: 'wait', timeout: input.askTimeout }
+    return { onTimeout: 'wait', timeout }
   }
-  return { onTimeout: input.kind === 'question' ? 'recommended' : 'deny', timeout: input.askTimeout }
+  if (input.kind === 'permission') {
+    return { onTimeout: 'deny', timeout }
+  }
+  return { onTimeout: source === 'none' ? 'wait' : 'recommended', timeout }
 }
 
-const recommendedAnswer = (ask: Ask): AskAnswer => ({
-  selected: ask.questions.map((question) => question.options.find((option) => option.recommended)?.id ?? ''),
+// Milliseconds until the policy acts; a policy that waits never does
+export const timeoutMs = (policy: Ask['policy']): number | null =>
+  policy.onTimeout === 'wait' ? null : parseDuration(policy.timeout)
+
+// Everything that can throw happens here, before the ask is stored or announced
+export const buildAsk = (input: OpenAskInput): Ask => {
+  const { questions, recommendationSource } = questionsOf(input)
+  const policy = policyFor(input, recommendationSource)
+  const createdAt = nowIso()
+  const delay = timeoutMs(policy)
+  return {
+    id: uuidv7(),
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    kind: input.kind,
+    title: input.title,
+    questions,
+    recommendationSource,
+    ...(input.toolCall === undefined ? {} : { toolCall: input.toolCall }),
+    policy,
+    status: 'pending',
+    createdAt,
+    deadlineAt: delay === null ? null : new Date(Date.parse(createdAt) + delay).toISOString(),
+  }
+}
+
+// Only an ask in which every question has a recommended option is ever answered this way
+const recommendedId = (question: AskQuestion): string => {
+  const pick = question.options.find((option) => option.recommended)
+  if (pick === undefined) {
+    throw new Error(`question ${question.id} has no recommended option`)
+  }
+  return pick.id
+}
+
+// One id per question, in order
+export const recommendedAnswer = (ask: Ask): AskAnswer => ({
+  selected: ask.questions.map((question) => recommendedId(question)),
 })
 
-const make = Effect.gen(function* () {
+// What the kernel answers when nobody did: a permission is denied with a reason, a question takes the recommendation
+export const timeoutAnswer = (ask: Ask): AskAnswer =>
+  ask.policy.onTimeout === 'deny'
+    ? { selected: ['deny'], otherText: DENY_ON_TIMEOUT_MESSAGE }
+    : recommendedAnswer(ask)
+```
+`packages/kernel/src/asks/ask-records.ts`:
+```ts
+import {
+  AnsweredVia,
+  Ask,
+  AskAnswer,
+  AskStatus,
+  Timestamp,
+  type AskRecord,
+} from '@bytebureau/protocol'
+import { Effect, Schema } from 'effect'
+import type { SqlClient, Statement } from 'effect/sql'
+import { StoreError, toStoreError } from '../errors.js'
+
+// The columns that make an ask whole: the payload it was opened with and the state that came after
+const Stored = Schema.Struct({
+  payload_json: Schema.fromJsonString(Ask),
+  status: AskStatus,
+  answer_json: Schema.NullOr(Schema.fromJsonString(AskAnswer)),
+  answered_at: Schema.NullOr(Timestamp),
+  answered_via: Schema.NullOr(AnsweredVia),
+})
+
+const decodeStored = Schema.decodeUnknownEffect(Stored)
+
+// A row that does not fit the protocol is a failure of the store, not a defect
+const toRecord = (row: unknown): Effect.Effect<AskRecord, StoreError> =>
+  decodeStored(row).pipe(
+    Effect.map((stored) => ({
+      ...stored.payload_json,
+      status: stored.status,
+      answer: stored.answer_json,
+      answeredAt: stored.answered_at,
+      answeredVia: stored.answered_via,
+    })),
+    Effect.mapError(
+      (cause) => new StoreError({ cause: new Error('an ask record is unreadable', { cause }) }),
+    ),
+  )
+
+// The record of the first row; a query that finds no row, or an update that claims none, has no record
+const firstRecord = (
+  rows: readonly unknown[],
+): Effect.Effect<AskRecord | undefined, StoreError> => {
+  const [row] = rows
+  return row === undefined ? Effect.undefined : toRecord(row)
+}
+
+export const insertAsk = (sql: SqlClient.SqlClient, ask: Ask): Effect.Effect<void, StoreError> =>
+  sql`
+    INSERT INTO asks (id, session_id, turn_id, kind, payload_json, status, recommendation_source, created_at, deadline_at)
+    VALUES (${ask.id}, ${ask.sessionId}, ${ask.turnId}, ${ask.kind}, ${JSON.stringify(ask)}, ${ask.status}, ${ask.recommendationSource}, ${ask.createdAt}, ${ask.deadlineAt})`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
+  )
+
+export const loadAsk = (
+  sql: SqlClient.SqlClient,
+  askId: string,
+): Effect.Effect<AskRecord | undefined, StoreError> =>
+  sql`SELECT * FROM asks WHERE id = ${askId}`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => firstRecord(rows)),
+  )
+
+// Pending asks, oldest first; the id breaks a tie because uuidv7 ids grow with time
+const pendingConditions = (
+  sql: SqlClient.SqlClient,
+  sessionId?: string,
+): readonly Statement.Fragment[] => [
+  sql`status = 'pending'`,
+  ...(sessionId === undefined ? [] : [sql`session_id = ${sessionId}`]),
+]
+
+export const listPending = (
+  sql: SqlClient.SqlClient,
+  sessionId?: string,
+): Effect.Effect<readonly AskRecord[], StoreError> =>
+  sql`SELECT * FROM asks WHERE ${sql.and(pendingConditions(sql, sessionId))} ORDER BY created_at, id`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => Effect.all(rows.map((row) => toRecord(row)))),
+  )
+
+export interface Answered {
+  readonly answer: AskAnswer
+  readonly via: AnsweredVia
+  readonly answeredAt: string
+}
+
+// Only a pending ask can be answered, whoever asks first wins
+export const claimAnswer = (
+  sql: SqlClient.SqlClient,
+  askId: string,
+  { answer, via, answeredAt }: Answered,
+): Effect.Effect<AskRecord | undefined, StoreError> =>
+  sql`
+    UPDATE asks SET status = 'answered', answer_json = ${JSON.stringify(answer)}, answered_at = ${answeredAt}, answered_via = ${via}
+    WHERE id = ${askId} AND status = 'pending' RETURNING *`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => firstRecord(rows)),
+  )
+
+// Only a pending ask can be cancelled
+export const claimCancel = (
+  sql: SqlClient.SqlClient,
+  askId: string,
+): Effect.Effect<AskRecord | undefined, StoreError> =>
+  sql`UPDATE asks SET status = 'cancelled' WHERE id = ${askId} AND status = 'pending' RETURNING *`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => firstRecord(rows)),
+  )
+```
+`packages/kernel/src/asks/ask-events.ts`:
+```ts
+import type { AnsweredVia, Ask, AskAnswer, AskRecord } from '@bytebureau/protocol'
+import { Effect } from 'effect'
+import type { StoreError } from '../errors.js'
+import type { EventLogShape } from '../events/event-log.js'
+
+// How an ask got its answer; a fallback means the timeout of the policy produced it
+export interface Settlement {
+  readonly answer: AskAnswer
+  readonly via: AnsweredVia
+  readonly fallback?: string | undefined
+}
+
+// The ids that tie an event to its ask; the turn is left out when the ask has none
+const idsOf = (ask: Ask): { readonly sessionId: string; readonly turnId?: string } => ({
+  sessionId: ask.sessionId,
+  ...(ask.turnId === null ? {} : { turnId: ask.turnId }),
+})
+
+export const announceRequest = (log: EventLogShape, ask: Ask): Effect.Effect<void, StoreError> =>
+  Effect.asVoid(log.publish({ type: 'ask.requested', ...idsOf(ask), payload: { ask } }))
+
+// A timeout is announced as the expiry with its fallback, then as the answer it produced
+export const announceAnswer = (
+  log: EventLogShape,
+  ask: AskRecord,
+  { answer, via, fallback }: Settlement,
+): Effect.Effect<void, StoreError> =>
+  Effect.gen(function* announcesAnswer() {
+    if (fallback !== undefined) {
+      yield* log.publish({
+        type: 'ask.expired',
+        ...idsOf(ask),
+        payload: { askId: ask.id, fallback },
+      })
+    }
+    yield* log.publish({
+      type: 'ask.answered',
+      ...idsOf(ask),
+      payload: { askId: ask.id, answer, answeredVia: via },
+    })
+  })
+
+export const announceCancel = (
+  log: EventLogShape,
+  ask: AskRecord,
+): Effect.Effect<void, StoreError> =>
+  Effect.asVoid(log.publish({ type: 'ask.cancelled', ...idsOf(ask), payload: { askId: ask.id } }))
+```
+`packages/kernel/src/asks/ask-settle.ts`:
+```ts
+import type { Ask, AskRecord } from '@bytebureau/protocol'
+import { Effect, Exit } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { AskError, type StoreError } from '../errors.js'
+import type { EventLogShape } from '../events/event-log.js'
+import { nowIso } from '../ids.js'
+import { timeoutAnswer } from './ask-build.js'
+import { announceAnswer, announceCancel, type Settlement } from './ask-events.js'
+import { claimAnswer, claimCancel, loadAsk } from './ask-records.js'
+import { wake, type Waiters } from './ask-waiters.js'
+
+// What a waiter learns when its ask is cancelled
+const cancelled = (askId: string): Exit.Exit<never, AskError> =>
+  Exit.fail(new AskError({ code: 'not_pending', reason: `ask ${askId} is cancelled` }))
+
+export interface AskDeps {
+  readonly sql: SqlClient.SqlClient
+  readonly log: EventLogShape
+  readonly waiters: Waiters
+}
+
+// The waiter is woken after the announcement, so whoever waits finds the answer in the log, and even when the announcement fails
+const deliver = (
+  deps: AskDeps,
+  record: AskRecord,
+  settlement: Settlement,
+): Effect.Effect<void, StoreError> => {
+  const outcome = Exit.succeed(settlement.answer)
+  return announceAnswer(deps.log, record, settlement).pipe(
+    Effect.ensuring(wake(deps.waiters, record.id, outcome)),
+  )
+}
+
+// The first claim of a pending ask wins and returns the answered record, any later one returns nothing
+// Nothing may interrupt the steps after the claim: an answer that is stored must also arrive
+// The time is read when the effect runs, not when it is built, because the timer builds it long before
+const settle = (
+  deps: AskDeps,
+  askId: string,
+  settlement: Settlement,
+): Effect.Effect<AskRecord | undefined, StoreError> =>
+  Effect.gen(function* settlesAsk() {
+    const claim = { answer: settlement.answer, via: settlement.via, answeredAt: nowIso() }
+    const record = yield* claimAnswer(deps.sql, askId, claim)
+    if (record !== undefined) {
+      yield* deliver(deps, record, settlement)
+    }
+    return record
+  }).pipe(Effect.uninterruptible)
+
+// The timer's turn: the policy answers unless somebody was quicker
+export const expire = (deps: AskDeps, ask: Ask): Effect.Effect<void, StoreError> =>
+  Effect.asVoid(
+    settle(deps, ask.id, {
+      answer: timeoutAnswer(ask),
+      via: 'timeout',
+      fallback: ask.policy.onTimeout,
+    }),
+  )
+
+// An ask that cannot be answered is told apart: one that never existed, or one that is not pending any more
+const refusal = (
+  sql: SqlClient.SqlClient,
+  askId: string,
+): Effect.Effect<never, AskError | StoreError> =>
+  loadAsk(sql, askId).pipe(
+    Effect.flatMap((record) =>
+      Effect.fail(
+        record === undefined
+          ? new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
+          : new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` }),
+      ),
+    ),
+  )
+
+export const answerAsk = (
+  deps: AskDeps,
+  askId: string,
+  settlement: Settlement,
+): Effect.Effect<AskRecord, AskError | StoreError> =>
+  Effect.gen(function* answersAsk() {
+    const record = yield* settle(deps, askId, settlement)
+    if (record === undefined) {
+      return yield* refusal(deps.sql, askId)
+    }
+    return record
+  })
+
+// Cancelling an ask that is not pending does nothing; a waiter fails with the cancellation, even when it cannot be announced
+export const cancelAsk = (deps: AskDeps, askId: string): Effect.Effect<void, StoreError> =>
+  Effect.gen(function* cancelsAsk() {
+    const record = yield* claimCancel(deps.sql, askId)
+    if (record === undefined) {
+      return
+    }
+    const outcome = cancelled(askId)
+    yield* announceCancel(deps.log, record).pipe(
+      Effect.ensuring(wake(deps.waiters, askId, outcome)),
+    )
+  }).pipe(Effect.uninterruptible)
+
+// An ask whose request could not be announced was offered to nobody: it is cancelled without an event and its waiter fails
+export const withdrawAsk = (deps: AskDeps, askId: string): Effect.Effect<void, StoreError> => {
+  const outcome = cancelled(askId)
+  return claimCancel(deps.sql, askId).pipe(
+    Effect.ensuring(wake(deps.waiters, askId, outcome)),
+    Effect.asVoid,
+  )
+}
+```
+`packages/kernel/src/asks/ask-waiters.ts`:
+```ts
+import type { AskAnswer } from '@bytebureau/protocol'
+import { Deferred, Effect, Exit } from 'effect'
+import { AskError } from '../errors.js'
+
+// What a caller of await waits on; an entry stays after its ask is settled, so a late caller still gets the outcome
+export type Waiters = Map<string, Deferred.Deferred<AskAnswer, AskError>>
+
+export const park = (waiters: Waiters, askId: string): Effect.Effect<void> =>
+  Effect.map(Deferred.make<AskAnswer, AskError>(), (waiter) => {
+    waiters.set(askId, waiter)
+  })
+
+export const wake = (
+  waiters: Waiters,
+  askId: string,
+  outcome: Exit.Exit<AskAnswer, AskError>,
+): Effect.Effect<void> => {
+  const waiter = waiters.get(askId)
+  return waiter === undefined ? Effect.void : Effect.asVoid(Deferred.done(waiter, outcome))
+}
+
+// The registry is read when the wait runs, not when it is built, so a wait can be built before its ask exists or run again
+export const awaitAnswer = (waiters: Waiters, askId: string): Effect.Effect<AskAnswer, AskError> =>
+  Effect.suspend(() => {
+    const waiter = waiters.get(askId)
+    return waiter === undefined
+      ? Effect.fail(
+          new AskError({
+            code: 'not_found',
+            reason: `ask ${askId} was not opened by this process`,
+          }),
+        )
+      : Deferred.await(waiter)
+  })
+
+// Nobody can answer an ask once the service is closed, so whoever still waits is told; a waiter that is done keeps its outcome
+export const closeWaiters = (waiters: Waiters): Effect.Effect<void> => {
+  const closed = Exit.fail(new AskError({ code: 'not_pending', reason: 'service closed' }))
+  return Effect.forEach([...waiters.values()], (waiter) => Deferred.done(waiter, closed), {
+    discard: true,
+  })
+}
+```
+`packages/kernel/src/asks/ask-open.ts`:
+```ts
+import type { Ask, AskRecord } from '@bytebureau/protocol'
+import { Effect, Fiber, Latch, type Scope } from 'effect'
+import type { StoreError } from '../errors.js'
+import { kernelLogger } from '../logging/logging.js'
+import { buildAsk, timeoutMs, unrecommendedQuestions, type OpenAskInput } from './ask-build.js'
+import { announceRequest } from './ask-events.js'
+import { insertAsk } from './ask-records.js'
+import { expire, withdrawAsk, type AskDeps } from './ask-settle.js'
+import { park } from './ask-waiters.js'
+
+// The timers belong to the scope of the layer, so they outlive the fiber of whoever opens an ask
+export interface OpenDeps extends AskDeps {
+  readonly scope: Scope.Scope
+}
+
+const logger = kernelLogger(['bb', 'asks'])
+
+// The title and the input of the tool stay out of the log: either can carry a credential
+const warnWithoutRecommendation = (ask: Ask): void => {
+  if (ask.recommendationSource === 'none') {
+    logger.warn('no recommendation available', {
+      sessionId: ask.sessionId,
+      kind: ask.kind,
+      ...(ask.toolCall === undefined ? {} : { toolName: ask.toolCall.name }),
+      questions: unrecommendedQuestions(ask),
+    })
+  }
+}
+
+// An expiry that fails leaves the ask pending, so the failure is told and never swallowed
+const reportExpiry =
+  (ask: Ask) =>
+  (error: StoreError): Effect.Effect<void> =>
+    Effect.sync(() => {
+      logger.error('an ask could not be expired', {
+        askId: ask.id,
+        sessionId: ask.sessionId,
+        cause: error.cause,
+      })
+    })
+
+// An ask that waits has no timer; any other one is expired by its policy once the timeout is over, but not before its request is announced
+// The result stops the timer; an ask that waits has none to stop
+export const armTimer = (
+  deps: OpenDeps,
+  ask: Ask,
+  announced: Latch.Latch,
+): Effect.Effect<Effect.Effect<void>> => {
+  const delay = timeoutMs(ask.policy)
+  if (delay === null) {
+    return Effect.succeed(Effect.void)
+  }
+  const expiry = Effect.sleep(delay).pipe(
+    Effect.andThen(announced.await),
+    Effect.andThen(expire(deps, ask)),
+  )
+  const guarded = expiry.pipe(Effect.catchTag('StoreError', reportExpiry(ask)))
+  return Effect.map(Effect.forkIn(guarded, deps.scope), (timer) => Fiber.interrupt(timer))
+}
+
+// The timer is armed before the request is announced; when the announcement fails there is no pending ask left behind
+// The ask is cancelled and its timer stopped, best effort, and the caller gets the failure of the announcement
+export const announce = (
+  deps: OpenDeps,
+  ask: Ask,
+  disarm: Effect.Effect<void>,
+): Effect.Effect<void, StoreError> =>
+  announceRequest(deps.log, ask).pipe(
+    Effect.tapError(() => Effect.ignore(Effect.andThen(disarm, withdrawAsk(deps, ask.id)))),
+  )
+
+// The waiter is parked before anything is announced, so an answer that comes at once has someone to reach
+// Nothing may interrupt the steps from the insert on: an ask is announced with its timer armed, or it is not left behind
+export const openAsk = (
+  deps: OpenDeps,
+  input: OpenAskInput,
+): Effect.Effect<AskRecord, StoreError> =>
+  Effect.gen(function* opensAsk() {
+    const ask = buildAsk(input)
+    warnWithoutRecommendation(ask)
+    yield* insertAsk(deps.sql, ask)
+    yield* park(deps.waiters, ask.id)
+    const announced = yield* Latch.make()
+    const disarm = yield* armTimer(deps, ask, announced)
+    yield* announce(deps, ask, disarm)
+    yield* announced.open
+    return { ...ask, answer: null, answeredAt: null, answeredVia: null }
+  }).pipe(Effect.uninterruptible)
+```
+`packages/kernel/src/asks/ask-service.ts`:
+```ts
+import type { AnsweredVia, AskAnswer, AskRecord } from '@bytebureau/protocol'
+import { Context, Effect, Layer } from 'effect'
+import { SqlClient } from 'effect/sql'
+import type { AskError, StoreError } from '../errors.js'
+import { EventLog } from '../events/event-log.js'
+import type { OpenAskInput } from './ask-build.js'
+import { openAsk, type OpenDeps } from './ask-open.js'
+import { listPending } from './ask-records.js'
+import { answerAsk, cancelAsk } from './ask-settle.js'
+import { awaitAnswer, closeWaiters } from './ask-waiters.js'
+
+export type { OpenAskInput } from './ask-build.js'
+export { DENY_ON_TIMEOUT_MESSAGE } from './ask-build.js'
+
+export interface AskServiceShape {
+  readonly open: (input: OpenAskInput) => Effect.Effect<AskRecord, StoreError>
+  readonly answer: (
+    askId: string,
+    answer: AskAnswer,
+    via: AnsweredVia,
+  ) => Effect.Effect<AskRecord, AskError | StoreError>
+  readonly cancel: (askId: string) => Effect.Effect<void, StoreError>
+  readonly pending: (sessionId?: string) => Effect.Effect<readonly AskRecord[], StoreError>
+  readonly await: (askId: string) => Effect.Effect<AskAnswer, AskError>
+}
+
+export class AskService extends Context.Service<AskService, AskServiceShape>()('bb/AskService') {}
+
+const make = Effect.gen(function* makeAskService() {
   const sql = yield* SqlClient.SqlClient
   const log = yield* EventLog
-  const logger = kernelLogger(['bb', 'asks'])
-  const waiters = new Map<string, Deferred.Deferred<AskAnswer, AskError>>()
-  const wrap = <A>(effect: Effect.Effect<A, unknown>): Effect.Effect<A, StoreError> => Effect.mapError(effect, (cause) => new StoreError({ cause }))
-
-  const load = (askId: string) => wrap(Effect.map(sql<Row>`SELECT id, payload_json, status, answer_json, answered_at, answered_via FROM asks WHERE id = ${askId}`, (rows) => (rows[0] === undefined ? undefined : fromRow(rows[0]))))
-
-  const settle = (record: AskRecord, answer: AskAnswer, via: AnsweredVia): Effect.Effect<AskRecord, StoreError> =>
-    Effect.gen(function* () {
-      const answeredAt = nowIso()
-      yield* wrap(sql`UPDATE asks SET status = 'answered', answer_json = ${JSON.stringify(answer)}, answered_at = ${answeredAt}, answered_via = ${via} WHERE id = ${record.id}`)
-      yield* log.publish({ type: 'ask.answered', sessionId: record.sessionId, ...(record.turnId === null ? {} : { turnId: record.turnId }), payload: { askId: record.id, answer, answeredVia: via } })
-      const waiter = waiters.get(record.id)
-      if (waiter !== undefined) {
-        yield* Deferred.succeed(waiter, answer)
-        waiters.delete(record.id)
-      }
-      return { ...record, status: 'answered', answer, answeredAt, answeredVia: via }
-    })
-
-  const expire = (ask: Ask): Effect.Effect<void, StoreError> =>
-    Effect.gen(function* () {
-      const current = yield* load(ask.id)
-      if (current === undefined || current.status !== 'pending') {
-        return
-      }
-      const fallback = ask.policy.onTimeout
-      yield* log.publish({ type: 'ask.expired', sessionId: ask.sessionId, payload: { askId: ask.id, fallback } })
-      const answer: AskAnswer = fallback === 'deny' ? { selected: ['deny'], otherText: DENY_ON_TIMEOUT_MESSAGE } : recommendedAnswer(ask)
-      yield* settle(current, answer, 'timeout')
-    })
-
-  const open: AskServiceShape['open'] = (input) =>
-    Effect.gen(function* () {
-      const built = input.kind === 'permission' && input.toolCall !== undefined ? permissionQuestion(input.toolCall, input.workspacePath, input.permissionMode) : undefined
-      const questions = built === undefined ? input.questions : [built.question]
-      const source: Ask['recommendationSource'] = built?.source ?? (questions.some((question) => question.options.some((option) => option.recommended)) ? (input.recommendationSource ?? 'agent') : 'none')
-      if (source === 'none') {
-        logger.warn('no recommendation available', { sessionId: input.sessionId, title: input.title })
-      }
-      const policy = policyFor(input)
-      const createdAt = nowIso()
-      const deadlineAt = policy.onTimeout === 'wait' ? null : new Date(Date.parse(createdAt) + parseDuration(policy.timeout)).toISOString()
-      const ask: Ask = { id: uuidv7(), sessionId: input.sessionId, turnId: input.turnId, kind: input.kind, title: input.title, questions, ...(input.toolCall === undefined ? {} : { toolCall: input.toolCall }), policy, recommendationSource: source, status: 'pending', createdAt, deadlineAt }
-      yield* wrap(sql`INSERT INTO asks (id, session_id, turn_id, kind, payload_json, status, recommendation_source, created_at, deadline_at) VALUES (${ask.id}, ${ask.sessionId}, ${ask.turnId}, ${ask.kind}, ${JSON.stringify(ask)}, 'pending', ${source}, ${createdAt}, ${deadlineAt})`)
-      waiters.set(ask.id, yield* Deferred.make<AskAnswer, AskError>())
-      yield* log.publish({ type: 'ask.requested', sessionId: ask.sessionId, ...(ask.turnId === null ? {} : { turnId: ask.turnId }), payload: { ask } })
-      if (policy.onTimeout !== 'wait') {
-        yield* Effect.forkChild(Effect.andThen(Effect.sleep(parseDuration(policy.timeout)), expire(ask)).pipe(Effect.ignore))
-      }
-      return { ...ask, answer: null, answeredAt: null, answeredVia: null }
-    })
-
+  const scope = yield* Effect.scope
+  const deps: OpenDeps = { sql, log, scope, waiters: new Map() }
+  yield* Effect.addFinalizer(() => closeWaiters(deps.waiters))
   return AskService.of({
-    open,
-    answer: (askId, answer, via) =>
-      Effect.gen(function* () {
-        const record = yield* load(askId)
-        if (record === undefined) {
-          return yield* new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
-        }
-        if (record.status !== 'pending') {
-          return yield* new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` })
-        }
-        return yield* settle(record, answer, via)
-      }),
-    cancel: (askId) =>
-      Effect.gen(function* () {
-        const record = yield* load(askId)
-        if (record === undefined || record.status !== 'pending') {
-          return
-        }
-        yield* wrap(sql`UPDATE asks SET status = 'cancelled' WHERE id = ${askId}`)
-        yield* log.publish({ type: 'ask.cancelled', sessionId: record.sessionId, payload: { askId } })
-        const waiter = waiters.get(askId)
-        if (waiter !== undefined) {
-          yield* Deferred.fail(waiter, new AskError({ code: 'not_pending', reason: 'cancelled' }))
-          waiters.delete(askId)
-        }
-      }),
-    pending: (sessionId) => wrap(Effect.map(sql<Row>`SELECT id, payload_json, status, answer_json, answered_at, answered_via FROM asks WHERE status = 'pending' AND (${sessionId ?? null} IS NULL OR session_id = ${sessionId ?? null}) ORDER BY created_at`, (rows) => rows.map(fromRow))),
-    await: (askId) => {
-      const waiter = waiters.get(askId)
-      return waiter === undefined ? Effect.fail(new AskError({ code: 'not_found', reason: `ask ${askId} is not pending in this process` })) : Deferred.await(waiter)
-    },
+    open: (input) => openAsk(deps, input),
+    answer: (askId, answer, via) => answerAsk(deps, askId, { answer, via }),
+    cancel: (askId) => cancelAsk(deps, askId),
+    pending: (sessionId) => listPending(sql, sessionId),
+    await: (askId) => awaitAnswer(deps.waiters, askId),
   })
 })
 
-export const AskServiceLive: Layer.Layer<AskService, never, SqlClient.SqlClient | EventLog> = Layer.effect(AskService, make)
+export const AskServiceLive: Layer.Layer<AskService, never, SqlClient.SqlClient | EventLog> =
+  Layer.effect(AskService, make)
 ```
-The forked timer uses `Effect.sleep`, so `TestClock.adjust` drives it in tests; in production the clock is real. Confirm `Deferred.make/succeed/fail/await` and `Effect.forkChild` names in the installed d.ts (the fact sheet lists `forkChild`).
+The timer uses `Effect.sleep`, so `TestClock.adjust` drives it in tests; it is forked into the layer scope (`Effect.forkIn`), never as a child of the `open` caller. Verified in Effect 4.0.0: `Deferred.make/succeed/fail/await` (`await` exported as `_await as await`); `asks.turn_id` is a foreign key, so the permission test seeds a `turns` row.
 
 Add to `index.ts`: `export { AskService, AskServiceLive, DENY_ON_TIMEOUT_MESSAGE, type OpenAskInput, type AskServiceShape } from './asks/ask-service.js'`, `export { recommendForPermission, parseDuration } from './asks/policy.js'`.
 
