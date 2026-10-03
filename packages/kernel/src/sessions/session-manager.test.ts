@@ -6,8 +6,8 @@ import { SessionError } from '../errors.js'
 import { SessionManager } from './session-manager.js'
 import { answerPending, collectUntilCompleted } from './session-ask-fixtures.js'
 import { registerRepo, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { helloFileOf, workspaceOf } from './session-helpers.js'
-import { sessionLayer } from './session-layers.js'
+import { helloFileOf, workspaceOf } from './session-helper-fixtures.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 
 const PROMPT = 'Create src/hello.ts exporting hello()\r\nwith čeština and an emoji 🚀'
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }

@@ -2,8 +2,8 @@ import type { Plugin } from '@bytebureau/plugin-api'
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { eventsUntil, openKernel } from './facade-fixtures.js'
-import { manifestOf, providerOf } from './plugins/plugin-fixtures.js'
-import { createTempRepo } from './testing/temp-repo.js'
+import { manifestOf, providerOf } from '../plugins/plugin-fixtures.js'
+import { createTempRepo } from '../testing/temp-repo.js'
 
 const failing: Plugin = {
   manifest: manifestOf('failing'),

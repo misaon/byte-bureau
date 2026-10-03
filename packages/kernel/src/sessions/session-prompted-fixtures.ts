@@ -4,6 +4,7 @@ import { TestClock } from 'effect/testing'
 import type { ProviderError, SessionError, StoreError } from '../errors.js'
 import { sessionOfKernel, type ScriptedSession } from '../testing/scripted-provider.js'
 import type { Driven } from './session-script-fixtures.js'
+import { START_LIMIT } from './session-start.js'
 import { SessionManager } from './session-manager.js'
 import type { Session, Turn } from './types.js'
 
@@ -25,9 +26,6 @@ export const prompted = (
     const turn = yield* sessions.prompt(session.id, input)
     return { turn, agent: sessionOfKernel(world.scripted, session.id) }
   })
-
-// How long the kernel waits for a provider to start a session
-const START_LIMIT = '60 seconds'
 
 type PromptFailure = SessionError | ProviderError | StoreError
 

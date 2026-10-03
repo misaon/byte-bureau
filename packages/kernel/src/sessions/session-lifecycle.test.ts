@@ -4,8 +4,8 @@ import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { countOf, helloFileOf, refusalOf, workspaceOf } from './session-helpers.js'
-import { sessionLayer } from './session-layers.js'
+import { countOf, helloFileOf, refusalOf, workspaceOf } from './session-helper-fixtures.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }

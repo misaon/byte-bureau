@@ -3,7 +3,8 @@ import { constVoid } from 'effect/Function'
 import type { StoreError } from '../errors.js'
 import { reasonOf } from '../plugins/reason.js'
 import type { Live } from './live-sessions.js'
-import { logger, type SessionDeps } from './session-deps.js'
+import type { SessionDeps } from './session-deps.js'
+import { logger } from './session-logger.js'
 import { saveExternalRef } from './session-records.js'
 import { moveToErrored, type Failure } from './session-status.js'
 import { finishTurn, type Outcome, type Owner } from './session-turns.js'
@@ -29,7 +30,7 @@ export const interruptAgent = async (live: Live): Promise<void> => {
 
 // A provider that does not answer a call within this time is given up on, so it cannot hold a session for ever
 // The prompt is the exception: it may be answered only when the turn is over
-const CALL_LIMIT = '10 seconds'
+export const CALL_LIMIT = '10 seconds'
 
 export const withinLimit = <Value, Problem>(
   call: Effect.Effect<Value, Problem>,
@@ -77,20 +78,35 @@ export const dispose = (deps: SessionDeps, live: Live): Effect.Effect<void> =>
 
 // A pump that does not end within this time is given up on: once its provider session is let go, nothing it says counts
 // An events stream that is an async generator ends only when the read in progress is answered, so a provider that does not end its events holds its pump
-const PUMP_LIMIT = '3 seconds'
+export const PUMP_LIMIT = '3 seconds'
+
+// Giving up is told: the fiber that is left waits on a provider that does not end its events
+const givenUp =
+  (what: string, context: Readonly<Record<string, unknown>>) =>
+  (waiting: Effect.Effect<unknown, Cause.TimeoutError>): Effect.Effect<void> =>
+    Effect.match(waiting, {
+      onFailure: () => {
+        logger.warn(`gave up waiting for ${what}`, context)
+      },
+      onSuccess: constVoid,
+    })
 
 // The pump ends by itself once the provider closes; one that does not is interrupted, and waited for only so long
 export const interruptPump = (live: Live): Effect.Effect<void> =>
   live.pump === undefined
     ? Effect.void
-    : Effect.ignore(Effect.timeout(Fiber.interrupt(live.pump), PUMP_LIMIT))
+    : givenUp('the event pump of a session', { sessionId: live.session.id })(
+        Effect.timeout(Fiber.interrupt(live.pump), PUMP_LIMIT),
+      )
 
 // The fibers of the sessions end with their scope, which is closed on a fiber of its own: a pump that does not end cannot hold the caller for more than a while
-export const releaseFibers = (scope: Scope.Closeable): Effect.Effect<void> =>
-  Effect.forkDetach(Scope.close(scope, Exit.void)).pipe(
-    Effect.flatMap((closing) => Effect.timeout(Fiber.await(closing), PUMP_LIMIT)),
-    Effect.ignore,
+const closeWithin = (scope: Scope.Closeable): Effect.Effect<unknown, Cause.TimeoutError> =>
+  Effect.flatMap(Effect.forkDetach(Scope.close(scope, Exit.void)), (closing) =>
+    Effect.timeout(Fiber.await(closing), PUMP_LIMIT),
   )
+
+export const releaseFibers = (scope: Scope.Closeable): Effect.Effect<void> =>
+  givenUp('the event pumps of the sessions', {})(closeWithin(scope))
 
 // The reference the provider gives its session is what a later resume attaches to
 export const rememberRef = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError> => {
@@ -139,4 +155,5 @@ export const failSession = (
         }),
       ),
     )
+    deps.live.forget(live.session.id)
   })

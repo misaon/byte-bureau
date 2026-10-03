@@ -28,6 +28,7 @@ export const connect = (
       session,
       workspacePath,
       agent,
+      interruptible: provider.capabilities.interrupt,
       controller,
       tools: new Map(),
       pump: undefined,

@@ -2,8 +2,8 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { git } from '../testing/temp-repo.js'
 import { registerRepo, sessionOf, typesOf } from './session-fixtures.js'
-import { firstOf, refusalOf } from './session-helpers.js'
-import { sessionLayer } from './session-layers.js'
+import { firstOf, refusalOf } from './session-helper-fixtures.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 
 const CONFIG = {

@@ -5,6 +5,7 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { SessionError } from '../errors.js'
 import type { Project } from '../projects/project-registry.js'
+import { warnings } from '../plugins/log-fixtures.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { employeeOf } from './employee-of.js'
 
@@ -188,4 +189,35 @@ it.effect(
       ]
       assert.deepStrictEqual(reads, ['', '', ''])
     }),
+)
+
+it.effect(
+  'warns about a configured prompt file that is missing, never about the built-in default',
+  () =>
+    Effect.gen(function* warnsAboutConfiguredPrompt() {
+      const records = yield* warnings
+      const dir = tempDir(PREFIX)
+      const prompts = [
+        yield* promptOf(dir, './.bytebureau/employees/developer.md'),
+        yield* promptOf(dir, 'prompts/reviewer.md'),
+      ]
+      assert.deepStrictEqual(prompts, ['', ''])
+      assert.deepStrictEqual(
+        records.map((record) => [record.message[0], record.properties['promptPath']]),
+        [['employee prompt unreadable', 'prompts/reviewer.md']],
+      )
+    }),
+)
+
+it.effect('warns about the built-in default prompt file when it is there but cannot be read', () =>
+  Effect.gen(function* warnsAboutUnreadableDefault() {
+    const records = yield* warnings
+    const dir = tempDir(PREFIX)
+    mkdirSync(path.join(dir, '.bytebureau', 'employees', 'developer.md'), { recursive: true })
+    assert.strictEqual(yield* promptOf(dir, './.bytebureau/employees/developer.md'), '')
+    assert.deepStrictEqual(
+      records.map((record) => record.message[0]),
+      ['employee prompt unreadable'],
+    )
+  }),
 )

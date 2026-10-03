@@ -1,10 +1,10 @@
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
-import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
-import type { KernelLayerOptions } from './kernel-live.js'
-import { KernelTest } from './kernel-test.js'
-import type { Session } from './sessions/types.js'
-import { createTempRepo, tempDir } from './testing/temp-repo.js'
+import { createKernelFrom, type Kernel, type KernelOptions } from '../facade.js'
+import type { KernelLayerOptions } from '../kernel-live.js'
+import { KernelTest } from '../kernel-test.js'
+import type { Session } from '../sessions/types.js'
+import { createTempRepo, tempDir } from '../testing/temp-repo.js'
 
 type Extras = Pick<KernelLayerOptions, 'extraPlugins'> & Partial<Pick<KernelOptions, 'env'>>
 

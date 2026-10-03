@@ -32,6 +32,10 @@ export interface ScriptedSession extends AgentSession {
 export interface Behaviour {
   // The reference its sessions report
   readonly externalRef?: ExternalSessionRef | undefined
+  // Whether the provider says its agents can be interrupted; they can unless the test says otherwise
+  readonly interruptible?: boolean | undefined
+  // Makes the interruption of its sessions fail
+  readonly interruptFailure?: Error | undefined
   // Makes the provider refuse to start a session
   readonly startFailure?: Error | undefined
   // What the session does when it is prompted; a rejection is the agent not taking the prompt
@@ -130,6 +134,9 @@ const sessionOf = (request: CreateSessionRequest, behaviour: Behaviour): Scripte
       session.interrupts += 1
       Latch.openUnsafe(calls.interrupt)
       await stall(behaviour, 'interrupt')
+      if (behaviour.interruptFailure !== undefined) {
+        throw behaviour.interruptFailure
+      }
     },
     answer: async (askId, answer) => {
       session.answers.push({ askId, answer })
@@ -167,8 +174,10 @@ export const scriptedProvider = (id: string, behaviour: Behaviour = {}): Scripte
   const asked = Latch.makeUnsafe()
   const created = Latch.makeUnsafe()
   const gate = Promise.withResolvers<null>()
+  const base = providerOf(id)
   const provider: AgentProvider = {
-    ...providerOf(id),
+    ...base,
+    capabilities: { ...base.capabilities, interrupt: behaviour.interruptible ?? true },
     createSession: async (request) => {
       requests.push(request)
       Latch.openUnsafe(asked)

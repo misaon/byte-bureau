@@ -14,7 +14,10 @@ import type { WorkspaceRuntimes } from './workspace/runtimes.js'
 import { WorkspaceManagerLive, type WorkspaceManager } from './workspace/workspace-manager.js'
 
 export interface KernelLayerOptions
-  extends FoundationOptions, Pick<PluginHostOptions, 'extraPlugins' | 'pluginConfig'> {}
+  extends FoundationOptions, Pick<PluginHostOptions, 'extraPlugins' | 'pluginConfig'> {
+  // The environment of the kernel: a session reads its configuration with it, so BYTEBUREAU_* overrides reach a run
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
+}
 
 export type KernelServices =
   | FoundationServices
@@ -38,7 +41,7 @@ export const composeKernel = (
   const registry = Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive).pipe(
     Layer.provideMerge(plugins),
   )
-  return SessionManagerLive.pipe(Layer.provideMerge(registry))
+  return SessionManagerLive({ env: options.env }).pipe(Layer.provideMerge(registry))
 }
 
 // Everything except the store; the caller provides SqlClient (StoreLive in the binary)

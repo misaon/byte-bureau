@@ -1,10 +1,10 @@
 import { Effect, Layer } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { QUIET } from './facade-fixtures.js'
-import { createKernelFrom } from './facade.js'
-import { KernelTest } from './kernel-test.js'
-import { PluginHost } from './plugins/plugin-host.js'
-import { tempDir } from './testing/temp-repo.js'
+import { createKernelFrom } from '../facade.js'
+import { KernelTest } from '../kernel-test.js'
+import { PluginHost } from '../plugins/plugin-host.js'
+import { tempDir } from '../testing/temp-repo.js'
 
 // Notes in the journal that its layer was released, which happens when the runtime is disposed
 const releasing = (journal: string[]): Layer.Layer<never> =>

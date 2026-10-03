@@ -5,7 +5,14 @@ import { employeeOf } from './employee-of.js'
 import type { SessionDeps } from './session-deps.js'
 import { newSession, register, type Creation } from './session-new.js'
 import { requireProvider } from './session-provider.js'
-import { baseBranchOf, checkRuntime, requireProject, runtimeIdOf } from './session-project.js'
+import {
+  baseBranchOf,
+  checkRuntime,
+  currentProject,
+  passEnvOf,
+  requireProject,
+  runtimeIdOf,
+} from './session-project.js'
 import type { SessionManagerShape } from './session-shape.js'
 import { move, moveToErrored } from './session-status.js'
 
@@ -41,7 +48,13 @@ const provisionOrCrash = (
         message,
         retryable: false,
       })
-      return Effect.ignore(failed)
+      return Effect.ignore(failed).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            deps.live.forget(creation.session.id)
+          }),
+        ),
+      )
     }),
   )
 
@@ -50,12 +63,14 @@ export const makeCreate =
   (deps: SessionDeps): SessionManagerShape['create'] =>
   (input) =>
     Effect.gen(function* createsSession() {
-      const project = yield* requireProject(deps, input.projectId)
+      const registered = yield* requireProject(deps, input.projectId)
+      const project = yield* currentProject(deps, registered)
       const employee = yield* employeeOf(project, input)
       yield* requireProvider(deps.host, employee.provider)
       yield* checkRuntime(deps, employee.permissionMode, runtimeIdOf(project))
       const session = newSession(project, employee, input)
       yield* register(deps, session)
-      deps.live.setEnvironment(session.id, input.env ?? {})
+      const passEnv = passEnvOf(project, employee.provider)
+      deps.live.setEnvironment(session.id, { extra: input.env ?? {}, passEnv })
       return yield* provisionOrCrash(deps, { project, session, input })
     })

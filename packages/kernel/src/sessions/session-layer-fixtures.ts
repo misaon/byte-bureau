@@ -1,9 +1,12 @@
 import { Effect, Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
 import type { UsageLayer } from '../kernel-foundation.js'
-import type { KernelLayerOptions } from '../kernel-live.js'
+import type { KernelLayerOptions, KernelServices } from '../kernel-live.js'
 import { KernelTest } from '../kernel-test.js'
 import { emptyHome } from '../projects/project-registry-fixtures.js'
-import type { SessionServices } from './session-services.js'
+
+// Everything a test of the sessions can ask the layer for: the services of the kernel and its store
+export type SessionServices = KernelServices | SqlClient.SqlClient
 
 // The kernel as the session tests run it: the bundled plugins, an in-memory store and an empty home that goes with the layer
 export const sessionLayer = (

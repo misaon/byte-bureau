@@ -13,7 +13,7 @@ import {
   turnCompleted,
   type Handled,
   type HandlerFailure,
-} from './session-handlers.js'
+} from './session-event-handlers.js'
 import { failSession, reported } from './session-live.js'
 
 type Handler<Type extends AgentEventType> = (

@@ -1,11 +1,11 @@
 import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
-import type { EmployeeConfig, EmployeeSpec } from '@bytebureau/protocol'
+import { defaultProjectConfig, type EmployeeConfig, type EmployeeSpec } from '@bytebureau/protocol'
 import { Effect } from 'effect'
 import { SessionError } from '../errors.js'
 import { reasonOf } from '../plugins/reason.js'
 import type { Project } from '../projects/project-registry.js'
-import { logger } from './session-deps.js'
+import { logger } from './session-logger.js'
 import type { CreateSessionInput } from './types.js'
 
 // The employee a session gets when nobody names one
@@ -32,18 +32,30 @@ const readPromptFile = async (project: Project, promptPath: string): Promise<str
   return text
 }
 
+const builtIn = defaultProjectConfig.employees['developer']
+
+// The prompt file the built-in developer names: a project that never wrote one has no news to be told
+const DEFAULT_PROMPT = builtIn === undefined ? undefined : builtIn.prompt
+
+const isMissing = (cause: unknown): boolean =>
+  cause instanceof Error && 'code' in cause && cause.code === 'ENOENT'
+
 // A prompt file that is missing or cannot be read leaves the employee without a system prompt, and the session is not refused for it
+// Only a prompt file somebody configured is warned about; the built-in default may well be absent
 const readPromptOrNothing = (project: Project, promptPath: string): Effect.Effect<string> =>
   Effect.tryPromise({
     try: async () => {
       const text = await readPromptFile(project, promptPath)
       return text
     },
-    catch: reasonOf,
+    catch: (cause) => cause,
   }).pipe(
     Effect.match({
-      onFailure: (reason) => {
-        logger.warn('employee prompt unreadable', { project: project.name, promptPath, reason })
+      onFailure: (cause) => {
+        if (promptPath !== DEFAULT_PROMPT || !isMissing(cause)) {
+          const reason = reasonOf(cause)
+          logger.warn('employee prompt unreadable', { project: project.name, promptPath, reason })
+        }
         return ''
       },
       onSuccess: (text) => text,

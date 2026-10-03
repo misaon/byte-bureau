@@ -62,6 +62,8 @@ const EDGES: readonly Edge[] = [
   ['waiting_for_human', 'stop', 'stopped'],
   ['paused_usage_limit', 'stop', 'stopped'],
   ['provisioning', 'stop', 'stopped'],
+  ['created', 'stop', 'stopped'],
+  ['created', 'crash', 'errored'],
   ['running', 'crash', 'errored'],
   ['waiting_for_human', 'crash', 'errored'],
   ['provisioning', 'crash', 'errored'],

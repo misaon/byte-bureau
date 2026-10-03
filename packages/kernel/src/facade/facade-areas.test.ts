@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { AskError, ConfigError, SessionError, WorkspaceError } from './errors.js'
+import { AskError, ConfigError, SessionError, WorkspaceError } from '../errors.js'
 import { openKernel, startFakeSession } from './facade-fixtures.js'
-import { createTempRepo } from './testing/temp-repo.js'
+import { createTempRepo } from '../testing/temp-repo.js'
 
 describe('the projects of the facade', () => {
   it('registers a repository, lists and reads it, and removes it again', async () => {

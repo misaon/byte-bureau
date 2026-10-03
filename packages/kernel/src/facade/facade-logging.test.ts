@@ -1,8 +1,8 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { createKernelFrom, type KernelOptions } from './facade.js'
-import { KernelTest } from './kernel-test.js'
-import { kernelLogger } from './logging/logging.js'
-import { tempDir } from './testing/temp-repo.js'
+import { createKernelFrom, type KernelOptions } from '../facade.js'
+import { KernelTest } from '../kernel-test.js'
+import { kernelLogger } from '../logging/logging.js'
+import { tempDir } from '../testing/temp-repo.js'
 
 const probe = kernelLogger(['bb', 'probe'])
 

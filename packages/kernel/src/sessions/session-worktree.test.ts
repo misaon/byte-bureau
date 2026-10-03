@@ -3,8 +3,8 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { WorkspaceManager } from '../workspace/workspace-manager.js'
 import { startSession } from './session-fixtures.js'
-import { refusalOf } from './session-helpers.js'
-import { sessionLayer } from './session-layers.js'
+import { refusalOf } from './session-helper-fixtures.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }

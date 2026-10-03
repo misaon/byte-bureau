@@ -28,13 +28,20 @@ const EDGES: Readonly<
   rate_limit: { running: 'paused_usage_limit' },
   limit_reset: { paused_usage_limit: 'running' },
   stop: {
+    created: 'stopped',
     ready: 'stopped',
     running: 'stopped',
     waiting_for_human: 'stopped',
     paused_usage_limit: 'stopped',
     provisioning: 'stopped',
   },
-  crash: { running: 'errored', waiting_for_human: 'errored', provisioning: 'errored' },
+  // A session can die before it is provisioned, and be ended then
+  crash: {
+    created: 'errored',
+    running: 'errored',
+    waiting_for_human: 'errored',
+    provisioning: 'errored',
+  },
   complete: { ready: 'completed' },
   resume: { stopped: 'ready', errored: 'ready' },
 }

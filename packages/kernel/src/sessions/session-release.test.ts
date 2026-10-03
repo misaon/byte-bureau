@@ -3,14 +3,13 @@ import { Effect, Exit, Fiber, Layer, Scope } from 'effect'
 import { TestClock } from 'effect/testing'
 import type { ScriptedSession } from '../testing/scripted-provider.js'
 import { sessionOf, startSession } from './session-fixtures.js'
+import { CALL_LIMIT, PUMP_LIMIT } from './session-live.js'
 import { SessionManager } from './session-manager.js'
 import { prompted } from './session-prompted-fixtures.js'
 import { FINISH, push } from './session-push-fixtures.js'
 import { driven, type Driven } from './session-script-fixtures.js'
 
 const AGENT = { providerId: 'scripted' } as const
-const CALL_LIMIT = '10 seconds'
-const PUMP_LIMIT = '3 seconds'
 
 // The time the kernel waits for the agent to close, and then for the pump of its events to end
 const givesUp = (agent: ScriptedSession): Effect.Effect<void> =>
@@ -56,6 +55,41 @@ it.effect('gives up on a pump that does not end when the layer is released', () 
     yield* Fiber.join(releasing)
     agent.queue.end()
     assert.ok(agent.closed)
+  }),
+)
+
+// Two prompted sessions on one layer of their own, whose agents do not answer when they are closed
+const startTwo = (world: Driven): Effect.Effect<readonly [Running, ScriptedSession], unknown> =>
+  Effect.gen(function* startsTwo() {
+    const scope = yield* Scope.make()
+    const context = yield* Layer.buildWithScope(world.layer, scope)
+    const sessions = yield* Effect.provide(
+      Effect.all([startSession(AGENT), startSession(AGENT)]),
+      context,
+    )
+    const agents = yield* Effect.provide(
+      Effect.all(sessions.map((session) => prompted(world, session))),
+      context,
+    )
+    const [first, second] = agents.map((started) => started.agent)
+    if (first === undefined || second === undefined) {
+      return yield* Effect.die(new Error('two agents were started'))
+    }
+    return [{ agent: first, release: Scope.close(scope, Exit.void) }, second] as const
+  })
+
+it.effect('closes the agents together when the layer is released, each within its own bound', () =>
+  Effect.gen(function* closesTogether() {
+    const [{ agent: first, release }, second] = yield* startTwo(
+      driven({ generator: true, hangs: ['close'] }),
+    )
+    const releasing = yield* Effect.forkChild(release, { startImmediately: true })
+    yield* Effect.all([first.calls.close.await, second.calls.close.await])
+    yield* givesUp(first)
+    yield* Fiber.join(releasing)
+    first.queue.end()
+    second.queue.end()
+    assert.deepStrictEqual([first.closed, second.closed], [true, true])
   }),
 )
 

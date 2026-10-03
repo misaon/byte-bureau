@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { StoreError } from '../errors.js'
 import { sessionOf, startSession } from './session-fixtures.js'
-import { sessionLayer } from './session-layers.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 import { claimStatus } from './session-records.js'
 

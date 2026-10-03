@@ -1,5 +1,5 @@
 import { Effect } from 'effect'
-import { SessionError, type StoreError } from '../errors.js'
+import type { StoreError } from '../errors.js'
 import type { Live } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
 import {
@@ -9,13 +9,15 @@ import {
   interruptAgent,
   interruptPump,
   rememberRef,
-  reported,
   settle,
 } from './session-live.js'
 import { requireSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
 import { ensureAllowed, move } from './session-status.js'
 import type { Outcome } from './session-turns.js'
+
+// The commands that end or pause what an agent does, in one place for the manager
+export { makeInterrupt } from './session-interrupt.js'
 
 // A turn that the caller stopped is interrupted, whatever the provider would have said about it
 const STOPPED: Outcome = { status: 'interrupted', stopReason: 'stopped', usage: null }
@@ -27,31 +29,6 @@ const release = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError>
     yield* dispose(deps, live)
     yield* interruptPump(live)
   })
-
-// The turn is marked before anything else is done, so a question it asks from then on is known to be moot
-const markInterrupted = (live: Live): Effect.Effect<void> =>
-  Effect.sync(() => {
-    live.interrupted = live.turn === null ? null : live.turn.turnId
-  })
-
-// The provider acknowledges an interruption by ending the turn, which is when the session is ready again
-// A question that waits for an answer is not answered by an interrupted agent, so it is cancelled, and so is one it asks meanwhile
-export const makeInterrupt =
-  (deps: SessionDeps): SessionManagerShape['interrupt'] =>
-  (sessionId) =>
-    Effect.suspend(() => {
-      const live = deps.live.get(sessionId)
-      if (live === undefined) {
-        return Effect.fail(
-          new SessionError({ code: 'not_found', reason: `session ${sessionId} is not running` }),
-        )
-      }
-      const cancelling = reported({ sessionId, event: 'interrupt' })(cancelAsks(deps, sessionId))
-      return markInterrupted(live).pipe(
-        Effect.andThen(cancelling),
-        Effect.andThen(bestEffort('interrupting the agent', live, interruptAgent)),
-      )
-    })
 
 // The agent is interrupted before it is closed, so it can end its turn; the worktree stays, and so does the record of the work
 const stopLive = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError> =>
@@ -73,6 +50,7 @@ export const makeStop =
         const live = deps.live.get(sessionId)
         yield* live === undefined ? settle(deps, session, STOPPED) : stopLive(deps, live)
         yield* move(deps, sessionId, 'stop')
+        deps.live.forget(sessionId)
       }),
     )
 
@@ -91,6 +69,7 @@ export const makeComplete =
         }
         yield* deps.workspaces.unlock(sessionId)
         yield* move(deps, sessionId, 'complete')
+        deps.live.forget(sessionId)
       }),
     )
 

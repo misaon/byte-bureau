@@ -5,7 +5,7 @@ import type { AskError, StoreError } from '../errors.js'
 import { EventLog } from '../events/event-log.js'
 import type { ScriptedSession } from '../testing/scripted-provider.js'
 import { waitFor } from './session-fixtures.js'
-import { workspaceOf } from './session-helpers.js'
+import { workspaceOf } from './session-helper-fixtures.js'
 import type { Session } from './types.js'
 
 type Waiting = Effect.Effect<

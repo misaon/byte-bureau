@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
-import { QUIET } from './facade-fixtures.js'
+import { QUIET } from './facade/facade-fixtures.js'
 import { createKernelFrom, type Kernel } from './facade.js'
 import { KernelTest } from './kernel-test.js'
-import { helloFileOf } from './sessions/session-helpers.js'
+import { helloFileOf } from './sessions/session-helper-fixtures.js'
 import type { Session } from './sessions/types.js'
 import { createTempRepo, tempDir } from './testing/temp-repo.js'
 

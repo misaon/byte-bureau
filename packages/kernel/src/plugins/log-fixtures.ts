@@ -3,12 +3,12 @@ import { Effect, type Scope } from 'effect'
 import { vi } from 'vitest'
 import { configureLogging, resetLogging } from '../logging/logging.js'
 
-// LogTape is global: the warnings of the test are collected until its scope closes, and kept off the console
+// LogTape is global: the warnings of the test are collected until its scope closes, and kept off stderr, where the console sink writes
 export const warnings: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = Effect.map(
   Effect.acquireRelease(
     Effect.promise(async () => {
       const records: LogRecord[] = []
-      const spy = vi.spyOn(globalThis.console, 'warn').mockReturnValue()
+      const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
       await configureLogging({
         level: 'warn',
         json: true,

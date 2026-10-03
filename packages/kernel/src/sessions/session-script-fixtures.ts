@@ -7,8 +7,7 @@ import {
   type Behaviour,
   type Scripted,
 } from '../testing/scripted-provider.js'
-import { withPlugins } from './session-layers.js'
-import type { SessionServices } from './session-services.js'
+import { withPlugins, type SessionServices } from './session-layer-fixtures.js'
 
 // A provider a test drives, and the layer that offers it beside the bundled plugins
 export interface Driven {

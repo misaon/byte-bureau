@@ -4,11 +4,10 @@ import { TestClock } from 'effect/testing'
 import { AskService } from '../asks/ask-service.js'
 import { askToWrite } from './session-ask-fixtures.js'
 import { payloadsOf, startSession, waitFor } from './session-fixtures.js'
+import { CALL_LIMIT } from './session-live.js'
 import { SessionManager } from './session-manager.js'
 import { prompted } from './session-prompted-fixtures.js'
 import { driven } from './session-script-fixtures.js'
-
-const LIMIT = '10 seconds'
 
 const mute = driven({ hangs: ['interrupt', 'close'] })
 
@@ -22,9 +21,9 @@ it.layer(mute.layer)('SessionManager agent that does not answer when it is stopp
         startImmediately: true,
       })
       yield* agent.calls.interrupt.await
-      yield* TestClock.adjust(LIMIT)
+      yield* TestClock.adjust(CALL_LIMIT)
       yield* agent.calls.close.await
-      yield* TestClock.adjust(LIMIT)
+      yield* TestClock.adjust(CALL_LIMIT)
       yield* Fiber.join(stopping)
       assert.deepStrictEqual(
         [agent.interrupts, agent.closed, agent.request.signal.aborted],
@@ -45,7 +44,7 @@ it.layer(deaf.layer)('SessionManager agent that does not take an answer in time'
       const pending = yield* askToWrite(session, agent)
       yield* asks.answer(pending.id, { selected: ['allow'] }, 'cli')
       yield* agent.calls.answer.await
-      yield* TestClock.adjust(LIMIT)
+      yield* TestClock.adjust(CALL_LIMIT)
       yield* waitFor(session.id, 'session.errored')
       const [crash] = yield* payloadsOf(session.id, 'session.errored')
       assert.match(JSON.stringify(crash), /the agent did not take the answer/u)

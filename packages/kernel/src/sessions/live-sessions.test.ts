@@ -1,6 +1,6 @@
 import type { AgentSession } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
-import { Effect, Latch } from 'effect'
+import { Effect, Fiber, Latch } from 'effect'
 import { describe, expect, it as test } from 'vitest'
 import { LiveSessions, type Live } from './live-sessions.js'
 import type { Session } from './types.js'
@@ -55,6 +55,7 @@ const liveOf = (id: string): Live => ({
   session: session(id),
   workspacePath: '/ws',
   agent,
+  interruptible: true,
   controller: new AbortController(),
   tools: new Map(),
   pump: undefined,
@@ -89,9 +90,18 @@ describe(LiveSessions, () => {
 
   test('has the environment given at creation, and none for a session it does not know', () => {
     const sessions = new LiveSessions()
-    sessions.setEnvironment('one', { BYTEBUREAU_X: '1' })
-    expect(sessions.environmentOf('one')).toStrictEqual({ BYTEBUREAU_X: '1' })
-    expect(sessions.environmentOf('nobody')).toStrictEqual({})
+    const environment = { extra: { BYTEBUREAU_X: '1' }, passEnv: ['GH_TOKEN'] }
+    sessions.setEnvironment('one', environment)
+    expect(sessions.environmentOf('one')).toStrictEqual(environment)
+    expect(sessions.environmentOf('nobody')).toStrictEqual({ extra: {}, passEnv: [] })
+  })
+
+  test('forgets the environment of a session that ended', () => {
+    const sessions = new LiveSessions()
+    sessions.setEnvironment('one', { extra: { BYTEBUREAU_X: '1' }, passEnv: [] })
+    sessions.forget('one')
+    expect(sessions.environmentOf('one')).toStrictEqual({ extra: {}, passEnv: [] })
+    expect(sessions.sizes()).toStrictEqual({ locks: 0, environments: 0 })
   })
 })
 
@@ -116,6 +126,34 @@ it.effect('runs the changes of one session one at a time', () =>
     const second = sessions.exclusive('one', note(journal, 'second runs'))
     yield* Effect.all([first, second, release.open], { concurrency: 'unbounded' })
     assert.deepStrictEqual(journal, ['first begins', 'first ends', 'second runs'])
+  }),
+)
+
+// The number of locks while a change holds one and another waits for it, then once both are done
+const lockCounts = (sessions: LiveSessions): Effect.Effect<readonly number[]> =>
+  Effect.gen(function* countsLocks() {
+    const release = yield* Latch.make()
+    const sizes: number[] = []
+    const measure = Effect.sync(() => {
+      sizes.push(sessions.sizes().locks)
+    })
+    const holding = sessions.exclusive('one', Effect.andThen(measure, release.await))
+    const waiting = sessions.exclusive('one', measure)
+    const both = yield* Effect.forkChild(
+      Effect.all([holding, waiting], { concurrency: 'unbounded' }),
+      {
+        startImmediately: true,
+      },
+    )
+    yield* Effect.andThen(measure, release.open)
+    yield* Fiber.join(both)
+    yield* measure
+    return sizes
+  })
+
+it.effect('keeps a lock only while somebody holds it or waits for it', () =>
+  Effect.gen(function* releasesIdleLocks() {
+    assert.deepStrictEqual(yield* lockCounts(new LiveSessions()), [1, 1, 1, 0])
   }),
 )
 
