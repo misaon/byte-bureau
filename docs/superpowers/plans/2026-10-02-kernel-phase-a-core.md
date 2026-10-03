@@ -1716,7 +1716,7 @@ git commit -m "feat(kernel): scaffold the kernel package with an effect sql stor
 - Modify: `packages/kernel/src/index.ts`
 
 **Interfaces:**
-- Produces: `uuidv7(): string`, `nowIso(): string`; error classes `ConfigError { file, pointer, reason }`, `StoreError { cause }`, `WorkspaceError { code, reason }`, `ProviderError { kind, reason, retryable }`, `AskError { code, reason }`, `PluginError { name, reason }`, `SessionError { code, reason }` (all `Data.TaggedError`, `_tag` equals the class name); `LoggingOptions { level, debug?, file?, json }`, `configureLogging(options): Promise<void>`, `kernelLogger(category: readonly string[]): Logger` (the plugin-api `Logger` over LogTape), `EffectLoggerLive: Layer<never>` (routes Effect logs into LogTape), `REDACTED_FIELDS`, `SECRET_PATTERNS`, `redactFields(sink)`, `redactText(formatter)`.
+- Produces: `uuidv7(): string`, `nowIso(): string`; error classes `ConfigError { file, pointer, reason }`, `StoreError { cause }`, `WorkspaceError { code, reason }`, `ProviderError { kind, reason, retryable }`, `AskError { code, reason }`, `PluginError { plugin, reason }`, `SessionError { code, reason }` (all `Data.TaggedError`, `_tag` equals the class name); `LoggingOptions { level, debug?, file?, json }`, `configureLogging(options): Promise<void>`, `kernelLogger(category: readonly string[]): Logger` (the plugin-api `Logger` over LogTape), `EffectLoggerLive: Layer<never>` (routes Effect logs into LogTape), `REDACTED_FIELDS`, `SECRET_PATTERNS`, `redactFields(sink)`, `redactText(formatter)`.
 
 Verified facts (fact sheet §6, §7): LogTape levels are `trace < debug < info < warning < error < fatal`; `redactByField` wraps a sink and `redactByPattern` wraps a formatter; a bridged record must carry `message: [text]` and a `rawMessage` with braces escaped; Effect's `References.MinimumLogLevel` defaults to `Info`; `uuid@14.0.2` `v7()` is monotonic.
 
@@ -1829,6 +1829,21 @@ describe(redactText, () => {
       expect(text).not.toContain(canary)
     }
     expect(text).toContain('[REDACTED]')
+  })
+
+  it('keeps a jsonl line valid: URL credentials never span quotes or JSON punctuation', () => {
+    const format = redactText(jsonLinesFormatter)
+    const line = format(
+      record(
+        { plugin: '@bytebureau/demo' },
+        'fetch http://user:pw@example.com/x then http://localhost:3000',
+      ),
+    )
+    expect(line).not.toContain('user:pw')
+    expect(JSON.parse(line)).toMatchObject({
+      message: 'fetch http://[REDACTED]@example.com/x then http://localhost:3000',
+      properties: { plugin: '@bytebureau/demo' },
+    })
   })
 })
 
@@ -1979,6 +1994,20 @@ async function failingSinkRun(): Promise<{
   }
 }
 
+async function debugDelivery(debug: string): Promise<readonly unknown[]> {
+  const seen = await captured(
+    { level: 'info', json: true, debug },
+    Effect.sync(() => {
+      getLogger(['bb', 'core']).debug('core debug')
+      getLogger(['bb', 'core']).info('core info')
+      getLogger(['bb', 'store']).debug('store debug')
+      getLogger(['bb', 'store']).info('store info')
+      getLogger(['bb', 'agent']).debug('agent debug')
+    }),
+  )
+  return seen.map((entry) => entry.message[0])
+}
+
 describe('effect bridge', () => {
   it('routes Effect logs into LogTape categories with annotations as properties', async () => {
     expect.hasAssertions()
@@ -1994,14 +2023,49 @@ describe('effect bridge', () => {
     expect(seen.map((entry) => entry.properties)).toMatchObject([{ sessionId: 's1' }])
   })
 
-  it('keeps an Effect log message literal, in bb.core without a category annotation', async () => {
+  it('keeps string parts literal and merges one object part into the properties, in bb.core by default', async () => {
     expect.hasAssertions()
     const seen = await captured(
       { level: 'info', json: true },
       Effect.logInfo('literal {name} }} {{x}}', { count: 1 }),
     )
-    expect(seen.map((entry) => [entry.category.join('.'), entry.message[0]])).toStrictEqual([
-      ['bb.core', 'literal {name} }} {{x}} { count: 1 }'],
+    expect(
+      seen.map((entry) => [entry.category.join('.'), entry.message[0], entry.properties]),
+    ).toStrictEqual([['bb.core', 'literal {name} }} {{x}}', { count: 1 }]])
+  })
+})
+
+describe('effect message parts', () => {
+  it('puts object parts through the field redaction, leaving no canary in text or properties', async () => {
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'info', json: true },
+      Effect.logInfo('x', {
+        password: 'hunter2-canary',
+        nested: { authorization: 'Bearer canary' },
+      }),
+    )
+    expect(JSON.stringify(seen)).not.toContain('canary')
+    expect(seen.map((entry) => [entry.message, entry.properties])).toStrictEqual([
+      [['x'], { nested: {} }],
+    ])
+  })
+
+  it('stores several, non-object and Error parts under parts, redacted like any property', async () => {
+    expect.hasAssertions()
+    const logging = Effect.all(
+      [
+        Effect.logInfo('a', 'b', { token: 'canary', keep: 1 }, 7),
+        Effect.logInfo('count', 5),
+        Effect.logError('failed', new Error('boom')),
+      ],
+      { discard: true },
+    )
+    const seen = await captured({ level: 'info', json: true }, logging)
+    expect(seen.map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
+      ['a b', { parts: [{ keep: 1 }, 7] }],
+      ['count', { parts: [5] }],
+      ['failed', { parts: [new Error('boom')] }],
     ])
   })
 })
@@ -2086,6 +2150,22 @@ describe(configureLogging, () => {
   })
 })
 
+describe('debug selections', () => {
+  const everything = ['core debug', 'core info', 'store debug', 'store info', 'agent debug']
+
+  it.each<[string, readonly string[]]>([
+    ['', everything],
+    ['true', everything],
+    ['bb,!bb.store', ['core debug', 'core info', 'agent debug']],
+    ['bb.agent,!bb.agent', ['core info', 'store info']],
+    ['bb.agent,bb.agent,!bb.store,!bb.store', ['core info', 'agent debug']],
+    ['logtape.meta', ['core info', 'store info']],
+  ])('--debug %j delivers %j', async (debug, delivered) => {
+    expect.hasAssertions()
+    await expect(debugDelivery(debug)).resolves.toStrictEqual(delivered)
+  })
+})
+
 describe(kernelLogger, () => {
   it('logs the text literally at the mapped level under the child category, minus secret fields', async () => {
     expect.hasAssertions()
@@ -2164,7 +2244,7 @@ export const AskError = Data.TaggedError('AskError')<{
 export type AskError = InstanceType<typeof AskError>
 
 export const PluginError = Data.TaggedError('PluginError')<{
-  readonly name: string
+  readonly plugin: string
   readonly reason: string
 }>
 export type PluginError = InstanceType<typeof PluginError>
@@ -2210,7 +2290,7 @@ export const SECRET_PATTERNS: readonly RedactionPattern[] = [
     replacement,
   },
   {
-    pattern: /(?<scheme>https?:\/\/)[^\s/@:]+:[^\s/@]+@/gu,
+    pattern: /(?<scheme>https?:\/\/)[^\s/@:"'\\]+:[^\s/@"'\\]+@/gu,
     replacement: `$<scheme>${replacement}@`,
   },
 ]
@@ -2224,7 +2304,6 @@ If `redactByField`'s options object uses a different key than `fieldPatterns`/`a
 
 `packages/kernel/src/logging/logging.ts`:
 ```ts
-import { inspect } from 'node:util'
 import {
   ansiColorFormatter,
   configure,
@@ -2304,28 +2383,42 @@ function sinks(options: LoggingOptions): Record<string, Sink> {
   return result
 }
 
+// Keyed by category so a repeated or bb-rooted selection replaces an entry; negations come last and win
+function categoryConfigs(options: LoggingOptions, sinkIds: string[]): CategoryConfig[] {
+  const { enabled, silenced } = parseDebug(options.debug) ?? NO_DEBUG
+  const configs = new Map<string, CategoryConfig>([
+    ['bb', { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) }],
+  ])
+  for (const category of enabled) {
+    configs.set(category.join('.'), {
+      category,
+      sinks: sinkIds,
+      parentSinks: 'override',
+      lowestLevel: 'debug',
+    })
+  }
+  for (const category of silenced) {
+    configs.set(category.join('.'), {
+      category,
+      sinks: [],
+      parentSinks: 'override',
+      lowestLevel: 'fatal',
+    })
+  }
+  // The kernel configures the meta logger itself
+  configs.delete('logtape.meta')
+  return [...configs.values()]
+}
+
 export async function configureLogging(options: LoggingOptions): Promise<void> {
   const allSinks = sinks(options)
-  const sinkIds = Object.keys(allSinks)
-  const { enabled, silenced } = parseDebug(options.debug) ?? NO_DEBUG
   await configure({
     reset: true,
     sinks: allSinks,
     loggers: [
+      // Without an explicit entry LogTape gives the meta logger a default console sink that skips the redaction
       { category: ['logtape', 'meta'], sinks: ['console'], lowestLevel: 'warning' },
-      { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) },
-      ...enabled.map((category): CategoryConfig => ({
-        category,
-        sinks: sinkIds,
-        parentSinks: 'override',
-        lowestLevel: 'debug',
-      })),
-      ...silenced.map((category): CategoryConfig => ({
-        category,
-        sinks: [],
-        parentSinks: 'override',
-        lowestLevel: 'fatal',
-      })),
+      ...categoryConfigs(options, Object.keys(allSinks)),
     ],
   })
 }
@@ -2345,11 +2438,25 @@ const levelMap: Record<EffectLogLevel.LogLevel, LogLevel | undefined> = {
   None: undefined,
 }
 
-const asText = (part: unknown): string =>
-  typeof part === 'string' ? part : inspect(part, { depth: 3 })
-
 const toParts = (message: unknown): readonly unknown[] =>
   Array.isArray(message) ? message : [message]
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+// Parts that are not strings become properties, so the field redaction sees them: one plain object is merged, the rest go under `parts`
+function partProperties(parts: readonly unknown[]): Record<string, unknown> {
+  const [only] = parts
+  if (parts.length === 1 && isPlainRecord(only)) {
+    return only
+  }
+  return parts.length > 0 ? { parts } : {}
+}
 
 // A bridged record carries one literal message part that is never a placeholder; the raw template's braces are escaped
 const literalMessage = (text: string): Pick<LogRecord, 'message' | 'rawMessage'> => ({
@@ -2357,17 +2464,19 @@ const literalMessage = (text: string): Pick<LogRecord, 'message' | 'rawMessage'>
   rawMessage: text.replaceAll('{', '{{').replaceAll('}', '}}'),
 })
 
-// Effect logger → LogTape: the category annotation picks the logger, the other annotations become properties
+// Effect logger → LogTape: the category annotation picks the logger, the other annotations and the non-string parts become properties
 export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((options) => {
   const level = levelMap[options.logLevel]
   if (level === undefined) {
     return
   }
   const { category, ...annotations } = options.fiber.getRef(References.CurrentLogAnnotations)
-  const text = toParts(options.message)
-    .map((part) => asText(part))
-    .join(' ')
-  const properties: Record<string, unknown> = { ...annotations }
+  const parts = toParts(options.message)
+  const text = parts.filter((part) => typeof part === 'string').join(' ')
+  const properties: Record<string, unknown> = {
+    ...annotations,
+    ...partProperties(parts.filter((part) => typeof part !== 'string')),
+  }
   if (options.cause.reasons.length > 0) {
     properties['cause'] = Cause.pretty(options.cause)
   }
