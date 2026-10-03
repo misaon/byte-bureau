@@ -21,3 +21,10 @@ export {
   type LoggingOptions,
   type KernelLogLevel,
 } from './logging/logging.js'
+export {
+  EventLog,
+  EventLogLive,
+  matches,
+  type EventFilter,
+  type EventLogShape,
+} from './events/event-log.js'
