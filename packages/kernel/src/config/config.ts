@@ -39,7 +39,11 @@ export interface ResolvedConfig {
 
 export interface ConfigShape {
   readonly load: (request: LoadRequest) => Effect.Effect<ResolvedConfig, ConfigError>
-  readonly validate: (projectPath: string) => Effect.Effect<readonly ConfigIssue[]>
+  // The environment layer takes part as in load, so an issue can name the variable it comes from
+  readonly validate: (
+    projectPath: string,
+    env?: LoadRequest['env'],
+  ) => Effect.Effect<readonly ConfigIssue[]>
   readonly schema: () => Record<string, unknown>
 }
 
@@ -151,8 +155,11 @@ const resolveConfig = (
   })
 
 // A file that cannot be read or parsed is one issue, not an empty document blamed for missing keys
-const validateConfig = (home: string, projectPath: string): Effect.Effect<readonly ConfigIssue[]> =>
-  inspect(home, { projectPath }).pipe(
+const validateConfig = (
+  home: string,
+  request: LoadRequest,
+): Effect.Effect<readonly ConfigIssue[]> =>
+  inspect(home, request).pipe(
     Effect.map((inspected) => inspected.issues),
     Effect.catchTag('ConfigError', (failure) =>
       Effect.succeed([{ file: failure.file, pointer: failure.pointer, message: failure.reason }]),
@@ -161,7 +168,7 @@ const validateConfig = (home: string, projectPath: string): Effect.Effect<readon
 
 const make = (home: string): ConfigShape => ({
   load: (request) => resolveConfig(home, request),
-  validate: (projectPath) => validateConfig(home, projectPath),
+  validate: (projectPath, env = {}) => validateConfig(home, { projectPath, env }),
   schema: configJsonSchema,
 })
 

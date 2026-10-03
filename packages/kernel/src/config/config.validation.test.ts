@@ -217,3 +217,15 @@ it.effect('decodes the init template on its own, with no defaults merged in', ()
     })
   }),
 )
+
+it.effect('validates the environment layer like a load, naming the variable', () =>
+  Effect.gen(function* validatesEnvironment() {
+    const { config, project } = yield* workspace()
+    const env = { BYTEBUREAU_LOG_LEVEL: 'loud' }
+    const issues = yield* config.validate(project, env)
+    const failure = yield* Effect.flip(config.load({ projectPath: project, env }))
+    assert.deepStrictEqual(where(issues), [['env:BYTEBUREAU_LOG_LEVEL', LEVEL]])
+    assert.strictEqual(failure.file, 'env:BYTEBUREAU_LOG_LEVEL')
+    assert.deepStrictEqual(yield* config.validate(project), [])
+  }),
+)

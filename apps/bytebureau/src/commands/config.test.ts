@@ -121,6 +121,22 @@ describe('bytebureau config validate', () => {
   })
 })
 
+describe('bytebureau config validate and the environment', () => {
+  it('validates the environment as run reads it, naming the variable of a bad value', async () => {
+    expect.hasAssertions()
+    const { project, env } = inFreshProject()
+    const result = await runCli(['config', 'validate', '--project', project], {
+      ...env,
+      BYTEBUREAU_LOG_LEVEL: 'loud',
+    })
+    expect(result.code).toBe(1)
+    expect(result.stdout.trim().split('\n')).toStrictEqual([
+      expect.stringMatching(/^env:BYTEBUREAU_LOG_LEVEL\/logging\/level: /u),
+    ])
+    expect(result.stderr.trim()).toBe('1 problem(s) found')
+  })
+})
+
 describe('bytebureau config schema', () => {
   it('prints the JSON Schema of bytebureau.json', async () => {
     expect.hasAssertions()

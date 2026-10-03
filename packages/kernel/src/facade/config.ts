@@ -10,6 +10,6 @@ export const configApi = (
   env: KernelOptions['env'],
 ): Kernel['config'] => ({
   load: promised(Config, (config, projectPath) => config.load({ projectPath, env })),
-  validate: promised(Config, (config, projectPath) => config.validate(projectPath)),
+  validate: promised(Config, (config, projectPath) => config.validate(projectPath, env)),
   schema: () => Context.get(services, Config).schema(),
 })

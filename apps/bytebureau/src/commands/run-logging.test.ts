@@ -1,4 +1,4 @@
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
@@ -71,5 +71,16 @@ describe('the home of the kernel', () => {
     const sideFiles = [`${database}-wal`, `${database}-shm`].filter((file) => existsSync(file))
     expect([modeOf(data), modeOf(database)]).toStrictEqual([0o700, 0o600])
     expect(sideFiles.map((file) => modeOf(file))).toStrictEqual(sideFiles.map(() => 0o600))
+  })
+
+  it('leaves the mode of a data directory that exists already and still narrows the database', async () => {
+    expect.hasAssertions()
+    const bench = workbench()
+    const data = path.join(bench.home, 'data')
+    mkdirSync(data, { mode: 0o755 })
+    chmodSync(data, 0o755)
+    const result = await fakeRunWith(bench, [])
+    expect(result.code).toBe(0)
+    expect([modeOf(data), modeOf(path.join(data, 'bytebureau.db'))]).toStrictEqual([0o755, 0o600])
   })
 })

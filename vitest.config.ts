@@ -28,6 +28,7 @@ export default defineConfig({
         'apps/bytebureau/src/resource.ts',
         'apps/bytebureau/src/render/**/*.ts',
         'apps/bytebureau/src/commands/run-session.ts',
+        'apps/bytebureau/src/commands/run-output.ts',
       ],
       exclude: ['packages/i18n/src/paraglide/**', '**/*.test.ts', '**/testing/**'],
       thresholds: { lines: 80, branches: 80 },

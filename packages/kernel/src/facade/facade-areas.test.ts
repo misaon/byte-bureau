@@ -27,6 +27,14 @@ describe('the configuration of the facade', () => {
     expect(issues).toStrictEqual([])
   })
 
+  it('validates with the environment it was opened with, naming the variable of a bad value', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const kernel = await openKernel({ env: { BYTEBUREAU_LOG_LEVEL: 'loud' } })
+    const issues = await kernel.config.validate(repo)
+    expect(issues).toMatchObject([{ file: 'env:BYTEBUREAU_LOG_LEVEL', pointer: '/logging/level' }])
+  })
+
   it('offers the JSON schema of the configuration without a promise', async () => {
     expect.hasAssertions()
     const kernel = await openKernel()
