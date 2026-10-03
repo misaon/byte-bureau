@@ -19,3 +19,9 @@ describe(kernelHome, () => {
     expect(kernelHome({ BYTEBUREAU_HOME: '' })).toBe(DEFAULT)
   })
 })
+
+describe('kernelHome of a relative path', () => {
+  it('resolves it against the working directory', () => {
+    expect(kernelHome({ BYTEBUREAU_HOME: 'relative/home' })).toBe(path.resolve('relative/home'))
+  })
+})

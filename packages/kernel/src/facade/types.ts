@@ -46,6 +46,10 @@ export interface Kernel {
     readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
   }
   readonly events: {
+    /**
+     * Replays the durable events after filter.since, all of them when since is left out, and then follows them live.
+     * Pass the last seq a consumer has seen as since to resume without a gap or a duplicate.
+     */
     readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope>
     readonly read: (
       filter: EventFilter,

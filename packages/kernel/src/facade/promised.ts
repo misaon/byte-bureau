@@ -13,10 +13,14 @@ export type Promised = <Id extends Services, Shape, Args extends readonly unknow
   call: (shape: Shape, ...args: Args) => Effect.Effect<Value, unknown>,
 ) => (...args: Args) => Promise<Value>
 
+// A runtime that is disposed rejects with a bare string; a caller always gets an Error
 export const promisedBy =
   (runtime: Runtime): Promised =>
   (service, call) =>
   async (...args) => {
-    const value = await runtime.runPromise(service.use((shape) => call(shape, ...args)))
-    return value
+    try {
+      return await runtime.runPromise(service.use((shape) => call(shape, ...args)))
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(String(error))
+    }
   }

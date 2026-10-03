@@ -41,6 +41,10 @@ export function parseLogLevel(level: string | undefined): KernelLogLevel {
 
 const toLogTape = (level: KernelLogLevel): LogLevel => (level === 'warn' ? 'warning' : level)
 
+// --debug lets the categories it selects log at debug, so Effect's own minimum has to let debug records through to them
+export const effectLevelOf = (level: KernelLogLevel, debug: string | undefined): KernelLogLevel =>
+  debug === undefined || level === 'trace' ? level : 'debug'
+
 interface DebugSelection {
   readonly enabled: readonly string[][]
   readonly silenced: readonly string[][]

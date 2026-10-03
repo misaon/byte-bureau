@@ -5,6 +5,7 @@ import {
   configureLogging,
   EffectLoggerLive,
   EffectLogLevelLive,
+  effectLevelOf,
   parseLogLevel,
   resetLogging,
   type KernelLogLevel,
@@ -58,5 +59,17 @@ describe(parseLogLevel, () => {
 
   it.each([undefined, '', 'verbose', 'DEBUG', 'warning'])('takes %j for info', (level) => {
     expect(parseLogLevel(level)).toBe('info')
+  })
+})
+
+describe(effectLevelOf, () => {
+  it.each<[KernelLogLevel, string | undefined, KernelLogLevel]>([
+    ['info', undefined, 'info'],
+    ['error', undefined, 'error'],
+    ['info', '', 'debug'],
+    ['error', 'bb.agent', 'debug'],
+    ['trace', '', 'trace'],
+  ])('lets Effect log from %s with --debug %j at %s', (level, debug, expected) => {
+    expect(effectLevelOf(level, debug)).toBe(expected)
   })
 })

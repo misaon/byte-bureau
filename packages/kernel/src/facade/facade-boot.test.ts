@@ -19,6 +19,11 @@ const releasing = (journal: string[]): Layer.Layer<never> =>
 // Everything the kernel stands on is up when the layer that dies is built
 const dying = Layer.effectDiscard(Effect.die(new Error('this layer cannot be built')))
 
+// A layer whose release fails, so disposing the runtime rejects as well
+const failingRelease = Layer.effectDiscard(
+  Effect.addFinalizer(() => Effect.die(new Error('this layer cannot be released'))),
+)
+
 // The plugins cannot be loaded, however the kernel was composed
 const failingLoad = Layer.effect(
   PluginHost,
@@ -52,6 +57,17 @@ describe('a kernel that cannot start', () => {
     const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
     await expect(starting).rejects.toThrow('the plugins cannot be loaded')
     expect(journal).toStrictEqual(['released'])
+  })
+
+  it('rejects with the failure of the start even when disposing the runtime fails too', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const layer = failingLoad.pipe(
+      Layer.provideMerge(failingRelease),
+      Layer.provideMerge(KernelTest({ home })),
+    )
+    const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    await expect(starting).rejects.toThrow('the plugins cannot be loaded')
   })
 
   it('keeps the layers of a kernel that starts until it is closed', async () => {

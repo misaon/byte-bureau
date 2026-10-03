@@ -37,8 +37,8 @@ describe('closing the kernel', () => {
     const kernel = await openKernel()
     await kernel.close()
     await kernel.close()
-    await expect(kernel.projects.list()).rejects.toBeDefined()
-    await expect(kernel.sessions.list()).rejects.toBeDefined()
+    await expect(kernel.projects.list()).rejects.toBeInstanceOf(Error)
+    await expect(kernel.sessions.list()).rejects.toBeInstanceOf(Error)
   })
 })
 
