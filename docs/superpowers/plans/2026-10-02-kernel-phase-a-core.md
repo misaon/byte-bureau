@@ -1146,7 +1146,7 @@ export interface SecretStore {
 `packages/plugin-api/src/plugin.ts`:
 ```ts
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { Ask, AskAnswer, KernelEvent, PromptInput } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, EventEnvelope, KernelEvent, PromptInput } from '@bytebureau/protocol'
 import type { Logger } from './logger.js'
 import type { AgentProvider, ExecHandle, ExecSpec, SecretStore, WorkspaceRuntime } from './ports.js'
 
@@ -1179,14 +1179,16 @@ export interface ProjectInfo {
 
 export interface PluginEvents {
   publish(event: KernelEvent): Promise<void>
+  // Events arrive as the log stores them, with seq, id and timestamp
   subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
-  }): AsyncIterable<KernelEvent>
+  }): AsyncIterable<EventEnvelope>
 }
 
 export interface PluginKv {
-  get<Type = unknown>(key: string): Promise<Type | undefined>
+  // The stored JSON value; a plugin decodes it with its own schema
+  get(key: string): Promise<unknown>
   set(key: string, value: unknown): Promise<void>
   delete(key: string): Promise<void>
 }
@@ -4992,6 +4994,7 @@ describe(allowlistEnv, () => {
         LC_ALL: 'C',
         TMPDIR: '/t',
         TERM: 'xterm',
+        SSH_AUTH_SOCK: '/tmp/agent.sock',
         ANTHROPIC_API_KEY: 'not-a-real-key',
         AWS_SECRET: 'y',
         BYTEBUREAU_HOME: '/bb',
@@ -5007,6 +5010,7 @@ describe(allowlistEnv, () => {
       'LANG',
       'LC_ALL',
       'PATH',
+      'SSH_AUTH_SOCK',
       'TERM',
       'TMPDIR',
       'TRACEPARENT',
@@ -5015,7 +5019,15 @@ describe(allowlistEnv, () => {
 
   it('drops look-alike names, unset variables and extras the source does not have', () => {
     const env = allowlistEnv(
-      { PATHS: '/x', path: '/lower', LC: 'x', BYTEBUREAU: 'y', HOME: undefined, LANG: 'C' },
+      {
+        PATHS: '/x',
+        path: '/lower',
+        LC: 'x',
+        BYTEBUREAU: 'y',
+        SSH_AUTH_SOCKET: '/z',
+        HOME: undefined,
+        LANG: 'C',
+      },
       ['MISSING'],
     )
     expect(env).toStrictEqual({ LANG: 'C' })
@@ -6050,7 +6062,7 @@ Under `it.effect` the ladder's sleeps are `TestClock` sleeps; the shipped tests 
 
 `packages/kernel/src/process/env-allowlist.ts`:
 ```ts
-const FIXED = new Set(['PATH', 'HOME', 'LANG', 'TMPDIR', 'TERM', 'TRACEPARENT'])
+const FIXED = new Set(['PATH', 'HOME', 'LANG', 'TMPDIR', 'TERM', 'SSH_AUTH_SOCK', 'TRACEPARENT'])
 
 const allowed = (name: string, extra: ReadonlySet<string>): boolean =>
   FIXED.has(name) || name.startsWith('LC_') || name.startsWith('BYTEBUREAU_') || extra.has(name)
@@ -9903,12 +9915,14 @@ git commit -m "feat(kernel): manage session worktrees with slugs, locks, retenti
 ### Task 11: `PluginHost` service — bundled plugins, manifest and config validation, ports, hooks, plugin context
 
 **Files:**
-- Create (and add `"@bytebureau/workspace-local": "workspace:*"` to `packages/kernel/package.json` dependencies, then `bun install`): `packages/kernel/src/plugins/semver-major.ts`, `packages/kernel/src/plugins/hooks.ts`, `packages/kernel/src/plugins/plugin-context.ts`, `packages/kernel/src/plugins/plugin-host.ts`, `packages/kernel/src/plugins/bundled.ts`, `packages/kernel/src/secrets/in-memory-secret-store.ts`, `packages/kernel/src/plugins/semver-major.test.ts`, `packages/kernel/src/plugins/hooks.test.ts`, `packages/kernel/src/plugins/plugin-host.test.ts`
-- Modify: `packages/kernel/src/index.ts`
+- Create: `packages/kernel/src/plugins/semver-major.ts`, `packages/kernel/src/plugins/reason.ts`, `packages/kernel/src/plugins/hooks-chain.ts`, `packages/kernel/src/plugins/hooks.ts`, `packages/kernel/src/plugins/port-registry.ts`, `packages/kernel/src/plugins/plugin-setup.ts`, `packages/kernel/src/plugins/plugin-loader.ts`, `packages/kernel/src/plugins/plugin-context.ts`, `packages/kernel/src/plugins/plugin-host.ts`, `packages/kernel/src/plugins/bundled.ts`, `packages/kernel/src/secrets/in-memory-secret-store.ts`, fixtures `packages/kernel/src/plugins/plugin-fixtures.ts`, `packages/kernel/src/plugins/plugin-call-fixtures.ts`, `packages/kernel/src/plugins/log-fixtures.ts`, and the tests `semver-major`, `reason`, `hooks`, `plugin-context`, `plugin-process`, `plugin-host`, `plugin-host-config`, `plugin-host-hooks`, `plugin-host-lifecycle`, `plugin-host-log`, `plugin-host-refusals`, `plugin-host-workspace`, `secrets/in-memory-secret-store` (`@bytebureau/workspace-local` was already a kernel dependency since Task 10)
+- Modify: `packages/kernel/src/index.ts`; `packages/plugin-api/src/plugin.ts` (`PluginEvents.subscribe` yields `EventEnvelope`, `PluginKv.get` returns `unknown`); `packages/kernel/src/process/env-allowlist.ts` (`SSH_AUTH_SOCK`)
 
 **Interfaces:**
 - Consumes: `Plugin`, `PluginManifest`, `PluginContext`, `PluginRegistration`, `Hooks`, `ProcessSpawner`, `ExecHandle` (Task 2); `localWorkspacePlugin` (Task 9); `EventLog`, `Supervisor`, `SqlClient`, `kernelLogger`, `PluginError`, `WorkspaceRuntimes` (Task 10).
 - Produces: `PluginHost` service `{ load(): Effect<void>; plugins(): readonly PluginStatus[]; agentProviders(): readonly AgentProvider[]; agentProvider(id): AgentProvider | undefined; workspaceRuntimes(): readonly WorkspaceRuntime[]; hooks: HookBus }`, `PluginHostLive(options: { extraPlugins?: readonly Plugin[]; pluginConfig?: Record<string, unknown> }): Layer<PluginHost | WorkspaceRuntimes, never, EventLog | Supervisor | SqlClient>`, `HookBus { register(name, hook): void; run<Name>(name, input, terminal): Effect<Result> }`, `PluginStatus { name; version; state: 'loaded' | 'failed'; reason?: string; ports: readonly string[] }`, `BUNDLED_PLUGINS: readonly Plugin[]` (Task 13 appends the fake agent plugin), `HOST_API_VERSION = '0.0.0'`, `satisfiesMajor(range, version)`, `InMemorySecretStore` (Phase C replaces it with the keychain store).
+
+Semantics (as shipped): plugin failures are `PluginError`s carrying the original message (a `tryPromise` failure stringifies to an opaque `UnknownError`); the hook bus is a mapped structure of five explicitly typed chains (`hooks-chain.ts`), so no cast is needed — a hook that throws or rejects is warned about and skipped, a hook that never calls `next` ends the chain with its own result, a failure after `next` keeps the downstream result; `load()` runs once (concurrent and repeated calls share the outcome); a duplicate plugin name or a provider/runtime id already held by another plugin is refused (the plugin is disposed and its hooks stay off the bus); a `setup` returning nothing is a refusal; a log failure never changes a plugin's outcome; `satisfiesMajor` compares the major by string equality with a regex without nested quantifiers; the context's `process.spawn` forwards `ExecSpec.signal`, implements `timeoutMs` with the kill ladder and closes its scope after `exit`; `WorkspaceRuntimes` is empty until `load()` has run (Task 14 loads before anything reads it). Known limits (final fix wave): `events.subscribe` replays from seq 0 (the plugin-api filter has no `since`; default to live-only), no timeout on `setup`/`dispose`, plugin processes outlive the host unless they pass `context.signal`, the `Effect.runPromise` bridges run on root fibers (no span, so no `TRACEPARENT` for plugin-spawned helpers).
 
 - [ ] **Step 1: Failing tests**
 
@@ -9924,135 +9938,1886 @@ describe(satisfiesMajor, () => {
     expect(satisfiesMajor('^1', '0.9.0')).toBe(false)
     expect(satisfiesMajor('>=1', '1.0.0')).toBe(false)
   })
+
+  it.each(['0', '~0.1', '^0.x', '^0.1.2.3', '', '^'])('refuses the range "%s"', (range) => {
+    expect(satisfiesMajor(range, '0.0.0')).toBe(false)
+  })
+
+  it('refuses a version that is not dotted', () => {
+    expect(satisfiesMajor('^0', '0')).toBe(false)
+  })
 })
 ```
 `packages/kernel/src/plugins/hooks.test.ts`:
 ```ts
+import type { AgentSpawnInput, PromptSendInput } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Exit } from 'effect'
 import { HookBus } from './hooks.js'
+import { warnings } from './log-fixtures.js'
+import { noting, passOn } from './plugin-fixtures.js'
+
+const SEND = 'prompt.beforeSend'
+
+const prompt = (text: string): PromptSendInput => ({ sessionId: 's', input: { text } })
+
+const echo = (input: PromptSendInput): Effect.Effect<PromptSendInput> => Effect.succeed(input)
+
+const agent: AgentSpawnInput = {
+  sessionId: 's',
+  providerId: 'p',
+  command: 'agent',
+  args: [],
+  env: {},
+}
+
+// A hook that notes its turn, appends its mark to the text and passes on
+const marking =
+  (order: string[], mark: string) =>
+  async (
+    input: Readonly<PromptSendInput>,
+    proceed: (input: PromptSendInput) => Promise<PromptSendInput>,
+  ): Promise<PromptSendInput> => {
+    order.push(mark)
+    const result = await proceed({ ...input, input: { text: `${input.input.text}+${mark}` } })
+    return result
+  }
+
+// A terminal that notes every input it is given
+const recording =
+  (seen: string[]) =>
+  (input: PromptSendInput): Effect.Effect<PromptSendInput> =>
+    Effect.sync(() => {
+      seen.push(input.input.text)
+      return input
+    })
 
 it.effect('runs hooks in registration order and continues when a hook throws', () =>
-  Effect.gen(function* () {
+  Effect.gen(function* runsInOrder() {
     const bus = new HookBus(['bb', 'test'])
     const order: string[] = []
-    bus.register('a', 'prompt.beforeSend', async (input, next) => {
-      order.push('a')
-      return next({ ...input, input: { text: `${input.input.text}+a` } })
-    })
-    bus.register('b', 'prompt.beforeSend', () => {
+    bus.register('a', SEND, marking(order, 'a'))
+    bus.register('b', SEND, () => {
       order.push('b')
       throw new Error('boom')
     })
-    bus.register('c', 'prompt.beforeSend', async (input, next) => {
-      order.push('c')
-      return next({ ...input, input: { text: `${input.input.text}+c` } })
-    })
-    const result = yield* bus.run('prompt.beforeSend', { sessionId: 's', input: { text: 'x' } }, (input) => Effect.succeed(input))
+    bus.register('c', SEND, marking(order, 'c'))
+    const result = yield* bus.run(SEND, prompt('x'), echo)
     assert.deepStrictEqual(order, ['a', 'b', 'c'])
     assert.strictEqual(result.input.text, 'x+a+c')
+  }),
+)
+
+it.effect('runs the terminal alone when no hook is registered', () =>
+  Effect.gen(function* runsTerminalAlone() {
+    const bus = new HookBus(['bb', 'test'])
+    const result = yield* bus.run(SEND, prompt('x'), echo)
+    assert.deepStrictEqual(result, prompt('x'))
+  }),
+)
+
+it.effect('skips a hook that rejects, the way it skips one that throws', () =>
+  Effect.gen(function* skipsRejection() {
+    const bus = new HookBus(['bb', 'test'])
+    const order: string[] = []
+    bus.register('late', SEND, async () => {
+      await Promise.resolve()
+      throw new Error('rejected')
+    })
+    bus.register('c', SEND, marking(order, 'c'))
+    const result = yield* bus.run(SEND, prompt('x'), echo)
+    assert.deepStrictEqual(order, ['c'])
+    assert.strictEqual(result.input.text, 'x+c')
+  }),
+)
+
+it.effect('logs a failing hook at warn with its plugin, the hook and the reason', () =>
+  Effect.gen(function* logsFailure() {
+    const records = yield* warnings
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('flaky', SEND, () => {
+      throw new Error('boom')
+    })
+    yield* bus.run(SEND, prompt('x'), echo)
+    const logged = records.map((record) => [
+      record.category.join('.'),
+      record.level,
+      record.message[0],
+      record.properties,
+    ])
+    assert.deepStrictEqual(logged, [
+      [
+        'bb.test.hooks',
+        'warning',
+        'hook failed; continuing',
+        { plugin: 'flaky', hook: SEND, cause: 'boom' },
+      ],
+    ])
+  }),
+)
+
+it.effect('lets a hook answer for the chain, and nothing after it runs', () =>
+  Effect.gen(function* answersForChain() {
+    const bus = new HookBus(['bb', 'test'])
+    const reached: string[] = []
+    bus.register('guard', 'agent.beforeSpawn', async () => {
+      await Promise.resolve()
+      return { deny: 'not today' }
+    })
+    const result = yield* bus.run('agent.beforeSpawn', agent, (input) =>
+      Effect.sync(() => {
+        reached.push(input.command)
+        return input
+      }),
+    )
+    assert.deepStrictEqual(result, { deny: 'not today' })
+    assert.deepStrictEqual(reached, [])
+  }),
+)
+
+it.effect('hands the result back through the hooks that passed on', () =>
+  Effect.gen(function* handsResultBack() {
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('shout', SEND, async (input, proceed) => {
+      const result = await proceed(input)
+      return { ...result, input: { text: result.input.text.toUpperCase() } }
+    })
+    const result = yield* bus.run(SEND, prompt('x'), (input) =>
+      Effect.succeed(prompt(`${input.input.text}-terminal`)),
+    )
+    assert.strictEqual(result.input.text, 'X-TERMINAL')
+  }),
+)
+
+it.effect('keeps the hooks of one name out of the chain of another', () =>
+  Effect.gen(function* keepsNamesApart() {
+    const bus = new HookBus(['bb', 'test'])
+    const order: string[] = []
+    bus.register('creator', 'session.beforeCreate', noting(order, 'creator'))
+    const seen: string[] = []
+    yield* bus.run(SEND, prompt('x'), recording(seen))
+    assert.deepStrictEqual([order, seen], [[], ['x']])
+  }),
+)
+
+it.effect('does not run the rest of the chain again when a hook fails after passing on', () =>
+  Effect.gen(function* runsRestOnce() {
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('late', SEND, async (input, proceed) => {
+      await proceed(input)
+      throw new Error('too late')
+    })
+    const seen: string[] = []
+    const result = yield* bus.run(SEND, prompt('x'), recording(seen))
+    assert.deepStrictEqual(seen, ['x'])
+    assert.strictEqual(result.input.text, 'x')
+  }),
+)
+
+it.effect('does not run a terminal again that has failed while a hook waited for it', () =>
+  Effect.gen(function* runsFailingTerminalOnce() {
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('a', SEND, passOn)
+    const calls: string[] = []
+    const failing = (): Effect.Effect<PromptSendInput> =>
+      Effect.sync(() => {
+        calls.push('terminal')
+        throw new Error('terminal failed')
+      })
+    const exit = yield* Effect.exit(bus.run(SEND, prompt('x'), failing))
+    assert.isTrue(Exit.isFailure(exit))
+    assert.deepStrictEqual(calls, ['terminal'])
   }),
 )
 ```
 `packages/kernel/src/plugins/plugin-host.test.ts`:
 ```ts
 import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
-import { assert, it, layer } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
-import { EventLog, EventLogLive } from '../events/event-log.js'
-import { SupervisorLive } from '../process/supervisor.js'
-import { StoreTest } from '../store/store-test.js'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { EventLog } from '../events/event-log.js'
+import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
 import { WorkspaceRuntimes } from '../workspace/runtimes.js'
-import { PluginHost, PluginHostLive } from './plugin-host.js'
+import { BUNDLED_PLUGINS } from './bundled.js'
+import {
+  hostOver,
+  loadedHost,
+  manifestOf,
+  passOn,
+  providerOf,
+  statusOf,
+} from './plugin-fixtures.js'
+import { PluginHost } from './plugin-host.js'
 
 const good = definePlugin({
-  manifest: { name: 'good', version: '1.0.0', hostApi: '^0', kind: 'in-process', contributes: { agentProviders: ['good'] } },
+  manifest: manifestOf('good', { contributes: { agentProviders: ['good'] } }),
   setup: (context) => ({
-    agentProviders: [{ id: 'good', displayName: 'Good', capabilities: { resume: false, interrupt: false, askUser: false, permissions: false, structuredOutput: false, usage: false, rateLimits: false, contextUsage: false, thinking: false, setModel: false, setEffort: false, attachments: false }, authStatus: () => Promise.resolve({ state: 'loggedIn' }), createSession: () => Promise.reject(new Error('unused')) }],
-    hooks: { 'prompt.beforeSend': (input, next) => next(input) },
-    dispose: async () => { await context.kv.set('disposed', true) },
+    agentProviders: [providerOf('good')],
+    hooks: { 'prompt.beforeSend': passOn },
+    dispose: async (): Promise<void> => {
+      await context.kv.set('disposed', true)
+    },
   }),
 })
-const broken: Plugin = { manifest: { name: 'broken', version: '1.0.0', hostApi: '^0', kind: 'in-process' }, setup: () => { throw new Error('setup failed') } }
-const incompatible: Plugin = { manifest: { name: 'future', version: '1.0.0', hostApi: '^9', kind: 'in-process' }, setup: () => ({}) }
-const Deps = Layer.mergeAll(EventLogLive, SupervisorLive).pipe(Layer.provideMerge(StoreTest))
+const vault = definePlugin({
+  manifest: manifestOf('vault'),
+  setup: () => ({ secretStores: [new InMemorySecretStore()] }),
+})
+const broken: Plugin = {
+  manifest: manifestOf('broken'),
+  setup: () => {
+    throw new Error('setup failed')
+  },
+}
+const incompatible: Plugin = {
+  manifest: manifestOf('future', { hostApi: '^9' }),
+  setup: () => ({}),
+}
 
-layer(PluginHostLive({ extraPlugins: [good, broken, incompatible] }).pipe(Layer.provideMerge(Deps)))('PluginHost', (it) => {
-  it.effect('loads bundled and extra plugins, records failures and keeps running', () =>
-    Effect.gen(function* () {
-      const host = yield* PluginHost
-      yield* host.load()
-      const statuses = Object.fromEntries(host.plugins().map((status) => [status.name, status]))
-      assert.strictEqual(statuses['workspace-local']?.state, 'loaded')
-      assert.strictEqual(statuses['good']?.state, 'loaded')
-      assert.strictEqual(statuses['broken']?.state, 'failed')
-      assert.match(statuses['future']?.reason ?? '', /\^9.*0\.0\.0/u)
+const REFUSAL = 'plugin future needs host API ^9, this ByteBureau provides 0.0.0'
+const LOADED = 'plugin.loaded'
+const FAILED = 'plugin.failed'
+const OUTCOMES = { types: [LOADED, FAILED] }
+const BUNDLED = BUNDLED_PLUGINS.length
+
+it.layer(hostOver({ extraPlugins: [good, broken, incompatible] }))('PluginHost', (suite) => {
+  suite.effect('loads bundled and extra plugins, records failures and keeps running', () =>
+    Effect.gen(function* loadsPlugins() {
+      const host = yield* loadedHost
+      assert.strictEqual(statusOf(host, 'workspace-local').state, 'loaded')
+      assert.strictEqual(statusOf(host, 'good').state, 'loaded')
+      assert.strictEqual(statusOf(host, 'broken').state, 'failed')
+      assert.match(statusOf(host, 'future').reason ?? '', /\^9.*0\.0\.0/u)
       assert.ok(host.agentProvider('good') !== undefined)
       assert.ok((yield* WorkspaceRuntimes).get('local') !== undefined)
-      const events = yield* (yield* EventLog).read({ types: ['plugin.loaded', 'plugin.failed'] }, { from: 0 })
-      assert.deepStrictEqual(events.map((event) => event.type).sort(), ['plugin.failed', 'plugin.failed', 'plugin.loaded', 'plugin.loaded'])
+      const events = yield* (yield* EventLog).read(OUTCOMES, { from: 0 })
+      const loaded = [...BUNDLED_PLUGINS, good].map(() => LOADED)
+      assert.deepStrictEqual(events.map((event) => event.type).toSorted(), [
+        FAILED,
+        FAILED,
+        ...loaded,
+      ])
     }),
   )
 })
+
+it.layer(hostOver({ extraPlugins: [good, broken, incompatible] }))('PluginHost record', (suite) => {
+  suite.effect('lists the bundled plugins first, then the extra ones with ports or reasons', () =>
+    Effect.gen(function* listsPlugins() {
+      const host = yield* loadedHost
+      const bundled = host.plugins().slice(0, BUNDLED)
+      assert.deepStrictEqual(
+        bundled.map((status) => [status.name, status.state]),
+        BUNDLED_PLUGINS.map((plugin) => [plugin.manifest.name, 'loaded']),
+      )
+      assert.deepStrictEqual(host.plugins().slice(BUNDLED), [
+        { name: 'good', version: '1.0.0', state: 'loaded', ports: ['agentProviders:good'] },
+        { name: 'broken', version: '1.0.0', state: 'failed', reason: 'setup failed', ports: [] },
+        { name: 'future', version: '1.0.0', state: 'failed', reason: REFUSAL, ports: [] },
+      ])
+    }),
+  )
+
+  suite.effect('announces each outcome in the log, in the same order', () =>
+    Effect.gen(function* announcesOutcomes() {
+      yield* loadedHost
+      const events = yield* (yield* EventLog).read(OUTCOMES, { from: 0 })
+      assert.deepStrictEqual(
+        events.slice(0, BUNDLED).map((event) => event.type),
+        BUNDLED_PLUGINS.map(() => LOADED),
+      )
+      assert.deepStrictEqual(
+        events.slice(BUNDLED).map((event) => [event.type, event.payload]),
+        [
+          [LOADED, { name: 'good', version: '1.0.0', ports: ['agentProviders:good'] }],
+          [FAILED, { name: 'broken', reason: 'setup failed' }],
+          [FAILED, { name: 'future', reason: REFUSAL }],
+        ],
+      )
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins: [good, vault] }))('PluginHost ports', (suite) => {
+  suite.effect('lists agent providers and workspace runtimes, on the host and as services', () =>
+    Effect.gen(function* listsPorts() {
+      const host = yield* loadedHost
+      const runtimes = yield* WorkspaceRuntimes
+      assert.include(
+        host.agentProviders().map((provider) => provider.id),
+        'good',
+      )
+      assert.strictEqual(host.agentProvider('nobody'), undefined)
+      assert.deepStrictEqual(
+        host.workspaceRuntimes().map((runtime) => runtime.id),
+        ['local'],
+      )
+      assert.deepStrictEqual(runtimes.list(), host.workspaceRuntimes())
+      assert.strictEqual(runtimes.get('local'), host.workspaceRuntimes()[0])
+      assert.strictEqual(runtimes.get('nobody'), undefined)
+    }),
+  )
+
+  suite.effect('reports a secret store as a port without an id', () =>
+    Effect.gen(function* reportsSecretStore() {
+      const host = yield* loadedHost
+      assert.deepStrictEqual(statusOf(host, 'vault').ports, ['secretStores'])
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins: [good] }))('PluginHost before load', (suite) => {
+  suite.effect('registers and announces nothing until load is called', () =>
+    Effect.gen(function* waitsForLoad() {
+      const host = yield* PluginHost
+      const events = yield* (yield* EventLog).read({}, { from: 0 })
+      assert.deepStrictEqual(host.plugins(), [])
+      assert.deepStrictEqual(host.agentProviders(), [])
+      assert.deepStrictEqual(host.workspaceRuntimes(), [])
+      assert.deepStrictEqual(events, [])
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/plugin-context.test.ts`:
+```ts
+import type { PluginEvents } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { EventLog } from '../events/event-log.js'
+import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { rejected, resolved, takeFrom } from './plugin-call-fixtures.js'
+import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
+
+const USER = 'message.user'
+
+const alpha = probe('alpha')
+const beta = probe('beta')
+const extraPlugins = [alpha.plugin, beta.plugin]
+
+it.layer(hostOver({ extraPlugins }))('plugin context kv', (suite) => {
+  suite.effect('stores, replaces and deletes a value, and reads a missing key as undefined', () =>
+    Effect.gen(function* storesValues() {
+      yield* loadedHost
+      const { kv } = alpha.context()
+      assert.strictEqual(yield* resolved(kv.get('missing')), undefined)
+      yield* resolved(kv.set('config', { retries: 3, tags: ['a'] }))
+      assert.deepStrictEqual(yield* resolved(kv.get('config')), { retries: 3, tags: ['a'] })
+      yield* resolved(kv.set('config', 'replaced'))
+      assert.strictEqual(yield* resolved(kv.get('config')), 'replaced')
+      yield* resolved(kv.delete('config'))
+      assert.strictEqual(yield* resolved(kv.get('config')), undefined)
+    }),
+  )
+
+  suite.effect('keeps the values of a plugin apart from the values of another', () =>
+    Effect.gen(function* separatesPlugins() {
+      yield* loadedHost
+      yield* resolved(alpha.context().kv.set('shared', 'from alpha'))
+      yield* resolved(beta.context().kv.set('shared', 'from beta'))
+      const sql = yield* SqlClient.SqlClient
+      const rows =
+        yield* sql`SELECT plugin_id, key, value_json FROM plugin_kv WHERE key = 'shared' ORDER BY plugin_id`
+      assert.deepStrictEqual(rows, [
+        { plugin_id: 'alpha', key: 'shared', value_json: '"from alpha"' },
+        { plugin_id: 'beta', key: 'shared', value_json: '"from beta"' },
+      ])
+      assert.strictEqual(yield* resolved(beta.context().kv.get('shared')), 'from beta')
+    }),
+  )
+
+  suite.effect('rejects a value that cannot be stored instead of throwing', () =>
+    Effect.gen(function* rejectsUnsupportedValue() {
+      yield* loadedHost
+      const failure = yield* rejected(alpha.context().kv.set('big', 10n))
+      assert.instanceOf(failure, TypeError)
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins }))('plugin context fields', (suite) => {
+  suite.effect('hands the plugin no project, a logger of its own, fetch and a live signal', () =>
+    Effect.gen(function* handsFields() {
+      yield* loadedHost
+      const context = alpha.context()
+      assert.strictEqual(context.project, null)
+      assert.deepStrictEqual(context.logger.category, ['bb', 'plugin', 'alpha'])
+      assert.strictEqual(context.http, fetch)
+      assert.isFalse(context.signal.aborted)
+    }),
+  )
+})
+
+const store = new InMemorySecretStore()
+
+it.layer(hostOver({ extraPlugins, secrets: store }))('plugin context secrets', (suite) => {
+  suite.effect('keeps the secrets of a plugin apart from the secrets of another', () =>
+    Effect.gen(function* separatesSecrets() {
+      yield* loadedHost
+      yield* resolved(alpha.context().secrets.set('token', 'a1'))
+      assert.strictEqual(yield* resolved(beta.context().secrets.get('token')), undefined)
+      yield* resolved(beta.context().secrets.set('token', 'b1'))
+      assert.strictEqual(yield* resolved(alpha.context().secrets.get('token')), 'a1')
+      yield* resolved(alpha.context().secrets.delete('token'))
+      assert.strictEqual(yield* resolved(alpha.context().secrets.get('token')), undefined)
+      assert.strictEqual(yield* resolved(beta.context().secrets.get('token')), 'b1')
+    }),
+  )
+
+  suite.effect('keeps them in the store of the host under the name of the plugin', () =>
+    Effect.gen(function* keepsUnderName() {
+      yield* loadedHost
+      yield* resolved(alpha.context().secrets.set('apiKey', 'not-a-real-key'))
+      assert.strictEqual(yield* resolved(store.get('alpha/apiKey')), 'not-a-real-key')
+    }),
+  )
+})
+
+// Two events in one session, one of them a warning, and one in another session
+const seed = (events: PluginEvents): Effect.Effect<void> =>
+  Effect.gen(function* seedsEvents() {
+    const warning = { kind: 'k', message: 'm' }
+    yield* resolved(events.publish({ type: USER, sessionId: 'sub-1', payload: { text: 'one' } }))
+    yield* resolved(
+      events.publish({ type: 'session.warning', sessionId: 'sub-1', payload: warning }),
+    )
+    yield* resolved(events.publish({ type: USER, sessionId: 'sub-2', payload: { text: 'two' } }))
+  })
+
+it.layer(hostOver({ extraPlugins }))('plugin context events', (suite) => {
+  suite.effect('publishes an event to the log, as the plugin names it', () =>
+    Effect.gen(function* publishesEvent() {
+      yield* loadedHost
+      const event = {
+        type: USER,
+        sessionId: 'pub-1',
+        payload: { text: 'hello' },
+      } as const
+      yield* resolved(alpha.context().events.publish(event))
+      const stored = yield* (yield* EventLog).read({ sessionId: 'pub-1' }, { from: 0 })
+      assert.deepStrictEqual(
+        stored.map((envelope) => [envelope.type, envelope.payload]),
+        [[USER, { text: 'hello' }]],
+      )
+    }),
+  )
+
+  suite.effect('delivers stored envelopes, all of a session or filtered by type', () =>
+    Effect.gen(function* deliversEnvelopes() {
+      yield* loadedHost
+      const { events } = alpha.context()
+      yield* seed(events)
+      const whole = yield* takeFrom(events.subscribe({ sessionId: 'sub-1' }), 2)
+      const typed = yield* takeFrom(
+        events.subscribe({ types: ['session.warning'], sessionId: 'sub-1' }),
+        1,
+      )
+      assert.deepStrictEqual(
+        whole.map((envelope) => envelope.type),
+        [USER, 'session.warning'],
+      )
+      assert.deepStrictEqual(
+        typed.map((envelope) => envelope.payload),
+        [{ kind: 'k', message: 'm' }],
+      )
+      assert.isTrue(
+        whole.every((envelope) => envelope.seq > 0 && envelope.id !== '' && envelope.ts !== ''),
+      )
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/plugin-process.test.ts`:
+```ts
+import { getEventListeners } from 'node:events'
+import type { ExecHandle } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { IDLE, withEnv } from '../process/supervisor-fixtures.js'
+import { linesOf, nodeExec, resolved } from './plugin-call-fixtures.js'
+import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
+import type { PluginHost } from './plugin-host.js'
+
+const spawner = probe('spawner')
+
+// Real child processes, so the supervisor runs on the real clock
+const live = { excludeTestServices: true }
+
+const spawn = (
+  ...args: Parameters<typeof nodeExec>
+): Effect.Effect<ExecHandle, never, PluginHost> =>
+  Effect.gen(function* spawnsScript() {
+    yield* loadedHost
+    return yield* resolved(spawner.context().process.spawn(nodeExec(...args)))
+  })
+
+it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)('plugin context process', (suite) => {
+  suite.effect('runs a command and reports its lines, its pid and its exit code', () =>
+    Effect.gen(function* runsCommand() {
+      const handle = yield* spawn('console.log("one"); console.error("two"); process.exit(3)')
+      assert.deepStrictEqual(yield* linesOf(handle.stdout), ['one'])
+      assert.deepStrictEqual(yield* linesOf(handle.stderr), ['two'])
+      assert.deepStrictEqual(yield* resolved(handle.exited), { code: 3, signal: null })
+      assert.isAbove(handle.pid, 0)
+    }),
+  )
+
+  suite.effect('hands the child the environment the plugin declares and none of the daemon', () =>
+    Effect.gen(function* declaresEnvironment() {
+      yield* withEnv('BB_PLUGIN_LEAK', 'daemon')
+      const script =
+        'console.log(process.env.BB_DECLARED); console.log(process.env.BB_PLUGIN_LEAK ?? "dropped")'
+      const handle = yield* spawn(script, { env: { BB_DECLARED: 'yes' } })
+      assert.deepStrictEqual(yield* linesOf(handle.stdout), ['yes', 'dropped'])
+    }),
+  )
+
+  suite.effect('reports a command that cannot start as exit -1 with the reason on stderr', () =>
+    Effect.gen(function* reportsMissingCommand() {
+      const handle = yield* spawn('', { command: 'bb-no-such-command' })
+      assert.strictEqual(handle.pid, -1)
+      assert.deepStrictEqual(yield* resolved(handle.exited), { code: -1, signal: null })
+      assert.isAbove((yield* linesOf(handle.stderr)).length, 0)
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
+  'plugin context process end',
+  (suite) => {
+    suite.effect('ends a command that outlives its timeout', () =>
+      Effect.gen(function* endsOnTimeout() {
+        const handle = yield* spawn(IDLE, { timeoutMs: 100 })
+        assert.deepStrictEqual(yield* resolved(handle.exited), { code: null, signal: 'SIGINT' })
+      }),
+    )
+
+    suite.effect('leaves a command alone that ends before its timeout', () =>
+      Effect.gen(function* leavesQuickCommand() {
+        const handle = yield* spawn('process.exit(0)', { timeoutMs: 60_000 })
+        assert.deepStrictEqual(yield* resolved(handle.exited), { code: 0, signal: null })
+      }),
+    )
+
+    suite.effect('ends a command when the plugin aborts its signal', () =>
+      Effect.gen(function* endsOnAbort() {
+        const controller = new AbortController()
+        const handle = yield* spawn(IDLE, { signal: controller.signal })
+        controller.abort()
+        assert.deepStrictEqual(yield* resolved(handle.exited), { code: null, signal: 'SIGINT' })
+      }),
+    )
+
+    suite.effect('sends the signal the plugin names when it kills the command', () =>
+      Effect.gen(function* killsOnRequest() {
+        const handle = yield* spawn(IDLE)
+        handle.kill('SIGKILL')
+        assert.deepStrictEqual(yield* resolved(handle.exited), { code: null, signal: 'SIGKILL' })
+      }),
+    )
+  },
+)
+
+const listenersOf = (signal: AbortSignal): Effect.Effect<number> =>
+  Effect.sync(() => getEventListeners(signal, 'abort').length)
+
+it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
+  'plugin context process cleanup',
+  (suite) => {
+    suite.effect('lets go of the abort signal of the plugin once the command has ended', () =>
+      Effect.gen(function* releasesSignal() {
+        const { signal } = new AbortController()
+        const handle = yield* spawn('process.exit(0)', { signal })
+        yield* resolved(handle.exited)
+        const listening = Effect.repeat(listenersOf(signal), { until: (count) => count === 0 })
+        assert.strictEqual(yield* Effect.timeout(listening, '2 seconds'), 0)
+      }),
+    )
+  },
+)
+```
+`packages/kernel/src/plugins/plugin-host-config.test.ts`:
+```ts
+import type { PluginManifest } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { hostOver, loadedHost, probe, statusOf } from './plugin-fixtures.js'
+
+type Schema = NonNullable<PluginManifest['config']>
+
+const schemaOf = (validate: Schema['~standard']['validate']): Schema => ({
+  '~standard': { version: 1, vendor: 'bytebureau-test', validate },
+})
+
+// Wants { flag: boolean } and adds a default of its own
+const flagSchema = schemaOf((value) =>
+  typeof value === 'object' && value !== null && 'flag' in value && typeof value.flag === 'boolean'
+    ? { value: { flag: value.flag, extra: 'default' } }
+    : { issues: [{ message: 'expected a boolean', path: ['flag'] }] },
+)
+
+const strict = probe('strict', {}, { config: flagSchema })
+const valid = probe('valid', {}, { config: flagSchema })
+const later = probe(
+  'later',
+  {},
+  {
+    config: schemaOf(async () => {
+      await Promise.resolve()
+      return { value: 'resolved later' }
+    }),
+  },
+)
+const defaulted = probe(
+  'defaulted',
+  {},
+  { config: schemaOf((value) => ({ value: { seen: value } })) },
+)
+const bare = probe('bare')
+const plain = probe('plain')
+const nested = probe(
+  'nested',
+  {},
+  {
+    config: schemaOf(() => ({
+      issues: [
+        { message: 'too deep', path: [{ key: 'nested' }, 'leaf'] },
+        { message: 'no path here' },
+      ],
+    })),
+  },
+)
+const throwing = probe(
+  'throwing',
+  {},
+  {
+    config: schemaOf(() => {
+      throw new Error('schema blew up')
+    }),
+  },
+)
+
+const extraPlugins = [strict, valid, later, defaulted, bare, plain, nested, throwing].map(
+  (candidate) => candidate.plugin,
+)
+const pluginConfig = { strict: { flag: 'yes' }, valid: { flag: true }, bare: { anything: 1 } }
+
+it.layer(hostOver({ extraPlugins, pluginConfig }))('PluginHost config', (suite) => {
+  suite.effect(
+    'refuses a plugin whose config the schema rejects, says where, and sets it up never',
+    () =>
+      Effect.gen(function* refusesInvalidConfig() {
+        const host = yield* loadedHost
+        assert.strictEqual(statusOf(host, 'strict').state, 'failed')
+        assert.strictEqual(
+          statusOf(host, 'strict').reason,
+          'config invalid: flag expected a boolean',
+        )
+        assert.throws(() => {
+          strict.context()
+        }, 'has not been set up')
+      }),
+  )
+
+  suite.effect(
+    'hands the plugin what the schema made of its config: sync, async and defaulted',
+    () =>
+      Effect.gen(function* handsValidatedConfig() {
+        yield* loadedHost
+        assert.deepStrictEqual(valid.context().config, { flag: true, extra: 'default' })
+        assert.strictEqual(later.context().config, 'resolved later')
+        assert.deepStrictEqual(defaulted.context().config, { seen: {} })
+      }),
+  )
+
+  suite.effect('hands over the config as it is when the plugin has no schema', () =>
+    Effect.gen(function* handsRawConfig() {
+      yield* loadedHost
+      assert.deepStrictEqual(bare.context().config, { anything: 1 })
+      assert.strictEqual(plain.context().config, undefined)
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins, pluginConfig }))('PluginHost config issues', (suite) => {
+  suite.effect('lists every issue, a nested path in dots and an issue without a path bare', () =>
+    Effect.gen(function* listsIssues() {
+      const host = yield* loadedHost
+      assert.strictEqual(
+        statusOf(host, 'nested').reason,
+        'config invalid: nested.leaf too deep; no path here',
+      )
+    }),
+  )
+
+  suite.effect('refuses a plugin whose schema throws, with what it threw', () =>
+    Effect.gen(function* refusesThrowingSchema() {
+      const host = yield* loadedHost
+      assert.strictEqual(statusOf(host, 'throwing').reason, 'schema blew up')
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/plugin-host-hooks.test.ts`:
+```ts
+import type {
+  AgentSpawnInput,
+  AskOpenInput,
+  KernelEvent,
+  PromptSendInput,
+  SessionCreateInput,
+} from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { hostOver, loadedHost, noting, probe } from './plugin-fixtures.js'
+
+const calls: string[] = []
+
+const wired = probe('wired', {
+  hooks: {
+    'session.beforeCreate': noting(calls, 'session.beforeCreate'),
+    'agent.beforeSpawn': noting(calls, 'agent.beforeSpawn'),
+    'ask.beforeOpen': noting(calls, 'ask.beforeOpen'),
+    'prompt.beforeSend': noting(calls, 'prompt.beforeSend'),
+    'event.beforePublish': noting(calls, 'event.beforePublish'),
+  },
+})
+
+const creation: SessionCreateInput = {
+  projectId: 'p',
+  employeeId: 'e',
+  providerId: 'x',
+  title: 't',
+}
+const spawning: AgentSpawnInput = {
+  sessionId: 's',
+  providerId: 'x',
+  command: 'agent',
+  args: [],
+  env: {},
+}
+const asking: AskOpenInput = {
+  ask: {
+    id: 'a',
+    sessionId: 's',
+    turnId: null,
+    kind: 'question',
+    title: 'Which one?',
+    questions: [],
+    policy: { onTimeout: 'wait', timeout: '30m' },
+    recommendationSource: 'none',
+    status: 'pending',
+    createdAt: '2026-10-03T00:00:00.000Z',
+    deadlineAt: null,
+  },
+}
+const prompting: PromptSendInput = { sessionId: 's', input: { text: 'hi' } }
+const publishing: KernelEvent = { type: 'message.user', sessionId: 's', payload: { text: 'hi' } }
+
+it.layer(hostOver({ extraPlugins: [wired.plugin] }))('PluginHost hooks', (suite) => {
+  suite.effect('puts every hook of the contract that a plugin registers on the bus', () =>
+    Effect.gen(function* wiresHooks() {
+      const { hooks } = yield* loadedHost
+      yield* hooks.run('session.beforeCreate', creation, (input) => Effect.succeed(input))
+      yield* hooks.run('agent.beforeSpawn', spawning, (input) => Effect.succeed(input))
+      yield* hooks.run('ask.beforeOpen', asking, (input) => Effect.succeed(input))
+      yield* hooks.run('prompt.beforeSend', prompting, (input) => Effect.succeed(input))
+      yield* hooks.run('event.beforePublish', publishing, () => Effect.void)
+      assert.deepStrictEqual(calls, [
+        'session.beforeCreate',
+        'agent.beforeSpawn',
+        'ask.beforeOpen',
+        'prompt.beforeSend',
+        'event.beforePublish',
+      ])
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/plugin-host-lifecycle.test.ts`:
+```ts
+import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { EventLog } from '../events/event-log.js'
+import { hostOver, loadedHost, manifestOf, probe, startHost } from './plugin-fixtures.js'
+
+const setups: string[] = []
+const counted: Plugin = {
+  manifest: manifestOf('counted'),
+  setup: () => {
+    setups.push('counted')
+    return {}
+  },
+}
+
+const journal: string[] = []
+
+// Writes and reads its store while it is disposed, and fails when asked to
+const tracked = (name: string, failing = false): Plugin =>
+  definePlugin({
+    manifest: manifestOf(name),
+    setup: (context) => ({
+      dispose: async () => {
+        await context.kv.set('bye', name)
+        const stored = await context.kv.get('bye')
+        journal.push(`${name} aborted=${context.signal.aborted} stored=${String(stored)}`)
+        if (failing) {
+          throw new Error('dispose failed')
+        }
+      },
+    }),
+  })
+
+const watcher = probe('watcher')
+
+// A registration whose dispose counts on being called as its method
+const tally = {
+  disposed: 0,
+  async dispose(): Promise<void> {
+    await Promise.resolve()
+    this.disposed += 1
+  },
+}
+const stateful: Plugin = { manifest: manifestOf('stateful'), setup: () => tally }
+
+it.layer(hostOver({ extraPlugins: [counted] }))('PluginHost load', (suite) => {
+  suite.effect('loads once: more calls set nothing up again and announce nothing again', () =>
+    Effect.gen(function* loadsOnce() {
+      const host = yield* loadedHost
+      yield* Effect.all([host.load(), host.load()], { concurrency: 'unbounded' })
+      yield* host.load()
+      const events = yield* (yield* EventLog).read({ types: ['plugin.loaded'] }, { from: 0 })
+      assert.deepStrictEqual(setups, ['counted'])
+      assert.strictEqual(events.length, host.plugins().length)
+    }),
+  )
+})
+
+it.effect('aborts the signal, then disposes in reverse order, whatever one dispose does', () =>
+  Effect.gen(function* disposesInReverse() {
+    const extraPlugins = [
+      tracked('first'),
+      tracked('second', true),
+      tracked('third'),
+      watcher.plugin,
+      stateful,
+    ]
+    const { host, stop } = yield* startHost({ extraPlugins })
+    yield* host.load()
+    assert.isFalse(watcher.context().signal.aborted)
+    yield* stop
+    assert.isTrue(watcher.context().signal.aborted)
+    assert.strictEqual(tally.disposed, 1)
+    assert.deepStrictEqual(journal, [
+      'third aborted=true stored=third',
+      'second aborted=true stored=second',
+      'first aborted=true stored=first',
+    ])
+  }),
+)
+```
+`packages/kernel/src/plugins/plugin-host-log.test.ts`:
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Layer, Stream } from 'effect'
+import { StoreError } from '../errors.js'
+import { EventLog } from '../events/event-log.js'
+import { SupervisorLive } from '../process/supervisor.js'
+import { StoreTest } from '../store/store-test.js'
+import { BUNDLED_PLUGINS } from './bundled.js'
+import { warnings } from './log-fixtures.js'
+import { loadedHost, statusOf } from './plugin-fixtures.js'
+import { PluginHostLive } from './plugin-host.js'
+
+const DOWN = 'the store is down'
+
+// A log that cannot record anything
+const unreachable = Layer.succeed(
+  EventLog,
+  EventLog.of({
+    publish: () => Effect.fail(new StoreError({ cause: DOWN })),
+    subscribe: () => Stream.empty,
+    read: () => Effect.succeed([]),
+  }),
+)
+
+const Deps = Layer.mergeAll(unreachable, SupervisorLive).pipe(Layer.provideMerge(StoreTest))
+
+it.layer(PluginHostLive().pipe(Layer.provideMerge(Deps)))('PluginHost without a log', (suite) => {
+  suite.effect('keeps a plugin loaded when its announcement cannot be recorded, and says so', () =>
+    Effect.gen(function* survivesLogFailure() {
+      const records = yield* warnings
+      const host = yield* loadedHost
+      const unrecorded = ['plugin event not recorded', { type: 'plugin.loaded', reason: DOWN }]
+      assert.strictEqual(statusOf(host, 'workspace-local').state, 'loaded')
+      assert.deepStrictEqual(
+        records.map((record) => [record.message[0], record.properties]),
+        BUNDLED_PLUGINS.map(() => unrecorded),
+      )
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/plugin-host-refusals.test.ts`:
+```ts
+import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { vi } from 'vitest'
+import {
+  hostOver,
+  loadedHost,
+  manifestOf,
+  noting,
+  providerOf,
+  runtimeOf,
+  statusOf,
+} from './plugin-fixtures.js'
+
+const setups: string[] = []
+const journal: string[] = []
+
+const ranged: Plugin = { manifest: manifestOf('ranged', { hostApi: '>=0' }), setup: () => ({}) }
+const late: Plugin = {
+  manifest: manifestOf('late'),
+  setup: async () => {
+    await Promise.resolve()
+    throw new Error('late failure')
+  },
+}
+
+// A mock without an answer returns nothing, as a plugin in plain JavaScript can
+const forgetful: Plugin = { manifest: manifestOf('forgetful'), setup: vi.fn<Plugin['setup']>() }
+
+const twin = (label: string): Plugin => ({
+  manifest: manifestOf('twin'),
+  setup: () => {
+    setups.push(label)
+    return {}
+  },
+})
+
+const heldProvider = providerOf('shared')
+const holder = definePlugin({
+  manifest: manifestOf('holder'),
+  setup: () => ({
+    agentProviders: [heldProvider],
+    hooks: { 'prompt.beforeSend': noting(journal, 'holder hook') },
+  }),
+})
+const rival = definePlugin({
+  manifest: manifestOf('rival'),
+  setup: () => ({
+    agentProviders: [providerOf('shared')],
+    hooks: { 'prompt.beforeSend': noting(journal, 'rival hook') },
+    dispose: async (): Promise<void> => {
+      await Promise.resolve()
+      journal.push('rival disposed')
+    },
+  }),
+})
+const impostor = runtimeOf('local')
+const intruder = definePlugin({
+  manifest: manifestOf('intruder'),
+  setup: () => ({ workspaceRuntimes: [impostor] }),
+})
+
+it.layer(hostOver({ extraPlugins: [ranged, late, forgetful] }))('PluginHost refusals', (suite) => {
+  suite.effect('refuses a host API that is not a caret range, naming both versions', () =>
+    Effect.gen(function* refusesRange() {
+      const host = yield* loadedHost
+      assert.strictEqual(statusOf(host, 'ranged').state, 'failed')
+      assert.strictEqual(
+        statusOf(host, 'ranged').reason,
+        'plugin ranged needs host API >=0, this ByteBureau provides 0.0.0',
+      )
+    }),
+  )
+
+  suite.effect('refuses a plugin whose setup rejects, with the reason it gave', () =>
+    Effect.gen(function* refusesRejection() {
+      const host = yield* loadedHost
+      assert.strictEqual(statusOf(host, 'late').state, 'failed')
+      assert.strictEqual(statusOf(host, 'late').reason, 'late failure')
+    }),
+  )
+
+  suite.effect('refuses a plugin whose setup returns no registration', () =>
+    Effect.gen(function* refusesNothing() {
+      const host = yield* loadedHost
+      assert.strictEqual(statusOf(host, 'forgetful').state, 'failed')
+      assert.strictEqual(
+        statusOf(host, 'forgetful').reason,
+        'plugin forgetful returned no registration from setup',
+      )
+    }),
+  )
+})
+
+it.layer(hostOver({ extraPlugins: [twin('first'), twin('second')] }))(
+  'PluginHost duplicates',
+  (suite) => {
+    suite.effect('refuses a second plugin of the same name without setting it up', () =>
+      Effect.gen(function* refusesTwin() {
+        const host = yield* loadedHost
+        const twins = host.plugins().filter((status) => status.name === 'twin')
+        assert.deepStrictEqual(
+          twins.map((status) => [status.state, status.reason]),
+          [
+            ['loaded', undefined],
+            ['failed', 'a plugin named twin is already loaded'],
+          ],
+        )
+        assert.deepStrictEqual(setups, ['first'])
+      }),
+    )
+  },
+)
+
+it.layer(hostOver({ extraPlugins: [holder, rival, intruder] }))(
+  'PluginHost port conflicts',
+  (suite) => {
+    suite.effect(
+      'refuses a plugin whose provider is taken, disposes it and leaves its hooks out',
+      () =>
+        Effect.gen(function* refusesTakenProvider() {
+          const host = yield* loadedHost
+          assert.strictEqual(statusOf(host, 'holder').state, 'loaded')
+          assert.strictEqual(statusOf(host, 'rival').state, 'failed')
+          assert.strictEqual(
+            statusOf(host, 'rival').reason,
+            'agentProviders:shared is already provided by plugin holder',
+          )
+          assert.strictEqual(host.agentProvider('shared'), heldProvider)
+          yield* host.hooks.run(
+            'prompt.beforeSend',
+            { sessionId: 's', input: { text: 'x' } },
+            (input) => Effect.succeed(input),
+          )
+          assert.deepStrictEqual(journal, ['rival disposed', 'holder hook'])
+        }),
+    )
+
+    suite.effect('refuses a plugin that offers the runtime of a bundled one', () =>
+      Effect.gen(function* refusesTakenRuntime() {
+        const host = yield* loadedHost
+        assert.strictEqual(
+          statusOf(host, 'intruder').reason,
+          'workspaceRuntimes:local is already provided by plugin workspace-local',
+        )
+        assert.strictEqual(host.workspaceRuntimes().length, 1)
+        assert.notStrictEqual(host.workspaceRuntimes()[0], impostor)
+      }),
+    )
+  },
+)
+```
+`packages/kernel/src/plugins/plugin-host-workspace.test.ts`:
+```ts
+import { existsSync } from 'node:fs'
+import type { WorkspaceSpec } from '@bytebureau/plugin-api'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { kernelLogger } from '../logging/logging.js'
+import { withEnv } from '../process/supervisor-fixtures.js'
+import { createTempRepo, tempDir } from '../testing/temp-repo.js'
+import { WorkspaceRuntimes } from '../workspace/runtimes.js'
+import { resolved } from './plugin-call-fixtures.js'
+import { hostOver, loadedHost } from './plugin-fixtures.js'
+
+// Real git processes, so the supervisor runs on the real clock
+const live = { excludeTestServices: true }
+
+const specFor = (projectPath: string): WorkspaceSpec => ({
+  sessionId: 'host-1',
+  projectPath,
+  baseBranch: 'main',
+  branch: 'bb/host-1',
+  copyIgnored: [],
+  logger: kernelLogger(['bb', 'test']),
+})
+
+it.layer(hostOver(), live)('PluginHost workspace runtime', (suite) => {
+  suite.effect('lets the bundled runtime provision and destroy a worktree through the host', () =>
+    Effect.gen(function* managesWorktree() {
+      yield* withEnv('HOME', tempDir('bb-home-'))
+      yield* loadedHost
+      const runtime = yield* Effect.fromNullishOr((yield* WorkspaceRuntimes).get('local'))
+      const repo = createTempRepo()
+      const handle = yield* resolved(runtime.provision(specFor(repo)))
+      assert.isTrue(existsSync(handle.path))
+      assert.strictEqual(handle.branch, 'bb/host-1')
+      assert.isFalse((yield* resolved(runtime.status(handle))).dirty)
+      yield* resolved(runtime.destroy(handle))
+      assert.isFalse(existsSync(handle.path))
+    }),
+  )
+})
+```
+`packages/kernel/src/plugins/reason.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import { reasonOf } from './reason.js'
+
+describe(reasonOf, () => {
+  it('reports the message of an error and the text of anything else', () => {
+    expect(reasonOf(new Error('boom'))).toBe('boom')
+    expect(reasonOf('plain text')).toBe('plain text')
+    expect(reasonOf(42)).toBe('42')
+  })
+})
+```
+`packages/kernel/src/secrets/in-memory-secret-store.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest'
+import { InMemorySecretStore } from './in-memory-secret-store.js'
+
+describe(InMemorySecretStore, () => {
+  it('keeps what is set, replaces it and forgets it once deleted', async () => {
+    expect.hasAssertions()
+    const store = new InMemorySecretStore()
+    await expect(store.get('key')).resolves.toBeUndefined()
+    await store.set('key', 'first')
+    await expect(store.get('key')).resolves.toBe('first')
+    await store.set('key', 'second')
+    await expect(store.get('key')).resolves.toBe('second')
+    await store.delete('key')
+    await expect(store.get('key')).resolves.toBeUndefined()
+  })
+})
+```
+`packages/kernel/src/plugins/plugin-fixtures.ts` (test plugins):
+```ts
+import {
+  definePlugin,
+  type AgentCapabilities,
+  type AgentProvider,
+  type Plugin,
+  type PluginContext,
+  type PluginManifest,
+  type PluginRegistration,
+  type WorkspaceRuntime,
+} from '@bytebureau/plugin-api'
+import { Context, Effect, Exit, Layer, Scope } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { EventLogLive, type EventLog } from '../events/event-log.js'
+import { SupervisorLive, type Supervisor } from '../process/supervisor.js'
+import { StoreTest } from '../store/store-test.js'
+import type { WorkspaceRuntimes } from '../workspace/runtimes.js'
+import {
+  PluginHost,
+  PluginHostLive,
+  type PluginHostOptions,
+  type PluginHostShape,
+  type PluginStatus,
+} from './plugin-host.js'
+
+const NO_CAPABILITIES: AgentCapabilities = {
+  resume: false,
+  interrupt: false,
+  askUser: false,
+  permissions: false,
+  structuredOutput: false,
+  usage: false,
+  rateLimits: false,
+  contextUsage: false,
+  thinking: false,
+  setModel: false,
+  setEffort: false,
+  attachments: false,
+}
+
+type Dependencies = EventLog | Supervisor | SqlClient.SqlClient
+
+// The event log and the supervisor over an in-memory store
+const Deps: Layer.Layer<Dependencies> = Layer.mergeAll(EventLogLive, SupervisorLive).pipe(
+  Layer.provideMerge(StoreTest),
+)
+
+// The host over those dependencies, which stay in reach of a test beside it
+export const hostOver = (
+  options: PluginHostOptions = {},
+): Layer.Layer<PluginHost | WorkspaceRuntimes | Dependencies> =>
+  PluginHostLive(options).pipe(Layer.provideMerge(Deps))
+
+// The host with its plugins loaded; loading twice is harmless
+export const loadedHost: Effect.Effect<PluginHostShape, never, PluginHost> = Effect.gen(
+  function* loadsHost() {
+    const host = yield* PluginHost
+    yield* host.load()
+    return host
+  },
+)
+
+export const manifestOf = (name: string, extra: Partial<PluginManifest> = {}): PluginManifest => ({
+  name,
+  version: '1.0.0',
+  hostApi: '^0',
+  kind: 'in-process',
+  ...extra,
+})
+
+const unused = async (): Promise<never> => {
+  await Promise.resolve()
+  throw new Error('a stub does nothing')
+}
+
+// A provider that offers nothing and never opens a session
+export const providerOf = (id: string): AgentProvider => ({
+  id,
+  displayName: id,
+  capabilities: NO_CAPABILITIES,
+  authStatus: async () => {
+    const state = await Promise.resolve('loggedIn' as const)
+    return { state }
+  },
+  createSession: unused,
+})
+
+// A runtime that offers nothing
+export const runtimeOf = (id: string): WorkspaceRuntime => ({
+  id,
+  isolation: 'none',
+  provision: unused,
+  exec: unused,
+  status: unused,
+  destroy: unused,
+})
+
+// A hook that passes everything on as it is
+export const passOn = async <Input, Result>(
+  input: Readonly<Input>,
+  proceed: (input: Input) => Promise<Result>,
+): Promise<Result> => {
+  const result = await proceed(input)
+  return result
+}
+
+// A hook that notes its name in the journal and passes on
+export const noting =
+  (journal: string[], name: string) =>
+  async <Input, Result>(
+    input: Readonly<Input>,
+    proceed: (input: Input) => Promise<Result>,
+  ): Promise<Result> => {
+    journal.push(name)
+    const result = await proceed(input)
+    return result
+  }
+
+export interface Probe {
+  readonly plugin: Plugin
+  // The context the host handed over in setup; asking before the plugin has loaded fails
+  readonly context: () => PluginContext
+}
+
+// A plugin that registers what it is given and keeps its context, for tests that call the context
+export function probe(
+  name: string,
+  registration: PluginRegistration = {},
+  manifest: Partial<PluginManifest> = {},
+): Probe {
+  const kept: { context?: PluginContext } = {}
+  const plugin = definePlugin({
+    manifest: manifestOf(name, manifest),
+    setup: (context) => {
+      kept.context = context
+      return registration
+    },
+  })
+  return {
+    plugin,
+    context: () => {
+      if (kept.context === undefined) {
+        throw new Error(`plugin ${name} has not been set up`)
+      }
+      return kept.context
+    },
+  }
+}
+
+export function statusOf(
+  host: { readonly plugins: () => readonly PluginStatus[] },
+  name: string,
+): PluginStatus {
+  const status = host.plugins().find((candidate) => candidate.name === name)
+  if (status === undefined) {
+    throw new Error(`no status for plugin ${name}`)
+  }
+  return status
+}
+
+// A host of its own, which the test shuts down itself; the scope closes it with the test at the latest
+export const startHost = (
+  options: PluginHostOptions = {},
+): Effect.Effect<
+  { readonly host: PluginHostShape; readonly stop: Effect.Effect<void> },
+  never,
+  Scope.Scope
+> =>
+  Effect.gen(function* startsHost() {
+    const scope = yield* Effect.acquireRelease(Scope.make(), (own) => Scope.close(own, Exit.void))
+    const context = yield* Layer.buildWithScope(hostOver(options), scope)
+    return { host: Context.get(context, PluginHost), stop: Scope.close(scope, Exit.void) }
+  })
+```
+`packages/kernel/src/plugins/plugin-call-fixtures.ts`:
+```ts
+import type { ExecSpec } from '@bytebureau/plugin-api'
+import { Effect } from 'effect'
+
+// What a promise of a plugin resolves to
+export const resolved = <Value>(promise: Promise<Value>): Effect.Effect<Value> =>
+  Effect.promise(async () => {
+    const value = await promise
+    return value
+  })
+
+// What a promise of a plugin rejects with; one that resolves fails the test
+export const rejected = (promise: Promise<unknown>): Effect.Effect<unknown, unknown> =>
+  Effect.flip(
+    Effect.tryPromise({
+      try: async () => {
+        const value = await promise
+        return value
+      },
+      catch: (cause) => cause,
+    }),
+  )
+
+export const linesOf = (lines: AsyncIterable<string>): Effect.Effect<readonly string[]> =>
+  Effect.promise(async () => {
+    const seen: string[] = []
+    for await (const line of lines) {
+      seen.push(line)
+    }
+    return seen
+  })
+
+// The first items of a subscription; leaving the loop ends it
+export const takeFrom = <Item>(
+  items: AsyncIterable<Item>,
+  count: number,
+): Effect.Effect<readonly Item[]> =>
+  Effect.promise(async () => {
+    const taken: Item[] = []
+    for await (const item of items) {
+      taken.push(item)
+      if (taken.length === count) {
+        break
+      }
+    }
+    return taken
+  })
+
+// A Node script as a command a plugin can spawn
+export const nodeExec = (
+  script: string,
+  extra: Partial<ExecSpec> = {},
+): ExecSpec & { readonly cwd: string } => ({
+  command: process.execPath,
+  args: ['-e', script],
+  cwd: process.cwd(),
+  ...extra,
+})
+```
+`packages/kernel/src/plugins/log-fixtures.ts`:
+```ts
+import type { LogRecord } from '@logtape/logtape'
+import { Effect, type Scope } from 'effect'
+import { vi } from 'vitest'
+import { configureLogging, resetLogging } from '../logging/logging.js'
+
+// LogTape is global: the warnings of the test are collected until its scope closes, and kept off the console
+export const warnings: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = Effect.map(
+  Effect.acquireRelease(
+    Effect.promise(async () => {
+      const records: LogRecord[] = []
+      const spy = vi.spyOn(globalThis.console, 'warn').mockReturnValue()
+      await configureLogging({
+        level: 'warn',
+        json: true,
+        capture: (record) => {
+          records.push(record)
+        },
+      })
+      return { records, spy }
+    }),
+    ({ spy }) =>
+      Effect.promise(async () => {
+        await resetLogging()
+        spy.mockRestore()
+      }),
+  ),
+  ({ records }) => records,
+)
 ```
 
 - [ ] **Step 2: Implementation**
 
 `packages/kernel/src/plugins/semver-major.ts`:
 ```ts
-// Only caret ranges are accepted for hostApi (^MAJOR[.MINOR[.PATCH]]); anything else is incompatible by design
+const DIGITS = /^\d+$/u
+
+// The major of MAJOR[.MINOR[.PATCH]] after a caret; anything else has none
+function wantedMajor(range: string): string | undefined {
+  if (!range.startsWith('^')) {
+    return undefined
+  }
+  const parts = range.slice(1).split('.')
+  return parts.length <= 3 && parts.every((part) => DIGITS.test(part)) ? parts[0] : undefined
+}
+
+// The major of a version with a dot after it
+function actualMajor(version: string): string | undefined {
+  const [major, ...rest] = version.split('.')
+  return rest.length > 0 && major !== undefined && DIGITS.test(major) ? major : undefined
+}
+
+// Only caret ranges are accepted for hostApi; anything else is incompatible by design
 export function satisfiesMajor(range: string, version: string): boolean {
-  const wanted = /^\^(\d+)(?:\.\d+)?(?:\.\d+)?$/u.exec(range)
-  const actual = /^(\d+)\./u.exec(version)
-  return wanted !== null && actual !== null && wanted[1] === actual[1]
+  const wanted = wantedMajor(range)
+  return wanted !== undefined && wanted === actualMajor(version)
 }
 ```
 `packages/kernel/src/plugins/hooks.ts`:
 ```ts
 import type { Hook, Hooks } from '@bytebureau/plugin-api'
-import { Effect } from 'effect'
+import type { Effect } from 'effect'
 import { kernelLogger } from '../logging/logging.js'
+import { HookChain } from './hooks-chain.js'
 
 type HookName = keyof Hooks
 type Input<Name extends HookName> = Parameters<Hooks[Name]>[0]
 type Result<Name extends HookName> = Awaited<ReturnType<Hooks[Name]>>
 
-interface Registered {
+// The hook of a name, typed by the name so that a hook cannot be registered under another
+type Registered = { [Name in HookName]: Hook<Input<Name>, Result<Name>> }
+type Chains = { [Name in HookName]: HookChain<Input<Name>, Result<Name>> }
+
+// Middleware chains in registration order; a throwing hook is logged and skipped
+export class HookBus {
+  private readonly chains: Chains
+
+  public constructor(category: readonly string[]) {
+    const logger = kernelLogger([...category, 'hooks'])
+    this.chains = {
+      'session.beforeCreate': new HookChain(logger, 'session.beforeCreate'),
+      'agent.beforeSpawn': new HookChain(logger, 'agent.beforeSpawn'),
+      'ask.beforeOpen': new HookChain(logger, 'ask.beforeOpen'),
+      'prompt.beforeSend': new HookChain(logger, 'prompt.beforeSend'),
+      'event.beforePublish': new HookChain(logger, 'event.beforePublish'),
+    }
+  }
+
+  public register<Name extends HookName>(plugin: string, name: Name, hook: Registered[Name]): void {
+    this.chains[name].add(plugin, hook)
+  }
+
+  // Whatever hooks a plugin has, each under its own name
+  public registerAll(plugin: string, hooks: Partial<Hooks>): void {
+    this.offer(plugin, 'session.beforeCreate', hooks['session.beforeCreate'])
+    this.offer(plugin, 'agent.beforeSpawn', hooks['agent.beforeSpawn'])
+    this.offer(plugin, 'ask.beforeOpen', hooks['ask.beforeOpen'])
+    this.offer(plugin, 'prompt.beforeSend', hooks['prompt.beforeSend'])
+    this.offer(plugin, 'event.beforePublish', hooks['event.beforePublish'])
+  }
+
+  public run<Name extends HookName>(
+    name: Name,
+    input: Input<Name>,
+    terminal: (input: Input<Name>) => Effect.Effect<Result<Name>>,
+  ): Effect.Effect<Result<Name>> {
+    return this.chains[name].run(input, terminal)
+  }
+
+  private offer<Name extends HookName>(
+    plugin: string,
+    name: Name,
+    hook: Registered[Name] | undefined,
+  ): void {
+    if (hook !== undefined) {
+      this.register(plugin, name, hook)
+    }
+  }
+}
+```
+`packages/kernel/src/plugins/hooks-chain.ts`:
+```ts
+import type { Hook, Logger } from '@bytebureau/plugin-api'
+import { Effect } from 'effect'
+import { reasonOf } from './reason.js'
+
+interface Entry<Input, Output> {
   readonly plugin: string
-  readonly hook: Hook<unknown, unknown>
+  readonly hook: Hook<Input, Output>
 }
 
-// Middleware chain in registration order; a throwing hook is logged and skipped
-export class HookBus {
-  private readonly hooks = new Map<HookName, Registered[]>()
-  private readonly logger
+type Rest<Input, Output> = (input: Input) => Effect.Effect<Output>
 
-  constructor(category: readonly string[]) {
-    this.logger = kernelLogger([...category, 'hooks'])
+// A hook that failed after passing on leaves what the rest of the chain produced; otherwise the chain goes on without it
+const resumed = <Output>(
+  passedOn: Promise<Output> | undefined,
+  without: () => Effect.Effect<Output>,
+): Effect.Effect<Output> =>
+  passedOn === undefined
+    ? without()
+    : Effect.promise(async () => {
+        const result = await passedOn
+        return result
+      })
+
+// The hooks of one name in registration order; each one decides whether to pass on to the next
+export class HookChain<Input, Output> {
+  private readonly entries: Entry<Input, Output>[] = []
+  private readonly logger: Logger
+  private readonly name: string
+
+  public constructor(logger: Logger, name: string) {
+    this.logger = logger
+    this.name = name
   }
 
-  register<Name extends HookName>(plugin: string, name: Name, hook: Hooks[Name]): void {
-    const list = this.hooks.get(name) ?? []
-    list.push({ plugin, hook: hook as Hook<unknown, unknown> })
-    this.hooks.set(name, list)
+  public add(plugin: string, hook: Hook<Input, Output>): void {
+    this.entries.push({ plugin, hook })
   }
 
-  run<Name extends HookName>(name: Name, input: Input<Name>, terminal: (input: Input<Name>) => Effect.Effect<Result<Name>>): Effect.Effect<Result<Name>> {
-    const chain = this.hooks.get(name) ?? []
-    const step = (index: number, current: Input<Name>): Effect.Effect<Result<Name>> => {
-      const entry = chain[index]
-      if (entry === undefined) {
-        return terminal(current)
-      }
-      return Effect.tryPromise(() => entry.hook(current, (next) => Effect.runPromise(step(index + 1, next as Input<Name>)))).pipe(
-        Effect.map((result) => result as Result<Name>),
-        Effect.catch((cause) => {
-          this.logger.warn('hook failed; continuing', { plugin: entry.plugin, hook: name, cause: String(cause) })
-          return step(index + 1, current)
-        }),
-      )
+  public run(input: Input, terminal: Rest<Input, Output>): Effect.Effect<Output> {
+    return this.from(0, input, terminal)
+  }
+
+  private from(
+    index: number,
+    current: Input,
+    terminal: Rest<Input, Output>,
+  ): Effect.Effect<Output> {
+    const entry = this.entries[index]
+    if (entry === undefined) {
+      return terminal(current)
     }
-    return step(0, input)
+    return this.attempt(entry, current, (value) => this.from(index + 1, value, terminal))
+  }
+
+  private attempt(
+    entry: Entry<Input, Output>,
+    current: Input,
+    rest: Rest<Input, Output>,
+  ): Effect.Effect<Output> {
+    const passedOn: Promise<Output>[] = []
+    const next = async (value: Input): Promise<Output> => {
+      const downstream = Effect.runPromise(rest(value))
+      passedOn.push(downstream)
+      const result = await downstream
+      return result
+    }
+    const call = Effect.tryPromise({
+      try: async () => {
+        const result = await entry.hook(current, next)
+        return result
+      },
+      catch: (failure) => failure,
+    })
+    return Effect.matchEffect(call, {
+      onFailure: (failure) => {
+        this.report(entry, failure)
+        return resumed(passedOn.at(-1), () => rest(current))
+      },
+      onSuccess: (result) => Effect.succeed(result),
+    })
+  }
+
+  private report(entry: Entry<Input, Output>, failure: unknown): void {
+    this.logger.warn('hook failed; continuing', {
+      plugin: entry.plugin,
+      hook: this.name,
+      cause: reasonOf(failure),
+    })
+  }
+}
+```
+`packages/kernel/src/plugins/reason.ts`:
+```ts
+// The text a failure is reported with, whatever was thrown
+export const reasonOf = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause)
+```
+`packages/kernel/src/plugins/port-registry.ts`:
+```ts
+import type { AgentProvider, PluginRegistration, WorkspaceRuntime } from '@bytebureau/plugin-api'
+
+// The ports that have an id of their own, and so can be taken
+const identified = (registration: PluginRegistration): readonly string[] => [
+  ...(registration.agentProviders ?? []).map((provider) => `agentProviders:${provider.id}`),
+  ...(registration.workspaceRuntimes ?? []).map((runtime) => `workspaceRuntimes:${runtime.id}`),
+]
+
+// Every port a registration offers, as plugin.loaded reports them
+export const portsOf = (registration: PluginRegistration): readonly string[] => [
+  ...identified(registration),
+  ...(registration.secretStores ?? []).map(() => 'secretStores'),
+]
+
+// The ports of the plugins that loaded; the first plugin to offer a port keeps it
+export class PortRegistry {
+  private readonly providers = new Map<string, AgentProvider>()
+  private readonly runtimes = new Map<string, WorkspaceRuntime>()
+  private readonly owners = new Map<string, string>()
+
+  // Takes all ports of a registration, or none and returns which port is held already, and by whom
+  public claim(plugin: string, registration: PluginRegistration): string | undefined {
+    const [held] = this.heldPorts(registration)
+    if (held === undefined) {
+      this.store(plugin, registration)
+    }
+    return held
+  }
+
+  public agentProviders(): readonly AgentProvider[] {
+    return [...this.providers.values()]
+  }
+
+  public agentProvider(id: string): AgentProvider | undefined {
+    return this.providers.get(id)
+  }
+
+  public workspaceRuntimes(): readonly WorkspaceRuntime[] {
+    return [...this.runtimes.values()]
+  }
+
+  public workspaceRuntime(id: string): WorkspaceRuntime | undefined {
+    return this.runtimes.get(id)
+  }
+
+  private heldPorts(registration: PluginRegistration): readonly string[] {
+    return identified(registration).flatMap((port) => {
+      const owner = this.owners.get(port)
+      return owner === undefined ? [] : [`${port} is already provided by plugin ${owner}`]
+    })
+  }
+
+  private store(plugin: string, registration: PluginRegistration): void {
+    for (const port of identified(registration)) {
+      this.owners.set(port, plugin)
+    }
+    for (const provider of registration.agentProviders ?? []) {
+      this.providers.set(provider.id, provider)
+    }
+    for (const runtime of registration.workspaceRuntimes ?? []) {
+      this.runtimes.set(runtime.id, runtime)
+    }
+  }
+}
+```
+`packages/kernel/src/plugins/plugin-setup.ts`:
+```ts
+import type { Plugin, PluginRegistration } from '@bytebureau/plugin-api'
+import { HOST_API_VERSION } from './bundled.js'
+import { createPluginContext, type ContextDeps } from './plugin-context.js'
+import { satisfiesMajor } from './semver-major.js'
+
+type Path = readonly (PropertyKey | { readonly key: PropertyKey })[] | undefined
+
+// Dotted keys of an issue, a nested one too; the empty text for an issue about the whole config
+const dotted = (path: Path): string =>
+  (path ?? [])
+    .map((segment) => String(typeof segment === 'object' ? segment.key : segment))
+    .join('.')
+
+const describeIssue = (path: Path, message: string): string => {
+  const where = dotted(path)
+  return where === '' ? message : `${where} ${message}`
+}
+
+// A plugin without a schema gets its config as it is; one with a schema gets what the schema makes of it, {} when there is none
+async function validateConfig(plugin: Plugin, config: unknown): Promise<unknown> {
+  const schema = plugin.manifest.config
+  if (schema === undefined) {
+    return config
+  }
+  const result = await schema['~standard'].validate(config ?? {})
+  if (result.issues !== undefined) {
+    const issues = result.issues.map((issue) => describeIssue(issue.path, issue.message))
+    throw new Error(`config invalid: ${issues.join('; ')}`)
+  }
+  return result.value
+}
+
+// A plugin written in plain JavaScript may forget to return its registration
+const isRegistration = (value: unknown): value is PluginRegistration =>
+  typeof value === 'object' && value !== null
+
+// Everything that can refuse a plugin: the host API gate, its config and its own setup
+export async function setUpPlugin(
+  plugin: Plugin,
+  config: unknown,
+  deps: ContextDeps,
+): Promise<PluginRegistration> {
+  const { name, hostApi } = plugin.manifest
+  if (!satisfiesMajor(hostApi, HOST_API_VERSION)) {
+    throw new Error(
+      `plugin ${name} needs host API ${hostApi}, this ByteBureau provides ${HOST_API_VERSION}`,
+    )
+  }
+  const validated = await validateConfig(plugin, config)
+  const registration: unknown = await plugin.setup(createPluginContext(name, validated, deps))
+  if (!isRegistration(registration)) {
+    throw new Error(`plugin ${name} returned no registration from setup`)
+  }
+  return registration
+}
+```
+`packages/kernel/src/plugins/plugin-loader.ts`:
+```ts
+import type { KernelEvent, Plugin, PluginRegistration } from '@bytebureau/plugin-api'
+import { Effect, Result } from 'effect'
+import { constVoid } from 'effect/Function'
+import { PluginError } from '../errors.js'
+import { kernelLogger } from '../logging/logging.js'
+import { HookBus } from './hooks.js'
+import type { ContextDeps } from './plugin-context.js'
+import { setUpPlugin } from './plugin-setup.js'
+import { PortRegistry, portsOf } from './port-registry.js'
+import { reasonOf } from './reason.js'
+
+export interface PluginStatus {
+  readonly name: string
+  readonly version: string
+  readonly state: 'loaded' | 'failed'
+  readonly reason?: string | undefined
+  readonly ports: readonly string[]
+}
+
+interface Loaded {
+  readonly name: string
+  readonly registration: PluginRegistration
+}
+
+// Sets plugins up one after the other, records what each did and registers what the loaded ones offer
+export class PluginLoader {
+  public readonly hooks = new HookBus(['bb', 'plugin'])
+  public readonly ports = new PortRegistry()
+  private readonly statuses: PluginStatus[] = []
+  private readonly loaded: Loaded[] = []
+  private readonly logger = kernelLogger(['bb', 'plugin'])
+  private readonly deps: ContextDeps
+  private readonly configs: Readonly<Record<string, unknown>>
+
+  public constructor(deps: ContextDeps, configs: Readonly<Record<string, unknown>>) {
+    this.deps = deps
+    this.configs = configs
+  }
+
+  public plugins(): readonly PluginStatus[] {
+    return [...this.statuses]
+  }
+
+  // A plugin that is refused is recorded and announced, and never stops the others
+  public load(plugins: readonly Plugin[]): Effect.Effect<void> {
+    return Effect.forEach(plugins, (plugin) => this.loadOne(plugin), { discard: true })
+  }
+
+  // The plugins that loaded go in reverse order, and a plugin that fails to dispose does not keep the others
+  public dispose(): Effect.Effect<void> {
+    return Effect.forEach(
+      this.loaded.toReversed(),
+      ({ name, registration }) => this.release(name, registration),
+      { discard: true },
+    )
+  }
+
+  private loadOne(plugin: Plugin): Effect.Effect<void> {
+    return Effect.result(this.admit(plugin)).pipe(
+      Effect.flatMap((outcome) =>
+        Result.isFailure(outcome)
+          ? this.refuse(plugin, outcome.failure)
+          : this.accept(plugin, outcome.success),
+      ),
+    )
+  }
+
+  private admit(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
+    const { name } = plugin.manifest
+    if (this.loaded.some((entry) => entry.name === name)) {
+      const reason = `a plugin named ${name} is already loaded`
+      return Effect.fail(new PluginError({ plugin: name, reason }))
+    }
+    return this.setUp(plugin).pipe(
+      Effect.flatMap((registration) => this.register(plugin, registration)),
+    )
+  }
+
+  private setUp(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
+    const { name } = plugin.manifest
+    return Effect.tryPromise({
+      try: async () => {
+        const registration = await setUpPlugin(plugin, this.configs[name], this.deps)
+        return registration
+      },
+      catch: (failure) => new PluginError({ plugin: name, reason: reasonOf(failure) }),
+    })
+  }
+
+  // A port another plugin holds refuses the plugin, which is disposed at once; its hooks never reach the bus
+  private register(
+    plugin: Plugin,
+    registration: PluginRegistration,
+  ): Effect.Effect<PluginRegistration, PluginError> {
+    const { name } = plugin.manifest
+    const held = this.ports.claim(name, registration)
+    if (held !== undefined) {
+      const refusal = Effect.fail(new PluginError({ plugin: name, reason: held }))
+      return Effect.andThen(this.release(name, registration), refusal)
+    }
+    this.hooks.registerAll(name, registration.hooks ?? {})
+    this.loaded.push({ name, registration })
+    return Effect.succeed(registration)
+  }
+
+  private accept(plugin: Plugin, registration: PluginRegistration): Effect.Effect<void> {
+    const { name, version } = plugin.manifest
+    const ports = portsOf(registration)
+    this.statuses.push({ name, version, state: 'loaded', ports })
+    return this.announce({ type: 'plugin.loaded', payload: { name, version, ports } })
+  }
+
+  private refuse(plugin: Plugin, failure: PluginError): Effect.Effect<void> {
+    const { name, version } = plugin.manifest
+    const { reason } = failure
+    this.statuses.push({ name, version, state: 'failed', reason, ports: [] })
+    this.logger.warn('plugin failed', { plugin: name, reason })
+    return this.announce({ type: 'plugin.failed', payload: { name, reason } })
+  }
+
+  // The log failing to record an announcement does not undo the plugin's outcome
+  private announce(event: KernelEvent): Effect.Effect<void> {
+    return Effect.match(this.deps.log.publish(event), {
+      onFailure: (failure) => {
+        this.logger.warn('plugin event not recorded', {
+          type: event.type,
+          reason: reasonOf(failure.cause),
+        })
+      },
+      onSuccess: constVoid,
+    })
+  }
+
+  private release(name: string, registration: PluginRegistration): Effect.Effect<void> {
+    const disposing = Effect.tryPromise({
+      try: async () => {
+        if (registration.dispose !== undefined) {
+          await registration.dispose()
+        }
+      },
+      catch: (failure) => failure,
+    })
+    return Effect.match(disposing, {
+      onFailure: (failure) => {
+        this.logger.warn('plugin dispose failed', { plugin: name, reason: reasonOf(failure) })
+      },
+      onSuccess: constVoid,
+    })
   }
 }
 ```
@@ -10063,77 +11828,147 @@ import type { SecretStore } from '@bytebureau/plugin-api'
 // Phase A placeholder; Phase C replaces it with the keychain and the age-encrypted fallback
 export class InMemorySecretStore implements SecretStore {
   private readonly values = new Map<string, string>()
-  get(key: string): Promise<string | undefined> {
-    return Promise.resolve(this.values.get(key))
+
+  public async get(key: string): Promise<string | undefined> {
+    await Promise.resolve()
+    return this.values.get(key)
   }
-  set(key: string, value: string): Promise<void> {
+
+  public async set(key: string, value: string): Promise<void> {
+    await Promise.resolve()
     this.values.set(key, value)
-    return Promise.resolve()
   }
-  delete(key: string): Promise<void> {
+
+  public async delete(key: string): Promise<void> {
+    await Promise.resolve()
     this.values.delete(key)
-    return Promise.resolve()
   }
 }
 ```
 `packages/kernel/src/plugins/plugin-context.ts`:
 ```ts
-import type { ExecHandle, ExecSpec, KernelEvent, PluginContext, SecretStore } from '@bytebureau/plugin-api'
-import { Effect, Scope, Stream } from 'effect'
-import { SqlClient } from 'effect/sql'
-import { EventLog } from '../events/event-log.js'
+import type {
+  ExecHandle,
+  ExecSpec,
+  PluginContext,
+  PluginEvents,
+  PluginKv,
+  ProcessSpawner,
+  SecretStore,
+} from '@bytebureau/plugin-api'
+import { Effect, Exit, Scope, Stream } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { EventLogShape } from '../events/event-log.js'
 import { kernelLogger } from '../logging/logging.js'
-import { Supervisor } from '../process/supervisor.js'
+import type { ManagedProcess, SpawnSpec, Supervisor } from '../process/supervisor.js'
 
 export interface ContextDeps {
-  readonly log: EventLog['Type']
-  readonly supervisor: Supervisor['Type']
+  readonly log: EventLogShape
+  readonly supervisor: Supervisor['Service']
   readonly sql: SqlClient.SqlClient
   readonly secrets: SecretStore
+  readonly signal: AbortSignal
 }
 
-const namespaced = (secrets: SecretStore, name: string): SecretStore => ({
-  get: (key) => secrets.get(`${name}/${key}`),
-  set: (key, value) => secrets.set(`${name}/${key}`, value),
-  delete: (key) => secrets.delete(`${name}/${key}`),
+type Exec = ExecSpec & { readonly cwd: string }
+
+const namespaced = (secrets: SecretStore, plugin: string): SecretStore => ({
+  get: async (key) => {
+    const value = await secrets.get(`${plugin}/${key}`)
+    return value
+  },
+  set: async (key, value) => {
+    await secrets.set(`${plugin}/${key}`, value)
+  },
+  delete: async (key) => {
+    await secrets.delete(`${plugin}/${key}`)
+  },
 })
 
-export function createPluginContext(name: string, config: unknown, deps: ContextDeps, signal: AbortSignal): PluginContext {
-  const { log, supervisor, sql } = deps
+const eventsOf = (log: EventLogShape): PluginEvents => ({
+  publish: async (event) => {
+    await Effect.runPromise(log.publish(event))
+  },
+  subscribe: (filter) =>
+    Stream.toAsyncIterable(log.subscribe({ types: filter.types, sessionId: filter.sessionId })),
+})
+
+const kvOf = (sql: SqlClient.SqlClient, plugin: string): PluginKv => ({
+  get: async (key) => {
+    const rows = await Effect.runPromise(
+      sql<{
+        readonly value_json: string
+      }>`SELECT value_json FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
+    )
+    const [row] = rows
+    const value: unknown = row === undefined ? undefined : JSON.parse(row.value_json)
+    return value
+  },
+  set: async (key, value) => {
+    await Effect.runPromise(
+      sql`INSERT INTO plugin_kv (plugin_id, key, value_json) VALUES (${plugin}, ${key}, ${JSON.stringify(value)}) ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json`,
+    )
+  },
+  delete: async (key) => {
+    await Effect.runPromise(sql`DELETE FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`)
+  },
+})
+
+// A plugin's own env is what it declared, so it passes the allowlist by name
+const specOf = (spec: Exec): SpawnSpec => ({
+  kind: 'helper',
+  command: spec.command,
+  args: spec.args,
+  cwd: spec.cwd,
+  env: spec.env ?? {},
+  passEnv: Object.keys(spec.env ?? {}),
+  signal: spec.signal,
+})
+
+const handleOf = (managed: ManagedProcess): ExecHandle => ({
+  pid: managed.pid,
+  stdout: Stream.toAsyncIterable(managed.stdout),
+  stderr: Stream.toAsyncIterable(managed.stderr),
+  exited: Effect.runPromise(managed.exit),
+  kill: (signal) => {
+    Effect.runFork(managed.kill(signal))
+  },
+})
+
+// The process lives in a scope of its own that closes once it has exited; the timeout is a fiber of that scope
+const spawnHandle = (supervisor: Supervisor['Service'], spec: Exec): Effect.Effect<ExecHandle> =>
+  Effect.gen(function* spawnsHandle() {
+    const scope = yield* Scope.make()
+    const managed = yield* Effect.provideService(supervisor.spawn(specOf(spec)), Scope.Scope, scope)
+    yield* Effect.forkDetach(Effect.andThen(managed.exit, Scope.close(scope, Exit.void)))
+    if (spec.timeoutMs !== undefined) {
+      yield* Effect.forkIn(Effect.andThen(Effect.sleep(spec.timeoutMs), managed.kill()), scope)
+    }
+    return handleOf(managed)
+  })
+
+const spawnerOf = (supervisor: Supervisor['Service']): ProcessSpawner => ({
+  spawn: async (spec) => {
+    const handle = await Effect.runPromise(spawnHandle(supervisor, spec))
+    return handle
+  },
+})
+
+export function createPluginContext(
+  name: string,
+  config: unknown,
+  deps: ContextDeps,
+): PluginContext {
   return {
     config,
     project: null,
     logger: kernelLogger(['bb', 'plugin', name]),
-    events: {
-      publish: (event: KernelEvent) => Effect.runPromise(Effect.asVoid(log.publish(event))),
-      subscribe: (filter) => Stream.toAsyncIterable(log.subscribe({ ...(filter.types === undefined ? {} : { types: filter.types }), ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }) })),
-    },
+    events: eventsOf(deps.log),
     secrets: namespaced(deps.secrets, name),
-    kv: {
-      get: <T>(key: string) =>
-        Effect.runPromise(Effect.map(sql<{ readonly value_json: string }>`SELECT value_json FROM plugin_kv WHERE plugin_id = ${name} AND key = ${key}`, (rows) => (rows[0] === undefined ? undefined : (JSON.parse(rows[0].value_json) as T)))),
-      set: (key, value) => Effect.runPromise(Effect.asVoid(sql`INSERT INTO plugin_kv (plugin_id, key, value_json) VALUES (${name}, ${key}, ${JSON.stringify(value)}) ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json`)),
-      delete: (key) => Effect.runPromise(Effect.asVoid(sql`DELETE FROM plugin_kv WHERE plugin_id = ${name} AND key = ${key}`)),
-    },
-    process: {
-      spawn: (spec: ExecSpec & { readonly cwd: string }): Promise<ExecHandle> =>
-        Effect.runPromise(
-          Effect.gen(function* () {
-            const scope = yield* Scope.make()
-            const managed = yield* supervisor.spawn({ kind: 'helper', command: spec.command, args: spec.args, cwd: spec.cwd, env: spec.env ?? {}, passEnv: Object.keys(spec.env ?? {}) }).pipe(Effect.provideService(Scope.Scope, scope))
-            yield* Effect.forkDetach(Effect.andThen(managed.exit, Scope.close(scope, Effect.void)))
-            return {
-              pid: managed.pid,
-              stdout: Stream.toAsyncIterable(managed.stdout),
-              stderr: Stream.toAsyncIterable(managed.stderr),
-              exited: Effect.runPromise(managed.exit),
-              kill: (signal) => { void Effect.runPromise(managed.kill(signal)) },
-            }
-          }),
-        ),
-    },
+    kv: kvOf(deps.sql, name),
+    process: spawnerOf(deps.supervisor),
     http: fetch,
-    signal,
+    signal: deps.signal,
   }
 }
 ```
@@ -10149,34 +11984,29 @@ export const BUNDLED_PLUGINS: readonly Plugin[] = [localWorkspacePlugin]
 ```
 `packages/kernel/src/plugins/plugin-host.ts`:
 ```ts
-import type { AgentProvider, Plugin, PluginRegistration, SecretStore, WorkspaceRuntime } from '@bytebureau/plugin-api'
-import { Context, Effect, Layer } from 'effect'
+import type { AgentProvider, Plugin, SecretStore, WorkspaceRuntime } from '@bytebureau/plugin-api'
+import { Context, Effect, Layer, type Scope } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
-import { kernelLogger } from '../logging/logging.js'
 import { Supervisor } from '../process/supervisor.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
-import { WorkspaceRuntimes } from '../workspace/runtimes.js'
-import { BUNDLED_PLUGINS, HOST_API_VERSION } from './bundled.js'
-import { HookBus } from './hooks.js'
-import { createPluginContext } from './plugin-context.js'
-import { satisfiesMajor } from './semver-major.js'
+import { WorkspaceRuntimes, type WorkspaceRuntimesShape } from '../workspace/runtimes.js'
+import { BUNDLED_PLUGINS } from './bundled.js'
+import type { HookBus } from './hooks.js'
+import { PluginLoader, type PluginStatus } from './plugin-loader.js'
 
-export interface PluginStatus {
-  readonly name: string
-  readonly version: string
-  readonly state: 'loaded' | 'failed'
-  readonly reason?: string | undefined
-  readonly ports: readonly string[]
-}
+export type { PluginStatus } from './plugin-loader.js'
+
 export interface PluginHostShape {
-  load(): Effect.Effect<void>
-  plugins(): readonly PluginStatus[]
-  agentProviders(): readonly AgentProvider[]
-  agentProvider(id: string): AgentProvider | undefined
-  workspaceRuntimes(): readonly WorkspaceRuntime[]
+  // Loads the bundled plugins and then the extra ones; the first call does the work, later ones wait for it
+  readonly load: () => Effect.Effect<void>
+  readonly plugins: () => readonly PluginStatus[]
+  readonly agentProviders: () => readonly AgentProvider[]
+  readonly agentProvider: (id: string) => AgentProvider | undefined
+  readonly workspaceRuntimes: () => readonly WorkspaceRuntime[]
   readonly hooks: HookBus
 }
+
 export interface PluginHostOptions {
   readonly extraPlugins?: readonly Plugin[] | undefined
   readonly pluginConfig?: Readonly<Record<string, unknown>> | undefined
@@ -10185,108 +12015,68 @@ export interface PluginHostOptions {
 
 export class PluginHost extends Context.Service<PluginHost, PluginHostShape>()('bb/PluginHost') {}
 
-const HOOK_NAMES = ['session.beforeCreate', 'agent.beforeSpawn', 'ask.beforeOpen', 'prompt.beforeSend', 'event.beforePublish'] as const
+const hostOf = (loader: PluginLoader, load: Effect.Effect<void>): PluginHostShape => ({
+  load: () => load,
+  plugins: () => loader.plugins(),
+  agentProviders: () => loader.ports.agentProviders(),
+  agentProvider: (id) => loader.ports.agentProvider(id),
+  workspaceRuntimes: () => loader.ports.workspaceRuntimes(),
+  hooks: loader.hooks,
+})
 
-async function validateConfig(plugin: Plugin, config: unknown): Promise<unknown> {
-  const schema = plugin.manifest.config
-  if (schema === undefined) {
-    return config
-  }
-  const result = await schema['~standard'].validate(config ?? {})
-  if ('issues' in result && result.issues !== undefined) {
-    throw new Error(`config invalid: ${result.issues.map((issue) => `${(issue.path ?? []).join('.')} ${issue.message}`).join('; ')}`)
-  }
-  return result.value
+const runtimesOf = (loader: PluginLoader): WorkspaceRuntimesShape => ({
+  get: (id) => loader.ports.workspaceRuntime(id),
+  list: () => loader.ports.workspaceRuntimes(),
+})
+
+interface Assembled {
+  readonly host: PluginHostShape
+  readonly runtimes: WorkspaceRuntimesShape
 }
 
-const portsOf = (registration: PluginRegistration): readonly string[] => [
-  ...(registration.agentProviders ?? []).map((provider) => `agentProviders:${provider.id}`),
-  ...(registration.workspaceRuntimes ?? []).map((runtime) => `workspaceRuntimes:${runtime.id}`),
-  ...(registration.secretStores ?? []).map(() => 'secretStores'),
-]
-
-const make = (options: PluginHostOptions) =>
-  Effect.gen(function* () {
+// At release the plugins' signal aborts first, then they are disposed
+const make = (
+  options: PluginHostOptions,
+): Effect.Effect<Assembled, never, EventLog | Supervisor | SqlClient.SqlClient | Scope.Scope> =>
+  Effect.gen(function* makePluginHost() {
     const log = yield* EventLog
     const supervisor = yield* Supervisor
     const sql = yield* SqlClient.SqlClient
-    const logger = kernelLogger(['bb', 'plugin'])
-    const secrets = options.secrets ?? new InMemorySecretStore()
-    const hooks = new HookBus(['bb', 'plugin'])
-    const statuses: PluginStatus[] = []
-    const providers = new Map<string, AgentProvider>()
-    const runtimes = new Map<string, WorkspaceRuntime>()
     const controller = new AbortController()
-    const disposers: (() => Promise<void>)[] = []
-
-    const register = (plugin: Plugin, registration: PluginRegistration): void => {
-      for (const provider of registration.agentProviders ?? []) {
-        providers.set(provider.id, provider)
-      }
-      for (const runtime of registration.workspaceRuntimes ?? []) {
-        runtimes.set(runtime.id, runtime)
-      }
-      for (const name of HOOK_NAMES) {
-        const hook = registration.hooks?.[name]
-        if (hook !== undefined) {
-          hooks.register(plugin.manifest.name, name, hook as never)
-        }
-      }
-      if (registration.dispose !== undefined) {
-        disposers.push(registration.dispose.bind(registration))
-      }
-    }
-
-    const loadOne = (plugin: Plugin): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        const { name, version, hostApi } = plugin.manifest
-        const outcome = yield* Effect.result(
-          Effect.tryPromise(async () => {
-            if (!satisfiesMajor(hostApi, HOST_API_VERSION)) {
-              throw new Error(`plugin ${name} needs host API ${hostApi}, this ByteBureau provides ${HOST_API_VERSION}`)
-            }
-            const config = await validateConfig(plugin, options.pluginConfig?.[name])
-            const context = createPluginContext(name, config, { log, supervisor, sql, secrets }, controller.signal)
-            return plugin.setup(context)
-          }),
-        )
-        if (outcome._tag === 'Failure') {
-          const reason = String(outcome.failure)
-          statuses.push({ name, version, state: 'failed', reason, ports: [] })
-          logger.warn('plugin failed', { plugin: name, reason })
-          yield* log.publish({ type: 'plugin.failed', payload: { name, reason } })
-          return
-        }
-        register(plugin, outcome.success)
-        const ports = portsOf(outcome.success)
-        statuses.push({ name, version, state: 'loaded', ports })
-        yield* log.publish({ type: 'plugin.loaded', payload: { name, version, ports } })
-      })
-
-    yield* Effect.addFinalizer(() => Effect.promise(async () => { controller.abort(); for (const dispose of disposers.reverse()) { await dispose().catch(() => undefined) } }))
-
-    const host: PluginHostShape = {
-      load: () => Effect.forEach([...BUNDLED_PLUGINS, ...(options.extraPlugins ?? [])], loadOne, { discard: true }),
-      plugins: () => [...statuses],
-      agentProviders: () => [...providers.values()],
-      agentProvider: (id) => providers.get(id),
-      workspaceRuntimes: () => [...runtimes.values()],
-      hooks,
-    }
-    return { host, runtimes }
+    const secrets = options.secrets ?? new InMemorySecretStore()
+    const deps = { log, supervisor, sql, secrets, signal: controller.signal }
+    const loader = new PluginLoader(deps, options.pluginConfig ?? {})
+    const load = yield* Effect.cached(
+      loader.load([...BUNDLED_PLUGINS, ...(options.extraPlugins ?? [])]),
+    )
+    yield* Effect.addFinalizer(() =>
+      Effect.andThen(
+        Effect.sync(() => {
+          controller.abort()
+        }),
+        loader.dispose(),
+      ),
+    )
+    return { host: hostOf(loader, load), runtimes: runtimesOf(loader) }
   })
 
-export const PluginHostLive = (options: PluginHostOptions = {}): Layer.Layer<PluginHost | WorkspaceRuntimes, never, EventLog | Supervisor | SqlClient.SqlClient> =>
+export const PluginHostLive = (
+  options: PluginHostOptions = {},
+): Layer.Layer<
+  PluginHost | WorkspaceRuntimes,
+  never,
+  EventLog | Supervisor | SqlClient.SqlClient
+> =>
   Layer.unwrap(
     Effect.map(make(options), ({ host, runtimes }) =>
       Layer.mergeAll(
         Layer.succeed(PluginHost, PluginHost.of(host)),
-        Layer.succeed(WorkspaceRuntimes, WorkspaceRuntimes.of({ get: (id) => runtimes.get(id), list: () => [...runtimes.values()] })),
+        Layer.succeed(WorkspaceRuntimes, WorkspaceRuntimes.of(runtimes)),
       ),
     ),
   )
 ```
-`Effect.result` yields `{ _tag: 'Success', success }` / `{ _tag: 'Failure', failure }` (verify the field names on `Result` in the installed `effect/Result` d.ts; the fact sheet confirms `Effect.result` exists and `effect/Either` became `effect/Result`). `Layer.unwrap` + `Effect.addFinalizer` need a scope: if `Layer.unwrap` does not provide one, use `Layer.scopedDiscard`-style composition (`Layer.effect` of a service holding both) — the simplest fallback is to make `PluginHost` the only service and let `WorkspaceRuntimes` be a `Layer.effect` that reads `PluginHost` (`runtimes` exposed via `host.workspaceRuntimes()`); Task 14 composes whichever form type-checks.
+Verified in Effect 4.0.0: `Result.isFailure(result)` with `.failure`/`.success`; `Layer.unwrap` strips `Scope`, so `Effect.addFinalizer` inside `make` is scoped to the layer (no fallback needed); `Scope.close(scope, Exit.void)`; the service types are `Supervisor['Service']` and `EventLog['Service']`.
 
 Add to `index.ts`: `export { PluginHost, PluginHostLive, type PluginHostShape, type PluginHostOptions, type PluginStatus } from './plugins/plugin-host.js'`, `export { HookBus } from './plugins/hooks.js'`, `export { BUNDLED_PLUGINS, HOST_API_VERSION } from './plugins/bundled.js'`, `export { InMemorySecretStore } from './secrets/in-memory-secret-store.js'`.
 
