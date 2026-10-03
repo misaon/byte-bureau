@@ -66,3 +66,11 @@ export {
 export { HookBus } from './plugins/hooks.js'
 export { BUNDLED_PLUGINS, HOST_API_VERSION } from './plugins/bundled.js'
 export { InMemorySecretStore } from './secrets/in-memory-secret-store.js'
+export {
+  AskService,
+  AskServiceLive,
+  DENY_ON_TIMEOUT_MESSAGE,
+  type OpenAskInput,
+  type AskServiceShape,
+} from './asks/ask-service.js'
+export { recommendForPermission, parseDuration } from './asks/policy.js'
