@@ -1730,8 +1730,12 @@ import { nowIso, uuidv7 } from './ids.js'
 describe(uuidv7, () => {
   it('produces time-ordered v7 ids', () => {
     const ids = Array.from({ length: 2000 }, () => uuidv7())
-    expect(ids.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id))).toBe(true)
-    expect([...ids].sort()).toEqual(ids)
+    expect(
+      ids.every((id) =>
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id),
+      ),
+    ).toBe(true)
+    expect(ids.toSorted()).toStrictEqual(ids)
   })
 })
 
@@ -1745,7 +1749,7 @@ describe(nowIso, () => {
 ```ts
 import { jsonLinesFormatter, type LogRecord } from '@logtape/logtape'
 import { describe, expect, it } from 'vitest'
-import { redactFields, redactText } from './redaction.js'
+import { REDACTED_FIELDS, redactFields, redactText, SECRET_PATTERNS } from './redaction.js'
 
 const record = (properties: Record<string, unknown>, message = 'hello'): LogRecord => ({
   category: ['bb', 'test'],
@@ -1756,20 +1760,55 @@ const record = (properties: Record<string, unknown>, message = 'hello'): LogReco
   properties,
 })
 
+const SECRET_NAMES = [
+  'authorization',
+  'Cookie',
+  'password',
+  'passphrase',
+  'accessToken',
+  'x-api-key',
+  'clientSecret',
+  'private_key',
+  'ANTHROPIC_API_KEY',
+]
+const ORDINARY_NAMES = ['sessionId', 'category', 'status', 'durationMs']
+
+const SECRET_SAMPLES = [
+  'sk-ant-api03-canary',
+  'sk-proj-canary1234',
+  'ghp_canary1234',
+  'github_pat_canary',
+  'xoxb-1-canary',
+  'AKIAIOSFODNN7CANARY',
+  'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc',
+  '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+  'https://user:pw@example.com/x',
+]
+const ORDINARY_TEXT =
+  '2026-10-02T12:00:00.000Z bb.store session 0199c2f1-7a3b-7c11-8f3e-2b1d4c5e6f70 task-12345678 risk-assessment /src/index.ts'
+
 describe(redactFields, () => {
   it('drops secret-looking property names at any depth', () => {
     const seen: LogRecord[] = []
     const sink = redactFields((entry) => {
       seen.push(entry)
     })
-    sink(record({ apiKey: 'sk-ant-canary', nested: { authorization: 'Bearer x', keep: 1 }, ANTHROPIC_API_KEY: 'y' }))
-    expect(JSON.stringify(seen[0]?.properties)).not.toMatch(/canary|Bearer|ANTHROPIC/u)
-    expect(JSON.stringify(seen[0]?.properties)).toContain('"keep":1')
+    sink(
+      record({
+        apiKey: 'sk-ant-canary',
+        nested: { authorization: 'Bearer x', keep: 1 },
+        ANTHROPIC_API_KEY: 'y',
+      }),
+    )
+    const properties = JSON.stringify(seen.map((entry) => entry.properties))
+    expect(properties).not.toMatch(/canary|Bearer|ANTHROPIC/u)
+    expect(properties).toContain('"keep":1')
   })
 })
 
 describe(redactText, () => {
   it('rewrites tokens, keys, JWTs, PEM blocks and URL credentials in formatted output', () => {
+    expect.hasAssertions()
     const format = redactText(jsonLinesFormatter)
     const text = format(
       record(
@@ -1777,45 +1816,306 @@ describe(redactText, () => {
         'sk-ant-api03-canary ghp_canary1234 github_pat_canary xoxb-1-canary AKIAIOSFODNN7CANARY eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc https://user:pw@example.com/x -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
       ),
     )
-    for (const canary of ['sk-ant-api03-canary', 'ghp_canary1234', 'github_pat_canary', 'xoxb-1-canary', 'AKIAIOSFODNN7CANARY', 'eyJhbGciOiJIUzI1NiJ9', 'user:pw@', 'MIIE']) {
+    for (const canary of [
+      'sk-ant-api03-canary',
+      'ghp_canary1234',
+      'github_pat_canary',
+      'xoxb-1-canary',
+      'AKIAIOSFODNN7CANARY',
+      'eyJhbGciOiJIUzI1NiJ9',
+      'user:pw@',
+      'MIIE',
+    ]) {
       expect(text).not.toContain(canary)
     }
     expect(text).toContain('[REDACTED]')
   })
 })
+
+describe('the redacted field list', () => {
+  it('has a sample name for every pattern', () => {
+    expect(
+      REDACTED_FIELDS.every((pattern) => SECRET_NAMES.some((name) => pattern.test(name))),
+    ).toBe(true)
+  })
+
+  it('deletes the secret names and keeps the ordinary ones', () => {
+    const seen: LogRecord[] = []
+    const sink = redactFields((entry) => {
+      seen.push(entry)
+    })
+    const properties = Object.fromEntries(
+      [...SECRET_NAMES, ...ORDINARY_NAMES].map((name) => [name, 'v']),
+    )
+    sink(record(properties))
+    expect(seen.flatMap((entry) => Object.keys(entry.properties))).toStrictEqual(ORDINARY_NAMES)
+  })
+
+  it('keeps token counters and deletes token credentials', () => {
+    const seen: LogRecord[] = []
+    const sink = redactFields((entry) => {
+      seen.push(entry)
+    })
+    sink(
+      record({
+        inputTokens: 10,
+        outputTokens: 4,
+        maxTokens: 100,
+        accessToken: 'x',
+        api_token: 'y',
+        TOKEN: 'z',
+      }),
+    )
+    expect(seen.map((entry) => entry.properties)).toStrictEqual([
+      { inputTokens: 10, outputTokens: 4, maxTokens: 100 },
+    ])
+  })
+})
+
+describe('the secret pattern list', () => {
+  it('has a sample for every pattern and leaves ordinary log text alone', () => {
+    expect.hasAssertions()
+    for (const { pattern } of SECRET_PATTERNS) {
+      expect(SECRET_SAMPLES.some((sample) => sample.search(pattern) !== -1)).toBe(true)
+      expect(ORDINARY_TEXT.search(pattern)).toBe(-1)
+    }
+  })
+})
 ```
 `packages/kernel/src/logging/logging.test.ts`:
 ```ts
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { getLogger, type LogRecord } from '@logtape/logtape'
-import { Effect, Layer, References } from 'effect'
-import { afterEach, describe, expect, it } from 'vitest'
-import { configureLogging, EffectLoggerLive, resetLogging } from './logging.js'
+import { Cause, Effect, Layer, type LogLevel, References } from 'effect'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  configureLogging,
+  EffectLoggerLive,
+  effectToLogTape,
+  kernelLogger,
+  parseDebug,
+  resetLogging,
+  type LoggingOptions,
+} from './logging.js'
 
-describe('logging', () => {
+// LogTape's configuration is global: each test configures it, runs its logging, collects the records and resets
+async function captured(
+  options: Omit<LoggingOptions, 'capture'>,
+  logging: Effect.Effect<void>,
+): Promise<readonly LogRecord[]> {
   const seen: LogRecord[] = []
-  afterEach(async () => {
-    await resetLogging()
-    seen.length = 0
+  await configureLogging({
+    ...options,
+    capture: (entry) => {
+      seen.push(entry)
+    },
   })
+  try {
+    const layer = Layer.mergeAll(
+      EffectLoggerLive,
+      Layer.succeed(References.MinimumLogLevel, 'Debug'),
+    )
+    await Effect.runPromise(Effect.provide(logging, layer))
+  } finally {
+    await resetLogging()
+  }
+  return seen
+}
 
+const LEVELS: readonly LogLevel.LogLevel[] = [
+  'All',
+  'Trace',
+  'Debug',
+  'Info',
+  'Warn',
+  'Error',
+  'Fatal',
+  'None',
+]
+
+async function sinkOutputs(): Promise<readonly string[]> {
+  const dir = mkdtempSync(path.join(tmpdir(), 'bb-logging-'))
+  const file = path.join(dir, 'kernel.log')
+  const info = vi.spyOn(console, 'info').mockReturnValue()
+  try {
+    await captured(
+      { level: 'info', json: true, file },
+      Effect.sync(() => {
+        kernelLogger(['bb', 'sinks']).info('key sk-ant-api03-canary', {
+          apiKey: 'field-only-value',
+          keep: 1,
+        })
+      }),
+    )
+    return [readFileSync(file, 'utf8'), ...info.mock.calls.map((call) => String(call[0]))]
+  } finally {
+    info.mockRestore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function failingSinkRun(): Promise<{
+  readonly delivered: readonly unknown[]
+  readonly reported: readonly string[]
+}> {
+  const capture = vi.fn<(record: LogRecord) => void>().mockImplementationOnce(() => {
+    throw new Error('sink boom')
+  })
+  const error = vi.spyOn(console, 'error').mockReturnValue()
+  try {
+    await configureLogging({ level: 'info', json: true, capture })
+    const logger = kernelLogger(['bb', 'sinks'])
+    logger.info('first')
+    logger.info('second')
+    return {
+      delivered: capture.mock.calls.map(([entry]) => entry.message[0]),
+      reported: error.mock.calls.map((call) => String(call[0])),
+    }
+  } finally {
+    await resetLogging()
+    error.mockRestore()
+  }
+}
+
+describe('effect bridge', () => {
   it('routes Effect logs into LogTape categories with annotations as properties', async () => {
-    await configureLogging({ level: 'debug', json: true, capture: (entry) => seen.push(entry) })
-    await Effect.runPromise(
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'debug', json: true },
       Effect.logDebug('from effect').pipe(
         Effect.annotateLogs({ category: 'bb.store', sessionId: 's1' }),
-        Effect.provide(Layer.mergeAll(EffectLoggerLive, Layer.succeed(References.MinimumLogLevel, 'Debug'))),
       ),
     )
-    expect(seen.map((entry) => [entry.category.join('.'), entry.level, entry.message[0]])).toEqual([['bb.store', 'debug', 'from effect']])
-    expect(seen[0]?.properties).toMatchObject({ sessionId: 's1' })
+    expect(
+      seen.map((entry) => [entry.category.join('.'), entry.level, entry.message[0]]),
+    ).toStrictEqual([['bb.store', 'debug', 'from effect']])
+    expect(seen.map((entry) => entry.properties)).toMatchObject([{ sessionId: 's1' }])
   })
 
+  it('keeps an Effect log message literal, in bb.core without a category annotation', async () => {
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'info', json: true },
+      Effect.logInfo('literal {name} }} {{x}}', { count: 1 }),
+    )
+    expect(seen.map((entry) => [entry.category.join('.'), entry.message[0]])).toStrictEqual([
+      ['bb.core', 'literal {name} }} {{x}} { count: 1 }'],
+    ])
+  })
+})
+
+describe('effect logger mapping', () => {
+  it('maps every Effect level onto its LogTape level, drops None and stamps the Effect date', async () => {
+    expect.hasAssertions()
+    const date = new Date('2026-10-02T12:00:00.000Z')
+    const seen = await captured(
+      { level: 'trace', json: true },
+      Effect.withFiber((fiber) =>
+        Effect.sync(() => {
+          for (const logLevel of LEVELS) {
+            effectToLogTape.log({ message: [logLevel], logLevel, cause: Cause.empty, fiber, date })
+          }
+        }),
+      ),
+    )
+    expect(seen.map((entry) => [entry.message[0], entry.level])).toStrictEqual([
+      ['All', 'trace'],
+      ['Trace', 'trace'],
+      ['Debug', 'debug'],
+      ['Info', 'info'],
+      ['Warn', 'warning'],
+      ['Error', 'error'],
+      ['Fatal', 'fatal'],
+    ])
+    expect(new Set(seen.map((entry) => entry.timestamp))).toStrictEqual(new Set([date.getTime()]))
+  })
+
+  it('attaches a failure cause as a pretty-printed property', async () => {
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'info', json: true },
+      Effect.logError('request failed', Cause.fail('upstream down')),
+    )
+    expect(seen.map((entry) => entry.message)).toStrictEqual([['request failed']])
+    expect(seen.map((entry) => entry.properties['cause'])).toStrictEqual([
+      expect.stringContaining('upstream down'),
+    ])
+  })
+})
+
+describe(configureLogging, () => {
   it('applies --debug category selection: listed categories at debug, negated ones silenced', async () => {
-    await configureLogging({ level: 'info', json: true, debug: 'bb.agent,!bb.store', capture: (entry) => seen.push(entry) })
-    getLogger(['bb', 'agent', 'fake']).debug('agent detail')
-    getLogger(['bb', 'store']).error('store error')
-    getLogger(['bb', 'core']).debug('core detail')
-    expect(seen.map((entry) => entry.message[0])).toEqual(['agent detail'])
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'info', json: true, debug: 'bb.agent,!bb.store' },
+      Effect.sync(() => {
+        getLogger(['bb', 'agent', 'fake']).debug('agent detail')
+        getLogger(['bb', 'store']).error('store error')
+        getLogger(['bb', 'store']).fatal('store fatal')
+        getLogger(['bb', 'store', 'sqlite']).error('sqlite error')
+        getLogger(['bb', 'core']).debug('core detail')
+      }),
+    )
+    expect(seen.map((entry) => entry.message[0])).toStrictEqual(['agent detail'])
+  })
+
+  it('reports a throwing sink on the console and keeps delivering to it', async () => {
+    expect.hasAssertions()
+    const { delivered, reported } = await failingSinkRun()
+    expect(delivered).toStrictEqual(['first', 'second'])
+    expect(reported).toHaveLength(1)
+    expect(JSON.parse(reported.join(''))).toMatchObject({
+      level: 'FATAL',
+      logger: 'logtape.meta',
+      properties: { error: { message: 'sink boom' } },
+    })
+  })
+
+  it('redacts secrets in the console and file output', async () => {
+    expect.hasAssertions()
+    const outputs = await sinkOutputs()
+    expect(outputs).toHaveLength(2)
+    for (const output of outputs) {
+      expect(output).toContain('"keep":1')
+      expect(output).toContain('[REDACTED]')
+      expect(output).not.toContain('canary')
+      expect(output).not.toContain('field-only-value')
+    }
+  })
+})
+
+describe(kernelLogger, () => {
+  it('logs the text literally at the mapped level under the child category, minus secret fields', async () => {
+    expect.hasAssertions()
+    const seen = await captured(
+      { level: 'warn', json: true },
+      Effect.sync(() => {
+        const logger = kernelLogger(['bb', 'plugin']).child('demo')
+        logger.info('dropped below the configured level')
+        logger.warn('closing } missing', { count: 1, apiKey: 'field-only-value' })
+        logger.error('hello {name}', { name: 'N' })
+      }),
+    )
+    expect(
+      seen.map((entry) => [entry.category.join('.'), entry.level, entry.message[0]]),
+    ).toStrictEqual([
+      ['bb.plugin.demo', 'warning', 'closing } missing'],
+      ['bb.plugin.demo', 'error', 'hello {name}'],
+    ])
+    expect(seen.map((entry) => entry.properties)).toStrictEqual([{ count: 1 }, { name: 'N' }])
+  })
+})
+
+describe(parseDebug, () => {
+  it('maps an empty list and "true" to every bb category and splits lists into enabled and silenced', () => {
+    const everything = { enabled: [['bb']], silenced: [] }
+    expect(['', 'true'].map((flag) => parseDebug(flag))).toStrictEqual([everything, everything])
+    expect(parseDebug(' bb.agent , !bb.store,,')).toStrictEqual({
+      enabled: [['bb', 'agent']],
+      silenced: [['bb', 'store']],
+    })
   })
 })
 ```
@@ -1834,24 +2134,51 @@ export const nowIso = (): string => new Date().toISOString()
 ```ts
 import { Data } from 'effect'
 
-export class ConfigError extends Data.TaggedError('ConfigError')<{
+export const ConfigError = Data.TaggedError('ConfigError')<{
   readonly file: string
   readonly pointer: string
   readonly reason: string
-}> {}
-export class StoreError extends Data.TaggedError('StoreError')<{ readonly cause: unknown }> {}
-export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{ readonly code: string; readonly reason: string }> {}
-export class ProviderError extends Data.TaggedError('ProviderError')<{
+}>
+export type ConfigError = InstanceType<typeof ConfigError>
+
+export const StoreError = Data.TaggedError('StoreError')<{ readonly cause: unknown }>
+export type StoreError = InstanceType<typeof StoreError>
+
+export const WorkspaceError = Data.TaggedError('WorkspaceError')<{
+  readonly code: string
+  readonly reason: string
+}>
+export type WorkspaceError = InstanceType<typeof WorkspaceError>
+
+export const ProviderError = Data.TaggedError('ProviderError')<{
   readonly kind: 'auth' | 'ratelimit' | 'crash' | 'protocol' | 'missing'
   readonly reason: string
   readonly retryable: boolean
-}> {}
-export class AskError extends Data.TaggedError('AskError')<{ readonly code: 'not_found' | 'not_pending' | 'invalid_answer'; readonly reason: string }> {}
-export class PluginError extends Data.TaggedError('PluginError')<{ readonly name: string; readonly reason: string }> {}
-export class SessionError extends Data.TaggedError('SessionError')<{
-  readonly code: 'not_found' | 'invalid_transition' | 'provider_missing' | 'yolo_refused' | 'employee_missing'
+}>
+export type ProviderError = InstanceType<typeof ProviderError>
+
+export const AskError = Data.TaggedError('AskError')<{
+  readonly code: 'not_found' | 'not_pending' | 'invalid_answer'
   readonly reason: string
-}> {}
+}>
+export type AskError = InstanceType<typeof AskError>
+
+export const PluginError = Data.TaggedError('PluginError')<{
+  readonly name: string
+  readonly reason: string
+}>
+export type PluginError = InstanceType<typeof PluginError>
+
+export const SessionError = Data.TaggedError('SessionError')<{
+  readonly code:
+    | 'not_found'
+    | 'invalid_transition'
+    | 'provider_missing'
+    | 'yolo_refused'
+    | 'employee_missing'
+  readonly reason: string
+}>
+export type SessionError = InstanceType<typeof SessionError>
 ```
 `packages/kernel/src/logging/redaction.ts`:
 ```ts
@@ -1861,29 +2188,37 @@ import type { Sink, TextFormatter } from '@logtape/logtape'
 export const REDACTED_FIELDS: readonly RegExp[] = [
   /^authorization$/iu,
   /^cookie$/iu,
-  /pass(word|phrase)?$/iu,
-  /token/iu,
+  /pass(?:word|phrase)?$/iu,
+  /token$/iu,
   /api[_-]?key/iu,
   /secret/iu,
   /private[_-]?key/iu,
-  /^(anthropic|openai|github|slack)_.*(key|token)$/iu,
+  /^(?:anthropic|openai|github|slack)_.*(?:key|token)$/iu,
 ]
 
 const replacement = '[REDACTED]'
 export const SECRET_PATTERNS: readonly RedactionPattern[] = [
   { pattern: /sk-ant-[A-Za-z0-9_-]{8,}/gu, replacement },
   { pattern: /\bsk-[A-Za-z0-9_-]{8,}/gu, replacement },
-  { pattern: /\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/gu, replacement },
-  { pattern: /\bgithub_pat_[A-Za-z0-9_]{8,}/gu, replacement },
+  { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/gu, replacement },
+  { pattern: /\bgithub_pat_[A-Za-z0-9_]{4,}/gu, replacement },
   { pattern: /\bxox[abp]-[A-Za-z0-9-]{4,}/gu, replacement },
   { pattern: /\bAKIA[0-9A-Z]{12,}/gu, replacement },
   { pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{3,}/gu, replacement },
-  { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu, replacement },
-  { pattern: /(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gu, replacement: `$1${replacement}@` },
+  {
+    pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
+    replacement,
+  },
+  {
+    pattern: /(?<scheme>https?:\/\/)[^\s/@:]+:[^\s/@]+@/gu,
+    replacement: `$<scheme>${replacement}@`,
+  },
 ]
 
-export const redactFields = (sink: Sink): Sink => redactByField(sink, { fieldPatterns: REDACTED_FIELDS, action: 'delete' })
-export const redactText = (formatter: TextFormatter): TextFormatter => redactByPattern(formatter, SECRET_PATTERNS)
+export const redactFields = (sink: Sink): Sink =>
+  redactByField(sink, { fieldPatterns: [...REDACTED_FIELDS], action: 'delete' })
+export const redactText = (formatter: TextFormatter): TextFormatter =>
+  redactByPattern(formatter, SECRET_PATTERNS)
 ```
 If `redactByField`'s options object uses a different key than `fieldPatterns`/`action` in the installed 2.3.10 types, follow the types (the fact sheet lists `{ fieldPatterns, action?, maxDepth?, maxProperties? }`).
 
@@ -1897,13 +2232,14 @@ import {
   getLogger,
   jsonLinesFormatter,
   reset,
+  type LoggerConfig,
   type LogLevel,
   type LogRecord,
   type Sink,
 } from '@logtape/logtape'
 import { getRotatingFileSink } from '@logtape/file'
 import type { Logger as PluginLogger } from '@bytebureau/plugin-api'
-import { Cause, Layer, Logger, References } from 'effect'
+import { Cause, Logger, References, type Layer, type LogLevel as EffectLogLevel } from 'effect'
 import { redactFields, redactText } from './redaction.js'
 
 export type KernelLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
@@ -1923,6 +2259,10 @@ interface DebugSelection {
   readonly silenced: readonly string[][]
 }
 
+const NO_DEBUG: DebugSelection = { enabled: [], silenced: [] }
+
+type CategoryConfig = LoggerConfig<string, string>
+
 // `--debug` with no list enables every bb.* category; `a,!b` enables a and silences b
 export function parseDebug(debug: string | undefined): DebugSelection | undefined {
   if (debug === undefined) {
@@ -1931,7 +2271,10 @@ export function parseDebug(debug: string | undefined): DebugSelection | undefine
   if (debug === '' || debug === 'true') {
     return { enabled: [['bb']], silenced: [] }
   }
-  const items = debug.split(',').map((item) => item.trim()).filter((item) => item !== '')
+  const items = debug
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '')
   return {
     enabled: items.filter((item) => !item.startsWith('!')).map((item) => item.split('.')),
     silenced: items.filter((item) => item.startsWith('!')).map((item) => item.slice(1).split('.')),
@@ -1940,16 +2283,23 @@ export function parseDebug(debug: string | undefined): DebugSelection | undefine
 
 function sinks(options: LoggingOptions): Record<string, Sink> {
   const result: Record<string, Sink> = {
-    console: redactFields(getConsoleSink({ formatter: options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter) })),
+    console: redactFields(
+      getConsoleSink({
+        formatter: options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter),
+      }),
+    ),
   }
   if (options.file !== undefined) {
-    result['file'] = redactFields(getRotatingFileSink(options.file, { maxSize: 20 * 1024 * 1024, maxFiles: 5, formatter: redactText(jsonLinesFormatter) }))
+    result['file'] = redactFields(
+      getRotatingFileSink(options.file, {
+        maxSize: 20 * 1024 * 1024,
+        maxFiles: 5,
+        formatter: redactText(jsonLinesFormatter),
+      }),
+    )
   }
   if (options.capture !== undefined) {
-    const capture = options.capture
-    result['capture'] = redactFields((record) => {
-      capture(record)
-    })
+    result['capture'] = redactFields(options.capture)
   }
   return result
 }
@@ -1957,22 +2307,34 @@ function sinks(options: LoggingOptions): Record<string, Sink> {
 export async function configureLogging(options: LoggingOptions): Promise<void> {
   const allSinks = sinks(options)
   const sinkIds = Object.keys(allSinks)
-  const selection = parseDebug(options.debug)
+  const { enabled, silenced } = parseDebug(options.debug) ?? NO_DEBUG
   await configure({
     reset: true,
     sinks: allSinks,
     loggers: [
-      { category: ['logtape', 'meta'], sinks: [], lowestLevel: 'warning' },
+      { category: ['logtape', 'meta'], sinks: ['console'], lowestLevel: 'warning' },
       { category: ['bb'], sinks: sinkIds, lowestLevel: toLogTape(options.level) },
-      ...(selection?.enabled ?? []).map((category) => ({ category, sinks: sinkIds, parentSinks: 'override' as const, lowestLevel: 'debug' as const })),
-      ...(selection?.silenced ?? []).map((category) => ({ category, sinks: [], parentSinks: 'override' as const, lowestLevel: 'fatal' as const })),
+      ...enabled.map((category): CategoryConfig => ({
+        category,
+        sinks: sinkIds,
+        parentSinks: 'override',
+        lowestLevel: 'debug',
+      })),
+      ...silenced.map((category): CategoryConfig => ({
+        category,
+        sinks: [],
+        parentSinks: 'override',
+        lowestLevel: 'fatal',
+      })),
     ],
   })
 }
 
-export const resetLogging = (): Promise<void> => reset()
+export async function resetLogging(): Promise<void> {
+  await reset()
+}
 
-const levelMap: Record<string, LogLevel | null> = {
+const levelMap: Record<EffectLogLevel.LogLevel, LogLevel | undefined> = {
   All: 'trace',
   Trace: 'trace',
   Debug: 'debug',
@@ -1980,20 +2342,31 @@ const levelMap: Record<string, LogLevel | null> = {
   Warn: 'warning',
   Error: 'error',
   Fatal: 'fatal',
-  None: null,
+  None: undefined,
 }
 
-const asText = (part: unknown): string => (typeof part === 'string' ? part : inspect(part, { depth: 3 }))
+const asText = (part: unknown): string =>
+  typeof part === 'string' ? part : inspect(part, { depth: 3 })
 
-// Effect logger → LogTape: one literal message part, braces escaped, annotations as properties
+const toParts = (message: unknown): readonly unknown[] =>
+  Array.isArray(message) ? message : [message]
+
+// A bridged record carries one literal message part that is never a placeholder; the raw template's braces are escaped
+const literalMessage = (text: string): Pick<LogRecord, 'message' | 'rawMessage'> => ({
+  message: [text],
+  rawMessage: text.replaceAll('{', '{{').replaceAll('}', '}}'),
+})
+
+// Effect logger → LogTape: the category annotation picks the logger, the other annotations become properties
 export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((options) => {
   const level = levelMap[options.logLevel]
-  if (level === null || level === undefined) {
+  if (level === undefined) {
     return
   }
-  const { category, ...annotations } = options.fiber.getRef(References.CurrentLogAnnotations) as Record<string, unknown>
-  const parts = Array.isArray(options.message) ? (options.message as unknown[]) : [options.message]
-  const text = parts.map(asText).join(' ')
+  const { category, ...annotations } = options.fiber.getRef(References.CurrentLogAnnotations)
+  const text = toParts(options.message)
+    .map((part) => asText(part))
+    .join(' ')
   const properties: Record<string, unknown> = { ...annotations }
   if (options.cause.reasons.length > 0) {
     properties['cause'] = Cause.pretty(options.cause)
@@ -2001,22 +2374,33 @@ export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((option
   getLogger(typeof category === 'string' ? category.split('.') : ['bb', 'core']).emit({
     timestamp: options.date.getTime(),
     level,
-    message: [text],
-    rawMessage: text.replaceAll('{', '{{').replaceAll('}', '}}'),
     properties,
+    ...literalMessage(text),
   })
 })
 
 export const EffectLoggerLive: Layer.Layer<never> = Logger.layer([effectToLogTape])
 
 export function kernelLogger(category: readonly string[]): PluginLogger {
-  const logger = getLogger([...category])
+  const logger = getLogger(category)
+  const log =
+    (level: LogLevel) =>
+    (message: string, properties?: Readonly<Record<string, unknown>>): void => {
+      if (logger.isEnabledFor(level)) {
+        logger.emit({
+          timestamp: Date.now(),
+          level,
+          properties: properties ?? {},
+          ...literalMessage(message),
+        })
+      }
+    }
   return {
     category,
-    debug: (message, properties) => logger.debug(message, properties ?? {}),
-    info: (message, properties) => logger.info(message, properties ?? {}),
-    warn: (message, properties) => logger.warn(message, properties ?? {}),
-    error: (message, properties) => logger.error(message, properties ?? {}),
+    debug: log('debug'),
+    info: log('info'),
+    warn: log('warning'),
+    error: log('error'),
     child: (name) => kernelLogger([...category, name]),
   }
 }
