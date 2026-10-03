@@ -35,3 +35,14 @@ export {
   type ProjectRegistryShape,
 } from './projects/project-registry.js'
 export { findGitRoot, isByteBureauWorktree, defaultBranchOf } from './projects/git-root.js'
+export {
+  Supervisor,
+  SupervisorLive,
+  restartSchedule,
+  type SpawnSpec,
+  type ManagedProcess,
+  type ExitInfo,
+  type ProcessInfo,
+  type KillSignal,
+} from './process/supervisor.js'
+export { allowlistEnv } from './process/env-allowlist.js'
