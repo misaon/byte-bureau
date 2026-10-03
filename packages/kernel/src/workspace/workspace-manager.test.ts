@@ -3,6 +3,7 @@ import path from 'node:path'
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import type { Project } from '../projects/project-registry.js'
+import { git } from '../testing/temp-repo.js'
 import { TestLayer } from './workspace-manager-fixtures.js'
 import { WorkspaceManager } from './workspace-manager.js'
 import {
@@ -150,6 +151,41 @@ it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
   )
 })
 
+it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
+  suite.effect('retains a workspace whose status is unavailable and destroys it when forced', () =>
+    Effect.gen(function* retainsWithoutStatus() {
+      const { repo, project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-11', status: 'completed' })
+      git(repo, 'branch', '-m', 'main', 'trunk')
+      yield* manager.destroy(handle)
+      assert.isTrue(existsSync(handle.path))
+      yield* manager.destroy(handle, { force: true })
+      assert.isFalse(existsSync(handle.path))
+      const later = (yield* eventsOf('session-11')).slice(1)
+      assert.deepStrictEqual(later, [
+        {
+          type: 'workspace.retained',
+          payload: { path: handle.path, reason: 'status unavailable' },
+        },
+        { type: 'workspace.destroyed', payload: { path: handle.path } },
+      ])
+    }),
+  )
+
+  suite.effect('leaves a worktree that git has locked in place, even when forced', () =>
+    Effect.gen(function* keepsPinnedWorktree() {
+      const { repo, project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const handle = yield* provisionSession(project, { id: 'session-12', status: 'completed' })
+      git(repo, 'worktree', 'lock', handle.path)
+      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      assert.strictEqual(codeOf(refused), 'locked')
+      assert.isTrue(existsSync(handle.path))
+    }),
+  )
+})
+
 it.layer(TestLayer)('WorkspaceManager status', (suite) => {
   suite.effect('reports what the runtime knows about the workspace', () =>
     Effect.gen(function* reportsStatus() {
@@ -170,8 +206,9 @@ it.layer(TestLayer)('WorkspaceManager status', (suite) => {
       const stray = { ...handle, runtimeId: 'nobody' }
       const statusError = yield* Effect.flip(manager.status(stray))
       const destroyError = yield* Effect.flip(manager.destroy(stray))
-      const codes = [codeOf(statusError), codeOf(destroyError)]
-      assert.deepStrictEqual(codes, ['runtime_missing', 'runtime_missing'])
+      const forcedError = yield* Effect.flip(manager.destroy(stray, { force: true }))
+      const codes = [statusError, destroyError, forcedError].map((error) => codeOf(error))
+      assert.deepStrictEqual(codes, ['runtime_missing', 'runtime_missing', 'runtime_missing'])
       assert.isTrue(existsSync(handle.path))
     }),
   )

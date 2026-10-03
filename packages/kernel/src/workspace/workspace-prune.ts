@@ -92,6 +92,10 @@ const reportOf = (verdicts: readonly Verdict[]): PruneReport => ({
   ),
 })
 
+// A worktree that is already gone has nothing left to prune, and no line in the report
+const present = (workspaces: readonly Workspace[]): readonly Workspace[] =>
+  workspaces.filter((workspace) => workspace.exists)
+
 // One worktree at a time, so a prune never runs several git commands at once
 export const makePrune =
   (
@@ -103,7 +107,7 @@ export const makePrune =
       const now = yield* Clock.currentTimeMillis
       const workspaces = yield* loadWorkspaces(sql, projectId)
       const verdicts = yield* Effect.forEach(
-        workspaces,
+        present(workspaces),
         (workspace) => pruneOne(actions, workspace, now),
         { concurrency: 1 },
       )

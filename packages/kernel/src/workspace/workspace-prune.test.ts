@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
@@ -169,6 +169,38 @@ it.layer(TestLayer)('WorkspaceManager prune statuses', (suite) => {
       const reason = 'younger than 7 days'
       const expected = { removed: [], retained: { 'no-end': reason, 'bad-end': reason } }
       assert.deepStrictEqual(summarize(report), expected)
+    }),
+  )
+})
+
+it.layer(TestLayer)('WorkspaceManager prune of worktrees that are gone', (suite) => {
+  suite.effect('says nothing of a worktree that is gone, pruned earlier or deleted by hand', () =>
+    Effect.gen(function* skipsGoneWorktrees() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const pruned = yield* provisionSession(project, { id: 'pruned', ...ENDED })
+      const deleted = yield* provisionSession(project, { id: 'deleted', ...ENDED })
+      rmSync(deleted.path, { recursive: true, force: true })
+      yield* TestClock.setTime(TODAY)
+      const first = yield* manager.prune(project.id)
+      const second = yield* manager.prune(project.id)
+      assert.deepStrictEqual(first, { removed: [pruned.path], retained: [] })
+      assert.deepStrictEqual(second, { removed: [], retained: [] })
+    }),
+  )
+
+  suite.effect('keeps listing a pruned worktree, flagged as missing', () =>
+    Effect.gen(function* listsPrunedWorktree() {
+      const { project } = yield* registerRepo()
+      const manager = yield* WorkspaceManager
+      const pruned = yield* provisionSession(project, { id: 'listed', ...ENDED })
+      yield* TestClock.setTime(TODAY)
+      yield* manager.prune(project.id)
+      const listed = yield* manager.list(project.id)
+      assert.deepStrictEqual(
+        listed.map((info) => [info.path, info.exists]),
+        [[pruned.path, false]],
+      )
     }),
   )
 })

@@ -22,6 +22,7 @@ export interface Workspace {
   readonly endedAt: string | null
   readonly retainDays: number
   readonly handle: WorkspaceHandle
+  readonly exists: boolean
 }
 
 interface Row {
@@ -61,6 +62,7 @@ const toWorkspace = (row: Row): Effect.Effect<Workspace, StoreError> =>
       endedAt: row.ended_at,
       retainDays: row.retain_days,
       handle,
+      exists: existsSync(handle.path),
     })),
     Effect.mapError(unreadable(row.id)),
   )
@@ -111,7 +113,7 @@ const infoOf = ({ handle, ...workspace }: Workspace): WorkspaceInfo => ({
   branch: handle.branch,
   baseRef: handle.baseRef,
   sessionStatus: workspace.sessionStatus,
-  exists: existsSync(handle.path),
+  exists: workspace.exists,
 })
 
 export const listWorkspaces = (

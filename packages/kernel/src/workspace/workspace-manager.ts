@@ -1,4 +1,4 @@
-import type { WorkspaceHandle, WorkspaceStatus } from '@bytebureau/plugin-api'
+import type { WorkspaceHandle, WorkspaceRuntime, WorkspaceStatus } from '@bytebureau/plugin-api'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { WorkspaceError, type StoreError } from '../errors.js'
@@ -53,7 +53,19 @@ const refuseLocked = (
     ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${handle.id} is running` }))
     : Effect.void
 
-// Uncommitted changes survive a destroy without force: the worktree is retained and the log says why
+// Without force a worktree goes only when its status says that nothing in it is lost
+const keepReason = (
+  runtime: WorkspaceRuntime,
+  handle: WorkspaceHandle,
+): Effect.Effect<string | undefined> =>
+  statusOn(runtime, handle).pipe(
+    Effect.match({
+      onFailure: () => 'status unavailable',
+      onSuccess: (current) => (current.dirty ? 'uncommitted changes' : undefined),
+    }),
+  )
+
+// A kept worktree is announced with its reason; force skips the status and the runtime still refuses a locked worktree
 const makeDestroy =
   (
     log: EventLogShape,
@@ -64,9 +76,8 @@ const makeDestroy =
     Effect.gen(function* destroyWorkspace() {
       yield* refuseLocked(locks, handle)
       const runtime = yield* runtimeFor(runtimes, handle.runtimeId)
-      const current = yield* statusOn(runtime, handle)
-      if (current.dirty && options.force !== true) {
-        const reason = 'uncommitted changes'
+      const reason = options.force === true ? undefined : yield* keepReason(runtime, handle)
+      if (reason !== undefined) {
         yield* log.publish({
           type: 'workspace.retained',
           sessionId: handle.id,
