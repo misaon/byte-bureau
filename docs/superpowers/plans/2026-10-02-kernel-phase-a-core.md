@@ -16765,8 +16765,8 @@ git commit -m "feat(kernel): compose the kernel layers and expose a promise faca
 ### Task 15: CLI — `run --no-daemon`, `config`, `projects`, `workspaces`
 
 **Files:**
-- Create: `apps/bytebureau/src/kernel.ts`, `apps/bytebureau/src/commands/run.ts`, `apps/bytebureau/src/commands/config.ts`, `apps/bytebureau/src/commands/projects.ts`, `apps/bytebureau/src/commands/workspaces.ts`, `apps/bytebureau/src/render/transcript.ts`, `apps/bytebureau/src/render/ask-prompt.ts`, `apps/bytebureau/src/render/transcript.test.ts`, `apps/bytebureau/src/commands/run.test.ts`
-- Modify: `apps/bytebureau/src/main.ts` (register the commands), `apps/bytebureau/package.json` (dependencies `@bytebureau/kernel`, `@bytebureau/protocol`), `apps/bytebureau/src/context.ts` (new global flags), `packages/i18n/messages/{en,cs}.json` (new strings), `vitest.config.ts` (coverage include for `apps/bytebureau/src/render/**`)
+- Create: `apps/bytebureau/src/kernel.ts`, `apps/bytebureau/src/kernel-home.ts`, `apps/bytebureau/src/errors.ts` (typed kernel errors formatted for the runner), `apps/bytebureau/src/resource.ts`, `apps/bytebureau/src/commands/run.ts`, `apps/bytebureau/src/commands/run-session.ts` (the session loop, exit codes, SIGINT), `apps/bytebureau/src/commands/config.ts`, `apps/bytebureau/src/commands/projects.ts`, `apps/bytebureau/src/commands/workspaces.ts`, `apps/bytebureau/src/render/transcript.ts`, `apps/bytebureau/src/render/ask-prompt.ts`, `apps/bytebureau/src/testing/{run-cli,temp-repo,events,json-lines,scripted-kernel,workbench}.ts`, and the tests `context`, `errors`, `kernel-home`, `resource`, `render/transcript`, `render/ask-prompt`, `commands/run`, `commands/run-session`, `commands/run-session-failures`, `commands/run-session-malformed`, `commands/run-session-terminal`, `commands/config`, `commands/projects`, `commands/workspaces`; `packages/protocol/src/events.ts` gains `decodeEventPayload(type, payload)` (strict decode through `KernelEventSchemas`, so the CLI never imports Effect)
+- Modify: `apps/bytebureau/src/main.ts` (register the commands, exit line), `apps/bytebureau/src/run.ts` (bare `--debug` → `--debug=`, typed error formatting through `errors.ts`), `apps/bytebureau/src/context.ts` (`yes`, `debug`, `log-level`, `Context.logging`), `apps/bytebureau/src/cli.test.ts` (imports the moved spawn helper), `apps/bytebureau/package.json` (`@bytebureau/kernel`, `@bytebureau/protocol`) + `bun.lock`, `packages/i18n/messages/{en,cs}.json` (the brief's keys plus `run_ask_waiting`, `run_event_skipped`, plural-free `run_completed`), `vitest.config.ts` (coverage include for the renderers), `cspell-words.txt`
 
 **Interfaces:**
 - Consumes (Task 14): `createKernel(options: KernelOptions): Promise<Kernel>` and the `Kernel` facade:
@@ -16790,6 +16790,8 @@ git commit -m "feat(kernel): compose the kernel layers and expose a promise faca
   ```
   plus the protocol types `EventEnvelope`, `Ask`, `AskAnswer`, `Session`, `Turn`, `Project`, `WorkspaceInfo`, `SessionUsage`, `ResolvedConfig`, `ConfigIssue`.
 - Produces: the commands wired into `main.ts`; `renderTranscript(events, output)`; `promptAsk(ask, { yes, interactive })`.
+
+Semantics (as shipped): `--json` prints NDJSON only (durable events — the stream subscribes with `ephemeral: false` so `seq` increases monotonically); a non-TTY run without `--json` is plain text without colours or prompts; `run` exits 0 on completion, 3 when stopped (SIGINT → `kernel.sessions.stop`), 4 when the session cannot start or finish through a provider (provider missing, `ProviderError`, `session.errored`, a project that is not a repository or is a ByteBureau worktree), and the runner's 2 for anything unexpected (typed kernel errors print `<name>: <reason>` with `code` or `file`+`pointer`); `--yes` answers an ask only when one option is recommended (an unrecommended ask is left to the kernel policy with a stderr warning); the "(Recommended)" marker is appended only when the label does not already carry one; a bare `--debug` is rewritten to `--debug=` before citty parses (categories only with `=`); a malformed event is skipped with a stderr warning and the summary is built only when printed; an empty `BYTEBUREAU_HOME` counts as unset; `config init` writes with `wx`; `withKernel` always closes the kernel and keeps the original error. Known limits (final fix wave): with `--debug` or `--log-level info|debug` the kernel's console sink writes to stdout under Bun and interleaves with NDJSON (kernel sink change); only SIGINT is handled and a second Ctrl-C is unhandled; `multiSelect` questions are asked as single-select; Ctrl-C during provisioning is not handled.
 
 - [ ] **Step 1: Global flags and i18n strings**
 
@@ -16832,27 +16834,23 @@ The parity test from SP0 keeps both catalogues aligned.
 
 `apps/bytebureau/src/kernel.ts`:
 ```ts
-import { homedir } from 'node:os'
-import path from 'node:path'
 import { createKernel, type Kernel } from '@bytebureau/kernel/bun'
 import type { Context } from './context.js'
-
-export function kernelHome(env: Readonly<Record<string, string | undefined>>): string {
-  return env['BYTEBUREAU_HOME'] ?? path.join(homedir(), '.bytebureau')
-}
+import { kernelHome } from './kernel-home.js'
+import { withResource } from './resource.js'
 
 // One in-process kernel per command invocation (--no-daemon mode); Phase B adds the daemon client
-export async function withKernel<T>(
+export async function withKernel<Result>(
   context: Context,
   env: Readonly<Record<string, string | undefined>>,
-  work: (kernel: Kernel) => Promise<T>,
-): Promise<T> {
-  const kernel = await createKernel({ home: kernelHome(env), env, logging: context.logging })
-  try {
-    return await work(kernel)
-  } finally {
-    await kernel.close()
+  work: (kernel: Kernel) => Promise<Result>,
+): Promise<Result> {
+  const open = async (): Promise<Kernel> => {
+    const kernel = await createKernel({ home: kernelHome(env), env, logging: context.logging })
+    return kernel
   }
+  const result = await withResource(open, work)
+  return result
 }
 ```
 
@@ -16860,40 +16858,270 @@ export async function withKernel<T>(
 
 `apps/bytebureau/src/render/transcript.test.ts`:
 ```ts
-import type { EventEnvelope } from '@bytebureau/protocol'
-import { describe, expect, it } from 'vitest'
+import { setLocale } from '@bytebureau/i18n'
+import type { EventEnvelope, KernelEventPayload } from '@bytebureau/protocol'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createOutput } from '../output.js'
-import { summarizeRun, transcriptLine } from './transcript.js'
+import { event } from '../testing/events.js'
+import { completionLine, readOrSkip, summarizeRun, titleOf, transcriptLine } from './transcript.js'
 
-function event(type: string, payload: Record<string, unknown>, seq = 1): EventEnvelope {
-  return {
-    seq,
-    id: '0192f0c8-7b2e-7c3d-9a4b-000000000010',
-    ts: '2026-10-02T12:00:00.000Z',
-    type,
-    sessionId: 's1',
-    payload,
-  } as EventEnvelope
+const ESCAPE = '\u001B'
+
+const PLAIN = createOutput({ json: false, color: false })
+const COLOURED = createOutput({ json: false, color: true })
+
+function toolStarted(input: unknown): EventEnvelope {
+  return event('tool.started', { id: 't1', name: 'Write', kind: 'builtin', input })
 }
 
 describe(transcriptLine, () => {
   it('renders assistant text, tool starts and ask requests; ignores deltas', () => {
-    const output = createOutput({ json: false, color: false })
-    expect(transcriptLine(event('message.assistant.completed', { text: 'Hello' }), output)).toBe('Hello')
-    expect(transcriptLine(event('tool.started', { name: 'Write', input: { path: 'src/hello.ts' } }), output)).toBe(
+    expect(
+      transcriptLine(event('message.assistant.completed', { text: 'Hello', content: [] }), PLAIN),
+    ).toBe('Hello')
+    expect(transcriptLine(toolStarted({ path: 'src/hello.ts' }), PLAIN)).toBe(
       '⚙ Write src/hello.ts',
     )
-    expect(transcriptLine(event('message.assistant.delta', { text: 'H' }), output)).toBeUndefined()
+    expect(
+      transcriptLine(event('message.assistant.delta', { kind: 'text', text: 'H' }), PLAIN),
+    ).toBeUndefined()
+  })
+
+  it('prints nothing for an assistant message without text', () => {
+    expect(
+      transcriptLine(event('message.assistant.completed', { text: '', content: [] }), PLAIN),
+    ).toBeUndefined()
+  })
+
+  it('prints nothing for events that are not part of the story', () => {
+    const usage = { inputTokens: 1, outputTokens: 1 }
+    expect(transcriptLine(event('session.ready', { status: 'ready' }), PLAIN)).toBeUndefined()
+    expect(transcriptLine(event('usage.updated', { usage }), PLAIN)).toBeUndefined()
+  })
+
+  it('colours a failure red and leaves plain output free of escape codes', () => {
+    const failed = event('tool.failed', { id: 't1', name: 'Bash', error: 'exit 1' })
+    expect(transcriptLine(failed, COLOURED)).toContain(ESCAPE)
+    expect(transcriptLine(failed, PLAIN)).not.toContain(ESCAPE)
   })
 })
+
+describe('transcriptLine for tools', () => {
+  it('shows the path, the command or the pattern of a tool, whichever its input has', () => {
+    expect(transcriptLine(toolStarted({ command: 'bun test' }), PLAIN)).toBe('⚙ Write bun test')
+    expect(transcriptLine(toolStarted({ pattern: '*.ts' }), PLAIN)).toBe('⚙ Write *.ts')
+    expect(transcriptLine(toolStarted({ path: 7, command: 'ls' }), PLAIN)).toBe('⚙ Write ls')
+  })
+
+  it('shows just the name of a tool whose input names no target', () => {
+    // A JSON null reaches the renderer as it came off the wire
+    const wireNull: unknown = JSON.parse('null')
+    expect(transcriptLine(toolStarted({ depth: 2 }), PLAIN)).toBe('⚙ Write')
+    expect(transcriptLine(toolStarted('text'), PLAIN)).toBe('⚙ Write')
+    expect(transcriptLine(toolStarted(wireNull), PLAIN)).toBe('⚙ Write')
+  })
+
+  it('renders a failed tool', () => {
+    const failed = event('tool.failed', { id: 't1', name: 'Bash', error: 'exit 1' })
+    expect(transcriptLine(failed, PLAIN)).toBe('✖ Bash: exit 1')
+  })
+})
+
+describe('transcriptLine for the life of a session', () => {
+  it('renders a warning and the start of a turn', () => {
+    const warning = event('session.warning', { kind: 'limit', message: 'near the limit' })
+    const started = event('turn.started', { turnId: 'u1', index: 0, status: 'running' })
+    expect(transcriptLine(warning, PLAIN)).toBe('! near the limit')
+    expect(transcriptLine(started, PLAIN)).toBe('The employee is working…')
+  })
+
+  it('names the branch of a provisioned workspace', () => {
+    const provisioned = event('workspace.provisioned', {
+      path: '/repo/.bytebureau/worktrees/s1',
+      branch: 'bb/hello',
+      baseRef: 'main',
+      runtimeId: 'local',
+    })
+    expect(transcriptLine(provisioned, PLAIN)).toBe('Preparing the workspace on branch bb/hello')
+  })
+
+  it('speaks the language that is set', () => {
+    onTestFinished(() => {
+      setLocale('en')
+    })
+    setLocale('cs')
+    const started = event('turn.started', { turnId: 'u1', index: 0, status: 'running' })
+    expect(transcriptLine(started, PLAIN)).toBe('Zaměstnanec pracuje…')
+  })
+})
+
+function turnCompleted(
+  usage: KernelEventPayload<'turn.completed'>['usage'],
+  seq: number,
+): EventEnvelope {
+  return event(
+    'turn.completed',
+    { turnId: `u${seq}`, index: seq, status: 'completed', stopReason: 'end_turn', usage },
+    seq,
+  )
+}
 
 describe(summarizeRun, () => {
   it('counts turns and tokens from turn.completed events', () => {
     const events = [
-      event('turn.completed', { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.01 } }, 1),
-      event('turn.completed', { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }, 2),
+      turnCompleted({ inputTokens: 10, outputTokens: 5, costUsd: 0.01 }, 1),
+      turnCompleted({ inputTokens: 1, outputTokens: 1 }, 2),
     ]
-    expect(summarizeRun(events)).toEqual({ turns: 2, inputTokens: 11, outputTokens: 6, costUsd: 0.01 })
+    expect(summarizeRun(events, PLAIN)).toStrictEqual({
+      turns: 2,
+      inputTokens: 11,
+      outputTokens: 6,
+      costUsd: 0.01,
+    })
+  })
+
+  it('adds up the cost of the turns that report one and ignores other events', () => {
+    const events = [
+      turnCompleted({ inputTokens: 1, outputTokens: 1, costUsd: 0.25 }, 1),
+      event('session.ready', { status: 'ready' }, 2),
+      turnCompleted({ inputTokens: 1, outputTokens: 1, costUsd: 0.5 }, 3),
+    ]
+    expect(summarizeRun(events, PLAIN).costUsd).toBe(0.75)
+  })
+
+  it('reports no cost for a run whose turns reported none, and nothing for no turns', () => {
+    expect(
+      summarizeRun([turnCompleted({ inputTokens: 1, outputTokens: 1 }, 1)], PLAIN).costUsd,
+    ).toBeUndefined()
+    expect(summarizeRun([], PLAIN)).toStrictEqual({
+      turns: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: undefined,
+    })
+  })
+})
+
+// An event of the type whose payload belongs to another type
+function malformed(type: string, seq: number): EventEnvelope {
+  return { ...event('session.ready', { status: 'ready' }, seq), type }
+}
+
+function unreadable(): string {
+  throw new Error('bad payload')
+}
+
+describe(readOrSkip, () => {
+  it('hands the result of a read that works on, and warns of nothing', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed('tool.started', 4), PLAIN, () => 'read')).toBe('read')
+    expect(warned).not.toHaveBeenCalled()
+  })
+
+  it('skips an event whose read throws, with one warning that names its type and seq', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed('tool.started', 4), PLAIN, unreadable)).toBeUndefined()
+    expect(warned.mock.calls).toStrictEqual([
+      ['Skipped the tool.started event (seq 4): its payload does not fit its type'],
+    ])
+  })
+
+  it('speaks the language that is set', () => {
+    onTestFinished(() => {
+      setLocale('en')
+    })
+    setLocale('cs')
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    readOrSkip(malformed('turn.completed', 9), PLAIN, unreadable)
+    expect(warned.mock.calls).toStrictEqual([
+      ['Událost turn.completed (pořadové číslo 9) byla přeskočena: její obsah neodpovídá typu'],
+    ])
+  })
+})
+
+describe('transcriptLine and summarizeRun with an event that does not fit its type', () => {
+  it('prints no line for the event, and warns once', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(transcriptLine(malformed('tool.started', 6), PLAIN)).toBeUndefined()
+    expect(transcriptLine(malformed('workspace.provisioned', 7), PLAIN)).toBeUndefined()
+    expect(warned).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not count the turn that cannot be read, and counts the others', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    const events = [
+      malformed('turn.completed', 2),
+      turnCompleted({ inputTokens: 4, outputTokens: 2 }, 3),
+    ]
+    expect(summarizeRun(events, PLAIN)).toStrictEqual({
+      turns: 1,
+      inputTokens: 4,
+      outputTokens: 2,
+      costUsd: undefined,
+    })
+    expect(warned.mock.calls).toStrictEqual([
+      ['Skipped the turn.completed event (seq 2): its payload does not fit its type'],
+    ])
+  })
+})
+
+function costed(costUsd: number): string {
+  return completionLine({ turns: 1, inputTokens: 1, outputTokens: 1, costUsd })
+}
+
+describe(completionLine, () => {
+  it('states turns and tokens, with the cost when there is one', () => {
+    expect(completionLine({ turns: 1, inputTokens: 120, outputTokens: 40, costUsd: 0.016 })).toBe(
+      'Done — turns: 1, input tokens: 120, output tokens: 40 ($0.02)',
+    )
+    expect(completionLine({ turns: 2, inputTokens: 3, outputTokens: 4 })).toBe(
+      'Done — turns: 2, input tokens: 3, output tokens: 4',
+    )
+  })
+
+  it('shows a cost under a cent with four decimals, so that it does not read as nothing', () => {
+    expect(costed(0.002)).toMatch(/ \(\$0\.0020\)$/u)
+    expect(costed(0.0099)).toMatch(/ \(\$0\.0099\)$/u)
+    expect(costed(0)).toMatch(/ \(\$0\.0000\)$/u)
+    expect(costed(0.01)).toMatch(/ \(\$0\.01\)$/u)
+    expect(costed(12.5)).toMatch(/ \(\$12\.50\)$/u)
+  })
+
+  it('speaks Czech when that is the language', () => {
+    onTestFinished(() => {
+      setLocale('en')
+    })
+    setLocale('cs')
+    expect(completionLine({ turns: 1, inputTokens: 120, outputTokens: 40, costUsd: 0.002 })).toBe(
+      'Hotovo — kol: 1, vstupní tokeny: 120, výstupní tokeny: 40 ($0.0020)',
+    )
+  })
+})
+
+describe(titleOf, () => {
+  it('keeps a short prompt as it is', () => {
+    expect(titleOf('Create src/hello.ts exporting hello()')).toBe(
+      'Create src/hello.ts exporting hello()',
+    )
+  })
+
+  it('takes the first line of a prompt that has several, whatever its line endings', () => {
+    expect(titleOf('Fix the build\n\nIt fails on CI')).toBe('Fix the build')
+    expect(titleOf('Fix the build\r\nIt fails on CI')).toBe('Fix the build')
+    expect(titleOf('\n  Fix the build  \n')).toBe('Fix the build')
+  })
+
+  it('cuts at sixty characters without splitting an emoji or a diacritic', () => {
+    const emoji = `${'a'.repeat(59)}😀 and more`
+    expect(titleOf(emoji)).toBe(`${'a'.repeat(59)}😀`)
+    expect(titleOf('Příliš žluťoučký kůň úpěl ďábelské ódy a pokračuje dál a dál do noci')).toBe(
+      'Příliš žluťoučký kůň úpěl ďábelské ódy a pokračuje dál a dál',
+    )
+  })
+
+  it('is empty for an empty prompt', () => {
+    expect(titleOf('')).toBe('')
+    expect(titleOf('  \n ')).toBe('')
   })
 })
 ```
@@ -16904,7 +17132,11 @@ Run: `bunx vitest run --project bytebureau` → FAIL.
 `apps/bytebureau/src/render/transcript.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
-import type { EventEnvelope } from '@bytebureau/protocol'
+import {
+  decodeEventPayload,
+  type EventEnvelope,
+  type KernelEventPayload,
+} from '@bytebureau/protocol'
 import type { Output } from '../output.js'
 
 export interface RunSummary {
@@ -16914,33 +17146,78 @@ export interface RunSummary {
   readonly costUsd?: number | undefined
 }
 
+const TITLE_LENGTH = 60
+const CHARACTERS = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+// The first line of the prompt, cut at 60 characters; an emoji or an accented letter is never split
+export function titleOf(prompt: string): string {
+  const [firstLine = ''] = prompt.trim().split(/\r?\n/u)
+  const characters = Array.from(CHARACTERS.segment(firstLine), ({ segment }) => segment)
+  return characters.slice(0, TITLE_LENGTH).join('')
+}
+
+const TARGET_KEYS = ['path', 'command', 'pattern'] as const
+
+// The one field of a tool input worth a glance: the path, the command or the pattern
 function toolTarget(input: unknown): string {
-  if (typeof input === 'object' && input !== null) {
-    const record = input as Record<string, unknown>
-    const target = record['path'] ?? record['command'] ?? record['pattern']
-    return typeof target === 'string' ? ` ${target}` : ''
+  if (typeof input !== 'object' || input === null) {
+    return ''
+  }
+  for (const key of TARGET_KEYS) {
+    const target: unknown = Reflect.get(input, key)
+    if (typeof target === 'string') {
+      return ` ${target}`
+    }
   }
   return ''
 }
 
-// One printable line per durable event the user cares about; undefined means "print nothing"
-export function transcriptLine(event: EventEnvelope, output: Output): string | undefined {
-  const payload = event.payload as Record<string, unknown>
+function toolStartLine(payload: KernelEventPayload<'tool.started'>, output: Output): string {
+  return output.colors.dim(`⚙ ${m.run_tool({ name: payload.name })}${toolTarget(payload.input)}`)
+}
+
+function toolFailLine(payload: KernelEventPayload<'tool.failed'>, output: Output): string {
+  return output.colors.red(`✖ ${payload.name}: ${payload.error}`)
+}
+
+function assistantLine(text: string): string | undefined {
+  return text === '' ? undefined : text
+}
+
+// An event whose payload does not fit its type is skipped, with one warning that names it
+export function readOrSkip<Result>(
+  event: EventEnvelope,
+  output: Output,
+  read: () => Result,
+): Result | undefined {
+  try {
+    return read()
+  } catch {
+    output.warn(m.run_event_skipped({ type: event.type, seq: event.seq }))
+    return undefined
+  }
+}
+
+function lineOf(event: EventEnvelope, output: Output): string | undefined {
   switch (event.type) {
     case 'message.assistant.completed': {
-      return String(payload['text'] ?? '')
+      return assistantLine(decodeEventPayload(event.type, event.payload).text)
     }
     case 'tool.started': {
-      return output.colors.dim(`⚙ ${String(payload['name'])}${toolTarget(payload['input'])}`)
+      return toolStartLine(decodeEventPayload(event.type, event.payload), output)
     }
     case 'tool.failed': {
-      return output.colors.red(`✖ ${String(payload['name'] ?? payload['id'])}: ${String(payload['error'])}`)
+      return toolFailLine(decodeEventPayload(event.type, event.payload), output)
     }
     case 'session.warning': {
-      return output.colors.yellow(`! ${String(payload['message'])}`)
+      return output.colors.yellow(`! ${decodeEventPayload(event.type, event.payload).message}`)
     }
     case 'workspace.provisioned': {
-      return output.colors.dim(m.run_provisioning({ branch: String(payload['branch']) }))
+      const { branch } = decodeEventPayload(event.type, event.payload)
+      return output.colors.dim(m.run_provisioning({ branch }))
+    }
+    case 'turn.started': {
+      return output.colors.dim(m.run_turn_started())
     }
     default: {
       return undefined
@@ -16948,75 +17225,156 @@ export function transcriptLine(event: EventEnvelope, output: Output): string | u
   }
 }
 
-export function summarizeRun(events: readonly EventEnvelope[]): RunSummary {
-  let turns = 0
-  let inputTokens = 0
-  let outputTokens = 0
-  let costUsd: number | undefined
+// One printable line per durable event the user cares about; undefined means "print nothing"
+export function transcriptLine(event: EventEnvelope, output: Output): string | undefined {
+  return readOrSkip(event, output, () => lineOf(event, output))
+}
+
+const NO_TURNS: RunSummary = { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: undefined }
+
+function withTurn(
+  summary: RunSummary,
+  usage: KernelEventPayload<'turn.completed'>['usage'],
+): RunSummary {
+  return {
+    turns: summary.turns + 1,
+    inputTokens: summary.inputTokens + usage.inputTokens,
+    outputTokens: summary.outputTokens + usage.outputTokens,
+    costUsd: usage.costUsd === undefined ? summary.costUsd : (summary.costUsd ?? 0) + usage.costUsd,
+  }
+}
+
+// A turn that cannot be read is not counted
+function withEventTurn(summary: RunSummary, event: EventEnvelope, output: Output): RunSummary {
+  const turn = readOrSkip(event, output, () => decodeEventPayload('turn.completed', event.payload))
+  return turn === undefined ? summary : withTurn(summary, turn.usage)
+}
+
+export function summarizeRun(events: readonly EventEnvelope[], output: Output): RunSummary {
+  let summary = NO_TURNS
   for (const event of events) {
-    if (event.type !== 'turn.completed') {
-      continue
-    }
-    const usage = (event.payload as { usage?: Record<string, number> }).usage ?? {}
-    turns += 1
-    inputTokens += usage['inputTokens'] ?? 0
-    outputTokens += usage['outputTokens'] ?? 0
-    if (usage['costUsd'] !== undefined) {
-      costUsd = (costUsd ?? 0) + usage['costUsd']
+    if (event.type === 'turn.completed') {
+      summary = withEventTurn(summary, event, output)
     }
   }
-  return { turns, inputTokens, outputTokens, costUsd }
+  return summary
+}
+
+// Under a cent the cost gets four decimals, since it would read as nothing at two
+function costText(costUsd: number): string {
+  return ` ($${costUsd.toFixed(costUsd < 0.01 ? 4 : 2)})`
+}
+
+// The closing line of a run that completed: turns, tokens and, when the provider reports it, the cost
+export function completionLine(summary: RunSummary): string {
+  return m.run_completed({
+    turns: summary.turns,
+    input: summary.inputTokens,
+    output: summary.outputTokens,
+    cost: summary.costUsd === undefined ? '' : costText(summary.costUsd),
+  })
 }
 ```
 
 `apps/bytebureau/src/render/ask-prompt.ts`:
 ```ts
-import { isCancel, select, text } from '@clack/prompts'
 import { m } from '@bytebureau/i18n'
-import type { Ask, AskAnswer } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, AskOption, AskQuestion } from '@bytebureau/protocol'
+import { isCancel, select, text, type Option } from '@clack/prompts'
 
 export interface AskPromptOptions {
   readonly yes: boolean
   readonly interactive: boolean
 }
 
-function recommendedOf(ask: Ask): string[] {
-  return ask.questions.map((question) => question.options.find((option) => option.recommended)?.id ?? '')
+// The prompts a person answers through; a test can put others in place of the terminal's
+export interface Prompts {
+  readonly select: typeof select<string>
+  readonly text: typeof text
 }
 
-// Returns undefined when nobody can answer (non-interactive without --yes): the kernel policy decides
-export async function promptAsk(ask: Ask, options: AskPromptOptions): Promise<AskAnswer | undefined> {
-  if (options.yes) {
-    return { selected: recommendedOf(ask) }
-  }
-  if (!options.interactive) {
+const TERMINAL: Prompts = { select, text }
+
+// The value of the extra choice that lets a person write an answer
+const OTHER = '__other__'
+
+// The id of the one recommended option; a question without one, or with several, has none to take
+function onlyRecommended(question: AskQuestion): string | undefined {
+  const recommended = question.options.filter((option) => option.recommended)
+  const [only] = recommended
+  return recommended.length === 1 && only !== undefined ? only.id : undefined
+}
+
+// --yes: every question gets its recommended option; an ask without that is left to the kernel policy
+function recommendedAnswer(ask: Ask): AskAnswer | undefined {
+  if (ask.recommendationSource === 'none') {
     return undefined
   }
-  const selected: string[] = []
-  for (const question of ask.questions) {
-    const recommended = question.options.find((option) => option.recommended)
-    const choice = await select({
-      message: `${m.run_ask_header()}: ${question.prompt}`,
-      initialValue: recommended?.id ?? question.options[0]?.id ?? '',
-      options: [
-        ...question.options.map((option) => ({
-          value: option.id,
-          label: option.recommended ? `${option.label} ${m.run_ask_recommended()}` : option.label,
-          hint: option.description,
-        })),
-        ...(question.allowOther ? [{ value: '__other__', label: m.run_ask_other() }] : []),
-      ],
-    })
-    if (isCancel(choice)) {
-      return undefined
-    }
-    if (choice === '__other__') {
-      const other = await text({ message: m.run_ask_other_prompt() })
-      return isCancel(other) ? undefined : { selected: 'other', otherText: other }
-    }
-    selected.push(choice)
+  const picks = ask.questions.map((question) => onlyRecommended(question))
+  return picks.every((pick) => pick !== undefined) ? { selected: picks } : undefined
+}
+
+// An agent often marks the label it recommends itself, in English or in Czech: one marker is enough
+const MARKED = /\((?:recommended|doporučeno)\)\s*$/iu
+
+function labelOf(option: AskOption): string {
+  const needsMarker = option.recommended && !MARKED.test(option.label)
+  return needsMarker ? `${option.label} ${m.run_ask_recommended()}` : option.label
+}
+
+function choicesOf(question: AskQuestion): Option<string>[] {
+  const choices = question.options.map((option) => ({
+    value: option.id,
+    label: labelOf(option),
+    ...(option.description === undefined ? {} : { hint: option.description }),
+  }))
+  return question.allowOther ? [...choices, { value: OTHER, label: m.run_ask_other() }] : choices
+}
+
+// The recommended option is where the cursor starts, else the first one
+function startOf(question: AskQuestion): { readonly initialValue: string } | undefined {
+  const [first] = question.options
+  const start = question.options.find((option) => option.recommended) ?? first
+  return start === undefined ? undefined : { initialValue: start.id }
+}
+
+async function writeOwnAnswer(prompts: Prompts): Promise<AskAnswer | undefined> {
+  const written = await prompts.text({ message: m.run_ask_other_prompt() })
+  return isCancel(written) ? undefined : { selected: 'other', otherText: written }
+}
+
+// The questions are put one after the other; "Other" ends them with the words of the person
+async function askFrom(
+  questions: readonly AskQuestion[],
+  selected: readonly string[],
+  prompts: Prompts,
+): Promise<AskAnswer | undefined> {
+  const [question, ...rest] = questions
+  if (question === undefined) {
+    return { selected }
   }
-  return { selected }
+  const choice = await prompts.select({
+    message: `${m.run_ask_header()}: ${question.prompt}`,
+    options: choicesOf(question),
+    ...startOf(question),
+  })
+  if (isCancel(choice)) {
+    return undefined
+  }
+  return choice === OTHER ? writeOwnAnswer(prompts) : askFrom(rest, [...selected, choice], prompts)
+}
+
+// Undefined when nobody can answer (no --yes and no terminal, a cancel, no recommendation): the kernel policy decides
+export async function promptAsk(
+  ask: Ask,
+  options: AskPromptOptions,
+  prompts: Prompts = TERMINAL,
+): Promise<AskAnswer | undefined> {
+  if (options.yes) {
+    return recommendedAnswer(ask)
+  }
+  const answer = options.interactive ? await askFrom(ask.questions, [], prompts) : undefined
+  return answer
 }
 ```
 
@@ -17024,111 +17382,10 @@ export async function promptAsk(ask: Ask, options: AskPromptOptions): Promise<As
 
 `apps/bytebureau/src/commands/run.ts`:
 ```ts
-import { isatty } from 'node:tty'
-import { m } from '@bytebureau/i18n'
-import type { Kernel } from '@bytebureau/kernel'
-import type { EventEnvelope } from '@bytebureau/protocol'
-import { intro, log, outro } from '@clack/prompts'
 import { defineCommand } from 'citty'
-import { createContext, globalArgs, type Context } from '../context.js'
+import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
-import { promptAsk } from '../render/ask-prompt.js'
-import { summarizeRun, transcriptLine } from '../render/transcript.js'
-
-export const EXIT_COMPLETED = 0
-export const EXIT_STOPPED = 3
-export const EXIT_PROVIDER_ERROR = 4
-
-const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
-
-interface RunOptions {
-  readonly prompt: string
-  readonly project: string
-  readonly branch?: string | undefined
-  readonly employee?: string | undefined
-  readonly provider?: string | undefined
-  readonly yes: boolean
-}
-
-function exitCodeFor(type: string): number {
-  if (type === 'session.stopped') {
-    return EXIT_STOPPED
-  }
-  return type === 'session.errored' ? EXIT_PROVIDER_ERROR : EXIT_COMPLETED
-}
-
-async function handleEvent(kernel: Kernel, event: EventEnvelope, context: Context, yes: boolean): Promise<void> {
-  if (context.output.json) {
-    context.output.emit(event as unknown as Record<string, unknown>)
-  } else {
-    const line = transcriptLine(event, context.output)
-    if (line !== undefined) {
-      log.message(line)
-    }
-  }
-  if (event.type === 'ask.requested') {
-    const answer = await promptAsk((event.payload as { ask: Parameters<typeof promptAsk>[0] }).ask, {
-      yes,
-      interactive: context.interactive,
-    })
-    if (answer !== undefined) {
-      await kernel.asks.answer((event.payload as { ask: { id: string } }).ask.id, answer, 'cli')
-    }
-  }
-}
-
-// Streams one session to completion; resolves with the exit code
-export async function runSession(kernel: Kernel, options: RunOptions, context: Context): Promise<number> {
-  const project = await kernel.projects.register(options.project)
-  const available = kernel.providers.list().map((provider) => provider.id)
-  if (options.provider !== undefined && !available.includes(options.provider)) {
-    context.output.warn(m.run_provider_missing({ provider: options.provider, available: available.join(', ') }))
-    return EXIT_PROVIDER_ERROR
-  }
-  const session = await kernel.sessions.create({
-    projectId: project.id,
-    title: options.prompt.slice(0, 60),
-    employeeId: options.employee,
-    providerId: options.provider,
-    branch: options.branch,
-  })
-  const stop = (): void => {
-    void kernel.sessions.stop(session.id)
-  }
-  process.once('SIGINT', stop)
-  const seen: EventEnvelope[] = []
-  const events = kernel.events.subscribe({ sessionId: session.id, since: 0 })
-  await kernel.sessions.prompt(session.id, { text: options.prompt })
-  let code = EXIT_COMPLETED
-  for await (const event of events) {
-    seen.push(event)
-    await handleEvent(kernel, event, context, options.yes)
-    if (event.type === 'turn.completed') {
-      await kernel.sessions.complete(session.id)
-    }
-    if (TERMINAL.has(event.type)) {
-      code = exitCodeFor(event.type)
-      break
-    }
-  }
-  process.off('SIGINT', stop)
-  const summary = summarizeRun(seen)
-  if (!context.output.json) {
-    outro(
-      code === EXIT_COMPLETED
-        ? m.run_completed({
-            turns: summary.turns,
-            input: summary.inputTokens,
-            output: summary.outputTokens,
-            cost: summary.costUsd === undefined ? '' : ` ($${summary.costUsd.toFixed(2)})`,
-          })
-        : code === EXIT_STOPPED
-          ? m.run_stopped()
-          : m.run_errored({ message: String((seen.at(-1)?.payload as { message?: string }).message ?? '') }),
-    )
-  }
-  return code
-}
+import { runSession } from './run-session.js'
 
 export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Run one prompt through an employee in an isolated worktree' },
@@ -17139,71 +17396,467 @@ export const runCommand = defineCommand({
     branch: { type: 'string', description: 'Base branch (default: the project default branch)' },
     employee: { type: 'string', description: 'Employee id from bytebureau.json' },
     provider: { type: 'string', description: 'Agent provider id (fake, claude, acp:<preset>)' },
-    'no-daemon': { type: 'boolean', description: 'Run the kernel in-process (the only mode in this phase)', default: true },
+    'no-daemon': {
+      type: 'boolean',
+      description: 'Run the kernel in-process (the only mode in this phase)',
+      default: true,
+    },
   },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    if (context.interactive) {
-      intro(context.output.colors.bold(m.run_intro({ title: args.prompt.slice(0, 60) })))
+    const context = processContext(args)
+    const options = {
+      prompt: args.prompt,
+      project: args.project ?? process.cwd(),
+      branch: args.branch,
+      employee: args.employee,
+      provider: args.provider,
+      yes: args.yes,
     }
-    const code = await withKernel(context, process.env, (kernel) =>
-      runSession(
-        kernel,
-        {
-          prompt: args.prompt,
-          project: args.project ?? process.cwd(),
-          branch: args.branch,
-          employee: args.employee,
-          provider: args.provider,
-          yes: args.yes,
-        },
-        context,
-      ),
-    )
-    process.exitCode = code
+    process.exitCode = await withKernel(context, process.env, async (kernel) => {
+      const code = await runSession(kernel, options, context)
+      return code
+    })
   },
 })
 ```
-`run.ts` (the citty runner from SP0) already maps a thrown error to exit 2; the `run` command sets `process.exitCode` for 0/3/4 so the SP0 runner's return value stays 0 — in `main.ts` the final line becomes `process.exit((await run(main, process.argv.slice(2))) || (process.exitCode ?? 0))`.
+`apps/bytebureau/src/commands/run-session.ts`:
+```ts
+import { m } from '@bytebureau/i18n'
+import {
+  ProviderError,
+  SessionError,
+  WorkspaceError,
+  type CreateSessionInput,
+  type EventFilter,
+} from '@bytebureau/kernel'
+import {
+  decodeEventPayload,
+  type AnsweredVia,
+  type Ask,
+  type AskAnswer,
+  type EventEnvelope,
+  type PromptInput,
+} from '@bytebureau/protocol'
+import { intro, log, outro } from '@clack/prompts'
+import type { Context } from '../context.js'
+import type { Output } from '../output.js'
+import { promptAsk } from '../render/ask-prompt.js'
+import {
+  completionLine,
+  readOrSkip,
+  summarizeRun,
+  titleOf,
+  transcriptLine,
+} from '../render/transcript.js'
+import { describeError } from '../errors.js'
+
+const EXIT_COMPLETED = 0
+const EXIT_STOPPED = 3
+const EXIT_PROVIDER_ERROR = 4
+
+const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
+
+// A project path that holds no repository to work in, or is a session worktree itself
+const UNUSABLE_PROJECT = new Set(['not_a_repository', 'is_bytebureau_worktree'])
+
+export interface RunOptions {
+  readonly prompt: string
+  readonly project: string
+  readonly branch?: string | undefined
+  readonly employee?: string | undefined
+  readonly provider?: string | undefined
+  readonly yes: boolean
+}
+
+// What a run needs of the kernel facade, which has more
+export interface RunKernel {
+  readonly providers: { readonly list: () => readonly { readonly id: string }[] }
+  readonly projects: { readonly register: (path: string) => Promise<{ readonly id: string }> }
+  readonly sessions: {
+    readonly create: (input: CreateSessionInput) => Promise<{ readonly id: string }>
+    readonly prompt: (sessionId: string, input: PromptInput) => Promise<unknown>
+    readonly stop: (sessionId: string) => Promise<void>
+    readonly complete: (sessionId: string) => Promise<void>
+  }
+  readonly asks: {
+    readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
+  }
+  readonly events: { readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope> }
+}
+
+interface Run {
+  readonly kernel: RunKernel
+  readonly session: { readonly id: string }
+  readonly options: RunOptions
+  readonly context: Context
+}
+
+interface Outcome {
+  readonly code: number
+  readonly text: string
+}
+
+// Failures that end a run with exit code 4: no repository to work in, a provider that is missing or fails
+function isRefusal(error: unknown): boolean {
+  if (error instanceof WorkspaceError) {
+    return UNUSABLE_PROJECT.has(error.code)
+  }
+  if (error instanceof SessionError) {
+    return error.code === 'provider_missing'
+  }
+  return error instanceof ProviderError
+}
+
+// A terminal gets a frame: the session opens it, and every way out of the run closes it
+function open({ output, interactive }: Context, prompt: string): void {
+  if (interactive) {
+    const title = titleOf(prompt)
+    intro(output.colors.bold(m.run_intro({ title })))
+  }
+}
+
+function closeFrame({ interactive }: Context): void {
+  if (interactive) {
+    outro()
+  }
+}
+
+// A refusal ends the run with exit code 4: its text is the closing line of the frame, or goes to stderr
+function refuse({ output, interactive }: Context, text: string): number {
+  if (interactive) {
+    outro(text)
+  } else {
+    output.warn(text)
+  }
+  return EXIT_PROVIDER_ERROR
+}
+
+// A named provider is checked before anything is registered or created
+function unknownProvider(kernel: RunKernel, provider: string | undefined): string | undefined {
+  const available = kernel.providers.list().map((candidate) => candidate.id)
+  return provider === undefined || available.includes(provider)
+    ? undefined
+    : m.run_provider_missing({ provider, available: available.join(', ') })
+}
+
+// JSON output is the events themselves; text output the lines worth reading, decorated at a terminal
+function show(event: EventEnvelope, { output, interactive }: Context): void {
+  if (output.json) {
+    output.emit(event)
+    return
+  }
+  const line = transcriptLine(event, output)
+  if (line === undefined) {
+    return
+  }
+  if (interactive) {
+    log.message(line)
+  } else {
+    output.print(line)
+  }
+}
+
+// An ask nobody can answer is left to the kernel policy; the person is told the session waits
+async function answerAsk({ kernel, options, context }: Run, ask: Ask): Promise<void> {
+  const answer = await promptAsk(ask, { yes: options.yes, interactive: context.interactive })
+  if (answer === undefined) {
+    context.output.warn(m.run_ask_waiting({ title: ask.title }))
+    return
+  }
+  await kernel.asks.answer(ask.id, answer, 'cli')
+}
+
+// The ask of an ask.requested event, if its payload fits
+function askOf(event: EventEnvelope, output: Output): Ask | undefined {
+  return readOrSkip(event, output, () => decodeEventPayload('ask.requested', event.payload).ask)
+}
+
+// Besides showing an event the CLI answers an ask, and completes the session once its turn is over
+async function react(run: Run, event: EventEnvelope): Promise<void> {
+  const ask = event.type === 'ask.requested' ? askOf(event, run.context.output) : undefined
+  if (ask !== undefined) {
+    await answerAsk(run, ask)
+  }
+  if (event.type === 'turn.completed') {
+    await run.kernel.sessions.complete(run.session.id)
+  }
+}
+
+// The events up to the end of the session, which is the last one returned
+async function follow(run: Run, events: AsyncIterable<EventEnvelope>): Promise<EventEnvelope[]> {
+  const seen: EventEnvelope[] = []
+  for await (const event of events) {
+    seen.push(event)
+    show(event, run.context)
+    await react(run, event)
+    if (TERMINAL.has(event.type)) {
+      break
+    }
+  }
+  return seen
+}
+
+// A stop that fails is only reported; Ctrl-C again ends the process
+async function stopSession({ kernel, session, context }: Run): Promise<void> {
+  try {
+    await kernel.sessions.stop(session.id)
+  } catch (error) {
+    context.output.warn(describeError(error))
+  }
+}
+
+// Ctrl-C stops the session; the events then say so and the run ends with the exit code of a stopped one
+// The children of the kernel run detached, so the terminal does not reach them: only the stop does
+async function followSession(run: Run): Promise<EventEnvelope[]> {
+  const { kernel, session, options } = run
+  let stopping = Promise.resolve()
+  const stop = (): void => {
+    stopping = stopSession(run)
+  }
+  process.once('SIGINT', stop)
+  try {
+    // The ephemeral events (text deltas) carry no seq of their own and no transcript line
+    const events = kernel.events.subscribe({ sessionId: session.id, since: 0, ephemeral: false })
+    await kernel.sessions.prompt(session.id, { text: options.prompt })
+    return await follow(run, events)
+  } finally {
+    process.off('SIGINT', stop)
+    await stopping
+  }
+}
+
+// The reason of an errored session; the type of the event stands in for a payload that cannot be read
+function reasonOf(last: EventEnvelope, output: Output): string {
+  const reason = readOrSkip(last, output, () => decodeEventPayload('session.errored', last.payload))
+  return reason === undefined ? last.type : reason.message
+}
+
+// The summary is built only for the words that are printed: JSON output has none
+function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: Output): Outcome {
+  switch (last.type) {
+    case 'session.stopped': {
+      return { code: EXIT_STOPPED, text: m.run_stopped() }
+    }
+    case 'session.errored': {
+      return { code: EXIT_PROVIDER_ERROR, text: m.run_errored({ message: reasonOf(last, output) }) }
+    }
+    default: {
+      return {
+        code: EXIT_COMPLETED,
+        text: output.json ? '' : completionLine(summarizeRun(seen, output)),
+      }
+    }
+  }
+}
+
+function report({ code, text }: Outcome, { output, interactive }: Context): void {
+  if (interactive) {
+    outro(text)
+  } else if (code === EXIT_PROVIDER_ERROR) {
+    output.warn(text)
+  } else {
+    output.print(text)
+  }
+}
+
+function conclude(seen: readonly EventEnvelope[], context: Context): number {
+  const last = seen.at(-1)
+  if (last === undefined || !TERMINAL.has(last.type)) {
+    throw new Error('the events ended before the session did')
+  }
+  const outcome = outcomeOf(last, seen, context.output)
+  report(outcome, context)
+  return outcome.code
+}
+
+async function startAndFollow(
+  kernel: RunKernel,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  const project = await kernel.projects.register(options.project)
+  const session = await kernel.sessions.create({
+    projectId: project.id,
+    title: titleOf(options.prompt),
+    employeeId: options.employee,
+    providerId: options.provider,
+    branch: options.branch,
+  })
+  const seen = await followSession({ kernel, session, options, context })
+  return conclude(seen, context)
+}
+
+// A named provider is refused before anything is registered or created
+async function runOrRefuse(
+  kernel: RunKernel,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  const refusal = unknownProvider(kernel, options.provider)
+  if (refusal !== undefined) {
+    return refuse(context, refusal)
+  }
+  const code = await startAndFollow(kernel, options, context)
+  return code
+}
+
+// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project or provider refused
+// A failure that has no exit code of its own closes the frame and goes on to the runner
+export async function runSession(
+  kernel: RunKernel,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  open(context, options.prompt)
+  try {
+    return await runOrRefuse(kernel, options, context)
+  } catch (error) {
+    if (!isRefusal(error)) {
+      closeFrame(context)
+      throw error
+    }
+    return refuse(context, describeError(error))
+  }
+}
+```
+`apps/bytebureau/src/errors.ts`:
+```ts
+function field(error: Error, key: string): string | undefined {
+  const value: unknown = Reflect.get(error, key)
+  return typeof value === 'string' ? value : undefined
+}
+
+type Describe = (error: unknown) => string
+
+// The reason a typed error names, else the story of its cause (a StoreError carries nothing but that)
+function reasonOf(error: Error, describeCause: Describe): string | undefined {
+  const reason = field(error, 'reason')
+  return reason === undefined && error.cause !== undefined ? describeCause(error.cause) : reason
+}
+
+// A file with its JSON pointer, else the code or the kind of the failure
+function whereOf(error: Error): string | undefined {
+  const file = field(error, 'file')
+  if (file !== undefined) {
+    return `${file}${field(error, 'pointer') ?? ''}`
+  }
+  return field(error, 'code') ?? field(error, 'kind')
+}
+
+// The tagged errors of the kernel have an empty message: their name and fields say what went wrong
+function describeTyped(error: Error, describeCause: Describe): string {
+  const reason = reasonOf(error, describeCause)
+  const head = reason === undefined ? error.name : `${error.name}: ${reason}`
+  const where = whereOf(error)
+  return where === undefined ? head : `${head} (${where})`
+}
+
+// An error and the errors behind it: "Failed to execute statement: FOREIGN KEY constraint failed"
+// An error behind that already begins with what this one says is not told twice
+function describeChain(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error)
+  }
+  if (error.message === '') {
+    return describeTyped(error, describeChain)
+  }
+  if (error.cause === undefined) {
+    return error.message
+  }
+  const behind = describeChain(error.cause)
+  const repeated = behind === error.message || behind.startsWith(`${error.message}: `)
+  return repeated ? behind : `${error.message}: ${behind}`
+}
+
+// The one line to print for an error: the message, or what a tagged error of the kernel says in place of one
+export function describeError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error)
+  }
+  return error.message === '' ? describeTyped(error, describeChain) : error.message
+}
+```
+`apps/bytebureau/src/kernel-home.ts`:
+```ts
+import { homedir } from 'node:os'
+import path from 'node:path'
+
+// An empty BYTEBUREAU_HOME names no directory: taken as it is it would put the data in ./data
+export function kernelHome(env: Readonly<Record<string, string | undefined>>): string {
+  const home = env['BYTEBUREAU_HOME']
+  return home === undefined || home === '' ? path.join(homedir(), '.bytebureau') : home
+}
+```
+`run.ts` (the citty runner from SP0) maps a thrown error to exit 2 and now formats typed kernel errors through `errors.ts`; the `run` command sets `process.exitCode` for 0/3/4 and `main.ts` ends with `process.exit((await run(main, process.argv.slice(2))) || (process.exitCode ?? 0))`.
 
 - [ ] **Step 6: `config`, `projects`, `workspaces` commands**
 
 `apps/bytebureau/src/commands/config.ts`:
 ```ts
 import { existsSync, writeFileSync } from 'node:fs'
-import { isatty } from 'node:tty'
 import path from 'node:path'
 import { m } from '@bytebureau/i18n'
 import { defaultProjectConfigText } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
-import { createContext, globalArgs } from '../context.js'
+import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
 
+const PROJECT_ARG = {
+  type: 'string',
+  description: 'Project path (default: current directory)',
+} as const
+
+// The kernel refuses a directory that has both
+const CONFIG_FILES = ['bytebureau.json', 'bytebureau.jsonc'] as const
+
+// The config file a directory already has, if any
+function existingConfig(directory: string): string | undefined {
+  return CONFIG_FILES.map((name) => path.join(directory, name)).find((file) => existsSync(file))
+}
+
+// Creates the file unless anything is there (a link to nowhere too): the file is never written through a link
+function createConfig(file: string): boolean {
+  try {
+    writeFileSync(file, defaultProjectConfigText(), { flag: 'wx' })
+    return true
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+      return false
+    }
+    throw error
+  }
+}
+
 const init = defineCommand({
-  meta: { name: 'init', description: 'Write a commented bytebureau.json with the default employee' },
-  args: { ...globalArgs, project: { type: 'string', description: 'Project path (default: current directory)' } },
+  meta: {
+    name: 'init',
+    description: 'Write a commented bytebureau.jsonc with the default employee',
+  },
+  args: { ...globalArgs, project: PROJECT_ARG },
   run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const file = path.join(args.project ?? process.cwd(), 'bytebureau.jsonc')
-    if (existsSync(file)) {
-      context.output.warn(m.config_init_exists({ file }))
-      process.exitCode = 1
+    const context = processContext(args)
+    const directory = path.resolve(args.project ?? process.cwd())
+    const file = path.join(directory, 'bytebureau.jsonc')
+    const existing = existingConfig(directory)
+    if (existing === undefined && createConfig(file)) {
+      context.output.print(m.config_init_written({ file }))
+      context.output.emit({ command: 'config.init', file })
       return
     }
-    writeFileSync(file, defaultProjectConfigText())
-    context.output.print(m.config_init_written({ file }))
-    context.output.emit({ command: 'config.init', file })
+    context.output.warn(m.config_init_exists({ file: existing ?? file }))
+    process.exitCode = 1
   },
 })
 
 const validate = defineCommand({
   meta: { name: 'validate', description: 'Validate the layered configuration for a project' },
-  args: { ...globalArgs, project: { type: 'string', description: 'Project path (default: current directory)' } },
+  args: { ...globalArgs, project: PROJECT_ARG },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const issues = await withKernel(context, process.env, (kernel) =>
-      kernel.config.validate(args.project ?? process.cwd()),
-    )
+    const context = processContext(args)
+    const issues = await withKernel(context, process.env, async (kernel) => {
+      const found = await kernel.config.validate(args.project ?? process.cwd())
+      return found
+    })
     context.output.emit({ command: 'config.validate', issues })
     if (issues.length === 0) {
       context.output.print(m.config_valid())
@@ -17221,9 +17874,12 @@ const schema = defineCommand({
   meta: { name: 'schema', description: 'Print the JSON Schema of bytebureau.json' },
   args: { ...globalArgs },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const document = await withKernel(context, process.env, (kernel) => Promise.resolve(kernel.config.schema()))
-    console.log(JSON.stringify(document, null, 2))
+    const context = processContext(args)
+    const document = await withKernel(context, process.env, async (kernel) => {
+      await Promise.resolve()
+      return kernel.config.schema()
+    })
+    console.log(JSON.stringify(document, undefined, 2))
   },
 })
 
@@ -17235,46 +17891,62 @@ export const configCommand = defineCommand({
 
 `apps/bytebureau/src/commands/projects.ts`:
 ```ts
-import { isatty } from 'node:tty'
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { createContext, globalArgs } from '../context.js'
+import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List registered projects' },
   args: { ...globalArgs },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const projects = await withKernel(context, process.env, (kernel) => kernel.projects.list())
+    const context = processContext(args)
+    const projects = await withKernel(context, process.env, async (kernel) => {
+      const listed = await kernel.projects.list()
+      return listed
+    })
     context.output.emit({ command: 'projects.ls', projects })
     if (projects.length === 0) {
       context.output.print(m.projects_none())
       return
     }
     for (const project of projects) {
-      context.output.print(`${project.id}  ${project.name}  ${project.path}  (${project.defaultBranch})`)
+      context.output.print(
+        `${project.id}  ${project.name}  ${project.path}  (${project.defaultBranch})`,
+      )
     }
   },
 })
 
 const add = defineCommand({
   meta: { name: 'add', description: 'Register a project (default: current directory)' },
-  args: { ...globalArgs, path: { type: 'positional', description: 'Project path', required: false } },
+  args: {
+    ...globalArgs,
+    path: { type: 'positional', description: 'Project path', required: false },
+  },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const project = await withKernel(context, process.env, (kernel) => kernel.projects.register(args.path ?? process.cwd()))
+    const context = processContext(args)
+    const project = await withKernel(context, process.env, async (kernel) => {
+      const registered = await kernel.projects.register(args.path ?? process.cwd())
+      return registered
+    })
     context.output.emit({ command: 'projects.add', project })
     context.output.print(m.projects_added({ name: project.name, path: project.path }))
   },
 })
 
 const rm = defineCommand({
-  meta: { name: 'rm', description: 'Unregister a project (its worktrees are kept)' },
+  meta: {
+    name: 'rm',
+    description:
+      'Unregister a project; its worktrees are kept, and it fails while sessions of the project exist',
+  },
   args: { ...globalArgs, id: { type: 'positional', description: 'Project id', required: true } },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    await withKernel(context, process.env, (kernel) => kernel.projects.remove(args.id))
+    const context = processContext(args)
+    await withKernel(context, process.env, async (kernel) => {
+      await kernel.projects.remove(args.id)
+    })
     context.output.emit({ command: 'projects.rm', id: args.id })
     context.output.print(m.projects_removed({ id: args.id }))
   },
@@ -17288,40 +17960,53 @@ export const projectsCommand = defineCommand({
 
 `apps/bytebureau/src/commands/workspaces.ts`:
 ```ts
-import { isatty } from 'node:tty'
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { createContext, globalArgs } from '../context.js'
+import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List session worktrees' },
   args: { ...globalArgs, project: { type: 'string', description: 'Project id' } },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const workspaces = await withKernel(context, process.env, (kernel) => kernel.workspaces.list(args.project))
+    const context = processContext(args)
+    const workspaces = await withKernel(context, process.env, async (kernel) => {
+      const listed = await kernel.workspaces.list(args.project)
+      return listed
+    })
     context.output.emit({ command: 'workspaces.ls', workspaces })
     if (workspaces.length === 0) {
       context.output.print(m.workspaces_none())
       return
     }
     for (const workspace of workspaces) {
-      context.output.print(`${workspace.sessionId}  ${workspace.branch}  ${workspace.status}  ${workspace.path}`)
+      context.output.print(
+        `${workspace.sessionId}  ${workspace.branch}  ${workspace.sessionStatus}  ${workspace.path}`,
+      )
     }
   },
 })
 
 const prune = defineCommand({
-  meta: { name: 'prune', description: 'Remove worktrees of finished sessions that are merged or pushed and older than the retain period' },
+  meta: {
+    name: 'prune',
+    description:
+      'Remove worktrees of finished sessions that are merged or pushed and older than the retain period',
+  },
   args: { ...globalArgs, project: { type: 'string', description: 'Project id' } },
   async run({ args }) {
-    const context = createContext(args, process.env, isatty(process.stdout.fd))
-    const report = await withKernel(context, process.env, (kernel) => kernel.workspaces.prune(args.project))
+    const context = processContext(args)
+    const report = await withKernel(context, process.env, async (kernel) => {
+      const pruned = await kernel.workspaces.prune(args.project)
+      return pruned
+    })
     context.output.emit({ command: 'workspaces.prune', ...report })
     for (const kept of report.retained) {
       context.output.print(`${kept.path}: ${kept.reason}`)
     }
-    context.output.print(m.workspaces_pruned({ removed: report.removed.length, retained: report.retained.length }))
+    context.output.print(
+      m.workspaces_pruned({ removed: report.removed.length, retained: report.retained.length }),
+    )
   },
 })
 
@@ -17337,56 +18022,324 @@ export const workspacesCommand = defineCommand({
 
 `apps/bytebureau/src/commands/run.test.ts` (spawns the CLI as a subprocess like `cli.test.ts` does, with `BYTEBUREAU_HOME` pointing at a temp dir and a temp git repository from the workspace-local test helper — import `createTempRepo` from `@bytebureau/workspace-local/testing` is not allowed (nothing imports a plugin's internals); copy the 20-line helper into `apps/bytebureau/src/testing/temp-repo.ts` instead):
 ```ts
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { eventLines, jsonLines, payloadOf } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { createTempRepo } from '../testing/temp-repo.js'
+import { tempDir } from '../testing/temp-repo.js'
+import {
+  configureEmployeeProvider,
+  FAKE,
+  ON_FAKE,
+  PROMPT,
+  workbench,
+  worktreesOf,
+} from '../testing/workbench.js'
 
 describe('bytebureau run (fake provider, no daemon)', () => {
   it('provisions a worktree, streams NDJSON events with increasing seq, answers the ask with --yes and exits 0', async () => {
-    const repo = createTempRepo()
-    const home = mkdtempSync(path.join(tmpdir(), 'bb-home-'))
-    const result = await runCli(
-      ['run', 'Create src/hello.ts exporting hello()', '--project', repo, '--provider', 'fake', '--json', '--yes'],
-      { BYTEBUREAU_HOME: home },
-    )
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const result = await runCli(['run', PROMPT, '--project', repo, ...FAKE], {
+      BYTEBUREAU_HOME: home,
+    })
     expect(result.code).toBe(0)
-    const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as { seq: number; type: string })
-    const seqs = events.map((event) => event.seq)
-    expect(seqs).toEqual([...seqs].sort((a, b) => a - b))
-    expect(events.map((event) => event.type)).toEqual(
-      expect.arrayContaining(['session.created', 'workspace.provisioned', 'turn.started', 'ask.requested', 'ask.answered', 'turn.completed', 'session.completed']),
+    const events = eventLines(result.stdout)
+    const sequence = events.map((line) => line.seq)
+    expect(sequence).toStrictEqual([...new Set(sequence)].toSorted((left, right) => left - right))
+    expect(events.map((line) => line.type)).toStrictEqual(
+      expect.arrayContaining([
+        'session.created',
+        'workspace.provisioned',
+        'turn.started',
+        'ask.requested',
+        'ask.answered',
+        'turn.completed',
+        'session.completed',
+      ]),
     )
-    const worktrees = path.join(repo, '.bytebureau', 'worktrees')
-    const [worktree] = readdirSync(worktrees)
-    expect(existsSync(path.join(worktrees, worktree ?? '', 'src', 'hello.ts'))).toBe(true)
-    expect(readFileSync(path.join(home, 'data', 'bytebureau.db')).length).toBeGreaterThan(0)
+    expect(events.at(-1)).toMatchObject({ type: 'session.completed' })
   })
 
-  it('exits 4 when the provider does not exist and creates nothing', async () => {
-    const repo = createTempRepo()
-    const home = mkdtempSync(path.join(tmpdir(), 'bb-home-'))
-    const result = await runCli(['run', 'x', '--project', repo, '--provider', 'nope', '--json'], { BYTEBUREAU_HOME: home })
-    expect(result.code).toBe(4)
-    expect(existsSync(path.join(repo, '.bytebureau', 'worktrees'))).toBe(false)
+  it('leaves the file of the agent in the worktree, written as the recommended answer says, and the data in the home', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    await runCli(['run', PROMPT, '--project', repo, ...FAKE], { BYTEBUREAU_HOME: home })
+    const [worktree = ''] = readdirSync(worktreesOf(repo))
+    const hello = path.join(worktreesOf(repo), worktree, 'src', 'hello.ts')
+    expect(readFileSync(hello, 'utf8')).toContain('export function hello()')
+    expect(existsSync(path.join(home, 'data', 'bytebureau.db'))).toBe(true)
   })
 
-  it('exits 3 and retains the worktree when interrupted mid-turn', async () => {
-    const repo = createTempRepo()
-    const home = mkdtempSync(path.join(tmpdir(), 'bb-home-'))
-    const result = await runCli(
-      ['run', 'slow task', '--project', repo, '--provider', 'fake', '--json', '--yes'],
-      { BYTEBUREAU_HOME: home, BYTEBUREAU_FAKE_SCRIPT: 'slow' },
-      { killAfterMs: 1500, signal: 'SIGINT' },
-    )
-    expect(result.code).toBe(3)
-    expect(existsSync(path.join(repo, '.bytebureau', 'worktrees'))).toBe(true)
-    const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as { type: string })
-    expect(events.map((event) => event.type)).toContain('turn.interrupted')
+  it('hands a prompt with CRLF, an emoji and diacritics to the agent unchanged and titles the session by its first line', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const prompt = 'Vytvoř soubor\r\nhello 😀 příliš žluťoučký kůň'
+    const result = await runCli(['run', prompt, '--project', repo, ...FAKE], {
+      BYTEBUREAU_HOME: home,
+    })
+    const events = eventLines(result.stdout)
+    expect(payloadOf(events, 'message.user')).toStrictEqual({ text: prompt })
+    expect(payloadOf(events, 'session.created')).toMatchObject({ title: 'Vytvoř soubor' })
   })
 })
+
+describe('bytebureau run when it cannot start', () => {
+  it('exits 4 when the provider does not exist and creates nothing', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const env = { BYTEBUREAU_HOME: home }
+    const result = await runCli(
+      ['run', 'x', '--project', repo, '--provider', 'nope', '--json'],
+      env,
+    )
+    expect(result.code).toBe(4)
+    expect(existsSync(path.join(repo, '.bytebureau'))).toBe(false)
+    expect(jsonLines(result.stderr)).toStrictEqual([
+      { level: 'warn', message: 'Provider "nope" is not available. Available: fake' },
+    ])
+    const projects = await runCli(['projects', 'ls', '--json'], env)
+    expect(jsonLines(projects.stdout)).toStrictEqual([{ command: 'projects.ls', projects: [] }])
+  })
+
+  it('exits 4 when the provider of the employee of the project is not available', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    configureEmployeeProvider(repo, 'nope')
+    const result = await runCli(['run', 'x', '--project', repo], { BYTEBUREAU_HOME: home })
+    expect(result.code).toBe(4)
+    expect(result.stderr).toContain(
+      'SessionError: provider "nope" is not available; available: fake (provider_missing)',
+    )
+    expect(existsSync(worktreesOf(repo))).toBe(false)
+  })
+
+  it('exits 4 with a one-line reason, and writes nothing, for a project that is not a repository', async () => {
+    expect.hasAssertions()
+    const directory = tempDir('bb-plain-')
+    const result = await runCli(['run', 'x', '--project', directory, ...ON_FAKE], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
+    expect(result.code).toBe(4)
+    expect(result.stderr.trim()).toBe(
+      `WorkspaceError: ${directory} is not inside a git repository (not_a_repository)`,
+    )
+    expect(readdirSync(directory)).toStrictEqual([])
+  })
+})
+
+const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+
+describe('bytebureau run when it is interrupted or nobody answers', () => {
+  it('exits 3 and retains the worktree when interrupted mid-turn', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const result = await runCli(
+      ['run', 'slow task', '--project', repo, ...FAKE],
+      { BYTEBUREAU_HOME: home, ...SLOW },
+      { signal: 'SIGINT', afterStdout: '"type":"turn.started"' },
+    )
+    expect(result.code).toBe(3)
+    const types = eventLines(result.stdout).map((line) => line.type)
+    expect(types).toContain('turn.interrupted')
+    expect(types.at(-1)).toBe('session.stopped')
+    expect(readdirSync(worktreesOf(repo))).toHaveLength(1)
+  })
+
+  it('leaves the session stopped and its worktree on record, ready to be resumed', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const env = { BYTEBUREAU_HOME: home }
+    await runCli(
+      ['run', 'slow task', '--project', repo, ...FAKE],
+      { ...env, ...SLOW },
+      { signal: 'SIGINT', afterStdout: '"type":"turn.started"' },
+    )
+    const listed = await runCli(['workspaces', 'ls', '--json'], env)
+    expect(jsonLines(listed.stdout)).toMatchObject([
+      { command: 'workspaces.ls', workspaces: [{ sessionStatus: 'stopped', exists: true }] },
+    ])
+  })
+
+  it('waits for an answer, and says so, when the ask cannot be answered without --yes', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const result = await runCli(
+      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--json'],
+      { BYTEBUREAU_HOME: home },
+      { signal: 'SIGINT', afterStdout: '"type":"session.waiting"' },
+    )
+    expect(result.code).toBe(3)
+    const types = eventLines(result.stdout).map((line) => line.type)
+    expect(types).not.toContain('ask.answered')
+    const messages = jsonLines(result.stderr).map((line) => line['message'])
+    expect(messages).toContain(
+      'The employee is waiting for your answer to "Export style" (not answered automatically)',
+    )
+  })
+})
+
+describe('bytebureau run read by a person', () => {
+  it('prints plain lines, without decoration, to a pipe', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const result = await runCli(['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes'], {
+      BYTEBUREAU_HOME: home,
+    })
+    expect(result.code).toBe(0)
+    const lines = result.stdout.trim().split('\n')
+    expect(lines[0]).toMatch(/^Preparing the workspace on branch bb\//u)
+    expect(lines.slice(1, 4)).toStrictEqual([
+      'The employee is working…',
+      '⚙ Write src/hello.ts',
+      'Created src/hello.ts exporting hello().',
+    ])
+    expect(lines.at(-1)).toBe('Done — turns: 1, input tokens: 120, output tokens: 40 ($0.0020)')
+    expect(result.stdout).not.toContain('│')
+  })
+
+  it('speaks Czech when asked to', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const result = await runCli(
+      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes', '--lang', 'cs'],
+      { BYTEBUREAU_HOME: home },
+    )
+    const lines = result.stdout.trim().split('\n')
+    expect(lines[0]).toMatch(/^Připravuji pracovní prostor na větvi bb\//u)
+    expect(lines.at(-1)).toBe('Hotovo — kol: 1, vstupní tokeny: 120, výstupní tokeny: 40 ($0.0020)')
+  })
+})
+```
+`apps/bytebureau/src/testing/run-cli.ts`:
+```ts
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import type { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
+import { onTestFinished } from 'vitest'
+import { tempDir } from './temp-repo.js'
+
+const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
+const BASE_ENV = {
+  PATH: process.env['PATH'] ?? '',
+  HOME: process.env['HOME'] ?? '',
+  LANG: 'en_US.UTF-8',
+  // The git of a test never reads the configuration of the person who runs the tests
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+}
+
+// A test that names no home for the CLI gets a throwaway one, never that of the person who runs the tests
+export function childEnv(env: Readonly<Record<string, string>>): Record<string, string> {
+  return { ...BASE_ENV, BYTEBUREAU_HOME: env['BYTEBUREAU_HOME'] ?? tempDir('bb-home-'), ...env }
+}
+
+export interface CliResult {
+  readonly code: number
+  readonly stdout: string
+  readonly stderr: string
+}
+
+// The signal goes out once the CLI has printed the text: no timing guess about how far the run has got
+export interface Interruption {
+  readonly signal: 'SIGINT' | 'SIGTERM'
+  readonly afterStdout: string
+}
+
+type Child = ChildProcessByStdio<null, Readable, Readable>
+
+interface Captured {
+  stdout: string
+  stderr: string
+}
+
+function capture(child: Child, interruption: Interruption | undefined): Captured {
+  const captured: Captured = { stdout: '', stderr: '' }
+  let signalled = false
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+    captured.stdout += chunk
+    if (
+      interruption !== undefined &&
+      !signalled &&
+      captured.stdout.includes(interruption.afterStdout)
+    ) {
+      signalled = true
+      child.kill(interruption.signal)
+    }
+  })
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+    captured.stderr += chunk
+  })
+  return captured
+}
+
+// Runs the CLI from source in a Bun process; a process still alive when the test ends is killed
+export async function runCli(
+  args: readonly string[],
+  env: Readonly<Record<string, string>> = {},
+  interruption?: Interruption,
+): Promise<CliResult> {
+  const child = spawn('bun', ['run', 'src/main.ts', ...args], {
+    cwd: CLI_DIRECTORY,
+    env: childEnv(env),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  const captured = capture(child, interruption)
+  const { promise, resolve, reject } = Promise.withResolvers<CliResult>()
+  child.once('error', reject)
+  child.once('close', (code) => {
+    resolve({ code: code ?? -1, stdout: captured.stdout, stderr: captured.stderr })
+  })
+  const result = await promise
+  return result
+}
+```
+`apps/bytebureau/src/testing/temp-repo.ts`:
+```ts
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { onTestFinished } from 'vitest'
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Test',
+  GIT_AUTHOR_EMAIL: 'test@example.com',
+  GIT_COMMITTER_NAME: 'Test',
+  GIT_COMMITTER_EMAIL: 'test@example.com',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim()
+}
+
+// Symlinks are resolved, as git reports paths: on macOS /var is a link to /private/var
+// The directory is removed when the running test has finished
+export function tempDir(prefix: string): string {
+  const created = mkdtempSync(path.join(tmpdir(), prefix))
+  const dir = realpathSync(created)
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+// A repository with one commit on `main`
+export function createTempRepo(): string {
+  const dir = tempDir('bb-repo-')
+  git(dir, 'init', '-q', '-b', 'main')
+  writeFileSync(path.join(dir, 'README.md'), '# fixture\n')
+  git(dir, 'add', 'README.md')
+  git(dir, 'commit', '-q', '-m', 'initial')
+  return dir
+}
 ```
 `apps/bytebureau/src/testing/run-cli.ts` spawns `bun run src/main.ts <args>` with the merged environment, optionally sending `signal` after `killAfterMs`, and resolves `{ code, stdout, stderr }` (reuse the helper already inside `cli.test.ts` by moving it into this file and importing it from both tests). Add `import { readdirSync } from 'node:fs'` to the test's imports.
 
