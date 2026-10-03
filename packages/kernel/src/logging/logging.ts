@@ -1,7 +1,6 @@
 import {
   ansiColorFormatter,
   configure,
-  getConsoleSink,
   getLogger,
   jsonLinesFormatter,
   reset,
@@ -9,6 +8,7 @@ import {
   type LogLevel,
   type LogRecord,
   type Sink,
+  type TextFormatter,
 } from '@logtape/logtape'
 import { getRotatingFileSink } from '@logtape/file'
 import type { Logger as PluginLogger } from '@bytebureau/plugin-api'
@@ -68,12 +68,17 @@ export function parseDebug(debug: string | undefined): DebugSelection | undefine
   }
 }
 
+// Every record goes to stderr, whatever its level: stdout belongs to the output of a command, such as the NDJSON of --json
+const stderrSink =
+  (formatter: TextFormatter): Sink =>
+  (record) => {
+    process.stderr.write(formatter(record))
+  }
+
 function sinks(options: LoggingOptions): Record<string, Sink> {
   const result: Record<string, Sink> = {
     console: redactFields(
-      getConsoleSink({
-        formatter: options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter),
-      }),
+      stderrSink(options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter)),
     ),
   }
   if (options.file !== undefined) {

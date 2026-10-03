@@ -1,8 +1,8 @@
+import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand, type CommandDef } from 'citty'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { globalArgs } from './context.js'
 import { run } from './run.js'
-import { typedError } from './testing/typed-error.js'
 
 interface Console {
   readonly log: MockInstance<typeof console.log>
@@ -78,7 +78,7 @@ describe('run with a typed error of the kernel', () => {
   it('prints it as its name, its reason and its code, and returns 2', async () => {
     expect.hasAssertions()
     const output = silenceConsole()
-    const error = typedError('WorkspaceError', {
+    const error = new WorkspaceError({
       code: 'not_a_repository',
       reason: '/tmp/x is not inside a git repository',
     })

@@ -7,7 +7,7 @@ import { sessionLayer } from './session-layers.js'
 import { SessionManager } from './session-manager.js'
 import { claimStatus } from './session-records.js'
 
-// Breaks a column of the session, so the row no longer fits what the manager reads
+// Breaks a column of the session, so the row no longer fits what the manager reads; a CHECK constraint is no excuse
 const corrupt = (
   sessionId: string,
   column: string,
@@ -15,7 +15,9 @@ const corrupt = (
 ): Effect.Effect<void, unknown, SqlClient.SqlClient> =>
   Effect.gen(function* corrupts() {
     const sql = yield* SqlClient.SqlClient
+    yield* sql`PRAGMA ignore_check_constraints = ON`
     yield* sql`UPDATE sessions SET ${sql(column)} = ${value} WHERE id = ${sessionId}`
+    yield* sql`PRAGMA ignore_check_constraints = OFF`
   })
 
 // A row that is gone cannot break what is read after it

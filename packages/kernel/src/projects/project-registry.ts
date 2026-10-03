@@ -3,7 +3,7 @@ import { decodeProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { Config, type ConfigShape } from '../config/config.js'
-import { StoreError, WorkspaceError, type ConfigError } from '../errors.js'
+import { toStoreError, WorkspaceError, type ConfigError, type StoreError } from '../errors.js'
 import { EventLog, type EventLogShape } from '../events/event-log.js'
 import { nowIso, uuidv7 } from '../ids.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
@@ -51,8 +51,6 @@ const fromRow = (row: Row): Project => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
-
-const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
 
 interface Deps {
   readonly sql: SqlClient.SqlClient

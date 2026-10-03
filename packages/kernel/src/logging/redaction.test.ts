@@ -13,11 +13,15 @@ const record = (properties: Record<string, unknown>, message = 'hello'): LogReco
 
 const SECRET_NAMES = [
   'authorization',
+  'Proxy-Authorization',
   'Cookie',
+  'set-cookie',
   'password',
   'passphrase',
+  'passwd',
   'accessToken',
   'x-api-key',
+  'AWS_ACCESS_KEY_ID',
   'clientSecret',
   'private_key',
   'ANTHROPIC_API_KEY',
@@ -33,6 +37,7 @@ const SECRET_SAMPLES = [
   'AKIAIOSFODNN7CANARY',
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc',
   '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+  'Authorization: Bearer abc.DEF-123_canary=',
   'https://user:pw@example.com/x',
 ]
 const ORDINARY_TEXT =
@@ -94,6 +99,26 @@ describe(redactText, () => {
     expect(JSON.parse(line)).toMatchObject({
       message: 'fetch http://[REDACTED]@example.com/x then http://localhost:3000',
       properties: { plugin: '@bytebureau/demo' },
+    })
+  })
+})
+
+describe('redactText beyond tokens of a known shape', () => {
+  it('redacts a bearer token in free text and the credentials of a URL whatever its scheme', () => {
+    expect.hasAssertions()
+    const format = redactText(jsonLinesFormatter)
+    const line = format(
+      record(
+        {},
+        'sent bearer abc.DEF-1 to HTTPS://joe:pw1@example.com, then ftp://ann:pw2@files.example.com and postgres://bob:pw3@db:5432/x',
+      ),
+    )
+    for (const canary of ['abc.DEF-1', 'joe:pw1', 'ann:pw2', 'bob:pw3']) {
+      expect(line).not.toContain(canary)
+    }
+    expect(JSON.parse(line)).toMatchObject({
+      message:
+        'sent Bearer [REDACTED] to HTTPS://[REDACTED]@example.com, then ftp://[REDACTED]@files.example.com and postgres://[REDACTED]@db:5432/x',
     })
   })
 })

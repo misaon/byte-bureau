@@ -1,7 +1,7 @@
 import { type EventEnvelope, isEphemeral, type KernelEvent } from '@bytebureau/protocol'
 import { Context, Effect, Layer, PubSub, Stream } from 'effect'
 import { SqlClient, type Statement } from 'effect/sql'
-import { StoreError } from '../errors.js'
+import { toStoreError, type StoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
 
 export interface EventFilter {
@@ -63,8 +63,6 @@ const fromRow = (row: Row): EventEnvelope => ({
   ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
   payload: JSON.parse(row.payload_json),
 })
-
-const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
 
 // RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
 const insertEvent = (

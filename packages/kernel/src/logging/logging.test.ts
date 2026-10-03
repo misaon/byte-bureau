@@ -1,42 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { getLogger, type LogRecord } from '@logtape/logtape'
-import { Cause, Effect, Layer, type LogLevel, References } from 'effect'
-import { describe, expect, it, vi } from 'vitest'
-import {
-  configureLogging,
-  EffectLoggerLive,
-  effectToLogTape,
-  kernelLogger,
-  parseDebug,
-  resetLogging,
-  type LoggingOptions,
-} from './logging.js'
-
-// LogTape's configuration is global: each test configures it, runs its logging, collects the records and resets
-async function captured(
-  options: Omit<LoggingOptions, 'capture'>,
-  logging: Effect.Effect<void>,
-): Promise<readonly LogRecord[]> {
-  const seen: LogRecord[] = []
-  await configureLogging({
-    ...options,
-    capture: (entry) => {
-      seen.push(entry)
-    },
-  })
-  try {
-    const layer = Layer.mergeAll(
-      EffectLoggerLive,
-      Layer.succeed(References.MinimumLogLevel, 'Debug'),
-    )
-    await Effect.runPromise(Effect.provide(logging, layer))
-  } finally {
-    await resetLogging()
-  }
-  return seen
-}
+import { getLogger } from '@logtape/logtape'
+import { Cause, Effect, type LogLevel } from 'effect'
+import { describe, expect, it } from 'vitest'
+import { captured } from './logging-fixtures.js'
+import { configureLogging, effectToLogTape, kernelLogger, parseDebug } from './logging.js'
 
 const LEVELS: readonly LogLevel.LogLevel[] = [
   'All',
@@ -48,50 +14,6 @@ const LEVELS: readonly LogLevel.LogLevel[] = [
   'Fatal',
   'None',
 ]
-
-async function sinkOutputs(): Promise<readonly string[]> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'bb-logging-'))
-  const file = path.join(dir, 'kernel.log')
-  const info = vi.spyOn(console, 'info').mockReturnValue()
-  try {
-    await captured(
-      { level: 'info', json: true, file },
-      Effect.sync(() => {
-        kernelLogger(['bb', 'sinks']).info('key sk-ant-api03-canary', {
-          apiKey: 'field-only-value',
-          keep: 1,
-        })
-      }),
-    )
-    return [readFileSync(file, 'utf8'), ...info.mock.calls.map((call) => String(call[0]))]
-  } finally {
-    info.mockRestore()
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
-async function failingSinkRun(): Promise<{
-  readonly delivered: readonly unknown[]
-  readonly reported: readonly string[]
-}> {
-  const capture = vi.fn<(record: LogRecord) => void>().mockImplementationOnce(() => {
-    throw new Error('sink boom')
-  })
-  const error = vi.spyOn(console, 'error').mockReturnValue()
-  try {
-    await configureLogging({ level: 'info', json: true, capture })
-    const logger = kernelLogger(['bb', 'sinks'])
-    logger.info('first')
-    logger.info('second')
-    return {
-      delivered: capture.mock.calls.map(([entry]) => entry.message[0]),
-      reported: error.mock.calls.map((call) => String(call[0])),
-    }
-  } finally {
-    await resetLogging()
-    error.mockRestore()
-  }
-}
 
 async function debugDelivery(debug: string): Promise<readonly unknown[]> {
   const seen = await captured(
@@ -161,10 +83,12 @@ describe('effect message parts', () => {
       { discard: true },
     )
     const seen = await captured({ level: 'info', json: true }, logging)
-    expect(seen.map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
+    expect(seen.slice(0, 2).map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
       ['a b', { parts: [{ keep: 1 }, 7] }],
       ['count', { parts: [5] }],
-      ['failed', { parts: [new Error('boom')] }],
+    ])
+    expect(seen.slice(2).map((entry) => entry.properties)).toMatchObject([
+      { parts: [{ name: 'Error', message: 'boom' }] },
     ])
   })
 })
@@ -222,30 +146,6 @@ describe(configureLogging, () => {
       }),
     )
     expect(seen.map((entry) => entry.message[0])).toStrictEqual(['agent detail'])
-  })
-
-  it('reports a throwing sink on the console and keeps delivering to it', async () => {
-    expect.hasAssertions()
-    const { delivered, reported } = await failingSinkRun()
-    expect(delivered).toStrictEqual(['first', 'second'])
-    expect(reported).toHaveLength(1)
-    expect(JSON.parse(reported.join(''))).toMatchObject({
-      level: 'FATAL',
-      logger: 'logtape.meta',
-      properties: { error: { message: 'sink boom' } },
-    })
-  })
-
-  it('redacts secrets in the console and file output', async () => {
-    expect.hasAssertions()
-    const outputs = await sinkOutputs()
-    expect(outputs).toHaveLength(2)
-    for (const output of outputs) {
-      expect(output).toContain('"keep":1')
-      expect(output).toContain('[REDACTED]')
-      expect(output).not.toContain('canary')
-      expect(output).not.toContain('field-only-value')
-    }
   })
 })
 

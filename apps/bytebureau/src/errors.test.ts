@@ -1,3 +1,4 @@
+import { ConfigError, ProviderError, StoreError, WorkspaceError } from '@bytebureau/kernel'
 import { describe, expect, it } from 'vitest'
 import { describeError } from './errors.js'
 import { typedError } from './testing/typed-error.js'
@@ -14,8 +15,8 @@ describe(describeError, () => {
     expect(describeError(42)).toBe('42')
   })
 
-  it('prints the name, the reason and the code of an error with an empty message', () => {
-    const error = typedError('WorkspaceError', {
+  it('prints the name, the reason and the code of a typed error of the kernel', () => {
+    const error = new WorkspaceError({
       code: 'not_a_repository',
       reason: '/tmp/x is not inside a git repository',
     })
@@ -25,7 +26,7 @@ describe(describeError, () => {
   })
 
   it('names the file and the JSON pointer of a configuration error', () => {
-    const error = typedError('ConfigError', {
+    const error = new ConfigError({
       file: '/repo/bytebureau.json',
       pointer: '/employees/developer/model',
       reason: 'Expected a string',
@@ -36,34 +37,36 @@ describe(describeError, () => {
   })
 
   it('names the file alone when a configuration error has no pointer', () => {
-    const error = typedError('ConfigError', { file: '/repo/bytebureau.json', reason: 'both exist' })
+    const error = new ConfigError({
+      file: '/repo/bytebureau.json',
+      pointer: '',
+      reason: 'both exist',
+    })
     expect(describeError(error)).toBe('ConfigError: both exist (/repo/bytebureau.json)')
   })
 
   it('names the kind of a provider error', () => {
-    const error = typedError('ProviderError', { kind: 'auth', reason: 'not logged in' })
+    const error = new ProviderError({ kind: 'auth', reason: 'not logged in', retryable: false })
     expect(describeError(error)).toBe('ProviderError: not logged in (auth)')
   })
 })
 
 describe('describeError for an error that names a cause, or nothing', () => {
   it('prints the cause of a store error', () => {
-    const store = typedError('StoreError', { cause: new Error('FOREIGN KEY constraint failed') })
+    const store = new StoreError({ cause: new Error('FOREIGN KEY constraint failed') })
     expect(describeError(store)).toBe('StoreError: FOREIGN KEY constraint failed')
   })
 
   it('digs through the causes, whatever kind of value the innermost one is', () => {
     const inner = typedError('SqlError', { cause: 'disk full' })
-    expect(describeError(typedError('StoreError', { cause: inner }))).toBe(
-      'StoreError: SqlError: disk full',
-    )
+    expect(describeError(new StoreError({ cause: inner }))).toBe('StoreError: SqlError: disk full')
   })
 
   it('adds what the errors behind a store error say, without telling the same twice', () => {
     const sqlite = new Error('FOREIGN KEY constraint failed')
     const inner = new Error('Failed to execute statement', { cause: sqlite })
     const sql = new Error('Failed to execute statement', { cause: inner })
-    expect(describeError(typedError('StoreError', { cause: sql }))).toBe(
+    expect(describeError(new StoreError({ cause: sql }))).toBe(
       'StoreError: Failed to execute statement: FOREIGN KEY constraint failed',
     )
   })

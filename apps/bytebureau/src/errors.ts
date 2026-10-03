@@ -1,3 +1,23 @@
+import {
+  AskError,
+  ConfigError,
+  PluginError,
+  ProviderError,
+  SessionError,
+  StoreError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
+
+const KERNEL_ERRORS = [
+  ConfigError,
+  StoreError,
+  WorkspaceError,
+  ProviderError,
+  AskError,
+  PluginError,
+  SessionError,
+] as const
+
 function field(error: Error, key: string): string | undefined {
   const value: unknown = Reflect.get(error, key)
   return typeof value === 'string' ? value : undefined
@@ -20,7 +40,12 @@ function whereOf(error: Error): string | undefined {
   return field(error, 'code') ?? field(error, 'kind')
 }
 
-// The tagged errors of the kernel have an empty message: their name and fields say what went wrong
+// A tagged error of the kernel says what went wrong through its name and fields; its message is only the reason
+// An error with no message at all is told the same way
+function isTyped(error: Error): boolean {
+  return error.message === '' || KERNEL_ERRORS.some((type) => error instanceof type)
+}
+
 function describeTyped(error: Error, describeCause: Describe): string {
   const reason = reasonOf(error, describeCause)
   const head = reason === undefined ? error.name : `${error.name}: ${reason}`
@@ -34,7 +59,7 @@ function describeChain(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error)
   }
-  if (error.message === '') {
+  if (isTyped(error)) {
     return describeTyped(error, describeChain)
   }
   if (error.cause === undefined) {
@@ -50,5 +75,5 @@ export function describeError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error)
   }
-  return error.message === '' ? describeTyped(error, describeChain) : error.message
+  return isTyped(error) ? describeTyped(error, describeChain) : error.message
 }

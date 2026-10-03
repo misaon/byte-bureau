@@ -98,3 +98,4 @@ oneline
 tokeny
 doporučeno
 giget
+seqno
