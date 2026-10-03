@@ -20,6 +20,7 @@ export default defineConfig({
         'scripts/**/*.ts',
         'apps/docs/scripts/**/*.ts',
         'apps/bytebureau/src/locale.ts',
+        'apps/bytebureau/src/context.ts',
         'apps/bytebureau/src/output.ts',
         'apps/bytebureau/src/run.ts',
         'apps/bytebureau/src/errors.ts',
