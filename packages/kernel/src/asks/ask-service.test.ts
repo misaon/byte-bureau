@@ -1,6 +1,6 @@
 import { assert, it } from '@effect/vitest'
 import { Effect, Fiber } from 'effect'
-import { askOf, question, request } from './ask-fixtures.js'
+import { askOf, request } from './ask-fixtures.js'
 import { AskService } from './ask-service.js'
 import { eventsOf, rowOf, seedSession, seedTurn, TestLayer } from './ask-service-fixtures.js'
 
@@ -39,13 +39,23 @@ it.layer(TestLayer)('AskService open', (suite) => {
 })
 
 it.layer(TestLayer)('AskService open a permission', (suite) => {
-  suite.effect('keeps the questions of a permission ask that carries no tool call', () =>
-    Effect.gen(function* keepsQuestions() {
+  suite.effect('offers allow and deny, recommending neither, when there is no tool call', () =>
+    Effect.gen(function* offersTwoOptions() {
       yield* seedSession('open-3')
       const asks = yield* AskService
       const ask = yield* asks.open(request('open-3', { kind: 'permission' }))
-      assert.deepStrictEqual(ask.questions, [question])
-      assert.strictEqual(ask.recommendationSource, 'agent')
+      const options = ask.questions.flatMap((entry) => entry.options)
+      assert.deepStrictEqual(
+        options.map((option) => [option.id, option.recommended]),
+        [
+          ['allow', false],
+          ['deny', false],
+        ],
+      )
+      assert.deepStrictEqual(
+        [ask.recommendationSource, (yield* rowOf(ask.id)).recommendation_source],
+        ['none', 'none'],
+      )
     }),
   )
 

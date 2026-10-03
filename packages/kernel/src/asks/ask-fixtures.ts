@@ -1,4 +1,4 @@
-import { Ask, type AskQuestion } from '@bytebureau/protocol'
+import { Ask, type AskOption, type AskQuestion } from '@bytebureau/protocol'
 import { Schema } from 'effect'
 import type { OpenAskInput } from './ask-build.js'
 
@@ -14,6 +14,21 @@ export const question: AskQuestion = {
     { id: 'b', label: 'B', recommended: false, evidence: [] },
   ],
 }
+
+// An option without evidence
+export const option = (id: string, recommended: boolean): AskOption => ({
+  id,
+  label: id,
+  recommended,
+  evidence: [],
+})
+
+// A question like the fixture one with other options
+export const asking = (id: string, options: readonly AskOption[]): AskQuestion => ({
+  ...question,
+  id,
+  options,
+})
 
 // A supervised question the agent has a recommendation for; a test overrides what it is about
 export const request = (

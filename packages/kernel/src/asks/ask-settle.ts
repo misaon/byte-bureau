@@ -9,6 +9,10 @@ import { announceAnswer, announceCancel, type Settlement } from './ask-events.js
 import { claimAnswer, claimCancel, loadAsk } from './ask-records.js'
 import { wake, type Waiters } from './ask-waiters.js'
 
+// What a waiter learns when its ask is cancelled
+const cancelled = (askId: string): Exit.Exit<never, AskError> =>
+  Exit.fail(new AskError({ code: 'not_pending', reason: `ask ${askId} is cancelled` }))
+
 export interface AskDeps {
   readonly sql: SqlClient.SqlClient
   readonly log: EventLogShape
@@ -89,10 +93,17 @@ export const cancelAsk = (deps: AskDeps, askId: string): Effect.Effect<void, Sto
     if (record === undefined) {
       return
     }
-    const outcome = Exit.fail(
-      new AskError({ code: 'not_pending', reason: `ask ${askId} is cancelled` }),
-    )
+    const outcome = cancelled(askId)
     yield* announceCancel(deps.log, record).pipe(
       Effect.ensuring(wake(deps.waiters, askId, outcome)),
     )
   }).pipe(Effect.uninterruptible)
+
+// An ask whose request could not be announced was offered to nobody: it is cancelled without an event and its waiter fails
+export const withdrawAsk = (deps: AskDeps, askId: string): Effect.Effect<void, StoreError> => {
+  const outcome = cancelled(askId)
+  return claimCancel(deps.sql, askId).pipe(
+    Effect.ensuring(wake(deps.waiters, askId, outcome)),
+    Effect.asVoid,
+  )
+}

@@ -1,33 +1,17 @@
 import { assert, it } from '@effect/vitest'
 import { Effect, Fiber, Layer } from 'effect'
-import { StoreError } from '../errors.js'
-import { EventLog, EventLogLive } from '../events/event-log.js'
 import { StoreTest } from '../store/store-test.js'
 import { request } from './ask-fixtures.js'
 import { AskService, AskServiceLive } from './ask-service.js'
-import { codeOf, rowOf, seedSession } from './ask-service-fixtures.js'
+import { codeOf, refusingLog, rowOf, seedSession } from './ask-service-fixtures.js'
 
 // An event log that records everything but how an ask ended
-const ForgetfulLog = Layer.effect(
-  EventLog,
-  Effect.gen(function* makesForgetfulLog() {
-    const log = yield* EventLog
-    return EventLog.of({
-      ...log,
-      publish: (event) =>
-        event.type === 'ask.answered' || event.type === 'ask.cancelled'
-          ? Effect.fail(new StoreError({ cause: 'the log is full' }))
-          : log.publish(event),
-    })
-  }),
-).pipe(Layer.provide(EventLogLive))
-
-const FailingLayer = AskServiceLive.pipe(
-  Layer.provideMerge(ForgetfulLog),
+const ForgetfulLayer = AskServiceLive.pipe(
+  Layer.provideMerge(refusingLog(['ask.answered', 'ask.cancelled'])),
   Layer.provideMerge(StoreTest),
 )
 
-it.layer(FailingLayer)('AskService with a log that fails', (suite) => {
+it.layer(ForgetfulLayer)('AskService with a log that fails', (suite) => {
   suite.effect('still hands an answer the log could not record to the caller that waits', () =>
     Effect.gen(function* answersDespiteLog() {
       yield* seedSession('fail-1')

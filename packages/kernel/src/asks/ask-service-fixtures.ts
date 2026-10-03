@@ -1,17 +1,70 @@
 import type { EventEnvelope } from '@bytebureau/protocol'
-import { Effect, Layer } from 'effect'
+import { Context, Effect, Exit, Layer, Scope, type Latch } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { vi } from 'vitest'
-import { AskError, toStoreError, type StoreError } from '../errors.js'
+import { AskError, StoreError, toStoreError } from '../errors.js'
 import { EventLog, EventLogLive } from '../events/event-log.js'
 import { StoreTest } from '../store/store-test.js'
-import { AskServiceLive } from './ask-service.js'
+import { AskService, AskServiceLive, type AskServiceShape } from './ask-service.js'
 
 // The service over the real event log and an in-memory store
 export const TestLayer = AskServiceLive.pipe(
   Layer.provideMerge(EventLogLive),
   Layer.provideMerge(StoreTest),
 )
+
+// The real event log, except that it cannot record the events of these types
+export const refusingLog = (
+  types: readonly string[],
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesRefusingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          types.includes(event.type)
+            ? Effect.fail(new StoreError({ cause: 'the log is full' }))
+            : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
+
+export interface OwnService {
+  readonly asks: AskServiceShape
+  readonly context: Context.Context<SqlClient.SqlClient>
+  readonly close: Effect.Effect<void>
+}
+
+// A service of its own, over a layer the test releases itself; the scope of the test releases it at the latest
+export const ownService = (
+  layer: Layer.Layer<AskService | EventLog | SqlClient.SqlClient> = TestLayer,
+): Effect.Effect<OwnService, never, Scope.Scope> =>
+  Effect.gen(function* buildsOwnService() {
+    const scope = yield* Effect.acquireRelease(Scope.make(), (own) => Scope.close(own, Exit.void))
+    const context = yield* Layer.buildWithScope(layer, scope)
+    return { asks: Context.get(context, AskService), context, close: Scope.close(scope, Exit.void) }
+  })
+
+// The real event log, except that announcing a request waits until the test lets it through
+export const holdingLog = (
+  entered: Latch.Latch,
+  release: Latch.Latch,
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesHoldingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          event.type === 'ask.requested'
+            ? Effect.andThen(Effect.andThen(entered.open, release.await), log.publish(event))
+            : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
 
 // A session row, and the project it needs, so asks can point at it
 export const seedSession = (id: string): Effect.Effect<void, StoreError, SqlClient.SqlClient> =>
@@ -113,6 +166,18 @@ export const codeOf = (error: AskError | StoreError): string =>
 // The reason of an ask error, nothing for any other failure
 export const reasonOf = (error: AskError | StoreError): string =>
   error instanceof AskError ? error.reason : ''
+
+// The ids of the asks a session has, in the order of the table
+export const askIdsOf = (
+  sessionId: string,
+): Effect.Effect<readonly string[], StoreError, SqlClient.SqlClient> =>
+  Effect.gen(function* readsIds() {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<{
+      readonly id: string
+    }>`SELECT id FROM asks WHERE session_id = ${sessionId} ORDER BY created_at, id`
+    return rows.map((row) => row.id)
+  }).pipe(Effect.mapError(toStoreError))
 
 // Lets the fibers that are ready run; a timer that fired needs a few turns to finish its work
 export const flush: Effect.Effect<void> = Effect.forEach(

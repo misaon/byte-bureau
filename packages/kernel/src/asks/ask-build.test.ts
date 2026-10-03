@@ -1,4 +1,3 @@
-import type { AskOption, AskQuestion } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import {
   buildAsk,
@@ -8,25 +7,12 @@ import {
   timeoutMs,
   type OpenAskInput,
 } from './ask-build.js'
-import { question, request } from './ask-fixtures.js'
+import { asking, option, question, request } from './ask-fixtures.js'
 
 const build = (overrides: Partial<OpenAskInput> = {}): ReturnType<typeof buildAsk> =>
   buildAsk(request('s1', overrides))
 
 const statusCall = { name: 'Bash', input: { command: 'git status' } }
-
-const option = (id: string, recommended: boolean): AskOption => ({
-  id,
-  label: id,
-  recommended,
-  evidence: [],
-})
-
-const asking = (id: string, options: readonly AskOption[]): AskQuestion => ({
-  ...question,
-  id,
-  options,
-})
 
 describe(buildAsk, () => {
   it.each([
@@ -107,11 +93,25 @@ describe('buildAsk for a permission', () => {
       ])
     },
   )
+})
 
-  it('keeps the questions of a permission ask that has no tool call', () => {
-    const ask = build({ kind: 'permission', questions: [question] })
-    expect(ask.questions).toStrictEqual([question])
-    expect(ask.recommendationSource).toBe('agent')
+describe('buildAsk for a permission without a tool call', () => {
+  it('offers allow and deny for a permission ask without a tool call, recommending neither', () => {
+    const ask = build({ kind: 'permission', questions: [question], recommendationSource: 'agent' })
+    expect(ask.recommendationSource).toBe('none')
+    expect(ask.questions).toStrictEqual([
+      {
+        id: 'permission',
+        header: 'Permission',
+        prompt: 'Allow this?',
+        options: [
+          { id: 'allow', label: 'Allow', recommended: false, evidence: [] },
+          { id: 'deny', label: 'Deny', recommended: false, evidence: [] },
+        ],
+        multiSelect: false,
+        allowOther: false,
+      },
+    ])
     expect(ask).not.toHaveProperty('toolCall')
   })
 
@@ -148,11 +148,11 @@ describe(recommendedAnswer, () => {
     })
   })
 
-  it('picks an empty id for a question without a recommended option', () => {
+  it('refuses a question without a recommended option instead of inventing an answer', () => {
     const bare = asking('q2', [option('x', false)])
-    expect(recommendedAnswer(build({ questions: [question, bare] }))).toStrictEqual({
-      selected: ['a', ''],
-    })
+    expect(() => recommendedAnswer(build({ questions: [question, bare] }))).toThrow(
+      'question q2 has no recommended option',
+    )
   })
 })
 

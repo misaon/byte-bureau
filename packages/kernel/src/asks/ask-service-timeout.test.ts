@@ -5,8 +5,10 @@ import { askOf, request } from './ask-fixtures.js'
 import { AskService, DENY_ON_TIMEOUT_MESSAGE } from './ask-service.js'
 import {
   atSystemTime,
+  codeOf,
   eventsOf,
   flush,
+  reasonOf,
   rowOf,
   seedSession,
   seedTurn,
@@ -140,6 +142,38 @@ it.layer(TestLayer)('AskService permission timeout', (suite) => {
   )
 })
 
+it.layer(TestLayer)('AskService denial', (suite) => {
+  suite.effect(
+    'announces the denial as an expiry with the deny fallback and then as the answer',
+    () =>
+      Effect.gen(function* announcesDenial() {
+        yield* seedSession('denial-1')
+        const asks = yield* AskService
+        const ask = yield* asks.open(permission('denial-1'))
+        yield* TestClock.adjust('5 minutes')
+        yield* asks.await(ask.id)
+        const answered = { askId: ask.id, answer: denial, answeredVia: 'timeout' }
+        assert.deepStrictEqual(yield* eventsOf('denial-1'), [
+          { type: 'ask.requested', payload: { ask: askOf(ask) } },
+          { type: 'ask.expired', payload: { askId: ask.id, fallback: 'deny' } },
+          { type: 'ask.answered', payload: answered },
+        ])
+      }),
+  )
+
+  suite.effect('denies a permission that no rule recommends anything for just the same', () =>
+    Effect.gen(function* deniesUnrecommended() {
+      yield* seedSession('denial-2')
+      const asks = yield* AskService
+      const toolCall = { name: 'Mystery', input: {} }
+      const ask = yield* asks.open({ ...permission('denial-2'), toolCall })
+      assert.deepStrictEqual([ask.recommendationSource, ask.policy.onTimeout], ['none', 'deny'])
+      yield* TestClock.adjust('5 minutes')
+      assert.deepStrictEqual(yield* asks.await(ask.id), denial)
+    }),
+  )
+})
+
 it.layer(TestLayer)('AskService supervised timeout', (suite) => {
   suite.effect('waits indefinitely, a permission ask without a recommendation included', () =>
     Effect.gen(function* waitsIndefinitely() {
@@ -171,6 +205,22 @@ it.layer(TestLayer)('AskService timer', (suite) => {
         { type: 'ask.requested', payload: { ask: askOf(ask) } },
         { type: 'ask.answered', payload: answered },
       ])
+    }),
+  )
+
+  suite.effect('refuses a human answer that comes after the timeout answered', () =>
+    Effect.gen(function* refusesLateHuman() {
+      yield* seedSession('timer-3')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('timer-3', autonomous))
+      yield* TestClock.adjust(TIMEOUT)
+      yield* asks.await(ask.id)
+      const error = yield* Effect.flip(asks.answer(ask.id, { selected: ['b'] }, 'cli'))
+      assert.deepStrictEqual(
+        [codeOf(error), reasonOf(error)],
+        ['not_pending', `ask ${ask.id} is answered`],
+      )
+      assert.strictEqual((yield* rowOf(ask.id)).answered_via, 'timeout')
     }),
   )
 

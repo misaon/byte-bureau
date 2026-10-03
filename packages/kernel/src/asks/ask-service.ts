@@ -7,7 +7,7 @@ import type { OpenAskInput } from './ask-build.js'
 import { openAsk, type OpenDeps } from './ask-open.js'
 import { listPending } from './ask-records.js'
 import { answerAsk, cancelAsk } from './ask-settle.js'
-import { awaitAnswer } from './ask-waiters.js'
+import { awaitAnswer, closeWaiters } from './ask-waiters.js'
 
 export type { OpenAskInput } from './ask-build.js'
 export { DENY_ON_TIMEOUT_MESSAGE } from './ask-build.js'
@@ -31,6 +31,7 @@ const make = Effect.gen(function* makeAskService() {
   const log = yield* EventLog
   const scope = yield* Effect.scope
   const deps: OpenDeps = { sql, log, scope, waiters: new Map() }
+  yield* Effect.addFinalizer(() => closeWaiters(deps.waiters))
   return AskService.of({
     open: (input) => openAsk(deps, input),
     answer: (askId, answer, via) => answerAsk(deps, askId, { answer, via }),

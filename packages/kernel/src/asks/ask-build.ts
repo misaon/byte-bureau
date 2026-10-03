@@ -1,6 +1,11 @@
 import type { Ask, AskAnswer, AskOption, AskQuestion, PermissionMode } from '@bytebureau/protocol'
 import { nowIso, uuidv7 } from '../ids.js'
-import { parseDuration, recommendForPermission, type ToolCall } from './policy.js'
+import {
+  NO_RECOMMENDATION,
+  parseDuration,
+  recommendForPermission,
+  type ToolCall,
+} from './policy.js'
 
 export const DENY_ON_TIMEOUT_MESSAGE = 'nobody available to approve; do not retry'
 
@@ -22,13 +27,13 @@ interface Questions {
   readonly recommendationSource: Ask['recommendationSource']
 }
 
-// A permission is always allow or deny; the rules recommend one of them, or neither
-const permissionQuestions = (
-  toolCall: ToolCall,
-  workspacePath: string,
-  mode: PermissionMode,
-): Questions => {
-  const { recommended, ruleId } = recommendForPermission(toolCall, workspacePath, mode)
+// A permission is always allow or deny; the rules recommend one of them for a tool call, or neither, and without a tool call there is nothing to judge
+const permissionQuestions = (input: OpenAskInput): Questions => {
+  const { toolCall } = input
+  const { recommended, ruleId } =
+    toolCall === undefined
+      ? NO_RECOMMENDATION
+      : recommendForPermission(toolCall, input.workspacePath, input.permissionMode)
   const option = (id: 'allow' | 'deny', label: string): AskOption => ({
     id,
     label,
@@ -38,7 +43,7 @@ const permissionQuestions = (
   const question: AskQuestion = {
     id: 'permission',
     header: 'Permission',
-    prompt: `${toolCall.name}: allow this tool call?`,
+    prompt: toolCall === undefined ? 'Allow this?' : `${toolCall.name}: allow this tool call?`,
     options: [option('allow', 'Allow'), option('deny', 'Deny')],
     multiSelect: false,
     allowOther: false,
@@ -46,13 +51,22 @@ const permissionQuestions = (
   return { questions: [question], recommendationSource: recommended === null ? 'none' : 'policy' }
 }
 
-const hasRecommendation = (questions: readonly AskQuestion[]): boolean =>
-  questions.some((question) => question.options.some((option) => option.recommended))
+const recommendedCount = (question: AskQuestion): number =>
+  question.options.filter((option) => option.recommended).length
 
-// A permission for a tool call gets the questions the rules derive; any other ask keeps the ones it came with
+// A recommendation is one recommended option in every question; a question with none or with two has no answer to take
+export const unrecommendedQuestions = (ask: Ask): readonly string[] =>
+  ask.questions
+    .filter((question) => recommendedCount(question) !== 1)
+    .map((question) => question.id)
+
+const hasRecommendation = (questions: readonly AskQuestion[]): boolean =>
+  questions.length > 0 && questions.every((question) => recommendedCount(question) === 1)
+
+// A permission always gets the questions the rules derive; any other ask keeps the ones it came with
 const questionsOf = (input: OpenAskInput): Questions => {
-  if (input.kind === 'permission' && input.toolCall !== undefined) {
-    return permissionQuestions(input.toolCall, input.workspacePath, input.permissionMode)
+  if (input.kind === 'permission') {
+    return permissionQuestions(input)
   }
   const source = hasRecommendation(input.questions)
     ? (input.recommendationSource ?? 'agent')
@@ -60,15 +74,17 @@ const questionsOf = (input: OpenAskInput): Questions => {
   return { questions: input.questions, recommendationSource: source }
 }
 
-// Supervised employees are waited for; the others get the fallback of the kind of ask once the timeout is over
-const policyFor = (input: OpenAskInput): Ask['policy'] => {
+// Supervised employees are waited for; so is a question nobody recommended an answer to, the kernel makes none up
+// The other asks get the fallback of their kind once the timeout is over: a question its recommendation, a permission a denial
+const policyFor = (input: OpenAskInput, source: Ask['recommendationSource']): Ask['policy'] => {
+  const timeout = input.askTimeout
   if (input.permissionMode === 'supervised') {
-    return { onTimeout: 'wait', timeout: input.askTimeout }
+    return { onTimeout: 'wait', timeout }
   }
-  return {
-    onTimeout: input.kind === 'question' ? 'recommended' : 'deny',
-    timeout: input.askTimeout,
+  if (input.kind === 'permission') {
+    return { onTimeout: 'deny', timeout }
   }
+  return { onTimeout: source === 'none' ? 'wait' : 'recommended', timeout }
 }
 
 // Milliseconds until the policy acts; a policy that waits never does
@@ -77,7 +93,8 @@ export const timeoutMs = (policy: Ask['policy']): number | null =>
 
 // Everything that can throw happens here, before the ask is stored or announced
 export const buildAsk = (input: OpenAskInput): Ask => {
-  const policy = policyFor(input)
+  const { questions, recommendationSource } = questionsOf(input)
+  const policy = policyFor(input, recommendationSource)
   const createdAt = nowIso()
   const delay = timeoutMs(policy)
   return {
@@ -86,7 +103,8 @@ export const buildAsk = (input: OpenAskInput): Ask => {
     turnId: input.turnId,
     kind: input.kind,
     title: input.title,
-    ...questionsOf(input),
+    questions,
+    recommendationSource,
     ...(input.toolCall === undefined ? {} : { toolCall: input.toolCall }),
     policy,
     status: 'pending',
@@ -95,12 +113,18 @@ export const buildAsk = (input: OpenAskInput): Ask => {
   }
 }
 
-// One id per question, in order; a question without a recommended option contributes an empty id
+// Only an ask in which every question has a recommended option is ever answered this way
+const recommendedId = (question: AskQuestion): string => {
+  const pick = question.options.find((option) => option.recommended)
+  if (pick === undefined) {
+    throw new Error(`question ${question.id} has no recommended option`)
+  }
+  return pick.id
+}
+
+// One id per question, in order
 export const recommendedAnswer = (ask: Ask): AskAnswer => ({
-  selected: ask.questions.map((question) => {
-    const pick = question.options.find((option) => option.recommended)
-    return pick === undefined ? '' : pick.id
-  }),
+  selected: ask.questions.map((question) => recommendedId(question)),
 })
 
 // What the kernel answers when nobody did: a permission is denied with a reason, a question takes the recommendation
