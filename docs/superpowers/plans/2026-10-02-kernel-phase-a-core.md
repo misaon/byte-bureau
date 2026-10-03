@@ -6,7 +6,7 @@
 
 **Architecture:** Hexagonal, exactly as the spec draws it: `packages/protocol` (Effect Schema DTOs, event catalogue, config schema, generated JSON Schema), `packages/plugin-api` (plain-TypeScript ports and plugin contract, no Effect), `packages/kernel` (Effect 4 services as Layers: Config, Store, EventLog, ProjectRegistry, Supervisor, WorkspaceManager, SessionManager, AskService, UsageService, PluginHost, Logging), `plugins/workspace-local` (git worktree runtime), and the CLI in `apps/bytebureau` that wires the kernel in-process (`--no-daemon`). Phase B adds the daemon, HTTP/SSE/WebSocket API and the generated client; Phase C adds the Claude and ACP adapters, profiles and the secret store; Phase D adds doctor, diagnostics bundle, service install, upgrade and the full logging/tracing surface. Every interface in this plan is written so those phases extend rather than rework it.
 
-**Tech Stack:** Bun 1.4.2 (runtime), TypeScript 7.0.x, Effect 4 (`effect`), Drizzle ORM + SQLite (`bun:sqlite` in the binary, `node:sqlite` under Vitest), c12 (config loader), LogTape (logging), `@standard-schema/spec`, Vitest 5 + fast-check, citty + @clack/prompts (CLI), git ≥ 2.40.
+**Tech Stack:** Bun 1.4.2 (runtime), TypeScript 7.0.x, Effect 4 (`effect`), Effect SQL + SQLite (`@effect/sql-sqlite-bun` in the binary, `@effect/sql-sqlite-node` under Vitest), `jsonc-parser` (configuration files are data), LogTape (logging), `@standard-schema/spec`, Vitest 5 + fast-check, citty + @clack/prompts (CLI), git ≥ 2.40.
 
 **Spec:** `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` (sections 1–7, 8.3–8.4, 9, 10, 11.3 (`run`, `config`, `projects`, `workspaces`), 12 (logger and redaction basics), 13, 14, 15, 16 (criteria 1, 6, 8, 10)). Verified stack facts: `docs/research/2026-10-02-reports/15-sp1-phase-a-stack.md`.
 
@@ -69,7 +69,7 @@ packages/kernel/src/store/store-live.ts             StoreLive(filename): bun:sql
 packages/kernel/src/store/store-test.ts             StoreTest: node:sqlite in memory for Vitest
 packages/kernel/src/config/merge.ts                 mergeConfig, mergeLayers, ConfigLayer
 packages/kernel/src/config/env-overrides.ts         BYTEBUREAU_* variables → env:<NAME> layers
-packages/kernel/src/config/files.ts                 JSON/JSONC discovery, c12 as parser only, project path check
+packages/kernel/src/config/files.ts                 JSON/JSONC discovery, jsonc-parser, symlink and project path checks
 packages/kernel/src/config/issues.ts                Standard Schema checks, RFC 6901 pointers, layer attribution
 packages/kernel/src/config/config.ts                Config service (precedence, load/validate/schema)
 packages/kernel/src/config/template.ts              defaultProjectConfigText() for config init
@@ -1381,8 +1381,8 @@ Why Effect SQL and not Drizzle at runtime (ADR-0010, written in Task 16): Drizzl
     "@logtape/file": "2.3.10",
     "@logtape/logtape": "2.3.10",
     "@logtape/redaction": "2.3.10",
-    "c12": "4.0.0-rc.2",
     "effect": "4.0.0",
+    "jsonc-parser": "3.3.1",
     "uuid": "14.0.2"
   },
   "devDependencies": {
@@ -2534,17 +2534,17 @@ git add packages/kernel bun.lock
 git commit -m "feat(kernel): add ids, tagged errors and logtape logging with secret redaction"
 ```
 
-### Task 5: `Config` service — layered loading with c12, strict validation, JSON pointers
+### Task 5: `Config` service — layered loading, strict validation, JSON pointers
 
 **Files:**
-- Create: `packages/kernel/src/config/merge.ts`, `packages/kernel/src/config/env-overrides.ts`, `packages/kernel/src/config/files.ts`, `packages/kernel/src/config/issues.ts`, `packages/kernel/src/config/config.ts`, `packages/kernel/src/config/template.ts`, `packages/kernel/src/config/config-fixtures.ts`, `packages/kernel/src/config/merge.test.ts`, `packages/kernel/src/config/config.test.ts`, `packages/kernel/src/config/config.validation.test.ts`
-- Modify: `packages/kernel/src/index.ts`, `knip.ts` (the kernel's temporary `ignoreDependencies` entries for `@bytebureau/protocol` and `c12` go away)
+- Create: `packages/kernel/src/config/merge.ts`, `packages/kernel/src/config/env-overrides.ts`, `packages/kernel/src/config/files.ts`, `packages/kernel/src/config/issues.ts`, `packages/kernel/src/config/config.ts`, `packages/kernel/src/config/template.ts`, `packages/kernel/src/config/config-fixtures.ts`, `packages/kernel/src/config/merge.test.ts`, `packages/kernel/src/config/config.test.ts`, `packages/kernel/src/config/config.validation.test.ts`, `packages/kernel/src/config/config.files.test.ts`
+- Modify: `packages/kernel/src/index.ts`, `packages/kernel/package.json` (`jsonc-parser` in, `c12` out), `knip.ts` (the kernel's temporary `ignoreDependencies` entries for `@bytebureau/protocol` and `c12` go away)
 
 **Interfaces:**
-- Consumes: `ProjectConfig`, `UserConfig`, `decodeProjectConfig`, `defaultProjectConfig`, `configJsonSchema` (Task 1); `ConfigError` (Task 4); c12 `loadConfig` as a JSON/JSONC parser only (fact sheet §5; options `{ name: 'bytebureau', rcFile: false, globalRc: false, dotenv: false, packageJson: false, envName: false, extend: false, giget: false, cwd, configFile }` with the exact file name including its extension — a bare name is echoed back when the file is missing, realpath'd when present, and an extensionless `bytebureau` file such as a downloaded binary makes c12 throw).
+- Consumes: `ProjectConfig`, `UserConfig`, `decodeProjectConfig`, `defaultProjectConfig`, `configJsonSchema` (Task 1); `ConfigError` (Task 4); `jsonc-parser` 3.3.1 — `parse(text, errors, { allowTrailingComma: true, allowEmptyContent: true })` and `printParseErrorCode` (configuration files are read as text; nothing is ever imported; c12 was dropped in fix round 2, see the semantics below).
 - Produces: `Config` service with `load(request: LoadRequest): Effect<ResolvedConfig, ConfigError>`, `validate(projectPath: string): Effect<readonly ConfigIssue[]>` (never fails; includes the user file), `schema(): Record<string, unknown>`; `ConfigLive(home: string): Layer<Config>`; `mergeConfig(base, overlay)` (deep merge, arrays replaced, `undefined` skipped at every depth), `mergeLayers(layers)` and `ConfigLayer { label, config, fromFile }` (internal); `envOverrides(env): readonly ConfigLayer[]` (one `env:<NAME>` layer per set variable); `defaultProjectConfigText()`; types `LoadRequest { projectPath?: string; env?: Record<string, string | undefined>; flags?: FlagOverrides }` (`env` defaults to an empty object — callers pass the environment), `FlagOverrides { employee?, branch?, logLevel? }`, `ResolvedConfig { project: ProjectConfig; user: UserConfig; projectPath: string | null; files: { user: string | null; project: string | null; local: string | null } }` (absolute paths of existing files), `ConfigIssue { file: string; pointer: string; message: string }` where `file` is the layer label: a file path, `env:<NAME>`, `flag:<key>` or `(defaults)`.
 
-Semantics (as shipped): configuration files are data, never code — only regular `bytebureau.json`/`bytebureau.jsonc`, `bytebureau.local.json`/`.jsonc` and `~/.bytebureau/config.json`/`.jsonc` are read; both variants of one name → `ConfigError` naming both; c12 runs with `extend: false` and `giget: false` (the spec's "`extends` for team presets" is deferred to a later phase as a kernel-native feature, because c12's `extends` concatenates arrays, hides unknown keys, resolves JS/TS presets and downloads `github:` sources). Every issue is attributed to the highest-priority layer that contains its pointer (`(defaults)` < user file (`logging` only) < project file < local file < `env:<NAME>` < `flag:<key>`); a missing key goes to the highest-priority file layer holding its parent, else the project file, else `(defaults)`. The user file is checked with its own strict Standard Schema (pointer-level). An array or `null` root is one issue at pointer `""`; scalar roots are normalised to `{}` by c12 (accepted limitation). A `projectPath` that does not exist or is not a directory fails `load` and is one issue from `validate`. Defaults are `structuredClone`d so resolved configs never share arrays with `defaultProjectConfig`; the built-in `developer` employee and the `claude` provider defaults merge into every project.
+Semantics (as shipped): configuration files are data, never code — only regular `bytebureau.json`/`bytebureau.jsonc`, `bytebureau.local.json`/`.jsonc` and `~/.bytebureau/config.json`/`.jsonc` are read; both variants of one name → `ConfigError` naming both; The kernel reads the files as text and parses them with `jsonc-parser` (comments and trailing commas allowed in both extensions; syntax errors are a `ConfigError` naming the file with line and column). c12 was dropped: with rc files, dotenv, environment keys, `package.json`, `extends` and giget switched off it was still a code loader that imported symlink targets, normalised scalar roots to `{}` and dropped top-level `null` sections and `$meta` before validation. Symlinks are followed as text (a link to a script is a parse error and never runs; a dangling link is an error). The spec's "`extends` for team presets" is deferred to a later phase as a kernel-native feature (JSON/JSONC presets by relative path, lowest project layer, cycle detection). Every issue is attributed to the highest-priority layer that contains its pointer (`(defaults)` < user file (`logging` only) < project file < local file < `env:<NAME>` < `flag:<key>`); a missing key goes to the highest-priority file layer holding its parent, else the project file, else `(defaults)`. The user file is checked with its own strict Standard Schema (pointer-level). Any root that is not a plain object (array, `null`, scalar, empty file) is one issue at pointer `""`. A `projectPath` that does not exist or is not a directory fails `load` and is one issue from `validate`. Defaults are `structuredClone`d so resolved configs never share arrays with `defaultProjectConfig`; the built-in `developer` employee and the `claude` provider defaults merge into every project.
 
 - [ ] **Step 1: Failing tests**
 
@@ -2591,12 +2591,10 @@ describe(mergeConfig, () => {
 ```
 `packages/kernel/src/config/config.test.ts`:
 ```ts
-import { existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { defaultProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, type Scope } from 'effect'
-import { ConfigError } from '../errors.js'
 import { Config, ConfigLive } from './config.js'
 import {
   LOCAL_FILE,
@@ -2746,110 +2744,12 @@ it.effect('reports absolute file paths for a relative home directory', () =>
   }),
 )
 
-it.effect('reads comments and trailing commas in a .jsonc file', () =>
-  Effect.gen(function* readsJsonc() {
-    const { config, project } = yield* workspace()
-    write(
-      project,
-      PROJECT_JSONC,
-      `{
-  // a line comment
-  "project": { "name": "commented", /* an inline comment */ },
-  "logging": { "level": "warn", },
-}`,
-    )
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'commented')
-    assert.deepStrictEqual(resolved.project.logging, { level: 'warn' })
-  }),
-)
-
 it.effect('shares no array with the protocol defaults', () =>
   Effect.gen(function* copiesDefaults() {
     const { config, project } = yield* workspace()
     const resolved = yield* config.load({ projectPath: project })
     assert.deepStrictEqual(settingSources(resolved.project), ['user', 'project', 'local'])
     assert.notStrictEqual(settingSources(resolved.project), settingSources(defaultProjectConfig))
-  }),
-)
-
-it.effect('ignores a file named like the config but without an extension', () =>
-  Effect.gen(function* ignoresBareName() {
-    const { config, project } = yield* workspace()
-    // A release binary downloaded into the project directory carries exactly this name
-    write(project, 'bytebureau', '#!/bin/sh\nexit 0\n')
-    const file = write(project, PROJECT_FILE, { project: { name: 'beside' } })
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'beside')
-    assert.strictEqual(resolved.files.project, file)
-  }),
-)
-
-it.effect('never runs a script named like the config', () =>
-  Effect.gen(function* ignoresScripts() {
-    const { config, project } = yield* workspace()
-    const marker = path.join(project, 'ran')
-    const script = `import { writeFileSync } from 'node:fs'
-writeFileSync(${JSON.stringify(marker)}, '')
-export default { project: { name: 'from-script' } }
-`
-    write(project, 'bytebureau.mjs', script)
-    const file = write(project, PROJECT_FILE, { project: { name: 'from-json' } })
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'from-json')
-    assert.strictEqual(resolved.files.project, file)
-    assert.isFalse(existsSync(marker))
-  }),
-)
-
-it.effect('ignores a directory named like the config file', () =>
-  Effect.gen(function* ignoresDirectory() {
-    const { config, project } = yield* workspace()
-    mkdirSync(path.join(project, PROJECT_FILE))
-    const without = yield* config.load({ projectPath: project })
-    assert.strictEqual(without.files.project, null)
-    const file = write(project, PROJECT_JSONC, { project: { name: 'beside' } })
-    const withFile = yield* config.load({ projectPath: project })
-    assert.strictEqual(withFile.files.project, file)
-  }),
-)
-
-it.effect('refuses a name that exists as both .json and .jsonc', () =>
-  Effect.gen(function* refusesBothVariants() {
-    const { config, project } = yield* workspace()
-    const json = write(project, PROJECT_FILE, {})
-    const jsonc = write(project, PROJECT_JSONC, {})
-    const error = yield* Effect.flip(config.load({ projectPath: project }))
-    assert.deepStrictEqual(
-      { file: error.file, pointer: error.pointer },
-      { file: json, pointer: '' },
-    )
-    assert.include(error.reason, json)
-    assert.include(error.reason, jsonc)
-    const issues = yield* config.validate(project)
-    assert.deepStrictEqual(issues, [{ file: json, pointer: '', message: error.reason }])
-  }),
-)
-
-it.effect('fails for a project path that does not exist or is not a directory', () =>
-  Effect.gen(function* rejectsProjectPath() {
-    const { config, project } = yield* workspace()
-    const missing = path.join(project, 'missing')
-    const plain = write(project, 'plain-file', 'text')
-    for (const [target, reason] of [
-      [missing, 'does not exist'],
-      [plain, 'not a directory'],
-    ] as const) {
-      const error = yield* Effect.flip(config.load({ projectPath: target }))
-      assert.instanceOf(error, ConfigError)
-      assert.deepStrictEqual(
-        { file: error.file, pointer: error.pointer },
-        { file: target, pointer: '' },
-      )
-      assert.include(error.reason, reason)
-      const issues = yield* config.validate(target)
-      assert.deepStrictEqual(issues, [{ file: target, pointer: '', message: error.reason }])
-    }
   }),
 )
 
@@ -2913,8 +2813,8 @@ export function workspace(): Effect.Effect<Workspace, never, Scope.Scope> {
 import path from 'node:path'
 import { decodeProjectConfig, defaultProjectConfig } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
-import { loadConfig } from 'c12'
 import { Effect, Result, type Scope } from 'effect'
+import { parse, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
 import type { ConfigIssue } from './config.js'
 import {
@@ -2983,43 +2883,6 @@ it.effect('escapes slashes and tildes in the segments of a pointer', () =>
       issues.map((issue) => issue.pointer).toSorted(),
       ['model', 'name', 'permissionMode', 'provider'].map((key) => `/employees/a~1b~0c/${key}`),
     )
-  }),
-)
-
-it.effect('reports a file that cannot be parsed as one issue instead of an empty document', () =>
-  Effect.gen(function* reportsBrokenSyntax() {
-    const { config, project } = yield* workspace()
-    const file = write(project, PROJECT_FILE, '{ "version": 1,')
-    const issues = yield* config.validate(project)
-    assert.deepStrictEqual(
-      issues.map((issue) => issue.file),
-      [file],
-    )
-    const error = yield* Effect.flip(config.load({ projectPath: project }))
-    assert.strictEqual(error.file, file)
-  }),
-)
-
-const NON_OBJECT_ROOTS = [
-  [PROJECT_FILE, '[1, 2]'],
-  [PROJECT_FILE, 'null'],
-  [PROJECT_JSONC, '// a comment in front\nnull'],
-  [PROJECT_JSONC, '/* empty */ []'],
-] as const
-
-it.effect('reports an array or null root as one issue at the root of its file', () =>
-  Effect.gen(function* rejectsRoots() {
-    for (const [name, text] of NON_OBJECT_ROOTS) {
-      const { config, project } = yield* workspace()
-      const file = write(project, name, text)
-      const issues = yield* config.validate(project)
-      assert.deepStrictEqual(issues, [{ file, pointer: '', message: 'expected a JSON object' }])
-      const error = yield* Effect.flip(config.load({ projectPath: project }))
-      assert.deepStrictEqual(
-        [error.file, error.pointer, error.reason],
-        [file, '', 'expected a JSON object'],
-      )
-    }
   }),
 )
 
@@ -3117,7 +2980,17 @@ it.effect('validates a broken user file even when a project file overrides its s
   }),
 )
 
-it.effect('leaves a local preset in extends unresolved and reports the key', () =>
+it.effect('validates a null section and a $meta key like any other value', () =>
+  Effect.gen(function* reportsNullAndMeta() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, { logging: null, $meta: {} })
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(issues.map((issue) => issue.pointer).toSorted(), ['/$meta', '/logging'])
+    assert.isTrue(issues.every((issue) => issue.file === file))
+  }),
+)
+
+it.effect('reports extends with a preset path as an unknown key', () =>
   Effect.gen(function* rejectsExtends() {
     const { config, project } = yield* workspace()
     write(project, 'base.json', { workspace: { copyIgnored: ['.a'] } })
@@ -3126,8 +2999,7 @@ it.effect('leaves a local preset in extends unresolved and reports the key', () 
   }),
 )
 
-// Nothing listens on port 9 of the loopback address, so a download attempt would fail at once
-it.effect('does not fetch a remote source in extends', () =>
+it.effect('reports extends with a remote source as an unknown key', () =>
   Effect.gen(function* rejectsRemoteExtends() {
     const { config, project } = yield* workspace()
     const file = write(project, PROJECT_FILE, { extends: 'http://127.0.0.1:9/preset' })
@@ -3146,21 +3018,280 @@ it.effect('loads the init template back as the default project configuration', (
 )
 
 it.effect('decodes the init template on its own, with no defaults merged in', () =>
-  Effect.gen(function* decodesTemplate() {
-    const { project } = yield* workspace()
-    write(project, PROJECT_JSONC, defaultProjectConfigText())
-    const parsed = yield* Effect.promise(async () => {
-      const loaded = await loadConfig({
-        name: 'bytebureau',
-        cwd: project,
-        configFile: PROJECT_JSONC,
-      })
-      return loaded.config
-    })
+  Effect.sync(() => {
+    const errors: ParseError[] = []
+    const parsed: unknown = parse(defaultProjectConfigText(), errors, { allowTrailingComma: true })
+    assert.deepStrictEqual(errors, [])
     assert.deepStrictEqual(decodeProjectConfig(parsed), {
       $schema: SCHEMA_URL,
       ...defaultProjectConfig,
     })
+  }),
+)
+```
+`packages/kernel/src/config/config.files.test.ts`:
+```ts
+import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
+import path from 'node:path'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { ConfigError } from '../errors.js'
+import { PROJECT_FILE, PROJECT_JSONC, workspace, write } from './config-fixtures.js'
+
+const BOM = '\uFEFF'
+const SCRIPTS = ['payload.mjs', 'payload.ts'] as const
+
+const NON_OBJECT_ROOTS = [
+  [PROJECT_FILE, '[1, 2]'],
+  [PROJECT_FILE, 'null'],
+  [PROJECT_FILE, '42'],
+  [PROJECT_FILE, '"text"'],
+  [PROJECT_FILE, 'true'],
+  [PROJECT_FILE, ''],
+  [PROJECT_JSONC, '// a comment in front\nnull'],
+  [PROJECT_JSONC, '/* empty */ []'],
+  [PROJECT_JSONC, '// only a comment\n'],
+] as const
+
+// A script that writes a marker file when it runs and names a project when it is loaded as configuration
+const payload = (marker: string): string => `import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(marker)}, '')
+export default { project: { name: 'from-script' } }
+`
+
+// A link named like the project file that points at such a script
+function linkedScript(project: string, name: string): { marker: string; link: string } {
+  const marker = path.join(project, 'ran')
+  const target = write(project, name, payload(marker))
+  const link = path.join(project, PROJECT_FILE)
+  symlinkSync(target, link)
+  return { marker, link }
+}
+
+it.effect('reads comments and trailing commas in a .jsonc file', () =>
+  Effect.gen(function* readsJsonc() {
+    const { config, project } = yield* workspace()
+    write(
+      project,
+      PROJECT_JSONC,
+      `{
+  // a line comment
+  "project": { "name": "commented", /* an inline comment */ },
+  "logging": { "level": "warn", },
+}`,
+    )
+    const resolved = yield* config.load({ projectPath: project })
+    assert.strictEqual(resolved.project.project.name, 'commented')
+    assert.deepStrictEqual(resolved.project.logging, { level: 'warn' })
+  }),
+)
+
+it.effect('reads comments and trailing commas in a .json file too', () =>
+  Effect.gen(function* readsCommentedJson() {
+    const { config, project } = yield* workspace()
+    write(project, PROJECT_FILE, '{ "project": { "name": "plain", }, // note\n}')
+    const resolved = yield* config.load({ projectPath: project })
+    assert.strictEqual(resolved.project.project.name, 'plain')
+  }),
+)
+
+it.effect('reads files that start with a byte order mark', () =>
+  Effect.gen(function* readsBom() {
+    for (const name of [PROJECT_FILE, PROJECT_JSONC]) {
+      const { config, project } = yield* workspace()
+      write(project, name, `${BOM}${JSON.stringify({ project: { name: 'bom' } })}`)
+      const resolved = yield* config.load({ projectPath: project })
+      assert.strictEqual(resolved.project.project.name, 'bom')
+    }
+  }),
+)
+
+it.effect('ignores a file named like the config but without an extension', () =>
+  Effect.gen(function* ignoresBareName() {
+    const { config, project } = yield* workspace()
+    // A release binary downloaded into the project directory carries exactly this name
+    write(project, 'bytebureau', '#!/bin/sh\nexit 0\n')
+    const file = write(project, PROJECT_FILE, { project: { name: 'beside' } })
+    const resolved = yield* config.load({ projectPath: project })
+    assert.strictEqual(resolved.project.project.name, 'beside')
+    assert.strictEqual(resolved.files.project, file)
+  }),
+)
+
+it.effect('never runs a script named like the config', () =>
+  Effect.gen(function* ignoresScripts() {
+    const { config, project } = yield* workspace()
+    const marker = path.join(project, 'ran')
+    write(project, 'bytebureau.mjs', payload(marker))
+    const file = write(project, PROJECT_FILE, { project: { name: 'from-json' } })
+    const resolved = yield* config.load({ projectPath: project })
+    assert.strictEqual(resolved.project.project.name, 'from-json')
+    assert.strictEqual(resolved.files.project, file)
+    assert.isFalse(existsSync(marker))
+  }),
+)
+
+it.effect('never runs the target of a link named like the config', () =>
+  Effect.gen(function* ignoresLinkedScripts() {
+    for (const name of SCRIPTS) {
+      const { config, project } = yield* workspace()
+      const { marker, link } = linkedScript(project, name)
+      const issues = yield* config.validate(project)
+      assert.deepStrictEqual(
+        issues.map((issue) => issue.file),
+        [link],
+      )
+      const error = yield* Effect.flip(config.load({ projectPath: project }))
+      assert.strictEqual(error.file, link)
+      assert.isFalse(existsSync(marker))
+    }
+  }),
+)
+
+it.effect('follows a link named like the config to a regular JSON file', () =>
+  Effect.gen(function* followsLink() {
+    const { config, project } = yield* workspace()
+    const target = write(project, 'shared.json', { project: { name: 'linked' } })
+    const link = path.join(project, PROJECT_FILE)
+    symlinkSync(target, link)
+    const resolved = yield* config.load({ projectPath: project })
+    assert.strictEqual(resolved.project.project.name, 'linked')
+    assert.strictEqual(resolved.files.project, link)
+  }),
+)
+
+it.effect('fails for a link named like the config whose target does not exist', () =>
+  Effect.gen(function* rejectsDanglingLink() {
+    const { config, project } = yield* workspace()
+    const link = path.join(project, PROJECT_FILE)
+    symlinkSync(path.join(project, 'missing.json'), link)
+    const error = yield* Effect.flip(config.load({ projectPath: project }))
+    assert.deepStrictEqual(
+      { file: error.file, pointer: error.pointer },
+      { file: link, pointer: '' },
+    )
+    assert.include(error.reason, 'target does not exist')
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(issues, [{ file: link, pointer: '', message: error.reason }])
+  }),
+)
+
+it.effect('ignores a directory named like the config file', () =>
+  Effect.gen(function* ignoresDirectory() {
+    const { config, project } = yield* workspace()
+    mkdirSync(path.join(project, PROJECT_FILE))
+    const without = yield* config.load({ projectPath: project })
+    assert.strictEqual(without.files.project, null)
+    const file = write(project, PROJECT_JSONC, { project: { name: 'beside' } })
+    const withFile = yield* config.load({ projectPath: project })
+    assert.strictEqual(withFile.files.project, file)
+  }),
+)
+
+it.effect('refuses a name that exists as both .json and .jsonc', () =>
+  Effect.gen(function* refusesBothVariants() {
+    const { config, project } = yield* workspace()
+    const json = write(project, PROJECT_FILE, {})
+    const jsonc = write(project, PROJECT_JSONC, {})
+    const error = yield* Effect.flip(config.load({ projectPath: project }))
+    assert.deepStrictEqual(
+      { file: error.file, pointer: error.pointer },
+      { file: json, pointer: '' },
+    )
+    assert.include(error.reason, json)
+    assert.include(error.reason, jsonc)
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(issues, [{ file: json, pointer: '', message: error.reason }])
+  }),
+)
+
+it.effect('fails for a project path that does not exist or is not a directory', () =>
+  Effect.gen(function* rejectsProjectPath() {
+    const { config, project } = yield* workspace()
+    const missing = path.join(project, 'missing')
+    const plain = write(project, 'plain-file', 'text')
+    for (const [target, reason] of [
+      [missing, 'does not exist'],
+      [plain, 'not a directory'],
+    ] as const) {
+      const error = yield* Effect.flip(config.load({ projectPath: target }))
+      assert.instanceOf(error, ConfigError)
+      assert.deepStrictEqual(
+        { file: error.file, pointer: error.pointer },
+        { file: target, pointer: '' },
+      )
+      assert.include(error.reason, reason)
+      const issues = yield* config.validate(target)
+      assert.deepStrictEqual(issues, [{ file: target, pointer: '', message: error.reason }])
+    }
+  }),
+)
+
+it.effect('reports a file that cannot be parsed as one issue instead of an empty document', () =>
+  Effect.gen(function* reportsBrokenSyntax() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, '{ "version": 1,')
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(
+      issues.map((issue) => issue.file),
+      [file],
+    )
+    const error = yield* Effect.flip(config.load({ projectPath: project }))
+    assert.strictEqual(error.file, file)
+  }),
+)
+
+it.effect('names the error, the line and the column of a syntax error', () =>
+  Effect.gen(function* namesSyntaxPosition() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, '{"a": }')
+    const single = yield* Effect.flip(config.load({ projectPath: project }))
+    assert.deepStrictEqual([single.file, single.pointer], [file, ''])
+    assert.strictEqual(single.reason, 'ValueExpected at line 1, column 7')
+    write(project, PROJECT_FILE, '{\n  "a": }')
+    const spread = yield* Effect.flip(config.load({ projectPath: project }))
+    assert.strictEqual(spread.reason, 'ValueExpected at line 2, column 8')
+  }),
+)
+
+it.effect('reports an array, null, scalar or empty root as one issue at the root of its file', () =>
+  Effect.gen(function* rejectsRoots() {
+    for (const [name, text] of NON_OBJECT_ROOTS) {
+      const { config, project } = yield* workspace()
+      const file = write(project, name, text)
+      const issues = yield* config.validate(project)
+      assert.deepStrictEqual(issues, [{ file, pointer: '', message: 'expected a JSON object' }])
+      const error = yield* Effect.flip(config.load({ projectPath: project }))
+      assert.deepStrictEqual(
+        [error.file, error.pointer, error.reason],
+        [file, '', 'expected a JSON object'],
+      )
+    }
+  }),
+)
+
+// Every "/* " opens a comment that never closes; rescanning the rest of the file per opener takes minutes on a megabyte
+it.effect('reports a large unterminated comment as a syntax error without stalling', () =>
+  Effect.gen(function* rejectsLargeComment() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, `{} ${'/* '.repeat(350_000)}`)
+    const issues = yield* config.validate(project)
+    const message = 'UnexpectedEndOfComment at line 1, column 4'
+    assert.deepStrictEqual(issues, [{ file, pointer: '', message }])
+  }),
+)
+
+// The parser recurses; far beyond any real document its stack runs out, and that must stay an issue, not a crash
+it.effect('reports a document nested beyond the parser as one issue', () =>
+  Effect.gen(function* rejectsDeepNesting() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, `${'{"a":'.repeat(100_000)}1${'}'.repeat(100_000)}`)
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(
+      issues.map((issue) => issue.file),
+      [file],
+    )
+    assert.include(issues.map((issue) => issue.message).join('; '), 'RangeError')
   }),
 )
 ```
@@ -3179,7 +3310,7 @@ export interface ConfigLayer {
   readonly fromFile: boolean
 }
 
-const isPlain = (value: unknown): value is Plain =>
+export const isPlain = (value: unknown): value is Plain =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const sectionOf = (value: unknown): Plain => (isPlain(value) ? value : {})
@@ -3245,52 +3376,97 @@ export function envOverrides(
 ```
 `packages/kernel/src/config/files.ts`:
 ```ts
-import { readFileSync, statSync, type Stats } from 'node:fs'
+import { lstatSync, readFileSync, statSync, type Stats } from 'node:fs'
 import path from 'node:path'
-import { loadConfig } from 'c12'
 import { Effect } from 'effect'
+import { parse, printParseErrorCode, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
-import type { Plain } from './merge.js'
+import { isPlain, type Plain } from './merge.js'
 
-// Only the parser of c12 is used: no rc files, dotenv, package.json, environment keys, presets or downloads
-const BASE = {
-  name: 'bytebureau',
-  rcFile: false,
-  globalRc: false,
-  dotenv: false,
-  packageJson: false,
-  envName: false,
-  extend: false,
-  giget: false,
-} as const
-
-// Configuration files are data: JSON or JSONC, never a script that c12 would run
+// Configuration files are data: the kernel reads JSON or JSONC as text and parses it with jsonc-parser, nothing is imported or run
 const EXTENSIONS = ['.json', '.jsonc'] as const
+
+const BOM = '\uFEFF'
 
 export interface LoadedFile {
   readonly file: string
   readonly config: Plain
 }
 
+type Entry = 'absent' | 'dangling' | 'file' | 'other'
+
+interface Candidate {
+  readonly file: string
+  readonly entry: Entry
+}
+
 const failure = (file: string, reason: string): ConfigError =>
   new ConfigError({ file, pointer: '', reason })
 
-// Regular files only; the exact name keeps c12 from matching a release binary or the process directory
-function existingFiles(directory: string, name: string): readonly string[] {
-  return EXTENSIONS.map((extension) => path.resolve(directory, `${name}${extension}`)).filter(
-    (candidate) => {
-      const stats = statSync(candidate, { throwIfNoEntry: false })
-      return stats !== undefined && stats.isFile()
-    },
-  )
+// A link to nowhere shows up in lstat but not in stat; a link to a file is followed and read as text
+function entryOf(candidate: string): Entry {
+  if (lstatSync(candidate, { throwIfNoEntry: false }) === undefined) {
+    return 'absent'
+  }
+  const stats = statSync(candidate, { throwIfNoEntry: false })
+  if (stats === undefined) {
+    return 'dangling'
+  }
+  return stats.isFile() ? 'file' : 'other'
 }
 
-const COMMENTS = /\/\/[^\n]*|\/\*[\s\S]*?\*\//gu
+const candidatesOf = (directory: string, name: string): readonly Candidate[] =>
+  EXTENSIONS.map((extension) => {
+    const file = path.resolve(directory, `${name}${extension}`)
+    return { file, entry: entryOf(file) }
+  })
 
-// An array passes through c12 and null crashes it, so the root is checked before the parse
-function hasObjectRoot(text: string): boolean {
-  const body = text.replaceAll(COMMENTS, ' ').trim()
-  return body !== 'null' && !body.startsWith('[')
+// At most one regular file; a link to nowhere or both variants is an error
+function chooseFile(candidates: readonly Candidate[]): Effect.Effect<string | null, ConfigError> {
+  const dangling = candidates.find((candidate) => candidate.entry === 'dangling')
+  if (dangling !== undefined) {
+    return Effect.fail(failure(dangling.file, 'a symbolic link whose target does not exist'))
+  }
+  const [first, second] = candidates.filter((candidate) => candidate.entry === 'file')
+  if (first !== undefined && second !== undefined) {
+    const reason = `${first.file} and ${second.file} both exist; keep one of them`
+    return Effect.fail(failure(first.file, reason))
+  }
+  return Effect.succeed(first === undefined ? null : first.file)
+}
+
+// 1-based line and column of an offset
+function positionOf(text: string, offset: number): string {
+  const before = text.slice(0, offset)
+  return `line ${before.split('\n').length}, column ${offset - before.lastIndexOf('\n')}`
+}
+
+interface Parsed {
+  readonly value: unknown
+  readonly errors: readonly ParseError[]
+}
+
+function parseText(text: string): Parsed {
+  const errors: ParseError[] = []
+  const value: unknown = parse(text, errors, { allowTrailingComma: true, allowEmptyContent: true })
+  return { value, errors }
+}
+
+// The parser recurses, so a pathologically nested file throws instead of returning
+function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigError> {
+  const text = raw.startsWith(BOM) ? raw.slice(BOM.length) : raw
+  return Effect.gen(function* parseJson() {
+    const { value, errors } = yield* Effect.try({
+      try: () => parseText(text),
+      catch: (cause) => failure(file, String(cause)),
+    })
+    const [first] = errors
+    if (first !== undefined) {
+      const position = positionOf(text, first.offset)
+      return yield* failure(file, `${printParseErrorCode(first.error)} at ${position}`)
+    }
+    return isPlain(value) ? value : yield* failure(file, 'expected a JSON object')
+  })
 }
 
 const loadFile = (file: string): Effect.Effect<LoadedFile, ConfigError> =>
@@ -3299,41 +3475,22 @@ const loadFile = (file: string): Effect.Effect<LoadedFile, ConfigError> =>
       try: () => readFileSync(file, 'utf8'),
       catch: (cause) => failure(file, String(cause)),
     })
-    if (!hasObjectRoot(text)) {
-      return yield* failure(file, 'expected a JSON object')
-    }
-    const config = yield* Effect.tryPromise({
-      try: async () => {
-        const loaded = await loadConfig<Plain>({
-          ...BASE,
-          cwd: path.dirname(file),
-          configFile: path.basename(file),
-        })
-        return loaded.config
-      },
-      catch: (cause) => failure(file, String(cause)),
-    })
+    const config = yield* parseConfig(file, text)
     return { file, config }
   })
 
-// `<name>.json` or `<name>.jsonc` in the directory; null when neither exists, an error when both do
+// `<name>.json` or `<name>.jsonc` in the directory, read as text and parsed with jsonc-parser; null when neither exists
 export const readLayer = (
   directory: string,
   name: string,
 ): Effect.Effect<LoadedFile | null, ConfigError> =>
   Effect.gen(function* readJsonLayer() {
-    const found = yield* Effect.try({
-      try: () => existingFiles(directory, name),
+    const candidates = yield* Effect.try({
+      try: () => candidatesOf(directory, name),
       catch: (cause) => failure(directory, String(cause)),
     })
-    const [first, second] = found
-    if (first === undefined) {
-      return null
-    }
-    if (second !== undefined) {
-      return yield* failure(first, `${first} and ${second} both exist; keep one of them`)
-    }
-    return yield* loadFile(first)
+    const file = yield* chooseFile(candidates)
+    return file === null ? null : yield* loadFile(file)
   })
 
 const directoryProblem = (stats: Stats | undefined): string | null => {

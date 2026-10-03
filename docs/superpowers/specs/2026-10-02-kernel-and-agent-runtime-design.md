@@ -46,7 +46,7 @@ Exact package names for Effect platform/SQL integrations (Bun platform layer, SQ
 
 | Service | Responsibility | Key operations |
 |---|---|---|
-| `Config` | load and validate layered configuration (§10) with c12; expose typed config; emit JSON Schema for `$schema`; watch project config for changes | `load(projectPath?)`, `get()`, `schema()` |
+| `Config` | load and validate layered configuration (§10) read as JSON/JSONC text with `jsonc-parser` (configuration files are data, never code); expose typed config; emit JSON Schema for `$schema`; watch project config for changes | `load(projectPath?)`, `get()`, `schema()` |
 | `Store` | SQLite connection (WAL, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`), migrations applied at startup, single writer (daemon) | `migrate()`, `sql` client |
 | `EventLog` | append-only durable events with monotonic `seq`; ephemeral events fan-out; replay from `seq` then live | `publish(event)`, `subscribe(filter, since?)`, `read(filter, range)` |
 | `ProjectRegistry` | register/unregister projects (path, name, default branch), detect git root, load per-project config | `register(path)`, `list()`, `get(id)`, `remove(id)` |
@@ -183,7 +183,7 @@ All payloads are DTOs (no functions); streams are `AsyncIterable`; cancellation 
 
 ## 10. Configuration
 
-Precedence: CLI flags > environment (`BYTEBUREAU_*`) > `<project>/bytebureau.local.json` (gitignored) > `<project>/bytebureau.json` (or `.jsonc`) > `~/.bytebureau/config.json` > defaults. Loader: c12 with JSON/JSONC documented; `extends` supported for team presets. Validation: effect/schema; errors report the file and JSON pointer; unknown keys are errors; plugin sections are validated by the plugin's Standard Schema.
+Precedence: CLI flags > environment (`BYTEBUREAU_*`) > `<project>/bytebureau.local.json` (gitignored) > `<project>/bytebureau.json` (or `.jsonc`) > `~/.bytebureau/config.json` > defaults. Loader: JSON/JSONC read as text and parsed with `jsonc-parser` — configuration files are data, never code (Phase A dropped c12: with every feature switched off it still imported symlink targets, normalised scalar roots and dropped `null` sections before validation); `extends` for team presets is deferred to a later phase as a kernel-native feature (JSON/JSONC presets by relative path, merged as the lowest project layer, cycle detection). Validation: effect/schema; errors report the file and JSON pointer; unknown keys are errors; plugin sections are validated by the plugin's Standard Schema.
 
 Project config v1 (`"$schema": "https://bytebureau.dev/schema/v1/config.json"` served also at `/api/v1/schemas/config.json`):
 ```jsonc
