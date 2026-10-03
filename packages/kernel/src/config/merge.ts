@@ -1,6 +1,13 @@
 export type Plain = Record<string, unknown>
 
-export const isPlain = (value: unknown): value is Plain =>
+// One source of configuration: the defaults, a file, an environment variable or a flag
+export interface ConfigLayer {
+  readonly label: string
+  readonly config: Plain
+  readonly fromFile: boolean
+}
+
+const isPlain = (value: unknown): value is Plain =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const sectionOf = (value: unknown): Plain => (isPlain(value) ? value : {})
@@ -14,4 +21,13 @@ export function mergeConfig(base: Plain, overlay: Plain): Plain {
     }
   }
   return result
+}
+
+// Lowest priority first
+export function mergeLayers(layers: readonly ConfigLayer[]): Plain {
+  let merged: Plain = {}
+  for (const layer of layers) {
+    merged = mergeConfig(merged, layer.config)
+  }
+  return merged
 }

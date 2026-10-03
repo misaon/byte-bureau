@@ -1,17 +1,18 @@
-import { existsSync } from 'node:fs'
 import path from 'node:path'
 import {
-  ProjectConfig,
   configJsonSchema,
-  decodeUserConfig,
   defaultProjectConfig,
+  type ProjectConfig,
   type UserConfig,
 } from '@bytebureau/protocol'
-import { loadConfig, SUPPORTED_EXTENSIONS } from 'c12'
-import { Context, Effect, Layer, Schema } from 'effect'
-import { ConfigError } from '../errors.js'
+import { Context, Effect, Layer } from 'effect'
+import type { ConfigError } from '../errors.js'
 import { envOverrides } from './env-overrides.js'
-import { mergeConfig, type Plain } from './merge.js'
+import { readLayer, requireDirectory, type LoadedFile } from './files.js'
+import { checkProject, checkUser, configErrorOf, distinct, type ConfigIssue } from './issues.js'
+import { mergeLayers, type ConfigLayer, type Plain } from './merge.js'
+
+export type { ConfigIssue } from './issues.js'
 
 export interface FlagOverrides {
   readonly employee?: string | undefined
@@ -23,12 +24,6 @@ export interface LoadRequest {
   readonly projectPath?: string | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly flags?: FlagOverrides | undefined
-}
-
-export interface ConfigIssue {
-  readonly file: string
-  readonly pointer: string
-  readonly message: string
 }
 
 export interface ResolvedConfig {
@@ -50,194 +45,119 @@ export interface ConfigShape {
 
 export class Config extends Context.Service<Config, ConfigShape>()('bb/Config') {}
 
-type ConfigFiles = ResolvedConfig['files']
+const FLAG_PATHS = [
+  ['logLevel', 'logging', 'level'],
+  ['employee', 'defaults', 'employee'],
+  ['branch', 'defaults', 'branch'],
+] as const
 
-const BASE = {
-  name: 'bytebureau',
-  rcFile: false,
-  globalRc: false,
-  dotenv: false,
-  packageJson: false,
-  envName: false,
-} as const
-
-interface FileLayer {
-  readonly config: Plain
-  readonly file: string | null
-}
-
-const NO_FILE: FileLayer = { config: {}, file: null }
-
-// Unlike a bare name, an exact file name cannot match a release binary or the process directory
-function locate(cwd: string, name: string): string | null {
-  const candidates = SUPPORTED_EXTENSIONS.map((extension) =>
-    path.resolve(cwd, `${name}${extension}`),
-  )
-  return candidates.find((candidate) => existsSync(candidate)) ?? null
-}
-
-const loadFile = (file: string): Effect.Effect<FileLayer, ConfigError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const loaded = await loadConfig<Plain>({
-        ...BASE,
-        cwd: path.dirname(file),
-        configFile: path.basename(file),
-      })
-      return { config: loaded.config, file }
-    },
-    catch: (cause) => new ConfigError({ file, pointer: '', reason: String(cause) }),
+// One layer per flag that is set, so an issue can name the flag it comes from
+const flagLayers = (flags: FlagOverrides): readonly ConfigLayer[] =>
+  FLAG_PATHS.flatMap(([flag, section, key]) => {
+    const value = flags[flag]
+    return value === undefined
+      ? []
+      : [{ label: `flag:${flag}`, config: { [section]: { [key]: value } }, fromFile: false }]
   })
 
-const readLayer = (cwd: string, name: string): Effect.Effect<FileLayer, ConfigError> =>
-  Effect.suspend(() => {
-    const file = locate(cwd, name)
-    return file === null ? Effect.succeed(NO_FILE) : loadFile(file)
+const defaultsLayer = (projectPath: string | null): ConfigLayer => {
+  const defaults = structuredClone(defaultProjectConfig)
+  const name = projectPath === null ? 'default' : path.basename(projectPath)
+  return {
+    label: '(defaults)',
+    config: { ...defaults, project: { ...defaults.project, name } },
+    fromFile: false,
+  }
+}
+
+const whole = (config: Plain): Plain => config
+
+// Only the sections user and project configuration share take part in the project layering
+const sharedWithProject = (user: Plain): Plain =>
+  user['logging'] === undefined ? {} : { logging: user['logging'] }
+
+const fileLayer = (
+  loaded: LoadedFile | null,
+  section: (config: Plain) => Plain,
+): readonly ConfigLayer[] =>
+  loaded === null ? [] : [{ label: loaded.file, config: section(loaded.config), fromFile: true }]
+
+const fileOf = (loaded: LoadedFile | null): string | null => (loaded === null ? null : loaded.file)
+
+interface Assembled {
+  readonly layers: readonly ConfigLayer[]
+  readonly user: Plain
+  readonly projectPath: string | null
+  readonly files: ResolvedConfig['files']
+}
+
+// Lowest priority first: defaults, user, project, local, environment, flags
+const assemble = (home: string, request: LoadRequest): Effect.Effect<Assembled, ConfigError> =>
+  Effect.gen(function* assembleLayers() {
+    const projectPath = request.projectPath === undefined ? null : path.resolve(request.projectPath)
+    if (projectPath !== null) {
+      yield* requireDirectory(projectPath)
+    }
+    const user = yield* readLayer(home, 'config')
+    const project = projectPath === null ? null : yield* readLayer(projectPath, 'bytebureau')
+    const local = projectPath === null ? null : yield* readLayer(projectPath, 'bytebureau.local')
+    const layers = [
+      defaultsLayer(projectPath),
+      ...fileLayer(user, sharedWithProject),
+      ...fileLayer(project, whole),
+      ...fileLayer(local, whole),
+      ...envOverrides(request.env ?? {}),
+      ...flagLayers(request.flags ?? {}),
+    ]
+    const files = { user: fileOf(user), project: fileOf(project), local: fileOf(local) }
+    return { layers, user: user === null ? {} : user.config, projectPath, files }
   })
 
-// The copy keeps protocol's schema clean: toStandardSchemaV1 attaches ~standard to the schema it receives
-const projectStandard = Schema.toStandardSchemaV1(ProjectConfig.annotate({}), {
-  parseOptions: { onExcessProperty: 'error', errors: 'all' },
-})
-
-type IssuePath = readonly (PropertyKey | { readonly key: PropertyKey })[]
-
-const escapeSegment = (segment: string): string =>
-  segment.replaceAll('~', '~0').replaceAll('/', '~1')
-
-// RFC 6901: the document itself is the empty pointer
-const pointerOf = (segments: IssuePath = []): string =>
-  segments
-    .map(
-      (segment) => `/${escapeSegment(String(typeof segment === 'object' ? segment.key : segment))}`,
-    )
-    .join('')
-
-interface Checked {
+interface Inspected {
+  readonly projectPath: string | null
+  readonly files: ResolvedConfig['files']
+  readonly user: UserConfig | undefined
   readonly project: ProjectConfig | undefined
   readonly issues: readonly ConfigIssue[]
 }
 
-const checkProject = (input: unknown, file: string): Effect.Effect<Checked> =>
-  Effect.promise(async () => {
-    const result = await projectStandard['~standard'].validate(input)
-    if (result.issues === undefined) {
-      return { project: result.value, issues: [] }
+// The user file is checked against its own schema, the layers merged against the project schema
+const inspect = (home: string, request: LoadRequest): Effect.Effect<Inspected, ConfigError> =>
+  Effect.gen(function* inspectLayers() {
+    const { layers, user, projectPath, files } = yield* assemble(home, request)
+    const checkedUser = yield* checkUser(user, files.user ?? path.join(home, 'config.json'))
+    const fallback = files.project ?? '(defaults)'
+    const checkedProject = yield* checkProject(mergeLayers(layers), layers, fallback)
+    const issues = distinct([...checkedUser.issues, ...checkedProject.issues])
+    return {
+      projectPath,
+      files,
+      user: checkedUser.value,
+      project: checkedProject.value,
+      issues,
     }
-    const issues = result.issues.map((issue) => ({
-      file,
-      pointer: pointerOf(issue.path),
-      message: issue.message,
-    }))
-    return { project: undefined, issues }
   })
-
-function configErrorOf(file: string, issues: readonly ConfigIssue[]): ConfigError {
-  const [first] = issues
-  return new ConfigError({
-    file,
-    pointer: first === undefined ? '' : first.pointer,
-    reason: issues.map((issue) => `${issue.pointer}: ${issue.message}`).join('; '),
-  })
-}
-
-const decodeUser = (user: Plain, file: string): Effect.Effect<UserConfig, ConfigError> =>
-  Effect.try({
-    try: () => decodeUserConfig(user),
-    catch: (cause) => new ConfigError({ file, pointer: '', reason: String(cause) }),
-  })
-
-const defaultsFor = (projectPath: string | null): Plain => ({
-  ...defaultProjectConfig,
-  project: {
-    ...defaultProjectConfig.project,
-    name: projectPath === null ? 'default' : path.basename(projectPath),
-  },
-})
-
-// Only the sections user and project configuration share take part in the project layering
-const sharedWithProject = (user: Plain): Plain => ({ logging: user['logging'] })
-
-// Undefined values are skipped by mergeConfig, so an absent flag leaves the lower layers untouched
-const flagOverrides = (flags: FlagOverrides): Plain => ({
-  logging: { level: flags.logLevel },
-  defaults: { employee: flags.employee, branch: flags.branch },
-})
-
-// Lowest priority first
-function mergeLayers(layers: readonly Plain[]): Plain {
-  let merged: Plain = {}
-  for (const layer of layers) {
-    merged = mergeConfig(merged, layer)
-  }
-  return merged
-}
-
-interface Assembled {
-  readonly merged: Plain
-  readonly user: Plain
-  readonly projectPath: string | null
-  readonly files: ConfigFiles
-}
-
-const assemble = (home: string, request: LoadRequest): Effect.Effect<Assembled, ConfigError> =>
-  Effect.gen(function* assembleLayers() {
-    const projectPath = request.projectPath === undefined ? null : path.resolve(request.projectPath)
-    const userLayer = yield* readLayer(home, 'config')
-    const projectLayer =
-      projectPath === null ? NO_FILE : yield* readLayer(projectPath, 'bytebureau')
-    const localLayer =
-      projectPath === null ? NO_FILE : yield* readLayer(projectPath, 'bytebureau.local')
-    const merged = mergeLayers([
-      defaultsFor(projectPath),
-      sharedWithProject(userLayer.config),
-      projectLayer.config,
-      localLayer.config,
-      envOverrides(request.env ?? {}),
-      flagOverrides(request.flags ?? {}),
-    ])
-    const files = { user: userLayer.file, project: projectLayer.file, local: localLayer.file }
-    return { merged, user: userLayer.config, projectPath, files }
-  })
-
-// Issues are attributed to the file with the highest priority; without one, to the defaults
-const issueFile = (files: ConfigFiles, fallback: string): string =>
-  files.local ?? files.project ?? fallback
 
 const resolveConfig = (
   home: string,
   request: LoadRequest,
 ): Effect.Effect<ResolvedConfig, ConfigError> =>
   Effect.gen(function* resolveLayers() {
-    const { merged, user, projectPath, files } = yield* assemble(home, request)
-    const userConfig = yield* decodeUser(user, files.user ?? path.join(home, 'config.json'))
-    const file = issueFile(files, '(defaults)')
-    const checked = yield* checkProject(merged, file)
-    if (checked.project === undefined) {
-      return yield* configErrorOf(file, checked.issues)
+    const { projectPath, files, user, project, issues } = yield* inspect(home, request)
+    if (user === undefined || project === undefined) {
+      return yield* configErrorOf(issues)
     }
-    return { project: checked.project, user: userConfig, projectPath, files }
+    return { project, user, projectPath, files }
   })
 
-// An unreadable or malformed file becomes an issue, not an empty document blamed for missing keys
-const validateConfig = (
-  home: string,
-  projectPath: string,
-): Effect.Effect<readonly ConfigIssue[]> => {
-  const root = path.resolve(projectPath)
-  return Effect.gen(function* validateLayers() {
-    const { merged, files } = yield* assemble(home, { projectPath: root })
-    const checked = yield* checkProject(
-      merged,
-      issueFile(files, path.join(root, 'bytebureau.json')),
-    )
-    return checked.issues
-  }).pipe(
+// A file that cannot be read or parsed is one issue, not an empty document blamed for missing keys
+const validateConfig = (home: string, projectPath: string): Effect.Effect<readonly ConfigIssue[]> =>
+  inspect(home, { projectPath }).pipe(
+    Effect.map((inspected) => inspected.issues),
     Effect.catchTag('ConfigError', (failure) =>
       Effect.succeed([{ file: failure.file, pointer: failure.pointer, message: failure.reason }]),
     ),
   )
-}
 
 const make = (home: string): ConfigShape => ({
   load: (request) => resolveConfig(home, request),

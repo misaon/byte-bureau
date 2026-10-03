@@ -1,4 +1,4 @@
-import { isPlain, type Plain } from './merge.js'
+import type { ConfigLayer, Plain } from './merge.js'
 
 // Explicit map: environment variable → config path (dotted); extend deliberately, never generically
 const ENV_MAP: readonly (readonly [string, string])[] = [
@@ -8,25 +8,29 @@ const ENV_MAP: readonly (readonly [string, string])[] = [
   ['BYTEBUREAU_WORKSPACE_RUNTIME', 'workspace.runtime'],
 ]
 
-function assign(target: Plain, dotted: string, value: string): void {
+// 'logging.level' and 'info' make { logging: { level: 'info' } }
+function nest(dotted: string, value: string): Plain {
   const keys = dotted.split('.')
-  let cursor = target
+  const result: Plain = {}
+  let cursor = result
   for (const key of keys.slice(0, -1)) {
-    const next = cursor[key]
-    const section: Plain = isPlain(next) ? next : {}
+    const section: Plain = {}
     cursor[key] = section
     cursor = section
   }
   cursor[keys.at(-1) ?? ''] = value
+  return result
 }
 
-export function envOverrides(env: Readonly<Record<string, string | undefined>>): Plain {
-  const result: Plain = {}
-  for (const [name, dotted] of ENV_MAP) {
+// One layer per variable that is set, so an issue can name the variable it comes from
+export function envOverrides(
+  env: Readonly<Record<string, string | undefined>>,
+): readonly ConfigLayer[] {
+  return ENV_MAP.flatMap(([name, dotted]) => {
     const value = env[name]
-    if (value !== undefined && value !== '') {
-      assign(result, dotted, value)
+    if (value === undefined || value === '') {
+      return []
     }
-  }
-  return result
+    return [{ label: `env:${name}`, config: nest(dotted, value), fromFile: false }]
+  })
 }
