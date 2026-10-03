@@ -85,3 +85,4 @@ xhigh
 pluginy
 auditovatelný
 bivariant
+logtape

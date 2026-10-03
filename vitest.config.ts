@@ -6,6 +6,7 @@ export default defineConfig({
       'packages/i18n',
       'packages/protocol',
       'packages/plugin-api',
+      'packages/kernel',
       'apps/bytebureau',
       'apps/docs',
       'scripts',
