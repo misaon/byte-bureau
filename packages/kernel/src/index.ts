@@ -28,3 +28,10 @@ export {
   type EventFilter,
   type EventLogShape,
 } from './events/event-log.js'
+export {
+  ProjectRegistry,
+  ProjectRegistryLive,
+  type Project,
+  type ProjectRegistryShape,
+} from './projects/project-registry.js'
+export { findGitRoot, isByteBureauWorktree, defaultBranchOf } from './projects/git-root.js'
