@@ -31,14 +31,28 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 2. The CLI registers the project and creates a session, and the kernel gives the session a git worktree under `<project>/.bytebureau/worktrees/` on a `bb/<slug>` branch, so the main checkout is never touched.
 3. The prompt goes to the `AgentProvider` port as one turn, and the kernel turns what the agent does into events, which the event log stores with an ever increasing `seq` unless they are ephemeral, like text deltas.
 4. The CLI follows the durable events only and prints them, as NDJSON with `--json`, and it answers an ask with the recommended option under `--yes` or with the choice made at a prompt.
-5. When the turn completes the CLI completes the session and leaves the worktree for inspection, and the exit code says how the run ended: 0 completed, 3 stopped, 4 could not start or finish.
+5. When the turn completes the CLI completes the session and leaves the worktree for inspection, and the exit code says how the run ended: 0 completed, 3 stopped, 4 when the project, its worktree or the provider cannot be used or the session errors. An invalid configuration or a failure of the store exits 2, a usage error 1.
 
 ## Decisions of phase A
 
 - SQLite is reached through `effect/sql` with embedded migrations, and Drizzle is deferred ([ADR-0010](../decisions/0010-sqlite-through-effect-sql/)).
 - Configuration files are JSON or JSONC read as text and never run, and c12 is gone ([ADR-0011](../decisions/0011-configuration-files-are-data/)).
 - An agent child process is spawned detached in a process group of its own, so Ctrl-C at the terminal reaches the kernel only, and it is signalled as a group, so what it started goes with it; its `exit` resolves at most two seconds after the process ends, even when a grandchild keeps a pipe open.
-- A child process gets an explicit environment allowlist (`PATH`, `HOME`, `LANG` and `LC_*`, `TMPDIR`, `TERM`, `TRACEPARENT`, `BYTEBUREAU_*` and the variables a spawn names explicitly), never the whole environment. `SSH_AUTH_SOCK` is on the list too, because git, ssh and Claude Code need the agent socket to reach SSH remotes. The extra environment of a session keeps its `BYTEBUREAU_*` names only.
-- The ask policy recommends `allow` for a shell command only when the whole command is one simple read-only command (no pipe, list, redirection or substitution), and the kernel never makes up an answer for a question without a recommended option: even for an autonomous employee such a question waits for a human.
+- A child process gets an explicit environment allowlist (`PATH`, `HOME`, `LANG` and `LC_*`, `TMPDIR`, `TERM`, `TRACEPARENT`, `BYTEBUREAU_*` and the variables a spawn names explicitly), never the whole environment. `SSH_AUTH_SOCK` is on the list too, because git, ssh and Claude Code need the agent socket to reach SSH remotes. The extra environment of a session keeps its `BYTEBUREAU_*` names only, and `providers.<id>.passEnv` in the project file names the further variables the agents of a provider get.
+- A session reads the configuration of its project when it is created, with the environment of the kernel, so `BYTEBUREAU_EMPLOYEE` and `BYTEBUREAU_BRANCH` reach `bytebureau run` and `--employee` and `--branch` still win; the snapshot the registry stored stays the record of the registration.
+- The ask policy recommends `allow` for a shell command only when the whole command is one simple read-only command (no pipe, list, redirection or substitution), uses no flag that writes or runs something and names nothing outside the workspace; a command that names a secrets path is denied. The kernel never makes up an answer for a question without a recommended option: even for an autonomous employee such a question waits for a human, and an answer must pick options the ask offers.
 - `KernelTest`, the kernel over an in-memory store, is exported from `@bytebureau/kernel/testing`, so tests run the real services.
 - `--json` is NDJSON, one event per line; a run without `--json` and without a terminal prints plain text, with no colours and no prompts.
+- Every log record goes to stderr, whatever its level, so stdout carries only what a command prints. The level comes from `--log-level`, else `BYTEBUREAU_LOG_LEVEL`, else `logging.level` of the user file, else info, and `--debug` lets Effect's own debug records through to the categories it selects.
+- The home of the kernel is private: `<home>` and `<home>/data` are created for the user alone (0700) and the database is 0600.
+- Event payloads are decoded as strictly as the published JSON Schema describes them: a field the schema does not know is refused.
+- `workspaces prune` keeps a worktree for uncommitted changes or for commits no remote-tracking ref contains; a pushed branch is removed.
+
+## Deferred to later phases
+
+- The supervisor's restart policy (spec §14, restart with backoff at most three times) arrives with the real providers of phase C; `restartSchedule` is not used yet.
+- Profile variables in the agent environment arrive with the profiles of phase C; `providers.<id>.passEnv` is the only extra source until then.
+- The plugin context bridges its promises on root fibers, so a helper a plugin spawns carries no `TRACEPARENT`; in phase B the host passes a runtime to the context.
+- The `^0` host API semver policy is settled before the first publish of `plugin-api`.
+- One shared test-support package replaces the copies of the `node-spawner` and `temp-repo` helpers in the kernel, the workspace plugin and the CLI.
+- Whether event payloads are redacted once at `EventLog.publish` or by every reader is an ADR of phase B; today the log stores what it is given and the log sinks redact what they print.
