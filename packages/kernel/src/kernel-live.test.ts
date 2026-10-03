@@ -1,11 +1,15 @@
 import type { LogRecord } from '@logtape/logtape'
 import { assert, describe, expect, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
-import { KernelLayer, KernelTest } from './kernel-live.js'
+import { KernelLayer } from './kernel-live.js'
 import { configureLogging, resetLogging, type KernelLogLevel } from './logging/logging.js'
 import { SessionManager } from './sessions/session-manager.js'
 import { StoreTest } from './store/store-test.js'
 import { tempDir } from './testing/temp-repo.js'
+
+// The kernel without a store, over the in-memory one the caller provides
+const kernelOver = (logLevel?: KernelLogLevel): Layer.Layer<SessionManager> =>
+  KernelLayer({ home: tempDir('bb-home-'), logLevel }).pipe(Layer.provideMerge(StoreTest))
 
 // A debug and an info record logged by Effect inside the kernel layer; LogTape itself lets both through
 async function loggedInKernel(logLevel?: KernelLogLevel): Promise<readonly unknown[]> {
@@ -19,15 +23,14 @@ async function loggedInKernel(logLevel?: KernelLogLevel): Promise<readonly unkno
   })
   try {
     const logging = Effect.andThen(Effect.logDebug('debug'), Effect.logInfo('info'))
-    const kernel = KernelTest({ home: tempDir('bb-home-'), logLevel })
-    await Effect.runPromise(Effect.provide(logging, kernel))
+    await Effect.runPromise(Effect.provide(logging, kernelOver(logLevel)))
   } finally {
     await resetLogging()
   }
   return seen.map((record) => record.message[0])
 }
 
-describe(KernelTest, () => {
+describe(KernelLayer, () => {
   it('lets Effect log from info up unless the options give a level', async () => {
     expect.hasAssertions()
     await expect(loggedInKernel()).resolves.toStrictEqual(['info'])
@@ -37,14 +40,11 @@ describe(KernelTest, () => {
     expect.hasAssertions()
     await expect(loggedInKernel('debug')).resolves.toStrictEqual(['debug', 'info'])
   })
-})
 
-describe(KernelLayer, () => {
-  it.effect('is the whole kernel but the store, which the caller provides', () => {
-    const layer = KernelLayer({ home: tempDir('bb-home-') }).pipe(Layer.provideMerge(StoreTest))
-    return Effect.gen(function* providesStore() {
+  it.effect('is the whole kernel but the store, which the caller provides', () =>
+    Effect.gen(function* providesStore() {
       const sessions = yield* SessionManager
       assert.deepStrictEqual(yield* sessions.list(), [])
-    }).pipe(Effect.provide(layer))
-  })
+    }).pipe(Effect.provide(kernelOver())),
+  )
 })

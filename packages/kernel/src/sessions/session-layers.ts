@@ -1,6 +1,7 @@
 import { Effect, Layer } from 'effect'
 import type { UsageLayer } from '../kernel-foundation.js'
-import { KernelTest, type KernelLayerOptions } from '../kernel-live.js'
+import type { KernelLayerOptions } from '../kernel-live.js'
+import { KernelTest } from '../kernel-test.js'
 import { emptyHome } from '../projects/project-registry-fixtures.js'
 import type { SessionServices } from './session-services.js'
 

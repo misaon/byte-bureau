@@ -87,12 +87,7 @@ export {
   type SessionUsage,
   type UsageSnapshot,
 } from './usage/usage-service.js'
-export {
-  KernelLayer,
-  KernelTest,
-  type KernelLayerOptions,
-  type KernelServices,
-} from './kernel-live.js'
+export { KernelLayer, type KernelLayerOptions, type KernelServices } from './kernel-live.js'
 export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 export { FakeAgentProvider } from './testing/fake-agent-provider.js'
 export { fakeAgentPlugin } from './testing/fake-agent-plugin.js'

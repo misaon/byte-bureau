@@ -1,6 +1,6 @@
 import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
 import { createKernelFrom, type KernelOptions } from './facade.js'
-import { KernelTest } from './kernel-live.js'
+import { KernelTest } from './kernel-test.js'
 import { kernelLogger } from './logging/logging.js'
 import { tempDir } from './testing/temp-repo.js'
 

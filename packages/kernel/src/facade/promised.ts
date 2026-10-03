@@ -5,7 +5,7 @@ import type { KernelServices } from '../kernel-live.js'
 // Everything a kernel layer offers, the store included
 export type Services = KernelServices | SqlClient.SqlClient
 
-type Runtime = ManagedRuntime.ManagedRuntime<Services, never>
+export type Runtime = ManagedRuntime.ManagedRuntime<Services, never>
 
 // A call of a service as a function that returns a promise
 export type Promised = <Id extends Services, Shape, Args extends readonly unknown[], Value>(

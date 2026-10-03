@@ -13,6 +13,10 @@
     "./bun": {
       "types": "./src/bun.ts",
       "default": "./src/bun.ts"
+    },
+    "./testing": {
+      "types": "./src/kernel-test.ts",
+      "default": "./src/kernel-test.ts"
     }
   },
   "scripts": {
