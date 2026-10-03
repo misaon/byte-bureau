@@ -11,6 +11,7 @@ import {
 } from 'effect'
 import { nowIso, uuidv7 } from '../ids.js'
 import { childEnv } from './child-env.js'
+import { drain } from './drain.js'
 import { launch, type ExitInfo, type Launched } from './launch.js'
 import { climb, ladderFor, TERMINATE_LADDER, type KillSignal } from './kill-ladder.js'
 import { startPump, type OutputPump } from './pump.js'
@@ -63,9 +64,6 @@ interface SupervisorShape {
 export class Supervisor extends Context.Service<Supervisor, SupervisorShape>()('bb/Supervisor') {}
 
 const DEFAULT_MAX_LINES = 10_000
-
-// How long the pipes of an exited process get to run dry; a grandchild that holds one can keep it open for good
-const DRAIN = '2 seconds'
 
 // Backoff between restarts of a crashed process: 500 ms doubling, jittered, at most maxRestarts times
 export const restartSchedule = (maxRestarts: number): Schedule.Schedule<Duration.Duration> =>
@@ -127,7 +125,7 @@ const settleExit = (running: Running, release: () => void): Effect.Effect<ExitIn
     const { launched } = running
     const { exit, failure } = yield* Deferred.await(launched.exited)
     release()
-    yield* Effect.timeoutOption(launched.closed.await, DRAIN)
+    yield* drain(launched)
     if (failure !== null) {
       running.stderr.append(failure)
     }

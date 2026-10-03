@@ -121,10 +121,10 @@ it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-7', status: 'running' })
       yield* manager.lock('session-7')
-      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      const refused = yield* Effect.flip(manager.destroy('session-7', handle, { force: true }))
       assert.strictEqual(codeOf(refused), 'locked')
       yield* manager.unlock('session-7')
-      yield* manager.destroy(handle)
+      yield* manager.destroy('session-7', handle)
       assert.isFalse(existsSync(handle.path))
     }),
   )
@@ -135,10 +135,13 @@ it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-8', status: 'completed' })
       writeFileSync(path.join(handle.path, 'dirty.txt'), 'x')
-      yield* manager.destroy(handle)
-      assert.isTrue(existsSync(handle.path))
-      yield* manager.destroy(handle, { force: true })
-      assert.isFalse(existsSync(handle.path))
+      const kept = yield* manager.destroy('session-8', handle)
+      const stayed = existsSync(handle.path)
+      const forced = yield* manager.destroy('session-8', handle, { force: true })
+      assert.deepStrictEqual(
+        [kept, stayed, forced, existsSync(handle.path)],
+        [{ removed: false, reason: 'uncommitted changes' }, true, { removed: true }, false],
+      )
       const later = (yield* eventsOf('session-8')).slice(1)
       assert.deepStrictEqual(later, [
         {
@@ -158,9 +161,9 @@ it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-11', status: 'completed' })
       git(repo, 'branch', '-m', 'main', 'trunk')
-      yield* manager.destroy(handle)
+      yield* manager.destroy('session-11', handle)
       assert.isTrue(existsSync(handle.path))
-      yield* manager.destroy(handle, { force: true })
+      yield* manager.destroy('session-11', handle, { force: true })
       assert.isFalse(existsSync(handle.path))
       const later = (yield* eventsOf('session-11')).slice(1)
       assert.deepStrictEqual(later, [
@@ -179,7 +182,7 @@ it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-12', status: 'completed' })
       git(repo, 'worktree', 'lock', handle.path)
-      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      const refused = yield* Effect.flip(manager.destroy('session-12', handle, { force: true }))
       assert.strictEqual(codeOf(refused), 'locked')
       assert.isTrue(existsSync(handle.path))
     }),
@@ -193,7 +196,14 @@ it.layer(TestLayer)('WorkspaceManager status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-9', status: 'running' })
       writeFileSync(path.join(handle.path, 'draft.txt'), 'x')
-      const expected = { dirty: true, ahead: 0, behind: 0, locked: false, branch: 'bb/session-9' }
+      const expected = {
+        dirty: true,
+        ahead: 0,
+        behind: 0,
+        pushed: false,
+        locked: false,
+        branch: 'bb/session-9',
+      }
       assert.deepStrictEqual(yield* manager.status(handle), expected)
     }),
   )
@@ -205,8 +215,8 @@ it.layer(TestLayer)('WorkspaceManager status', (suite) => {
       const handle = yield* provisionSession(project, { id: 'session-10', status: 'running' })
       const stray = { ...handle, runtimeId: 'nobody' }
       const statusError = yield* Effect.flip(manager.status(stray))
-      const destroyError = yield* Effect.flip(manager.destroy(stray))
-      const forcedError = yield* Effect.flip(manager.destroy(stray, { force: true }))
+      const destroyError = yield* Effect.flip(manager.destroy('session-10', stray))
+      const forcedError = yield* Effect.flip(manager.destroy('session-10', stray, { force: true }))
       const codes = [statusError, destroyError, forcedError].map((error) => codeOf(error))
       assert.deepStrictEqual(codes, ['runtime_missing', 'runtime_missing', 'runtime_missing'])
       assert.isTrue(existsSync(handle.path))

@@ -10,8 +10,9 @@ import {
   WorkspaceRuntimes,
   type WorkspaceRuntimesShape,
 } from './runtimes.js'
+import { RETAINED } from './retain-reasons.js'
 import { makeProvision, type ProvisionInput } from './workspace-provision.js'
-import { makePrune, type PruneReport } from './workspace-prune.js'
+import { makePrune, type DestroyOutcome, type PruneReport } from './workspace-prune.js'
 import { listWorkspaces, type WorkspaceInfo } from './workspace-records.js'
 
 export type { ProvisionInput } from './workspace-provision.js'
@@ -23,10 +24,12 @@ export interface WorkspaceManagerShape {
     input: ProvisionInput,
   ) => Effect.Effect<WorkspaceHandle, WorkspaceError | StoreError>
   readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
+  // The session id is the one the manager knows, never read back from the handle a runtime returned
   readonly destroy: (
+    sessionId: string,
     handle: WorkspaceHandle,
     options?: { readonly force?: boolean },
-  ) => Effect.Effect<void, WorkspaceError | StoreError>
+  ) => Effect.Effect<DestroyOutcome, WorkspaceError | StoreError>
   readonly lock: (sessionId: string) => Effect.Effect<void>
   readonly unlock: (sessionId: string) => Effect.Effect<void>
   readonly list: (projectId?: string) => Effect.Effect<readonly WorkspaceInfo[], StoreError>
@@ -47,10 +50,10 @@ const makeStatus =
 // A running session keeps its worktree, whatever force says
 const refuseLocked = (
   locks: ReadonlySet<string>,
-  handle: WorkspaceHandle,
+  sessionId: string,
 ): Effect.Effect<void, WorkspaceError> =>
-  locks.has(handle.id)
-    ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${handle.id} is running` }))
+  locks.has(sessionId)
+    ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${sessionId} is running` }))
     : Effect.void
 
 // Without force a worktree goes only when its status says that nothing in it is lost
@@ -60,44 +63,39 @@ const keepReason = (
 ): Effect.Effect<string | undefined> =>
   statusOn(runtime, handle).pipe(
     Effect.match({
-      onFailure: () => 'status unavailable',
-      onSuccess: (current) => (current.dirty ? 'uncommitted changes' : undefined),
+      onFailure: () => RETAINED.statusUnavailable,
+      onSuccess: (current) => (current.dirty ? RETAINED.uncommitted : undefined),
     }),
   )
 
 // A kept worktree is announced with its reason; force skips the status and the runtime still refuses a locked worktree
+// The outcome says whether the worktree went, so a caller that checked the status before cannot report it gone when it stayed
 const makeDestroy =
   (
     log: EventLogShape,
     runtimes: WorkspaceRuntimesShape,
     locks: ReadonlySet<string>,
   ): WorkspaceManagerShape['destroy'] =>
-  (handle, options = {}) =>
+  (sessionId, handle, options = {}) =>
     Effect.gen(function* destroyWorkspace() {
-      yield* refuseLocked(locks, handle)
+      yield* refuseLocked(locks, sessionId)
       const runtime = yield* runtimeFor(runtimes, handle.runtimeId)
       const reason = options.force === true ? undefined : yield* keepReason(runtime, handle)
       if (reason !== undefined) {
-        yield* log.publish({
-          type: 'workspace.retained',
-          sessionId: handle.id,
-          payload: { path: handle.path, reason },
-        })
-        return
+        const payload = { path: handle.path, reason }
+        yield* log.publish({ type: 'workspace.retained', sessionId, payload })
+        return { removed: false, reason } as const
       }
       yield* destroyOn(runtime, handle, options)
-      yield* log.publish({
-        type: 'workspace.destroyed',
-        sessionId: handle.id,
-        payload: { path: handle.path },
-      })
+      yield* log.publish({ type: 'workspace.destroyed', sessionId, payload: { path: handle.path } })
+      return { removed: true } as const
     })
 
 const make = Effect.gen(function* makeWorkspaceManager() {
   const sql = yield* SqlClient.SqlClient
   const log = yield* EventLog
   const runtimes = yield* WorkspaceRuntimes
-  // Sessions that are running; the set lives as long as the layer
+  // The sessions that are running, by session id; the set belongs to this process and lives as long as the layer
   const locks = new Set<string>()
   const status = makeStatus(runtimes)
   const destroy = makeDestroy(log, runtimes, locks)

@@ -85,6 +85,7 @@ export interface WorkspaceSpec {
 }
 
 export interface WorkspaceHandle {
+  /** The session id the kernel passed as WorkspaceSpec.sessionId; the kernel expects it back unchanged. */
   readonly id: string
   readonly runtimeId: string
   readonly path: string
@@ -96,6 +97,8 @@ export interface WorkspaceStatus {
   readonly dirty: boolean
   readonly ahead: number
   readonly behind: number
+  /** True when a remote-tracking ref contains the head of the branch: it was pushed, or merged on the remote. */
+  readonly pushed: boolean
   readonly locked: boolean
   readonly branch: string
 }

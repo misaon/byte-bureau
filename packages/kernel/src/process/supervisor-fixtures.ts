@@ -49,6 +49,21 @@ export const HOLDER = `${startsGrandchild(false)}; setInterval(() => {}, 1000)`
 // The grandchild has left the group, so only a pipe ties it to the child
 export const ESCAPED_HOLDER = `${startsGrandchild(true)}; setInterval(() => {}, 1000)`
 
+// Writes a line every 20 ms; a write that fails, as one to a pipe nobody reads any more does, ends the process
+const WRITER = String.raw`setInterval(() => process.stdout.write('tick\n'), 20)`
+
+// The grandchild has left the group and writes to the pipe it shares with the child
+export const WRITING_HOLDER = `const grand = require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(WRITER)}], { stdio: "inherit", detached: true }); console.log("up " + grand.pid); setInterval(() => {}, 1000)`
+
+// Whether a process of that pid still exists
+export const isAlive = (pid: number): boolean => {
+  try {
+    return process.kill(pid, 0)
+  } catch {
+    return false
+  }
+}
+
 // Ignores SIGINT and reports how its grandchild ends, which only the grandchild's parent, which reaps it, can see
 export const REAPING_HOLDER = `process.on("SIGINT", () => {}); ${startsGrandchild(false)}; grand.on("exit", (code, signal) => console.log("grandchild " + signal)); setInterval(() => {}, 1000)`
 

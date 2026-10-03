@@ -19,10 +19,10 @@ it.layer(sessionLayer())('SessionManager worktree', (suite) => {
         const session = yield* startSession({ env: SLOW })
         yield* sessions.prompt(session.id, { text: 'take your time' })
         const handle = yield* Effect.fromNullishOr(session.workspace)
-        const refused = yield* refusalOf(workspaces.destroy(handle, { force: true }))
+        const refused = yield* refusalOf(workspaces.destroy(session.id, handle, { force: true }))
         assert.match(refused, /^locked: /u)
         yield* sessions.stop(session.id)
-        yield* workspaces.destroy(handle, { force: true })
+        yield* workspaces.destroy(session.id, handle, { force: true })
         assert.ok(!existsSync(handle.path))
       }),
   )

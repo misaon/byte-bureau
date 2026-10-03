@@ -20,7 +20,7 @@ it.layer(TestLayer)('WorkspaceManager list', (suite) => {
         const live = yield* provisionSession(project, { id: 'live', status: 'running' })
         const gone = yield* provisionSession(project, { id: 'gone', ...ENDED })
         yield* seedSession(project.id, { id: 'bare', status: 'created' })
-        yield* manager.destroy(gone, { force: true })
+        yield* manager.destroy('gone', gone, { force: true })
         const shared = { projectId: project.id, baseRef: 'main' }
         assert.deepStrictEqual(yield* manager.list(project.id), [
           {

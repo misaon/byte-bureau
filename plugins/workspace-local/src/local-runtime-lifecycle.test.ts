@@ -7,6 +7,11 @@ import type { LocalWorkspaceRuntime } from './local-runtime.js'
 import { createRuntime, readLines, scriptedSpawner, workspaceSpec } from './testing/fixtures.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
+// An empty commit with the message, on whatever is checked out in the directory
+function commitEmpty(directory: string, message: string): void {
+  git(directory, 'commit', '--allow-empty', '-q', '-m', message)
+}
+
 // A provisioned worktree that holds an uncommitted file
 async function dirtyWorktree(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
   const handle = await runtime.provision(workspaceSpec(createTempRepo()))
@@ -23,9 +28,23 @@ describe('status', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      pushed: false,
       locked: false,
       branch: 'bb/add-hello',
     })
+  })
+
+  it('reports a branch whose head a remote-tracking ref contains as pushed, and a local commit as not', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    commitEmpty(handle.path, 'work')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: false })
+    git(handle.path, 'push', '-q', 'origin', 'bb/add-hello')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: true })
+    commitEmpty(handle.path, 'more')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 2, pushed: false })
   })
 
   it('counts the commits ahead of and behind the base ref', async () => {
@@ -33,9 +52,9 @@ describe('status', () => {
     const repo = createTempRepo()
     const runtime = createRuntime()
     const handle = await runtime.provision(workspaceSpec(repo))
-    git(handle.path, 'commit', '--allow-empty', '-q', '-m', 'work')
-    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream one')
-    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream two')
+    commitEmpty(handle.path, 'work')
+    commitEmpty(repo, 'upstream one')
+    commitEmpty(repo, 'upstream two')
     await expect(runtime.status(handle)).resolves.toMatchObject({
       dirty: false,
       ahead: 1,

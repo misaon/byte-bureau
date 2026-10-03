@@ -7,6 +7,7 @@ import {
   failingSpawner,
   readJson,
   recordingLogger,
+  rejectingSpawner,
   workspaceSpec,
 } from './testing/fixtures.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
@@ -140,6 +141,19 @@ describe('a provision that fails halfway', () => {
     expect.hasAssertions()
     const { logger, entries } = recordingLogger()
     const runtime = createRuntime(failingSpawner('worktree remove', 'branch -D'))
+    const spec = workspaceSpec(repoWithClashingBase(), {
+      baseBranch: 'clash',
+      copyIgnored: ['scratch'],
+      logger,
+    })
+    await expect(runtime.provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+  })
+
+  it('reports the original error when the spawner rejects while the worktree is taken back', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const runtime = createRuntime(rejectingSpawner('worktree remove'))
     const spec = workspaceSpec(repoWithClashingBase(), {
       baseBranch: 'clash',
       copyIgnored: ['scratch'],

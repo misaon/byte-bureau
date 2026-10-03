@@ -100,6 +100,19 @@ export function failingSpawner(...phrases: readonly string[]): ProcessSpawner {
   }
 }
 
+// A spawner that rejects the git commands that start with one of the phrases, as a spawner that cannot start a process does
+export function rejectingSpawner(...phrases: readonly string[]): ProcessSpawner {
+  return {
+    async spawn(spec) {
+      if (phrases.includes(spec.args.slice(0, 2).join(' '))) {
+        throw new Error(`cannot start git ${spec.args.join(' ')}`)
+      }
+      const child = await nodeSpawner.spawn(spec)
+      return child
+    },
+  }
+}
+
 // A spawner whose git reports one version and fails every other command
 export function versionSpawner(version: string): ProcessSpawner {
   return scriptedSpawner((args) =>

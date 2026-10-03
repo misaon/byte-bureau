@@ -47,7 +47,7 @@ it.layer(TestLayer)('WorkspaceManager prune', (suite) => {
         retained: {
           fresh: 'younger than 7 days',
           live: 'session is running',
-          'old-ahead': 'commits not merged or pushed',
+          'old-ahead': 'commits not on origin',
         },
       })
     }),

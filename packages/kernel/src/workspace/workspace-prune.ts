@@ -2,6 +2,7 @@ import type { WorkspaceHandle, WorkspaceStatus } from '@bytebureau/plugin-api'
 import { Clock, Effect } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import type { StoreError, WorkspaceError } from '../errors.js'
+import { RETAINED } from './retain-reasons.js'
 import { loadWorkspaces, type Workspace } from './workspace-records.js'
 
 export interface PruneReport {
@@ -9,13 +10,19 @@ export interface PruneReport {
   readonly retained: readonly { readonly path: string; readonly reason: string }[]
 }
 
+// What destroy did: the worktree went, or it stayed for the reason given
+export type DestroyOutcome =
+  | { readonly removed: true }
+  | { readonly removed: false; readonly reason: string }
+
 // What pruning asks of the manager it belongs to
-interface Actions {
+export interface Actions {
   readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
   readonly destroy: (
+    sessionId: string,
     handle: WorkspaceHandle,
     options: { readonly force: boolean },
-  ) => Effect.Effect<void, WorkspaceError | StoreError>
+  ) => Effect.Effect<DestroyOutcome, WorkspaceError | StoreError>
 }
 
 type Verdict =
@@ -42,21 +49,23 @@ const staleReason = (workspace: Workspace, now: number): string | undefined => {
   return endedLongAgo(workspace, now) ? undefined : `younger than ${workspace.retainDays} days`
 }
 
-// What git says: work that is saved nowhere else
+// What git says: work that is saved nowhere else; a pushed branch, or one merged on the remote, is saved there
 const unsavedReason = (current: WorkspaceStatus): string | undefined => {
   if (current.dirty) {
-    return 'uncommitted changes'
+    return RETAINED.uncommitted
   }
-  return current.ahead > 0 ? 'commits not merged or pushed' : undefined
+  return current.ahead > 0 && !current.pushed ? RETAINED.notOnRemote : undefined
 }
 
-// A worktree the runtime refuses to remove stays, with the runtime's reason
+// Destroy checks again, so a worktree that changed since the status stays; one the runtime refuses to remove stays with the runtime's reason
 const removeOrKeep = (
   actions: Actions,
-  handle: WorkspaceHandle,
+  { sessionId, handle }: Workspace,
 ): Effect.Effect<Verdict, StoreError> =>
-  actions.destroy(handle, { force: false }).pipe(
-    Effect.as(removed(handle.path)),
+  actions.destroy(sessionId, handle, { force: false }).pipe(
+    Effect.map((outcome) =>
+      outcome.removed ? removed(handle.path) : retained(handle.path, outcome.reason),
+    ),
     Effect.catchTag('WorkspaceError', (failure) =>
       Effect.succeed(retained(handle.path, failure.reason)),
     ),
@@ -75,14 +84,14 @@ const pruneOne = (
     }
     const unsaved = yield* actions.status(handle).pipe(
       Effect.match({
-        onFailure: () => 'status unavailable',
+        onFailure: () => RETAINED.statusUnavailable,
         onSuccess: (current) => unsavedReason(current),
       }),
     )
     if (unsaved !== undefined) {
       return retained(handle.path, unsaved)
     }
-    return yield* removeOrKeep(actions, handle)
+    return yield* removeOrKeep(actions, workspace)
   })
 
 const reportOf = (verdicts: readonly Verdict[]): PruneReport => ({

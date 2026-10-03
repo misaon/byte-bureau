@@ -8,12 +8,14 @@ import {
   hasEnded,
   HOLDER,
   IDLE,
+  isAlive,
   isPending,
   nodeSpec,
   ownScope,
   REAPING_HOLDER,
   spawnHolder,
   untilUnlisted,
+  WRITING_HOLDER,
 } from './supervisor-fixtures.js'
 
 // A grandchild that holds the pipes keeps the child's close event away, which exit must not wait for
@@ -30,6 +32,23 @@ it.layer(SupervisorLive)('Supervisor drain bound', (suite) => {
       assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
       assert.ok(yield* hasEnded(lines))
     }),
+  )
+
+  suite.effect(
+    'destroys the pipes after the drain, so a grandchild that still writes gets EPIPE and ends',
+    () =>
+      Effect.gen(function* endsLingeringWriter() {
+        const supervisor = yield* Supervisor
+        const { child, grandchildPid } = yield* spawnHolder(supervisor, WRITING_HOLDER)
+        yield* child.kill('SIGKILL')
+        yield* untilUnlisted(supervisor)
+        yield* TestClock.adjust('2 seconds')
+        yield* child.exit
+        while (isAlive(grandchildPid)) {
+          yield* Effect.yieldNow
+        }
+        assert.isFalse(isAlive(grandchildPid))
+      }),
   )
 
   suite.effect('closes the scope within the same bound', () =>

@@ -83,7 +83,9 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
       worktreePath: worktreePathOf(projectPath, spec.sessionId),
       baseRef,
     }
-    const branch = await this.enqueue(projectPath, async () => {
+    // A main checkout and its linked worktrees share one queue: the branch names they pick from are the same
+    const repository = await this.git.commonDir(projectPath)
+    const branch = await this.enqueue(repository, async () => {
       const added = await this.addWorktree(place, spec.branch)
       return added
     })
@@ -102,7 +104,8 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
     const range = `${handle.baseRef}...HEAD`
     const counts = await this.git.must(handle.path, ['rev-list', '--left-right', '--count', range])
     const [behind = '0', ahead = '0'] = counts.split('\t')
-    return { ...state, ahead: Number(ahead), behind: Number(behind) }
+    const pushed = await this.git.onRemote(handle.path)
+    return { ...state, ahead: Number(ahead), behind: Number(behind), pushed }
   }
 
   public async destroy(
@@ -227,13 +230,19 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
     }
   }
 
+  // Taking back a failed provision is best effort: whatever goes wrong here, the caller gets the original error
   private async discard(place: Placement, branch: string, logger: Logger): Promise<void> {
-    const remove = ['worktree', 'remove', '--force', place.worktreePath]
-    const removed = await this.git.run(place.projectPath, remove)
-    const deleted = await this.git.run(place.projectPath, ['branch', '-D', branch])
-    if (removed.code !== 0 || deleted.code !== 0) {
-      const leftover = { worktree: place.worktreePath, branch }
-      logger.warn('could not take back a provision that failed', leftover)
+    const leftover = { worktree: place.worktreePath, branch }
+    try {
+      const remove = ['worktree', 'remove', '--force', place.worktreePath]
+      const removed = await this.git.run(place.projectPath, remove)
+      const deleted = await this.git.run(place.projectPath, ['branch', '-D', branch])
+      if (removed.code !== 0 || deleted.code !== 0) {
+        logger.warn('could not take back a provision that failed', leftover)
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      logger.warn('could not take back a provision that failed', { ...leftover, reason })
     }
   }
 }

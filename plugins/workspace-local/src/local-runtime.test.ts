@@ -129,6 +129,28 @@ describe('branch names', () => {
     expect(handle.branch).toBe('bb/add-hello-3')
     expect(git(handle.path, 'branch', '--show-current')).toBe('bb/add-hello-3')
   })
+})
+
+describe('branch names of sessions that start at once', () => {
+  it('gives sessions of a main checkout and of its linked worktree that start at once a name each', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const linked = path.join(tempDir('bb-linked-'), 'linked')
+    git(repo, 'worktree', 'add', '-q', linked, '-b', 'side')
+    const runtime = createRuntime()
+    const handles = await Promise.all([
+      runtime.provision(sameBranch('a', repo)),
+      runtime.provision(sameBranch('b', linked)),
+      runtime.provision(sameBranch('c', repo)),
+      runtime.provision(sameBranch('d', linked)),
+    ])
+    expect(handles.map((handle) => handle.branch).toSorted()).toStrictEqual([
+      'bb/x',
+      'bb/x-2',
+      'bb/x-3',
+      'bb/x-4',
+    ])
+  })
 
   it('gives sessions that start at once a name each, however they name the project', async () => {
     expect.hasAssertions()

@@ -53,6 +53,27 @@ export interface Git {
   readonly refExists: (cwd: string, ref: string) => Promise<boolean>
   readonly localBranches: (cwd: string, prefix: string) => Promise<readonly string[]>
   readonly worktreeLocked: (cwd: string, worktreePath: string) => Promise<boolean>
+  // The directory every worktree of the repository shares, absolute
+  readonly commonDir: (cwd: string) => Promise<string>
+  // Whether a remote-tracking ref contains the commit HEAD points at
+  readonly onRemote: (cwd: string) => Promise<boolean>
+}
+
+type Must = Git['must']
+
+// What the repository as a whole says, whichever of its worktrees is asked
+function repositoryQueries(must: Must): Pick<Git, 'commonDir' | 'onRemote'> {
+  return {
+    async commonDir(cwd) {
+      const directory = await must(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      return directory
+    },
+    async onRemote(cwd) {
+      const args = ['for-each-ref', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes']
+      const refs = await must(cwd, args)
+      return refs !== ''
+    },
+  }
 }
 
 export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
@@ -102,5 +123,6 @@ export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
     async worktreeLocked(cwd, worktreePath) {
       return isLocked(await must(cwd, ['worktree', 'list', '--porcelain']), worktreePath)
     },
+    ...repositoryQueries(must),
   }
 }
