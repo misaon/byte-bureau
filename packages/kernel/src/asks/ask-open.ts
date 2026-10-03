@@ -1,5 +1,5 @@
 import type { Ask, AskRecord } from '@bytebureau/protocol'
-import { Effect, Fiber, Latch, type Scope } from 'effect'
+import { Cause, Effect, Fiber, Latch, type Scope } from 'effect'
 import type { StoreError } from '../errors.js'
 import { kernelLogger } from '../logging/logging.js'
 import { buildAsk, timeoutMs, unrecommendedQuestions, type OpenAskInput } from './ask-build.js'
@@ -58,15 +58,29 @@ export const armTimer = (
   return Effect.map(Effect.forkIn(guarded, deps.scope), (timer) => Fiber.interrupt(timer))
 }
 
-// The timer is armed before the request is announced; when the announcement fails there is no pending ask left behind
-// The ask is cancelled and its timer stopped, best effort, and the caller gets the failure of the announcement
+// Taking back an ask that was never announced is best effort; a failure of it is told, the caller still gets the first one
+const withdraw = (deps: OpenDeps, ask: Ask, disarm: Effect.Effect<void>): Effect.Effect<void> =>
+  Effect.andThen(disarm, withdrawAsk(deps, ask.id)).pipe(
+    Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        logger.error('an ask that was not announced could not be withdrawn', {
+          askId: ask.id,
+          sessionId: ask.sessionId,
+          cause: Cause.pretty(cause),
+        })
+      }),
+    ),
+  )
+
+// The timer is armed before the request is announced; when the announcement fails or dies there is no pending ask left behind
+// The ask is cancelled and its timer stopped, and the caller gets the failure, or the defect, of the announcement
 export const announce = (
   deps: OpenDeps,
   ask: Ask,
   disarm: Effect.Effect<void>,
 ): Effect.Effect<void, StoreError> =>
-  announceRequest(deps.log, ask).pipe(
-    Effect.tapError(() => Effect.ignore(Effect.andThen(disarm, withdrawAsk(deps, ask.id)))),
+  Effect.suspend(() => announceRequest(deps.log, ask)).pipe(
+    Effect.onError(() => withdraw(deps, ask, disarm)),
   )
 
 // The waiter is parked before anything is announced, so an answer that comes at once has someone to reach

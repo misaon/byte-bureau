@@ -1,5 +1,5 @@
 import { assert, it } from '@effect/vitest'
-import { Effect, Fiber, Latch, Layer } from 'effect'
+import { Effect, Exit, Fiber, Latch, Layer } from 'effect'
 import { TestClock } from 'effect/testing'
 import { StoreTest } from '../store/store-test.js'
 import { request } from './ask-fixtures.js'
@@ -7,6 +7,7 @@ import { AskService, AskServiceLive, type AskServiceShape } from './ask-service.
 import {
   askIdsOf,
   codeOf,
+  dyingLog,
   eventsOf,
   flush,
   holdingLog,
@@ -46,6 +47,32 @@ it.layer(DeafLayer)('AskService with a log that cannot announce a request', (sui
       const error = yield* Effect.flip(asks.await(askId))
       assert.strictEqual(codeOf(error), 'not_pending')
       assert.deepStrictEqual(yield* eventsOf('open-fail-2'), [])
+    }),
+  )
+})
+
+// An event log that dies while it announces a request
+const BrokenLayer = AskServiceLive.pipe(
+  Layer.provideMerge(dyingLog(['ask.requested'])),
+  Layer.provideMerge(StoreTest),
+)
+
+it.layer(BrokenLayer)('AskService with a log that dies announcing a request', (suite) => {
+  suite.effect('passes the defect on and leaves no pending ask, parked waiter or armed timer', () =>
+    Effect.gen(function* cleansUpAfterDefect() {
+      yield* seedSession('open-defect')
+      const asks = yield* AskService
+      const opened = yield* Effect.exit(asks.open(request('open-defect', autonomous)))
+      const [askId = ''] = yield* askIdsOf('open-defect')
+      const waited = yield* Effect.flip(asks.await(askId))
+      yield* TestClock.adjust('30 minutes')
+      yield* flush
+      assert.isTrue(Exit.hasDies(opened))
+      assert.deepStrictEqual(
+        [codeOf(waited), (yield* rowOf(askId)).status],
+        ['not_pending', 'cancelled'],
+      )
+      assert.deepStrictEqual(yield* eventsOf('open-defect'), [])
     }),
   )
 })

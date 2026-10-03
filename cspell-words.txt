@@ -100,3 +100,4 @@ doporučeno
 giget
 seqno
 NOCASE
+reflog

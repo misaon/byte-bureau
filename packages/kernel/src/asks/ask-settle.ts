@@ -1,4 +1,4 @@
-import type { Ask, AskRecord } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, AskRecord } from '@bytebureau/protocol'
 import { Effect, Exit } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { AskError, type StoreError } from '../errors.js'
@@ -59,31 +59,41 @@ export const expire = (deps: AskDeps, ask: Ask): Effect.Effect<void, StoreError>
   )
 
 // An ask that cannot be answered is told apart: one that never existed, or one that is not pending any more
-const refusal = (
-  sql: SqlClient.SqlClient,
-  askId: string,
-): Effect.Effect<never, AskError | StoreError> =>
-  loadAsk(sql, askId).pipe(
-    Effect.flatMap((record) =>
-      Effect.fail(
-        record === undefined
-          ? new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
-          : new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` }),
-      ),
-    ),
-  )
+const refusalOf = (askId: string, record: AskRecord | undefined): AskError =>
+  record === undefined
+    ? new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
+    : new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` })
 
+// An answer picks options the ask offers, or words of its own where a question allows them
+const invalidity = (ask: Ask, answer: AskAnswer): string | undefined => {
+  if (answer.selected === 'other') {
+    const open = ask.questions.some((question) => question.allowOther)
+    return open ? undefined : `ask ${ask.id} takes no answer of its own`
+  }
+  const offered = new Set(
+    ask.questions.flatMap((question) => question.options.map((option) => option.id)),
+  )
+  const unknown = answer.selected.filter((id) => !offered.has(id))
+  return unknown.length === 0 ? undefined : `ask ${ask.id} has no option ${unknown.join(', ')}`
+}
+
+// The ask is read first, so a refusal or an answer that does not fit changes nothing; the claim still decides a race
 export const answerAsk = (
   deps: AskDeps,
   askId: string,
   settlement: Settlement,
 ): Effect.Effect<AskRecord, AskError | StoreError> =>
   Effect.gen(function* answersAsk() {
-    const record = yield* settle(deps, askId, settlement)
-    if (record === undefined) {
-      return yield* refusal(deps.sql, askId)
+    const current = yield* loadAsk(deps.sql, askId)
+    if (current === undefined || current.status !== 'pending') {
+      return yield* refusalOf(askId, current)
     }
-    return record
+    const invalid = invalidity(current, settlement.answer)
+    if (invalid !== undefined) {
+      return yield* new AskError({ code: 'invalid_answer', reason: invalid })
+    }
+    const record = yield* settle(deps, askId, settlement)
+    return record ?? (yield* refusalOf(askId, yield* loadAsk(deps.sql, askId)))
   })
 
 // Cancelling an ask that is not pending does nothing; a waiter fails with the cancellation, even when it cannot be announced

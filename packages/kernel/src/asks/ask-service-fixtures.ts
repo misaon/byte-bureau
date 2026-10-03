@@ -31,6 +31,22 @@ export const refusingLog = (
     }),
   ).pipe(Layer.provide(EventLogLive))
 
+// The real event log, except that recording the events of these types dies, as a defect of the log would
+export const dyingLog = (
+  types: readonly string[],
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesDyingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          types.includes(event.type) ? Effect.die(new Error('the log broke')) : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
+
 export interface OwnService {
   readonly asks: AskServiceShape
   readonly context: Context.Context<SqlClient.SqlClient>

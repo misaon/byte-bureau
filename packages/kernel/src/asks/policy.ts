@@ -1,5 +1,6 @@
 import path from 'node:path'
 import type { PermissionMode } from '@bytebureau/protocol'
+import { isReadOnly, isUnder, placesOf, removesOutside, type Place } from './policy-command.js'
 
 const { posix } = path
 
@@ -17,10 +18,11 @@ export interface PermissionRecommendation {
 interface Facts {
   readonly name: string
   readonly command: string
+  // What the command names, resolved against the workspace
+  readonly places: readonly Place[]
   // The file as the tool names it, and the file it lands on once `.` and `..` are resolved
   readonly filePath: string
   readonly target: string
-  readonly workspacePath: string
   // The workspace when it is an absolute path, else empty: nothing is inside a workspace that is not one
   readonly root: string
   readonly mode: PermissionMode
@@ -33,15 +35,9 @@ interface Rule {
 }
 
 const FORCE_PUSH = /\bgit push\b.*(?:--force|-f\b|\+)/u
-const RECURSIVE_REMOVE = /\brm\s+-[a-z]*r[a-z]*f?\b/u
-// A listed command named in full: its word ends at a space or at the end of the command; find is not listed, its -delete and -exec remove and run
-const READ_ONLY =
-  /^(?:git (?:status|log|diff|show|branch|rev-parse)|ls|cat|head|tail|rg|grep|wc|pwd|echo)(?:[ \t]|$)/u
-// What makes a command more than one simple command, or more than a read: a pipe, a list, a background job, a redirection, a substitution (parentheses cover $(), <() and zsh =()) or a line break
-const SHELL_SYNTAX = /[|;&<>`(\n\r]/u
-// A .env file or one of its .env.* variants, a certificate, a private key, a credentials file, anything under .ssh
+// A .env file or one of its .env.* variants, a certificate, a private key, a credentials file, anything under .ssh, in any case
 const SECRETS =
-  /(?:^|\/)\.env(?:\.|$)|\.pem$|(?:^|\/)(?:id_(?:rsa|ed25519)|\.npmrc|\.netrc)$|(?:^|\/)\.ssh\//u
+  /(?:^|\/)\.env(?:\.|$)|\.pem$|(?:^|\/)(?:id_(?:rsa|ed25519)|\.npmrc|\.netrc)$|(?:^|\/)\.ssh\/|(?:^|\/)\.aws\/credentials$/iu
 const NETWORK_TOOLS = new Set(['WebFetch', 'WebSearch', 'curl', 'wget'])
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -52,20 +48,15 @@ const field = (input: unknown, key: string): string => {
   return typeof value === 'string' ? value : ''
 }
 
-// Read-only is a property of the whole command, not of its first word
-const isReadOnly = (command: string): boolean =>
-  READ_ONLY.test(command) && !SHELL_SYNTAX.test(command)
-
-// Strictly under the root: neither the root itself nor a path that climbs out of it
-const isUnder = (root: string, target: string): boolean => {
-  const relation = posix.relative(root, target)
-  return relation !== '' && relation !== '..' && !relation.startsWith('../')
-}
-
 // The check is lexical: a symlink inside the workspace that points out of it cannot be told from a plain path, only the file system knows
 // With no absolute workspace nothing is inside it, whatever the path looks like
 const inWorkspace = ({ root, target }: Facts): boolean =>
   root !== '' && target !== '' && isUnder(root, target)
+
+const namesSecret = ({ filePath, target, places }: Facts): boolean =>
+  SECRETS.test(filePath) ||
+  SECRETS.test(target) ||
+  places.some((place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''))
 
 // Rules are evaluated top-down and the first match decides, so the deny rules come first
 const RULES: readonly Rule[] = [
@@ -73,21 +64,19 @@ const RULES: readonly Rule[] = [
   {
     id: 'rm-outside-workspace',
     verdict: 'deny',
-    // Without a workspace every recursive removal is outside it
-    applies: ({ command, workspacePath }) =>
-      RECURSIVE_REMOVE.test(command) && (workspacePath === '' || !command.includes(workspacePath)),
+    applies: ({ command, root }) => removesOutside(command, root),
   },
-  {
-    id: 'secrets-path',
-    verdict: 'deny',
-    applies: ({ filePath, target }) => SECRETS.test(filePath) || SECRETS.test(target),
-  },
+  { id: 'secrets-path', verdict: 'deny', applies: namesSecret },
   {
     id: 'network-in-supervised',
     verdict: 'deny',
     applies: ({ mode, name }) => mode === 'supervised' && NETWORK_TOOLS.has(name),
   },
-  { id: 'read-only-command', verdict: 'allow', applies: ({ command }) => isReadOnly(command) },
+  {
+    id: 'read-only-command',
+    verdict: 'allow',
+    applies: ({ command, root }) => command !== '' && isReadOnly(command, root),
+  },
   {
     id: 'in-workspace-read',
     verdict: 'allow',
@@ -99,24 +88,33 @@ const RULES: readonly Rule[] = [
 export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
 
 // A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
-const resolveTarget = (filePath: string, workspacePath: string): string => {
+const resolveTarget = (filePath: string, root: string): string => {
   if (filePath === '') {
     return ''
   }
-  return posix.isAbsolute(workspacePath)
-    ? posix.resolve(workspacePath, filePath)
-    : posix.normalize(filePath)
+  return root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
+}
+
+// A glob searches its pattern below its path, so the two together say where it reaches
+const filePathOf = ({ name, input }: ToolCall): string => {
+  const pattern = field(input, 'pattern')
+  if (name === 'Glob' && pattern !== '') {
+    return posix.isAbsolute(pattern) ? pattern : posix.join(field(input, 'path') || '.', pattern)
+  }
+  return field(input, 'file_path') || field(input, 'path')
 }
 
 const factsOf = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): Facts => {
-  const filePath = field(toolCall.input, 'file_path') || field(toolCall.input, 'path')
+  const root = posix.isAbsolute(workspacePath) ? workspacePath : ''
+  const command = field(toolCall.input, 'command')
+  const filePath = filePathOf(toolCall)
   return {
     name: toolCall.name,
-    command: field(toolCall.input, 'command'),
+    command,
+    places: placesOf(command, root),
     filePath,
-    target: resolveTarget(filePath, workspacePath),
-    workspacePath,
-    root: posix.isAbsolute(workspacePath) ? workspacePath : '',
+    target: resolveTarget(filePath, root),
+    root,
     mode,
   }
 }
