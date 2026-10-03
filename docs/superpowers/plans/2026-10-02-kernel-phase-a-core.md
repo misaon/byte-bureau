@@ -213,11 +213,36 @@ export default defineProject({ test: { name: 'protocol', include: ['src/**/*.tes
 import { describe, expect, it } from 'vitest'
 import { decodeProjectConfig, decodeUserConfig, defaultProjectConfig } from './config.js'
 
+const withTimeout = (askTimeout: string): unknown => ({
+  ...defaultProjectConfig,
+  employees: { developer: { ...defaultProjectConfig.employees['developer'], askTimeout } },
+})
+
 describe(decodeProjectConfig, () => {
   it('accepts the documented sample and fills nothing silently', () => {
     const config = decodeProjectConfig(defaultProjectConfig)
     expect(config.version).toBe(1)
     expect(config.employees['developer']).toMatchObject({ permissionMode: 'supervised' })
+  })
+
+  it('takes an ask timeout of a whole number and a unit only', () => {
+    expect.hasAssertions()
+    for (const accepted of ['500ms', '30s', '30m', '1h', '2 h']) {
+      expect(() => decodeProjectConfig(withTimeout(accepted))).not.toThrow()
+    }
+    for (const refused of ['soon', '30', '1.5h', '30min', '-1m']) {
+      expect(() => decodeProjectConfig(withTimeout(refused))).toThrow(/askTimeout/u)
+    }
+  })
+
+  it('reads the passEnv list of a provider and leaves its other keys to the provider', () => {
+    const providers = {
+      claude: { executable: 'claude', passEnv: ['GH_TOKEN'], extra: { depth: 1 } },
+    }
+    const config = decodeProjectConfig({ ...defaultProjectConfig, providers })
+    expect(config.providers).toStrictEqual(providers)
+    const broken = { ...defaultProjectConfig, providers: { claude: { passEnv: 'GH_TOKEN' } } }
+    expect(() => decodeProjectConfig(broken)).toThrow(/passEnv/u)
   })
 
   it('reports every problem with its path and rejects unknown keys', () => {
@@ -263,6 +288,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { addDefinitions } from './definitions.js'
 import { KERNEL_EVENT_TYPES } from './events.js'
 import { configJsonSchema, eventsJsonSchema } from './json-schema.js'
 
@@ -283,10 +309,12 @@ describe('generated JSON Schema files', () => {
   })
 
   it('events.json is up to date and lists every event type', () => {
+    expect.hasAssertions()
     const generated = eventsJsonSchema()
     expect(readSchema('events.json')).toStrictEqual(generated)
-    expect(generated['$defs']).toHaveProperty(['session.created'])
-    expect(generated['$defs']).toHaveProperty(['message.assistant.delta'])
+    for (const type of KERNEL_EVENT_TYPES) {
+      expect(generated['$defs']).toHaveProperty([type])
+    }
   })
 
   it('events.json defines every payload as a closed object', () => {
@@ -300,9 +328,27 @@ describe('generated JSON Schema files', () => {
     }
   })
 
+  it('publishes the ask timeout as a duration and the passEnv list of a provider beside its own keys', () => {
+    const text = JSON.stringify(configJsonSchema())
+    expect(text).toContain(String.raw`"pattern":"^\\d+\\s*(?:ms|s|m|h)$"`)
+    expect(text).toContain('"passEnv":{"type":"array","items":{"type":"string"}}')
+  })
+
   it('publishes numbers as number or integer, without Infinity or NaN alternatives', () => {
     expect(JSON.stringify(configJsonSchema())).not.toMatch(/Infinity|NaN/u)
     expect(JSON.stringify(eventsJsonSchema())).not.toMatch(/Infinity|NaN/u)
+  })
+})
+
+describe(addDefinitions, () => {
+  it('adds a definition twice when it is the same, and refuses a different one under a taken name', () => {
+    const defs: Record<string, unknown> = {}
+    addDefinitions(defs, { Usage: { type: 'object' } })
+    addDefinitions(defs, { Usage: { type: 'object' } })
+    expect(defs).toStrictEqual({ Usage: { type: 'object' } })
+    expect(() => {
+      addDefinitions(defs, { Usage: { type: 'string' } })
+    }).toThrow('two different JSON Schema definitions are named Usage')
   })
 })
 ```
@@ -546,6 +592,9 @@ import { Schema } from 'effect'
 import { RateLimit, ToolKind, Usage } from './agent-event.js'
 import { Ask, AskAnswer } from './ask.js'
 import { AnsweredVia, Id, SessionStatus, Timestamp, TurnStatus } from './common.js'
+import { EventPayloadError } from './event-payload-error.js'
+
+export { EventPayloadError } from './event-payload-error.js'
 
 export const EventEnvelope = Schema.Struct({
   seq: Schema.Int,
@@ -663,9 +712,12 @@ export const EPHEMERAL_EVENT_TYPES = [
   'heartbeat',
 ] as const
 
+const isKernelEventType = (type: string): type is KernelEventType =>
+  Object.hasOwn(KernelEventSchemas, type)
+
 export const KERNEL_EVENT_TYPES: readonly KernelEventType[] = Object.keys(
   KernelEventSchemas,
-).filter((key): key is KernelEventType => Object.hasOwn(KernelEventSchemas, key))
+).filter((key) => isKernelEventType(key))
 
 export type KernelEventType = keyof typeof KernelEventSchemas
 export type KernelEventPayload<EventType extends KernelEventType> =
@@ -684,6 +736,35 @@ export interface KernelEvent<EventType extends KernelEventType = KernelEventType
 export function isEphemeral(type: string): boolean {
   return (EPHEMERAL_EVENT_TYPES as readonly string[]).includes(type)
 }
+
+// The same contract as the published JSON Schema: every payload is a closed object
+const STRICT = { errors: 'all', onExcessProperty: 'error' } as const
+
+/**
+ * Decodes the payload of an event against the schema of its type.
+ * A type narrowed to a literal gives the typed payload; any other string is checked at run time.
+ * Throws an EventPayloadError when the type is not in the catalogue or the payload does not fit its schema.
+ * A field the schema does not know is refused, as the published JSON Schema refuses it; a payload grows with a new schema version.
+ */
+export function decodeEventPayload<EventType extends KernelEventType>(
+  type: EventType,
+  payload: unknown,
+): KernelEventPayload<EventType>
+/** Decodes the payload of an event whose type is only known as a string. */
+export function decodeEventPayload(type: string, payload: unknown): unknown
+export function decodeEventPayload(type: string, payload: unknown): unknown {
+  if (!isKernelEventType(type)) {
+    throw new EventPayloadError(type, `unknown kernel event type: ${type}`)
+  }
+  try {
+    return Schema.decodeUnknownSync(KernelEventSchemas[type])(payload, STRICT)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new EventPayloadError(type, `the payload of ${type} does not fit its schema: ${reason}`, {
+      cause: error,
+    })
+  }
+}
 ```
 
 - [ ] **Step 5: Config schemas and JSON Schema generation**
@@ -696,6 +777,9 @@ import { Appearance, ToolPolicy } from './employee.js'
 
 export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
 
+// A whole number and a unit, as the kernel parses it: 500ms, 30s, 30m, 1h
+const DurationText = Schema.String.check(Schema.isPattern(/^\d+\s*(?:ms|s|m|h)$/u))
+
 export const EmployeeConfig = Schema.Struct({
   name: Schema.String,
   provider: Schema.String,
@@ -707,7 +791,7 @@ export const EmployeeConfig = Schema.Struct({
   tools: Schema.optionalKey(ToolPolicy),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
   maxTurns: Schema.optionalKey(Schema.Int),
-  askTimeout: Schema.optionalKey(Schema.String),
+  askTimeout: Schema.optionalKey(DurationText),
   appearance: Schema.optionalKey(Appearance),
 })
 
@@ -723,7 +807,13 @@ const WorkspaceSection = Schema.Struct({
   copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
   retainDays: Schema.optionalKey(Schema.Int),
 })
-const ProvidersSection = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))
+// The kernel reads passEnv: the names of further variables of its environment an agent of the provider is given
+// Every other key belongs to the provider plugin
+const PassEnv = Schema.optionalKey(Schema.Array(Schema.String))
+const ProviderSection = Schema.StructWithRest(Schema.Struct({ passEnv: PassEnv }), [
+  Schema.Record(Schema.String, Schema.Unknown),
+])
+const ProvidersSection = Schema.Record(Schema.String, ProviderSection)
 const ProjectDefaults = Schema.Struct({
   employee: Schema.optionalKey(Schema.String),
   branch: Schema.optionalKey(Schema.String),
@@ -818,6 +908,7 @@ export const defaultProjectConfig: ProjectConfig = {
 ```ts
 import { JsonSchema, Schema } from 'effect'
 import { ProjectConfig } from './config.js'
+import { addDefinitions } from './definitions.js'
 import { EventEnvelope, KernelEventSchemas } from './events.js'
 
 const CONFIG_ID = 'https://bytebureau.dev/schema/v1/config.json'
@@ -834,14 +925,18 @@ export function configJsonSchema(): Record<string, unknown> {
   }
 }
 
-/** JSON Schema (draft 2020-12) of the event envelope and of each kernel event payload, keyed by wire type */
+/**
+ * JSON Schema (draft 2020-12) of the event envelope and of each kernel event payload, keyed by wire type.
+ * Every payload is a closed object, and decodeEventPayload decodes with the same strictness.
+ */
 export function eventsJsonSchema(): Record<string, unknown> {
   const envelope = Schema.toJsonSchemaDocument(EventEnvelope, { onExcessProperty: 'error' })
-  const defs: Record<string, unknown> = { EventEnvelope: envelope.schema, ...envelope.definitions }
+  const defs: Record<string, unknown> = {}
+  addDefinitions(defs, { EventEnvelope: envelope.schema, ...envelope.definitions })
   for (const [type, schema] of Object.entries(KernelEventSchemas)) {
     const document = Schema.toJsonSchemaDocument(schema, { onExcessProperty: 'error' })
-    defs[type] = document.schema
-    Object.assign(defs, document.definitions)
+    addDefinitions(defs, { [type]: document.schema })
+    addDefinitions(defs, document.definitions)
   }
   return {
     $schema: JsonSchema.META_SCHEMA_URI_DRAFT_2020_12,
@@ -1098,6 +1193,7 @@ export interface WorkspaceSpec {
 }
 
 export interface WorkspaceHandle {
+  /** The session id the kernel passed as WorkspaceSpec.sessionId; the kernel expects it back unchanged. */
   readonly id: string
   readonly runtimeId: string
   readonly path: string
@@ -1109,6 +1205,8 @@ export interface WorkspaceStatus {
   readonly dirty: boolean
   readonly ahead: number
   readonly behind: number
+  /** True when a remote-tracking ref contains the head of the branch: it was pushed, or merged on the remote. */
+  readonly pushed: boolean
   readonly locked: boolean
   readonly branch: string
 }
@@ -1183,7 +1281,7 @@ export interface ProjectInfo {
 
 export interface PluginEvents {
   publish(event: KernelEvent): Promise<void>
-  // Events arrive as the log stores them, with seq, id and timestamp
+  /** Events published from the moment the subscription opens, as the log stores them, with seq, id and timestamp; history is not replayed. */
   subscribe(filter: {
     readonly types?: readonly string[]
     readonly sessionId?: string
@@ -1242,10 +1340,15 @@ export interface PromptSendInput {
 }
 
 export interface Hooks {
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'session.beforeCreate': Hook<SessionCreateInput, SessionCreateInput>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'agent.beforeSpawn': Hook<AgentSpawnInput, AgentSpawnResult>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'ask.beforeOpen': Hook<AskOpenInput, AskOpenResult>
+  /** Invoked for every prompt before the agent receives it; what it returns is what the agent gets, while the turn records what the caller said. */
   readonly 'prompt.beforeSend': Hook<PromptSendInput, PromptSendInput>
+  /** Reserved: the kernel does not invoke it before Phase C. */
   readonly 'event.beforePublish': Hook<KernelEvent, void>
 }
 
@@ -1435,7 +1538,7 @@ If `execArgv` is rejected by the installed Vitest 5 config types, use `poolOptio
 import { assert, it } from '@effect/vitest'
 import { Effect, Result } from 'effect'
 import { SqlClient } from 'effect/sql'
-import { MIGRATIONS, runMigrations } from './migrate.js'
+import { applyMigration, MIGRATIONS, runMigrations } from './migrate.js'
 import { StoreTest } from './store-test.js'
 
 const SP1_TABLES = [
@@ -1450,6 +1553,10 @@ const SP1_TABLES = [
   'usage_snapshots',
   'plugin_kv',
 ]
+
+const PROJECT = `INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES ('p', 'p', '/p', 'main', '{}', 't', 't')`
+const session = (id: string, project: string): string =>
+  `INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES ('${id}', '${project}', 't', '{}', 'fake', NULL, '{}', 'created', '2026-10-02T00:00:00.000Z')`
 
 it.layer(StoreTest)('Store', (suite) => {
   suite.effect('applies every migration once and records them', () =>
@@ -1471,8 +1578,8 @@ it.layer(StoreTest)('Store', (suite) => {
     }),
   )
 
-  suite.effect('creates the SP1 tables with foreign keys enforced', () =>
-    Effect.gen(function* enforcesForeignKeys() {
+  suite.effect('creates the SP1 tables with foreign keys on and synchronous NORMAL', () =>
+    Effect.gen(function* createsTables() {
       const sql = yield* SqlClient.SqlClient
       const tables = yield* sql<{
         readonly name: string
@@ -1482,14 +1589,53 @@ it.layer(StoreTest)('Store', (suite) => {
         assert.include(names, expected)
       }
       const fk = yield* sql<{ readonly foreign_keys: number }>`PRAGMA foreign_keys`
+      const synchronous = yield* sql<{ readonly synchronous: number }>`PRAGMA synchronous`
       assert.deepStrictEqual(
-        fk.map((row) => row.foreign_keys),
-        [1],
+        [...fk.map((row) => row.foreign_keys), ...synchronous.map((row) => row.synchronous)],
+        [1, 1],
       )
-      const orphan = yield* Effect.result(
-        sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES ('s', 'missing', 't', '{}', 'fake', NULL, '{}', 'created', '2026-10-02T00:00:00.000Z')`,
-      )
-      assert.isTrue(Result.isFailure(orphan))
+    }),
+  )
+
+  suite.effect('refuses a row whose foreign key points nowhere and takes one that does not', () =>
+    Effect.gen(function* enforcesForeignKeys() {
+      const sql = yield* SqlClient.SqlClient
+      const orphan = yield* Effect.result(sql.unsafe(session('orphan', 'missing')))
+      yield* sql.unsafe(PROJECT)
+      const owned = yield* Effect.result(sql.unsafe(session('owned', 'p')))
+      assert.deepStrictEqual([Result.isFailure(orphan), Result.isSuccess(owned)], [true, true])
+    }),
+  )
+})
+
+it.layer(StoreTest)('Store migration runner', (suite) => {
+  suite.effect(
+    'skips a migration that was recorded meanwhile, checking inside its transaction',
+    () =>
+      Effect.gen(function* skipsRecorded() {
+        const sql = yield* SqlClient.SqlClient
+        const initial = yield* Effect.fromNullishOr(MIGRATIONS[0])
+        yield* applyMigration(sql, initial)
+        const recorded = yield* sql<{
+          readonly total: number
+        }>`SELECT count(*) AS total FROM bb_migrations`
+        assert.deepStrictEqual(
+          recorded.map((row) => row.total),
+          [MIGRATIONS.length],
+        )
+      }),
+  )
+
+  suite.effect('names the migration that failed, and records nothing of it', () =>
+    Effect.gen(function* namesFailedMigration() {
+      const sql = yield* SqlClient.SqlClient
+      const broken = { id: '9999_broken', sql: 'CREATE TABLE broken (id TEXT);\nCREATE TABLE (' }
+      const failure = yield* Effect.flip(applyMigration(sql, broken))
+      assert.match(failure.message, /^migration 9999_broken failed: /u)
+      const leftovers = yield* sql<{
+        readonly name: string
+      }>`SELECT name FROM sqlite_master WHERE name = 'broken' UNION ALL SELECT id FROM bb_migrations WHERE id = '9999_broken'`
+      assert.deepStrictEqual(leftovers, [])
     }),
   )
 })
@@ -1506,6 +1652,7 @@ export interface Migration {
 }
 
 // Spec §5.2; one statement per line group so SQLite executes them in order
+// The splitter cuts at every `;`, so no statement may hold one inside a literal or a trigger body
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: '0001_initial',
@@ -1537,22 +1684,26 @@ CREATE TABLE sessions (
   profile_id TEXT REFERENCES profiles(id),
   workspace_json TEXT NOT NULL,
   external_ref TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('created', 'provisioning', 'ready', 'running', 'waiting_for_human', 'paused_usage_limit', 'completed', 'stopped', 'errored')),
   created_at TEXT NOT NULL,
   started_at TEXT,
   ended_at TEXT,
   parent_session_id TEXT REFERENCES sessions(id)
 );
+CREATE INDEX sessions_project ON sessions(project_id);
+CREATE INDEX sessions_profile ON sessions(profile_id);
+CREATE INDEX sessions_parent ON sessions(parent_session_id);
 CREATE TABLE turns (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   idx INTEGER NOT NULL,
   prompt_json TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'errored')),
   stop_reason TEXT,
   usage_json TEXT,
   started_at TEXT NOT NULL,
-  ended_at TEXT
+  ended_at TEXT,
+  UNIQUE (session_id, idx)
 );
 CREATE TABLE messages (
   id TEXT PRIMARY KEY,
@@ -1562,12 +1713,14 @@ CREATE TABLE messages (
   content_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE INDEX messages_session ON messages(session_id);
+CREATE INDEX messages_turn ON messages(turn_id);
 CREATE TABLE tool_calls (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   turn_id TEXT REFERENCES turns(id),
   tool_name TEXT NOT NULL,
-  kind TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('builtin', 'mcp', 'bash', 'subagent', 'skill')),
   input_json TEXT NOT NULL,
   output_summary TEXT,
   input_bytes INTEGER NOT NULL DEFAULT 0,
@@ -1577,20 +1730,24 @@ CREATE TABLE tool_calls (
   ended_at TEXT,
   error_type TEXT
 );
+CREATE INDEX tool_calls_session ON tool_calls(session_id);
+CREATE INDEX tool_calls_turn ON tool_calls(turn_id);
 CREATE TABLE asks (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   turn_id TEXT REFERENCES turns(id),
   kind TEXT NOT NULL CHECK (kind IN ('question', 'permission')),
   payload_json TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'answered', 'expired', 'cancelled')),
   answer_json TEXT,
-  recommendation_source TEXT NOT NULL,
+  recommendation_source TEXT NOT NULL CHECK (recommendation_source IN ('agent', 'policy', 'none')),
   created_at TEXT NOT NULL,
   deadline_at TEXT,
   answered_at TEXT,
   answered_via TEXT
 );
+CREATE INDEX asks_session ON asks(session_id);
+CREATE INDEX asks_turn ON asks(turn_id);
 CREATE TABLE events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT NOT NULL,
@@ -1630,7 +1787,7 @@ Note the `turns.index` column from the spec is named `idx` (`INDEX` is reserved 
 `packages/kernel/src/store/migrate.ts`:
 ```ts
 import { Effect } from 'effect'
-import { SqlClient, type SqlError } from 'effect/sql'
+import { SqlClient, SqlError } from 'effect/sql'
 import { MIGRATIONS, type Migration } from './migrations.js'
 
 export { MIGRATIONS } from './migrations.js'
@@ -1642,18 +1799,45 @@ function statements(migration: Migration): readonly string[] {
     .filter((statement) => statement !== '')
 }
 
-const applyOne = (
+const isApplied = (
+  sql: SqlClient.SqlClient,
+  migration: Migration,
+): Effect.Effect<boolean, SqlError.SqlError> =>
+  Effect.map(
+    sql<{ readonly id: string }>`SELECT id FROM bb_migrations WHERE id = ${migration.id}`,
+    (rows) => rows.length > 0,
+  )
+
+// A failed migration says which one it was; the store cannot open without it
+const failedMigration =
+  (migration: Migration) =>
+  (error: SqlError.SqlError): SqlError.SqlError =>
+    new SqlError.SqlError({
+      reason: new SqlError.UnknownError({
+        cause: error,
+        message: `migration ${migration.id} failed: ${error.message}`,
+        operation: `migration ${migration.id}`,
+      }),
+    })
+
+// The transaction begins IMMEDIATE, so the second of two kernels that start together sees the first one's record and skips
+export const applyMigration = (
   sql: SqlClient.SqlClient,
   migration: Migration,
 ): Effect.Effect<void, SqlError.SqlError> =>
-  sql.withTransaction(
-    Effect.gen(function* applyMigration() {
-      for (const statement of statements(migration)) {
-        yield* sql.unsafe(statement)
-      }
-      yield* sql`INSERT INTO bb_migrations (id, applied_at) VALUES (${migration.id}, ${new Date().toISOString()})`
-    }),
-  )
+  sql
+    .withTransaction(
+      Effect.gen(function* applyOnce() {
+        if (yield* isApplied(sql, migration)) {
+          return
+        }
+        for (const statement of statements(migration)) {
+          yield* sql.unsafe(statement)
+        }
+        yield* sql`INSERT INTO bb_migrations (id, applied_at) VALUES (${migration.id}, ${new Date().toISOString()})`
+      }),
+    )
+    .pipe(Effect.mapError(failedMigration(migration)))
 
 // Idempotent: every migration runs once, inside its own transaction, in array order
 export const runMigrations: Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> =
@@ -1664,7 +1848,7 @@ export const runMigrations: Effect.Effect<void, SqlError.SqlError, SqlClient.Sql
     const done = new Set(applied.map((row) => row.id))
     for (const migration of MIGRATIONS) {
       if (!done.has(migration.id)) {
-        yield* applyOne(sql, migration)
+        yield* applyMigration(sql, migration)
       }
     }
   })
@@ -1780,11 +1964,15 @@ const record = (properties: Record<string, unknown>, message = 'hello'): LogReco
 
 const SECRET_NAMES = [
   'authorization',
+  'Proxy-Authorization',
   'Cookie',
+  'set-cookie',
   'password',
   'passphrase',
+  'passwd',
   'accessToken',
   'x-api-key',
+  'AWS_ACCESS_KEY_ID',
   'clientSecret',
   'private_key',
   'ANTHROPIC_API_KEY',
@@ -1800,6 +1988,7 @@ const SECRET_SAMPLES = [
   'AKIAIOSFODNN7CANARY',
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc',
   '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+  'Authorization: Bearer abc.DEF-123_canary=',
   'https://user:pw@example.com/x',
 ]
 const ORDINARY_TEXT =
@@ -1865,6 +2054,26 @@ describe(redactText, () => {
   })
 })
 
+describe('redactText beyond tokens of a known shape', () => {
+  it('redacts a bearer token in free text and the credentials of a URL whatever its scheme', () => {
+    expect.hasAssertions()
+    const format = redactText(jsonLinesFormatter)
+    const line = format(
+      record(
+        {},
+        'sent bearer abc.DEF-1 to HTTPS://joe:pw1@example.com, then ftp://ann:pw2@files.example.com and postgres://bob:pw3@db:5432/x',
+      ),
+    )
+    for (const canary of ['abc.DEF-1', 'joe:pw1', 'ann:pw2', 'bob:pw3']) {
+      expect(line).not.toContain(canary)
+    }
+    expect(JSON.parse(line)).toMatchObject({
+      message:
+        'sent Bearer [REDACTED] to HTTPS://[REDACTED]@example.com, then ftp://[REDACTED]@files.example.com and postgres://[REDACTED]@db:5432/x',
+    })
+  })
+})
+
 describe('the redacted field list', () => {
   it('has a sample name for every pattern', () => {
     expect(
@@ -1917,45 +2126,11 @@ describe('the secret pattern list', () => {
 ```
 `packages/kernel/src/logging/logging.test.ts`:
 ```ts
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { getLogger, type LogRecord } from '@logtape/logtape'
-import { Cause, Effect, Layer, type LogLevel, References } from 'effect'
-import { describe, expect, it, vi } from 'vitest'
-import {
-  configureLogging,
-  EffectLoggerLive,
-  effectToLogTape,
-  kernelLogger,
-  parseDebug,
-  resetLogging,
-  type LoggingOptions,
-} from './logging.js'
-
-// LogTape's configuration is global: each test configures it, runs its logging, collects the records and resets
-async function captured(
-  options: Omit<LoggingOptions, 'capture'>,
-  logging: Effect.Effect<void>,
-): Promise<readonly LogRecord[]> {
-  const seen: LogRecord[] = []
-  await configureLogging({
-    ...options,
-    capture: (entry) => {
-      seen.push(entry)
-    },
-  })
-  try {
-    const layer = Layer.mergeAll(
-      EffectLoggerLive,
-      Layer.succeed(References.MinimumLogLevel, 'Debug'),
-    )
-    await Effect.runPromise(Effect.provide(logging, layer))
-  } finally {
-    await resetLogging()
-  }
-  return seen
-}
+import { getLogger } from '@logtape/logtape'
+import { Cause, Effect, type LogLevel } from 'effect'
+import { describe, expect, it } from 'vitest'
+import { captured } from './logging-fixtures.js'
+import { configureLogging, effectToLogTape, kernelLogger, parseDebug } from './logging.js'
 
 const LEVELS: readonly LogLevel.LogLevel[] = [
   'All',
@@ -1967,50 +2142,6 @@ const LEVELS: readonly LogLevel.LogLevel[] = [
   'Fatal',
   'None',
 ]
-
-async function sinkOutputs(): Promise<readonly string[]> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'bb-logging-'))
-  const file = path.join(dir, 'kernel.log')
-  const info = vi.spyOn(console, 'info').mockReturnValue()
-  try {
-    await captured(
-      { level: 'info', json: true, file },
-      Effect.sync(() => {
-        kernelLogger(['bb', 'sinks']).info('key sk-ant-api03-canary', {
-          apiKey: 'field-only-value',
-          keep: 1,
-        })
-      }),
-    )
-    return [readFileSync(file, 'utf8'), ...info.mock.calls.map((call) => String(call[0]))]
-  } finally {
-    info.mockRestore()
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
-async function failingSinkRun(): Promise<{
-  readonly delivered: readonly unknown[]
-  readonly reported: readonly string[]
-}> {
-  const capture = vi.fn<(record: LogRecord) => void>().mockImplementationOnce(() => {
-    throw new Error('sink boom')
-  })
-  const error = vi.spyOn(console, 'error').mockReturnValue()
-  try {
-    await configureLogging({ level: 'info', json: true, capture })
-    const logger = kernelLogger(['bb', 'sinks'])
-    logger.info('first')
-    logger.info('second')
-    return {
-      delivered: capture.mock.calls.map(([entry]) => entry.message[0]),
-      reported: error.mock.calls.map((call) => String(call[0])),
-    }
-  } finally {
-    await resetLogging()
-    error.mockRestore()
-  }
-}
 
 async function debugDelivery(debug: string): Promise<readonly unknown[]> {
   const seen = await captured(
@@ -2080,10 +2211,12 @@ describe('effect message parts', () => {
       { discard: true },
     )
     const seen = await captured({ level: 'info', json: true }, logging)
-    expect(seen.map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
+    expect(seen.slice(0, 2).map((entry) => [entry.message[0], entry.properties])).toStrictEqual([
       ['a b', { parts: [{ keep: 1 }, 7] }],
       ['count', { parts: [5] }],
-      ['failed', { parts: [new Error('boom')] }],
+    ])
+    expect(seen.slice(2).map((entry) => entry.properties)).toMatchObject([
+      { parts: [{ name: 'Error', message: 'boom' }] },
     ])
   })
 })
@@ -2141,30 +2274,6 @@ describe(configureLogging, () => {
       }),
     )
     expect(seen.map((entry) => entry.message[0])).toStrictEqual(['agent detail'])
-  })
-
-  it('reports a throwing sink on the console and keeps delivering to it', async () => {
-    expect.hasAssertions()
-    const { delivered, reported } = await failingSinkRun()
-    expect(delivered).toStrictEqual(['first', 'second'])
-    expect(reported).toHaveLength(1)
-    expect(JSON.parse(reported.join(''))).toMatchObject({
-      level: 'FATAL',
-      logger: 'logtape.meta',
-      properties: { error: { message: 'sink boom' } },
-    })
-  })
-
-  it('redacts secrets in the console and file output', async () => {
-    expect.hasAssertions()
-    const outputs = await sinkOutputs()
-    expect(outputs).toHaveLength(2)
-    for (const output of outputs) {
-      expect(output).toContain('"keep":1')
-      expect(output).toContain('[REDACTED]')
-      expect(output).not.toContain('canary')
-      expect(output).not.toContain('field-only-value')
-    }
   })
 })
 
@@ -2232,63 +2341,115 @@ export const nowIso = (): string => new Date().toISOString()
 ```ts
 import { Data } from 'effect'
 
-export const ConfigError = Data.TaggedError('ConfigError')<{
-  readonly file: string
-  readonly pointer: string
-  readonly reason: string
-}>
+const fieldOf = (error: unknown, key: string): unknown =>
+  typeof error === 'object' && error !== null ? Reflect.get(error, key) : undefined
+
+// The message of a typed error is its reason
+function reasonMessage(this: unknown): string {
+  const reason = fieldOf(this, 'reason')
+  return typeof reason === 'string' ? reason : ''
+}
+
+// A store failure has no reason of its own; the message is what its cause says
+function causeMessage(this: unknown): string {
+  const cause = fieldOf(this, 'cause')
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+// Effect builds a tagged error with an empty message; the getter on its prototype gives it one, so every printer of an Error says why
+function described<Constructor extends object>(
+  constructor: Constructor,
+  message: (this: unknown) => string,
+): Constructor {
+  const prototype: unknown = Reflect.get(constructor, 'prototype')
+  if (typeof prototype === 'object' && prototype !== null) {
+    Reflect.defineProperty(prototype, 'message', { get: message, configurable: true })
+  }
+  return constructor
+}
+
+export const ConfigError = described(
+  Data.TaggedError('ConfigError')<{
+    readonly file: string
+    readonly pointer: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
 export type ConfigError = InstanceType<typeof ConfigError>
 
-export const StoreError = Data.TaggedError('StoreError')<{ readonly cause: unknown }>
+export const StoreError = described(
+  Data.TaggedError('StoreError')<{ readonly cause: unknown }>,
+  causeMessage,
+)
 export type StoreError = InstanceType<typeof StoreError>
 
-export const WorkspaceError = Data.TaggedError('WorkspaceError')<{
-  readonly code: string
-  readonly reason: string
-}>
+// Wraps a failure of the store layer, for Effect.mapError
+export const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
+
+export const WorkspaceError = described(
+  Data.TaggedError('WorkspaceError')<{
+    readonly code: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
 export type WorkspaceError = InstanceType<typeof WorkspaceError>
 
-export const ProviderError = Data.TaggedError('ProviderError')<{
-  readonly kind: 'auth' | 'ratelimit' | 'crash' | 'protocol' | 'missing'
-  readonly reason: string
-  readonly retryable: boolean
-}>
+export const ProviderError = described(
+  Data.TaggedError('ProviderError')<{
+    readonly kind: 'auth' | 'ratelimit' | 'crash' | 'protocol' | 'missing'
+    readonly reason: string
+    readonly retryable: boolean
+  }>,
+  reasonMessage,
+)
 export type ProviderError = InstanceType<typeof ProviderError>
 
-export const AskError = Data.TaggedError('AskError')<{
-  readonly code: 'not_found' | 'not_pending' | 'invalid_answer'
-  readonly reason: string
-}>
+export const AskError = described(
+  Data.TaggedError('AskError')<{
+    readonly code: 'not_found' | 'not_pending' | 'invalid_answer'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
 export type AskError = InstanceType<typeof AskError>
 
-export const PluginError = Data.TaggedError('PluginError')<{
-  readonly plugin: string
-  readonly reason: string
-}>
+export const PluginError = described(
+  Data.TaggedError('PluginError')<{
+    readonly plugin: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
 export type PluginError = InstanceType<typeof PluginError>
 
-export const SessionError = Data.TaggedError('SessionError')<{
-  readonly code:
-    | 'not_found'
-    | 'invalid_transition'
-    | 'provider_missing'
-    | 'yolo_refused'
-    | 'employee_missing'
-  readonly reason: string
-}>
+export const SessionError = described(
+  Data.TaggedError('SessionError')<{
+    readonly code:
+      | 'not_found'
+      | 'invalid_transition'
+      | 'provider_missing'
+      | 'yolo_refused'
+      | 'employee_missing'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
 export type SessionError = InstanceType<typeof SessionError>
 ```
 `packages/kernel/src/logging/redaction.ts`:
 ```ts
 import { redactByField, redactByPattern, type RedactionPattern } from '@logtape/redaction'
-import type { Sink, TextFormatter } from '@logtape/logtape'
+import type { LogRecord, Sink, TextFormatter } from '@logtape/logtape'
 
 export const REDACTED_FIELDS: readonly RegExp[] = [
-  /^authorization$/iu,
-  /^cookie$/iu,
-  /pass(?:word|phrase)?$/iu,
+  /^(?:proxy-)?authorization$/iu,
+  /^(?:set-)?cookie$/iu,
+  /pass(?:word|phrase|wd)?$/iu,
   /token$/iu,
   /api[_-]?key/iu,
+  /access[_-]?key/iu,
   /secret/iu,
   /private[_-]?key/iu,
   /^(?:anthropic|openai|github|slack)_.*(?:key|token)$/iu,
@@ -2307,14 +2468,87 @@ export const SECRET_PATTERNS: readonly RedactionPattern[] = [
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
     replacement,
   },
+  { pattern: /\bBearer [A-Za-z0-9._~+/-]+=*/giu, replacement: `Bearer ${replacement}` },
+  // Any scheme, any case: https, ftp, postgres; userinfo stops at quotes and backslashes, so a JSON line stays valid
   {
-    pattern: /(?<scheme>https?:\/\/)[^\s/@:"'\\]+:[^\s/@"'\\]+@/gu,
+    pattern: /(?<scheme>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:"'\\]+:[^\s/@"'\\]+@/giu,
     replacement: `$<scheme>${replacement}@`,
   },
 ]
 
-export const redactFields = (sink: Sink): Sink =>
-  redactByField(sink, { fieldPatterns: [...REDACTED_FIELDS], action: 'delete' })
+// The redactor stops descending here; what lies deeper is replaced by a marker
+const LIMITS = { maxDepth: 10, maxProperties: 200 } as const
+
+const isPlainRecord = (value: object): boolean => {
+  const prototype = Reflect.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+type Walk = (value: unknown) => unknown
+
+// The fields of an Error the redactor can see: name, message, stack, its own fields and its cause
+const errorFields = (error: Error, walk: Walk): Record<string, unknown> => {
+  const own = Object.entries(error).filter(([key]) => key !== 'cause')
+  return {
+    name: error.name,
+    message: error.message,
+    ...(error.stack === undefined ? {} : { stack: error.stack }),
+    ...Object.fromEntries(own.map(([key, value]) => [key, walk(value)])),
+    ...(error.cause === undefined ? {} : { cause: walk(error.cause) }),
+  }
+}
+
+const isWalkable = (value: unknown): value is object =>
+  typeof value === 'object' &&
+  value !== null &&
+  (value instanceof Error || Array.isArray(value) || isPlainRecord(value))
+
+const containerOf = (value: object, walk: Walk): unknown => {
+  if (value instanceof Error) {
+    return errorFields(value, walk)
+  }
+  if (Array.isArray(value)) {
+    return value.map((item: unknown) => walk(item))
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, walk(item)]))
+}
+
+// A bigint becomes text, which the JSON formatter would otherwise throw on; an Error becomes a record the field redaction walks
+// Only what is on the current path counts as a cycle; what lies deeper than the redactor looks is left to it
+function plainValue(value: unknown, depth: number, path: WeakSet<object>): unknown {
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+  if (!isWalkable(value) || depth > LIMITS.maxDepth) {
+    return value
+  }
+  if (path.has(value)) {
+    return '[Circular]'
+  }
+  path.add(value)
+  const result = containerOf(value, (item) => plainValue(item, depth + 1, path))
+  path.delete(value)
+  return result
+}
+
+const plainProperties = (properties: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(properties).map(([key, value]) => [key, plainValue(value, 1, new WeakSet())]),
+  )
+
+// The redactor carries over the disposal of the sink it wraps, which is what flushes a file on reset; so does this wrapper
+export const redactFields = (sink: Sink): Sink => {
+  const redacted = redactByField(sink, {
+    fieldPatterns: [...REDACTED_FIELDS],
+    action: 'delete',
+    ...LIMITS,
+  })
+  const prepared = (record: LogRecord): void => {
+    redacted({ ...record, properties: plainProperties(record.properties) })
+  }
+  return Object.assign(prepared, redacted)
+}
+
 export const redactText = (formatter: TextFormatter): TextFormatter =>
   redactByPattern(formatter, SECRET_PATTERNS)
 ```
@@ -2325,7 +2559,6 @@ If `redactByField`'s options object uses a different key than `fieldPatterns`/`a
 import {
   ansiColorFormatter,
   configure,
-  getConsoleSink,
   getLogger,
   jsonLinesFormatter,
   reset,
@@ -2333,10 +2566,11 @@ import {
   type LogLevel,
   type LogRecord,
   type Sink,
+  type TextFormatter,
 } from '@logtape/logtape'
 import { getRotatingFileSink } from '@logtape/file'
 import type { Logger as PluginLogger } from '@bytebureau/plugin-api'
-import { Cause, Logger, References, type Layer, type LogLevel as EffectLogLevel } from 'effect'
+import { Cause, Layer, Logger, References, type LogLevel as EffectLogLevel } from 'effect'
 import { redactFields, redactText } from './redaction.js'
 
 export type KernelLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
@@ -2349,7 +2583,25 @@ export interface LoggingOptions {
   readonly capture?: ((record: LogRecord) => void) | undefined
 }
 
+// A level that is missing or unknown is info, so a mistyped flag never silences the kernel
+export function parseLogLevel(level: string | undefined): KernelLogLevel {
+  if (
+    level === 'trace' ||
+    level === 'debug' ||
+    level === 'info' ||
+    level === 'warn' ||
+    level === 'error'
+  ) {
+    return level
+  }
+  return 'info'
+}
+
 const toLogTape = (level: KernelLogLevel): LogLevel => (level === 'warn' ? 'warning' : level)
+
+// --debug lets the categories it selects log at debug, so Effect's own minimum has to let debug records through to them
+export const effectLevelOf = (level: KernelLogLevel, debug: string | undefined): KernelLogLevel =>
+  debug === undefined || level === 'trace' ? level : 'debug'
 
 interface DebugSelection {
   readonly enabled: readonly string[][]
@@ -2378,12 +2630,17 @@ export function parseDebug(debug: string | undefined): DebugSelection | undefine
   }
 }
 
+// Every record goes to stderr, whatever its level: stdout belongs to the output of a command, such as the NDJSON of --json
+const stderrSink =
+  (formatter: TextFormatter): Sink =>
+  (record) => {
+    process.stderr.write(formatter(record))
+  }
+
 function sinks(options: LoggingOptions): Record<string, Sink> {
   const result: Record<string, Sink> = {
     console: redactFields(
-      getConsoleSink({
-        formatter: options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter),
-      }),
+      stderrSink(options.json ? redactText(jsonLinesFormatter) : redactText(ansiColorFormatter)),
     ),
   }
   if (options.file !== undefined) {
@@ -2508,6 +2765,18 @@ export const effectToLogTape: Logger.Logger<unknown, void> = Logger.make((option
 
 export const EffectLoggerLive: Layer.Layer<never> = Logger.layer([effectToLogTape])
 
+const effectLevels: Record<KernelLogLevel, EffectLogLevel.LogLevel> = {
+  trace: 'Trace',
+  debug: 'Debug',
+  info: 'Info',
+  warn: 'Warn',
+  error: 'Error',
+}
+
+// Effect drops a record below its minimum level before any logger sees it, so the kernel's level has to reach it too
+export const EffectLogLevelLive = (level: KernelLogLevel): Layer.Layer<never> =>
+  Layer.succeed(References.MinimumLogLevel, effectLevels[level])
+
 export function kernelLogger(category: readonly string[]): PluginLogger {
   const logger = getLogger(category)
   const log =
@@ -2562,7 +2831,24 @@ Semantics (as shipped): configuration files are data, never code — only regula
 `packages/kernel/src/config/merge.test.ts`:
 ```ts
 import { describe, expect, it } from 'vitest'
-import { mergeConfig } from './merge.js'
+import { isPlain, mergeConfig, type Plain } from './merge.js'
+
+// A document parsed by JSON.parse, which defines every key, __proto__ too, as an own key
+function parsed(text: string): Plain {
+  const value: unknown = JSON.parse(text)
+  if (!isPlain(value)) {
+    throw new TypeError('not an object')
+  }
+  return value
+}
+
+function sectionOf(merged: Plain): Plain {
+  const { section } = merged
+  if (!isPlain(section)) {
+    throw new TypeError('no section')
+  }
+  return section
+}
 
 describe(mergeConfig, () => {
   it('merges objects deeply and replaces arrays instead of concatenating them', () => {
@@ -2597,6 +2883,14 @@ describe(mergeConfig, () => {
     expect(overlay).toStrictEqual({ section: { fromOverlay: 2 }, added: { nested: true } })
     expect(merged['added']).toStrictEqual({ nested: true })
     expect(merged['added']).not.toBe(overlay.added)
+  })
+
+  it('keeps a __proto__ key a key, never the prototype of the result', () => {
+    const merged = mergeConfig({}, parsed('{ "section": { "__proto__": { "polluted": true } } }'))
+    const section = sectionOf(merged)
+    expect(Reflect.getPrototypeOf(section)).toBe(Object.prototype)
+    expect(Object.keys(section)).toStrictEqual(['__proto__'])
+    expect(Reflect.get(section, 'polluted')).toBeUndefined()
   })
 })
 ```
@@ -3327,12 +3621,22 @@ export const isPlain = (value: unknown): value is Plain =>
 
 const sectionOf = (value: unknown): Plain => (isPlain(value) ? value : {})
 
+const ownValue = (record: Plain, key: string): unknown =>
+  Object.hasOwn(record, key) ? record[key] : undefined
+
 // Deep merge where the overlay wins; arrays and scalars replace, undefined is skipped at every depth
+// Keys are defined, not assigned: a "__proto__" key stays a key that validation reports, it never becomes a prototype
 export function mergeConfig(base: Plain, overlay: Plain): Plain {
   const result: Plain = { ...base }
   for (const [key, value] of Object.entries(overlay)) {
     if (value !== undefined) {
-      result[key] = isPlain(value) ? mergeConfig(sectionOf(result[key]), value) : value
+      const merged = isPlain(value) ? mergeConfig(sectionOf(ownValue(result, key)), value) : value
+      Reflect.defineProperty(result, key, {
+        value: merged,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
     }
   }
   return result
@@ -3393,6 +3697,7 @@ import path from 'node:path'
 import { Effect } from 'effect'
 import { parse, printParseErrorCode, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
+import { pointerOf } from './issues.js'
 import { isPlain, type Plain } from './merge.js'
 
 // Configuration files are data: the kernel reads JSON or JSONC as text and parses it with jsonc-parser, nothing is imported or run
@@ -3456,19 +3761,44 @@ function positionOf(text: string, offset: number): string {
 interface Parsed {
   readonly value: unknown
   readonly errors: readonly ParseError[]
+  // The keys to the first object whose prototype a "__proto__" key replaced, if any
+  readonly prototyped: readonly string[] | null
+}
+
+const childrenOf = (value: object): readonly (readonly [string, unknown])[] =>
+  Array.isArray(value)
+    ? value.map((item: unknown, index) => [String(index), item] as const)
+    : Object.entries(value)
+
+// The parser assigns the keys it reads, so a "__proto__" key sets the prototype of its object instead of becoming a key
+function prototypedPath(value: unknown, keys: readonly string[]): readonly string[] | null {
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    return [...keys, '__proto__']
+  }
+  for (const [key, child] of childrenOf(value)) {
+    const found = prototypedPath(child, [...keys, key])
+    if (found !== null) {
+      return found
+    }
+  }
+  return null
 }
 
 function parseText(text: string): Parsed {
   const errors: ParseError[] = []
   const value: unknown = parse(text, errors, { allowTrailingComma: true, allowEmptyContent: true })
-  return { value, errors }
+  return { value, errors, prototyped: prototypedPath(value, []) }
 }
 
 // The parser recurses, so a pathologically nested file throws instead of returning
 function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigError> {
   const text = raw.startsWith(BOM) ? raw.slice(BOM.length) : raw
   return Effect.gen(function* parseJson() {
-    const { value, errors } = yield* Effect.try({
+    const { value, errors, prototyped } = yield* Effect.try({
       try: () => parseText(text),
       catch: (cause) => failure(file, String(cause)),
     })
@@ -3476,6 +3806,10 @@ function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigErro
     if (first !== undefined) {
       const position = positionOf(text, first.offset)
       return yield* failure(file, `${printParseErrorCode(first.error)} at ${position}`)
+    }
+    if (prototyped !== null) {
+      const reason = 'a "__proto__" key is not allowed'
+      return yield* new ConfigError({ file, pointer: pointerOf(prototyped), reason })
     }
     return isPlain(value) ? value : yield* failure(file, 'expected a JSON object')
   })
@@ -3554,7 +3888,7 @@ const escapeSegment = (segment: string): string =>
   segment.replaceAll('~', '~0').replaceAll('/', '~1')
 
 // RFC 6901: the document itself is the empty pointer
-const pointerOf = (keys: readonly PropertyKey[]): string =>
+export const pointerOf = (keys: readonly PropertyKey[]): string =>
   keys.map((key) => `/${escapeSegment(String(key))}`).join('')
 
 function containsPath(root: unknown, keys: readonly PropertyKey[]): boolean {
@@ -4139,7 +4473,7 @@ Under `it.effect` the clock is a `TestClock`; the subscription is started with `
 import { type EventEnvelope, isEphemeral, type KernelEvent } from '@bytebureau/protocol'
 import { Context, Effect, Layer, PubSub, Stream } from 'effect'
 import { SqlClient, type Statement } from 'effect/sql'
-import { StoreError } from '../errors.js'
+import { StoreError, toStoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
 
 export interface EventFilter {
@@ -4190,19 +4524,41 @@ interface Row {
   readonly payload_json: string
 }
 
-// The protocol declares the ids optional keys, so an absent one is left out and never set to undefined
-const fromRow = (row: Row): EventEnvelope => ({
-  seq: row.seq,
-  id: row.id,
-  ts: row.ts,
-  type: row.type,
-  ...(row.project_id === null ? {} : { projectId: row.project_id }),
-  ...(row.session_id === null ? {} : { sessionId: row.session_id }),
-  ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
-  payload: JSON.parse(row.payload_json),
-})
+const unreadable =
+  (seq: number): ((cause: unknown) => StoreError) =>
+  (cause) =>
+    new StoreError({ cause: new Error(`the payload of event ${seq} is not JSON`, { cause }) })
 
-const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
+// The protocol declares the ids optional keys, so an absent one is left out and never set to undefined
+// A row whose payload is not JSON is a failure of the store that names the row, not a defect
+const fromRow = (row: Row): Effect.Effect<EventEnvelope, StoreError> =>
+  Effect.try({
+    try: (): unknown => JSON.parse(row.payload_json),
+    catch: unreadable(row.seq),
+  }).pipe(
+    Effect.map((payload) => ({
+      seq: row.seq,
+      id: row.id,
+      ts: row.ts,
+      type: row.type,
+      ...(row.project_id === null ? {} : { projectId: row.project_id }),
+      ...(row.session_id === null ? {} : { sessionId: row.session_id }),
+      ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+      payload,
+    })),
+  )
+
+// A payload JSON cannot hold, such as a bigint or a cycle, is refused before anything is stored
+const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
+  Effect.try({
+    try: () => JSON.stringify(event.payload),
+    catch: (cause) =>
+      new StoreError({
+        cause: new Error(`the payload of a ${event.type} event cannot be stored as JSON`, {
+          cause,
+        }),
+      }),
+  })
 
 // RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
 const insertEvent = (
@@ -4210,13 +4566,15 @@ const insertEvent = (
   event: KernelEvent,
   stamp: { readonly id: string; readonly ts: string },
 ): Effect.Effect<number, StoreError> =>
-  sql<Pick<Row, 'seq'>>`
-    INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
-    VALUES (${stamp.id}, ${stamp.ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${JSON.stringify(event.payload)})
-    RETURNING seq`.pipe(
-    Effect.flatMap(([row]) => Effect.fromNullishOr(row)),
-    Effect.map((row) => row.seq),
-    Effect.mapError(toStoreError),
+  Effect.flatMap(payloadJson(event), (json) =>
+    sql<Pick<Row, 'seq'>>`
+      INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
+      VALUES (${stamp.id}, ${stamp.ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${json})
+      RETURNING seq`.pipe(
+      Effect.flatMap(([row]) => Effect.fromNullishOr(row)),
+      Effect.map((row) => row.seq),
+      Effect.mapError(toStoreError),
+    ),
   )
 
 // Session and project narrow the query itself, so the (session_id, seq) and (project_id, seq) indexes serve it
@@ -4237,12 +4595,12 @@ const makeRead =
     sql<Row>`
       SELECT seq, id, ts, type, project_id, session_id, turn_id, payload_json FROM events
       WHERE ${sql.and(conditions(sql, filter, range))} ORDER BY seq`.pipe(
-      Effect.map((rows) =>
-        rows.map((row) => fromRow(row)).filter((event) => matches(filter, event)),
-      ),
       Effect.mapError(toStoreError),
+      Effect.flatMap((rows) => Effect.all(rows.map((row) => fromRow(row)))),
+      Effect.map((events) => events.filter((event) => matches(filter, event))),
     )
 
+// Nothing may interrupt the steps from the insert on: a stored row that no live subscriber is offered would be seen only by a replay
 const makePublish =
   (sql: SqlClient.SqlClient, hub: PubSub.PubSub<EventEnvelope>): EventLogShape['publish'] =>
   (event) =>
@@ -4260,10 +4618,11 @@ const makePublish =
       }
       yield* PubSub.publish(hub, envelope)
       return envelope
-    })
+    }).pipe(Effect.uninterruptible)
 
 // The subscription opens before the replay is read, so nothing published meanwhile is lost
 // An event can then arrive twice; the live part drops those the replay already carried
+// An ephemeral event published during the replay waits in the subscription, so it arrives after the replayed rows
 const makeSubscribe =
   (read: EventLogShape['read'], hub: PubSub.PubSub<EventEnvelope>): EventLogShape['subscribe'] =>
   (filter) =>
@@ -4283,9 +4642,11 @@ const makeSubscribe =
       }),
     )
 
+// Releasing the layer shuts the hub down, which ends the subscriptions that wait on it as if the stream had run out
 const make = Effect.gen(function* makeEventLog() {
   const sql = yield* SqlClient.SqlClient
   const hub = yield* PubSub.unbounded<EventEnvelope>()
+  yield* Effect.addFinalizer(() => PubSub.shutdown(hub))
   const read = makeRead(sql)
   return EventLog.of({ publish: makePublish(sql, hub), subscribe: makeSubscribe(read, hub), read })
 })
@@ -4324,11 +4685,32 @@ Semantics (as shipped): `defaultProjectConfig` no longer carries `project.defaul
 
 `packages/kernel/src/projects/git-root.test.ts`:
 ```ts
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { createTempRepo, git, tempDir } from '../testing/temp-repo.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
+
+// A variable of this process for the rest of the test
+function setEnv(name: string, value: string): void {
+  const before = process.env[name]
+  process.env[name] = value
+  onTestFinished(() => {
+    if (before === undefined) {
+      Reflect.deleteProperty(process.env, name)
+    } else {
+      process.env[name] = before
+    }
+  })
+}
+
+// A session worktree where provisioning puts one, added by git itself, without the marker file
+function placedWorktree(): string {
+  const repo = createTempRepo()
+  const worktree = path.join(repo, '.bytebureau', 'worktrees', 's1')
+  git(repo, 'worktree', 'add', '-q', worktree, '-b', 'bb/s1')
+  return realpathSync(worktree)
+}
 
 // A repository that has been initialised and holds no commit yet
 function emptyRepo(): string {
@@ -4361,6 +4743,24 @@ describe(findGitRoot, () => {
     const repo = emptyRepo()
     expect(findGitRoot(repo)).toBe(repo)
   })
+
+  it('keeps a space at the end of the path, cutting only the newline git ends with', () => {
+    const repo = path.join(tempDir('bb-space-'), 'repo ')
+    mkdirSync(repo)
+    git(repo, 'init', '-q', '-b', 'main')
+    expect(findGitRoot(repo)).toBe(repo)
+  })
+
+  it('runs git without the variables the kernel does not pass on, such as GIT_DIR', () => {
+    const repo = createTempRepo()
+    setEnv('GIT_DIR', path.join(tempDir('bb-nowhere-'), 'missing.git'))
+    expect(findGitRoot(repo)).toBe(repo)
+  })
+
+  it('finds the toplevel of a session worktree that git added', () => {
+    const worktree = placedWorktree()
+    expect(findGitRoot(worktree)).toBe(worktree)
+  })
 })
 
 describe(isByteBureauWorktree, () => {
@@ -4370,16 +4770,38 @@ describe(isByteBureauWorktree, () => {
     writeFileSync(path.join(repo, '.bytebureau-session.json'), '{}')
     expect(isByteBureauWorktree(repo)).toBe(true)
   })
+
+  it('recognises a worktree where provisioning puts one, without its marker', () => {
+    expect(isByteBureauWorktree(placedWorktree())).toBe(true)
+    expect(isByteBureauWorktree('/repo/.bytebureau/worktrees')).toBe(false)
+    expect(isByteBureauWorktree('/repo/.bytebureau/worktrees/s1/src')).toBe(false)
+  })
 })
 
 describe(defaultBranchOf, () => {
-  it('uses origin/HEAD when present and main otherwise', () => {
+  it('uses origin/HEAD when present and the checked-out branch otherwise', () => {
     expect(defaultBranchOf(createTempRepo())).toBe('main')
     expect(defaultBranchOf(createTempRepo({ withRemote: true }))).toBe('main')
   })
 
-  it('falls back to main in a repository without commits', () => {
+  it('takes the checked-out branch of a repository without a remote, such as master', () => {
+    const repo = createTempRepo()
+    git(repo, 'branch', '-m', 'main', 'master')
+    expect(defaultBranchOf(repo)).toBe('master')
+  })
+
+  it('falls back to main when nothing is checked out', () => {
+    const repo = createTempRepo()
+    git(repo, 'checkout', '-q', '--detach')
+    expect(defaultBranchOf(repo)).toBe('main')
     expect(defaultBranchOf(emptyRepo())).toBe('main')
+  })
+
+  it('reads origin/HEAD in full, so a local branch named origin/main does not confuse it', () => {
+    const repo = createTempRepo({ withRemote: true })
+    git(repo, 'remote', 'set-head', 'origin', 'main')
+    git(repo, 'branch', 'origin/main')
+    expect(defaultBranchOf(repo)).toBe('main')
   })
 
   it.each(['develop', 'release/1.x'])('follows origin/HEAD to %s', (branch) => {
@@ -4533,22 +4955,21 @@ it.layer(TestLayer)('ProjectRegistry list, get and remove', (suite) => {
     }),
   )
 
-  suite.effect('removes a project and announces it, also for an id nobody holds', () =>
-    Effect.gen(function* removesProject() {
-      const registry = yield* ProjectRegistry
-      const log = yield* EventLog
-      const project = yield* registry.register(createTempRepo())
-      yield* registry.remove(project.id)
-      yield* registry.remove('unknown')
-      assert.strictEqual(yield* registry.get(project.id), undefined)
-      const known = yield* log.read({ projectId: project.id }, { from: 0 })
-      const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
-      const types = [known, unknown].map((events) => events.map((event) => event.type))
-      assert.deepStrictEqual(types, [
-        ['project.registered', 'project.removed'],
-        ['project.removed'],
-      ])
-    }),
+  suite.effect(
+    'removes a project and announces it, and announces nothing for an id nobody holds',
+    () =>
+      Effect.gen(function* removesProject() {
+        const registry = yield* ProjectRegistry
+        const log = yield* EventLog
+        const project = yield* registry.register(createTempRepo())
+        yield* registry.remove(project.id)
+        yield* registry.remove('unknown')
+        assert.strictEqual(yield* registry.get(project.id), undefined)
+        const known = yield* log.read({ projectId: project.id }, { from: 0 })
+        const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
+        const types = [known, unknown].map((events) => events.map((event) => event.type))
+        assert.deepStrictEqual(types, [['project.registered', 'project.removed'], []])
+      }),
   )
 })
 
@@ -4650,14 +5071,24 @@ export function registerAt(
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { allowlistEnv } from '../process/env-allowlist.js'
 
+const REMOTE_HEAD = 'refs/remotes/origin/'
+// Where provisioning puts a worktree: a session worktree even after its marker is deleted
+const PLACED = /[\\/]\.bytebureau[\\/]worktrees[\\/][^\\/]+$/u
+const GIT_TIMEOUT_MS = 10_000
+
+// Git sees the allowlisted environment, cannot prompt and cannot hang the kernel; only the final newline of its output goes
 function git(cwd: string, args: readonly string[]): string | null {
   try {
-    return execFileSync('git', args, {
+    const output = execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
+      env: { ...allowlistEnv(process.env), GIT_TERMINAL_PROMPT: '0' },
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
+      timeout: GIT_TIMEOUT_MS,
+    })
+    return output.replace(/\r?\n$/u, '')
   } catch {
     return null
   }
@@ -4667,34 +5098,40 @@ export const findGitRoot = (directory: string): string | null =>
   git(directory, ['rev-parse', '--show-toplevel'])
 
 export const isByteBureauWorktree = (root: string): boolean =>
-  existsSync(path.join(root, '.bytebureau-session.json'))
+  PLACED.test(root) || existsSync(path.join(root, '.bytebureau-session.json'))
 
+// The default branch is origin/HEAD read in full (a local branch named origin/main makes --short ambiguous), else the checked-out branch, else main
 export function defaultBranchOf(root: string): string {
-  const head = git(root, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
-  return head === null ? 'main' : head.replace(/^origin\//u, '')
+  const remoteHead = git(root, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
+  if (remoteHead !== null && remoteHead.startsWith(REMOTE_HEAD)) {
+    return remoteHead.slice(REMOTE_HEAD.length)
+  }
+  return git(root, ['symbolic-ref', '--short', 'HEAD']) ?? 'main'
 }
 ```
 `packages/kernel/src/projects/project-registry.ts`:
 ```ts
 import path from 'node:path'
-import { decodeProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
+import type { ProjectConfig } from '@bytebureau/protocol'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { Config, type ConfigShape } from '../config/config.js'
-import { StoreError, WorkspaceError, type ConfigError } from '../errors.js'
+import { WorkspaceError, type ConfigError, type StoreError } from '../errors.js'
 import { EventLog, type EventLogShape } from '../events/event-log.js'
 import { nowIso, uuidv7 } from '../ids.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
+import {
+  deleteProject,
+  findByPath,
+  getProject,
+  insertProject,
+  listProjects,
+  updateProject,
+  type Project,
+  type Row,
+} from './project-records.js'
 
-export interface Project {
-  readonly id: string
-  readonly name: string
-  readonly path: string
-  readonly defaultBranch: string
-  readonly config: ProjectConfig
-  readonly createdAt: string
-  readonly updatedAt: string
-}
+export type { Project } from './project-records.js'
 
 export interface ProjectRegistryShape {
   readonly register: (
@@ -4702,35 +5139,13 @@ export interface ProjectRegistryShape {
   ) => Effect.Effect<Project, WorkspaceError | ConfigError | StoreError>
   readonly list: () => Effect.Effect<readonly Project[], StoreError>
   readonly get: (id: string) => Effect.Effect<Project | undefined, StoreError>
-  readonly remove: (id: string) => Effect.Effect<void, StoreError>
+  // A project that sessions still belong to is refused with WorkspaceError has_sessions
+  readonly remove: (id: string) => Effect.Effect<void, StoreError | WorkspaceError>
 }
 
 export class ProjectRegistry extends Context.Service<ProjectRegistry, ProjectRegistryShape>()(
   'bb/ProjectRegistry',
 ) {}
-
-interface Row {
-  readonly id: string
-  readonly name: string
-  readonly path: string
-  readonly default_branch: string
-  readonly config_json: string
-  readonly created_at: string
-  readonly updated_at: string
-}
-
-// The snapshot is decoded again, so a row that no longer fits the schema fails loudly
-const fromRow = (row: Row): Project => ({
-  id: row.id,
-  name: row.name,
-  path: row.path,
-  defaultBranch: row.default_branch,
-  config: decodeProjectConfig(JSON.parse(row.config_json)),
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-})
-
-const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
 
 interface Deps {
   readonly sql: SqlClient.SqlClient
@@ -4767,35 +5182,6 @@ const snapshotOf = (config: ConfigShape, root: string): Effect.Effect<Snapshot, 
     defaultBranch: project.project.defaultBranch ?? defaultBranchOf(root),
     config: project,
   }))
-
-const findByPath = (
-  sql: SqlClient.SqlClient,
-  root: string,
-): Effect.Effect<Row | undefined, StoreError> =>
-  sql<Row>`SELECT * FROM projects WHERE path = ${root}`.pipe(
-    Effect.map(([row]) => row),
-    Effect.mapError(toStoreError),
-  )
-
-const insertProject = (
-  sql: SqlClient.SqlClient,
-  project: Project,
-): Effect.Effect<void, StoreError> =>
-  sql`
-    INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at)
-    VALUES (${project.id}, ${project.name}, ${project.path}, ${project.defaultBranch}, ${JSON.stringify(project.config)}, ${project.createdAt}, ${project.updatedAt})`.pipe(
-    Effect.asVoid,
-    Effect.mapError(toStoreError),
-  )
-
-const updateProject = (
-  sql: SqlClient.SqlClient,
-  project: Project,
-): Effect.Effect<void, StoreError> =>
-  sql`
-    UPDATE projects
-    SET name = ${project.name}, default_branch = ${project.defaultBranch}, config_json = ${JSON.stringify(project.config)}, updated_at = ${project.updatedAt}
-    WHERE id = ${project.id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
 
 const announce = (
   log: EventLogShape,
@@ -4866,29 +5252,15 @@ const makeRegister =
       return yield* refreshProject(deps, existing, snapshot)
     })
 
-const makeList =
-  (sql: SqlClient.SqlClient): ProjectRegistryShape['list'] =>
-  () =>
-    sql<Row>`SELECT * FROM projects ORDER BY name`.pipe(
-      Effect.map((rows) => rows.map((row) => fromRow(row))),
-      Effect.mapError(toStoreError),
-    )
-
-const makeGet =
-  (sql: SqlClient.SqlClient): ProjectRegistryShape['get'] =>
-  (id) =>
-    sql<Row>`SELECT * FROM projects WHERE id = ${id}`.pipe(
-      Effect.map(([row]) => (row === undefined ? undefined : fromRow(row))),
-      Effect.mapError(toStoreError),
-    )
-
-// Removing an id nobody holds is not an error: the announcement still goes out
+// Removing an id nobody holds is not an error, and announces nothing
 const makeRemove =
   ({ sql, log }: Deps): ProjectRegistryShape['remove'] =>
   (id) =>
     Effect.gen(function* removeProject() {
-      yield* sql`DELETE FROM projects WHERE id = ${id}`.pipe(Effect.mapError(toStoreError))
-      yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
+      const removed = yield* deleteProject(sql, id)
+      if (removed) {
+        yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
+      }
     })
 
 const make = Effect.gen(function* makeProjectRegistry() {
@@ -4898,8 +5270,8 @@ const make = Effect.gen(function* makeProjectRegistry() {
   const deps: Deps = { sql, log, config }
   return ProjectRegistry.of({
     register: makeRegister(deps),
-    list: makeList(sql),
-    get: makeGet(sql),
+    list: () => listProjects(sql),
+    get: (id) => getProject(sql, id),
     remove: makeRemove(deps),
   })
 })
@@ -5498,12 +5870,14 @@ import {
   hasEnded,
   HOLDER,
   IDLE,
+  isAlive,
   isPending,
   nodeSpec,
   ownScope,
   REAPING_HOLDER,
   spawnHolder,
   untilUnlisted,
+  WRITING_HOLDER,
 } from './supervisor-fixtures.js'
 
 // A grandchild that holds the pipes keeps the child's close event away, which exit must not wait for
@@ -5520,6 +5894,23 @@ it.layer(SupervisorLive)('Supervisor drain bound', (suite) => {
       assert.deepStrictEqual(yield* child.exit, { code: null, signal: 'SIGKILL' })
       assert.ok(yield* hasEnded(lines))
     }),
+  )
+
+  suite.effect(
+    'destroys the pipes after the drain, so a grandchild that still writes gets EPIPE and ends',
+    () =>
+      Effect.gen(function* endsLingeringWriter() {
+        const supervisor = yield* Supervisor
+        const { child, grandchildPid } = yield* spawnHolder(supervisor, WRITING_HOLDER)
+        yield* child.kill('SIGKILL')
+        yield* untilUnlisted(supervisor)
+        yield* TestClock.adjust('2 seconds')
+        yield* child.exit
+        while (isAlive(grandchildPid)) {
+          yield* Effect.yieldNow
+        }
+        assert.isFalse(isAlive(grandchildPid))
+      }),
   )
 
   suite.effect('closes the scope within the same bound', () =>
@@ -5974,6 +6365,21 @@ export const HOLDER = `${startsGrandchild(false)}; setInterval(() => {}, 1000)`
 // The grandchild has left the group, so only a pipe ties it to the child
 export const ESCAPED_HOLDER = `${startsGrandchild(true)}; setInterval(() => {}, 1000)`
 
+// Writes a line every 20 ms; a write that fails, as one to a pipe nobody reads any more does, ends the process
+const WRITER = String.raw`setInterval(() => process.stdout.write('tick\n'), 20)`
+
+// The grandchild has left the group and writes to the pipe it shares with the child
+export const WRITING_HOLDER = `const grand = require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(WRITER)}], { stdio: "inherit", detached: true }); console.log("up " + grand.pid); setInterval(() => {}, 1000)`
+
+// Whether a process of that pid still exists
+export const isAlive = (pid: number): boolean => {
+  try {
+    return process.kill(pid, 0)
+  } catch {
+    return false
+  }
+}
+
 // Ignores SIGINT and reports how its grandchild ends, which only the grandchild's parent, which reaps it, can see
 export const REAPING_HOLDER = `process.on("SIGINT", () => {}); ${startsGrandchild(false)}; grand.on("exit", (code, signal) => console.log("grandchild " + signal)); setInterval(() => {}, 1000)`
 
@@ -6417,6 +6823,7 @@ import {
 } from 'effect'
 import { nowIso, uuidv7 } from '../ids.js'
 import { childEnv } from './child-env.js'
+import { drain } from './drain.js'
 import { launch, type ExitInfo, type Launched } from './launch.js'
 import { climb, ladderFor, TERMINATE_LADDER, type KillSignal } from './kill-ladder.js'
 import { startPump, type OutputPump } from './pump.js'
@@ -6469,9 +6876,6 @@ interface SupervisorShape {
 export class Supervisor extends Context.Service<Supervisor, SupervisorShape>()('bb/Supervisor') {}
 
 const DEFAULT_MAX_LINES = 10_000
-
-// How long the pipes of an exited process get to run dry; a grandchild that holds one can keep it open for good
-const DRAIN = '2 seconds'
 
 // Backoff between restarts of a crashed process: 500 ms doubling, jittered, at most maxRestarts times
 export const restartSchedule = (maxRestarts: number): Schedule.Schedule<Duration.Duration> =>
@@ -6533,7 +6937,7 @@ const settleExit = (running: Running, release: () => void): Effect.Effect<ExitIn
     const { launched } = running
     const { exit, failure } = yield* Deferred.await(launched.exited)
     release()
-    yield* Effect.timeoutOption(launched.closed.await, DRAIN)
+    yield* drain(launched)
     if (failure !== null) {
       running.stderr.append(failure)
     }
@@ -7157,6 +7561,19 @@ export function failingSpawner(...phrases: readonly string[]): ProcessSpawner {
   }
 }
 
+// A spawner that rejects the git commands that start with one of the phrases, as a spawner that cannot start a process does
+export function rejectingSpawner(...phrases: readonly string[]): ProcessSpawner {
+  return {
+    async spawn(spec) {
+      if (phrases.includes(spec.args.slice(0, 2).join(' '))) {
+        throw new Error(`cannot start git ${spec.args.join(' ')}`)
+      }
+      const child = await nodeSpawner.spawn(spec)
+      return child
+    },
+  }
+}
+
 // A spawner whose git reports one version and fails every other command
 export function versionSpawner(version: string): ProcessSpawner {
   return scriptedSpawner((args) =>
@@ -7414,6 +7831,28 @@ describe('branch names', () => {
     expect(handle.branch).toBe('bb/add-hello-3')
     expect(git(handle.path, 'branch', '--show-current')).toBe('bb/add-hello-3')
   })
+})
+
+describe('branch names of sessions that start at once', () => {
+  it('gives sessions of a main checkout and of its linked worktree that start at once a name each', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo()
+    const linked = path.join(tempDir('bb-linked-'), 'linked')
+    git(repo, 'worktree', 'add', '-q', linked, '-b', 'side')
+    const runtime = createRuntime()
+    const handles = await Promise.all([
+      runtime.provision(sameBranch('a', repo)),
+      runtime.provision(sameBranch('b', linked)),
+      runtime.provision(sameBranch('c', repo)),
+      runtime.provision(sameBranch('d', linked)),
+    ])
+    expect(handles.map((handle) => handle.branch).toSorted()).toStrictEqual([
+      'bb/x',
+      'bb/x-2',
+      'bb/x-3',
+      'bb/x-4',
+    ])
+  })
 
   it('gives sessions that start at once a name each, however they name the project', async () => {
     expect.hasAssertions()
@@ -7446,6 +7885,11 @@ import type { LocalWorkspaceRuntime } from './local-runtime.js'
 import { createRuntime, readLines, scriptedSpawner, workspaceSpec } from './testing/fixtures.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 
+// An empty commit with the message, on whatever is checked out in the directory
+function commitEmpty(directory: string, message: string): void {
+  git(directory, 'commit', '--allow-empty', '-q', '-m', message)
+}
+
 // A provisioned worktree that holds an uncommitted file
 async function dirtyWorktree(runtime: LocalWorkspaceRuntime): Promise<WorkspaceHandle> {
   const handle = await runtime.provision(workspaceSpec(createTempRepo()))
@@ -7462,9 +7906,23 @@ describe('status', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      pushed: false,
       locked: false,
       branch: 'bb/add-hello',
     })
+  })
+
+  it('reports a branch whose head a remote-tracking ref contains as pushed, and a local commit as not', async () => {
+    expect.hasAssertions()
+    const repo = createTempRepo({ withRemote: true })
+    const runtime = createRuntime()
+    const handle = await runtime.provision(workspaceSpec(repo))
+    commitEmpty(handle.path, 'work')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: false })
+    git(handle.path, 'push', '-q', 'origin', 'bb/add-hello')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 1, pushed: true })
+    commitEmpty(handle.path, 'more')
+    await expect(runtime.status(handle)).resolves.toMatchObject({ ahead: 2, pushed: false })
   })
 
   it('counts the commits ahead of and behind the base ref', async () => {
@@ -7472,9 +7930,9 @@ describe('status', () => {
     const repo = createTempRepo()
     const runtime = createRuntime()
     const handle = await runtime.provision(workspaceSpec(repo))
-    git(handle.path, 'commit', '--allow-empty', '-q', '-m', 'work')
-    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream one')
-    git(repo, 'commit', '--allow-empty', '-q', '-m', 'upstream two')
+    commitEmpty(handle.path, 'work')
+    commitEmpty(repo, 'upstream one')
+    commitEmpty(repo, 'upstream two')
     await expect(runtime.status(handle)).resolves.toMatchObject({
       dirty: false,
       ahead: 1,
@@ -7760,6 +8218,7 @@ import {
   failingSpawner,
   readJson,
   recordingLogger,
+  rejectingSpawner,
   workspaceSpec,
 } from './testing/fixtures.js'
 import { createTempRepo, git, tempDir } from './testing/temp-repo.js'
@@ -7893,6 +8352,19 @@ describe('a provision that fails halfway', () => {
     expect.hasAssertions()
     const { logger, entries } = recordingLogger()
     const runtime = createRuntime(failingSpawner('worktree remove', 'branch -D'))
+    const spec = workspaceSpec(repoWithClashingBase(), {
+      baseBranch: 'clash',
+      copyIgnored: ['scratch'],
+      logger,
+    })
+    await expect(runtime.provision(spec)).rejects.toMatchObject({ code: 'fs_failed' })
+    expect(entries.filter((entry) => entry.level === 'warn')).toHaveLength(1)
+  })
+
+  it('reports the original error when the spawner rejects while the worktree is taken back', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const runtime = createRuntime(rejectingSpawner('worktree remove'))
     const spec = workspaceSpec(repoWithClashingBase(), {
       baseBranch: 'clash',
       copyIgnored: ['scratch'],
@@ -8087,6 +8559,27 @@ export interface Git {
   readonly refExists: (cwd: string, ref: string) => Promise<boolean>
   readonly localBranches: (cwd: string, prefix: string) => Promise<readonly string[]>
   readonly worktreeLocked: (cwd: string, worktreePath: string) => Promise<boolean>
+  // The directory every worktree of the repository shares, absolute
+  readonly commonDir: (cwd: string) => Promise<string>
+  // Whether a remote-tracking ref contains the commit HEAD points at
+  readonly onRemote: (cwd: string) => Promise<boolean>
+}
+
+type Must = Git['must']
+
+// What the repository as a whole says, whichever of its worktrees is asked
+function repositoryQueries(must: Must): Pick<Git, 'commonDir' | 'onRemote'> {
+  return {
+    async commonDir(cwd) {
+      const directory = await must(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      return directory
+    },
+    async onRemote(cwd) {
+      const args = ['for-each-ref', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes']
+      const refs = await must(cwd, args)
+      return refs !== ''
+    },
+  }
 }
 
 export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
@@ -8136,6 +8629,7 @@ export function createGit(spawn: ProcessSpawner, logger: Logger): Git {
     async worktreeLocked(cwd, worktreePath) {
       return isLocked(await must(cwd, ['worktree', 'list', '--porcelain']), worktreePath)
     },
+    ...repositoryQueries(must),
   }
 }
 ```
@@ -8339,7 +8833,9 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
       worktreePath: worktreePathOf(projectPath, spec.sessionId),
       baseRef,
     }
-    const branch = await this.enqueue(projectPath, async () => {
+    // A main checkout and its linked worktrees share one queue: the branch names they pick from are the same
+    const repository = await this.git.commonDir(projectPath)
+    const branch = await this.enqueue(repository, async () => {
       const added = await this.addWorktree(place, spec.branch)
       return added
     })
@@ -8358,7 +8854,8 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
     const range = `${handle.baseRef}...HEAD`
     const counts = await this.git.must(handle.path, ['rev-list', '--left-right', '--count', range])
     const [behind = '0', ahead = '0'] = counts.split('\t')
-    return { ...state, ahead: Number(ahead), behind: Number(behind) }
+    const pushed = await this.git.onRemote(handle.path)
+    return { ...state, ahead: Number(ahead), behind: Number(behind), pushed }
   }
 
   public async destroy(
@@ -8483,13 +8980,19 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
     }
   }
 
+  // Taking back a failed provision is best effort: whatever goes wrong here, the caller gets the original error
   private async discard(place: Placement, branch: string, logger: Logger): Promise<void> {
-    const remove = ['worktree', 'remove', '--force', place.worktreePath]
-    const removed = await this.git.run(place.projectPath, remove)
-    const deleted = await this.git.run(place.projectPath, ['branch', '-D', branch])
-    if (removed.code !== 0 || deleted.code !== 0) {
-      const leftover = { worktree: place.worktreePath, branch }
-      logger.warn('could not take back a provision that failed', leftover)
+    const leftover = { worktree: place.worktreePath, branch }
+    try {
+      const remove = ['worktree', 'remove', '--force', place.worktreePath]
+      const removed = await this.git.run(place.projectPath, remove)
+      const deleted = await this.git.run(place.projectPath, ['branch', '-D', branch])
+      if (removed.code !== 0 || deleted.code !== 0) {
+        logger.warn('could not take back a provision that failed', leftover)
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      logger.warn('could not take back a provision that failed', { ...leftover, reason })
     }
   }
 }
@@ -8703,10 +9206,10 @@ it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-7', status: 'running' })
       yield* manager.lock('session-7')
-      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      const refused = yield* Effect.flip(manager.destroy('session-7', handle, { force: true }))
       assert.strictEqual(codeOf(refused), 'locked')
       yield* manager.unlock('session-7')
-      yield* manager.destroy(handle)
+      yield* manager.destroy('session-7', handle)
       assert.isFalse(existsSync(handle.path))
     }),
   )
@@ -8717,10 +9220,13 @@ it.layer(TestLayer)('WorkspaceManager destroy', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-8', status: 'completed' })
       writeFileSync(path.join(handle.path, 'dirty.txt'), 'x')
-      yield* manager.destroy(handle)
-      assert.isTrue(existsSync(handle.path))
-      yield* manager.destroy(handle, { force: true })
-      assert.isFalse(existsSync(handle.path))
+      const kept = yield* manager.destroy('session-8', handle)
+      const stayed = existsSync(handle.path)
+      const forced = yield* manager.destroy('session-8', handle, { force: true })
+      assert.deepStrictEqual(
+        [kept, stayed, forced, existsSync(handle.path)],
+        [{ removed: false, reason: 'uncommitted changes' }, true, { removed: true }, false],
+      )
       const later = (yield* eventsOf('session-8')).slice(1)
       assert.deepStrictEqual(later, [
         {
@@ -8740,9 +9246,9 @@ it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-11', status: 'completed' })
       git(repo, 'branch', '-m', 'main', 'trunk')
-      yield* manager.destroy(handle)
+      yield* manager.destroy('session-11', handle)
       assert.isTrue(existsSync(handle.path))
-      yield* manager.destroy(handle, { force: true })
+      yield* manager.destroy('session-11', handle, { force: true })
       assert.isFalse(existsSync(handle.path))
       const later = (yield* eventsOf('session-11')).slice(1)
       assert.deepStrictEqual(later, [
@@ -8761,7 +9267,7 @@ it.layer(TestLayer)('WorkspaceManager destroy without status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-12', status: 'completed' })
       git(repo, 'worktree', 'lock', handle.path)
-      const refused = yield* Effect.flip(manager.destroy(handle, { force: true }))
+      const refused = yield* Effect.flip(manager.destroy('session-12', handle, { force: true }))
       assert.strictEqual(codeOf(refused), 'locked')
       assert.isTrue(existsSync(handle.path))
     }),
@@ -8775,7 +9281,14 @@ it.layer(TestLayer)('WorkspaceManager status', (suite) => {
       const manager = yield* WorkspaceManager
       const handle = yield* provisionSession(project, { id: 'session-9', status: 'running' })
       writeFileSync(path.join(handle.path, 'draft.txt'), 'x')
-      const expected = { dirty: true, ahead: 0, behind: 0, locked: false, branch: 'bb/session-9' }
+      const expected = {
+        dirty: true,
+        ahead: 0,
+        behind: 0,
+        pushed: false,
+        locked: false,
+        branch: 'bb/session-9',
+      }
       assert.deepStrictEqual(yield* manager.status(handle), expected)
     }),
   )
@@ -8787,8 +9300,8 @@ it.layer(TestLayer)('WorkspaceManager status', (suite) => {
       const handle = yield* provisionSession(project, { id: 'session-10', status: 'running' })
       const stray = { ...handle, runtimeId: 'nobody' }
       const statusError = yield* Effect.flip(manager.status(stray))
-      const destroyError = yield* Effect.flip(manager.destroy(stray))
-      const forcedError = yield* Effect.flip(manager.destroy(stray, { force: true }))
+      const destroyError = yield* Effect.flip(manager.destroy('session-10', stray))
+      const forcedError = yield* Effect.flip(manager.destroy('session-10', stray, { force: true }))
       const codes = [statusError, destroyError, forcedError].map((error) => codeOf(error))
       assert.deepStrictEqual(codes, ['runtime_missing', 'runtime_missing', 'runtime_missing'])
       assert.isTrue(existsSync(handle.path))
@@ -8820,7 +9333,7 @@ it.layer(TestLayer)('WorkspaceManager list', (suite) => {
         const live = yield* provisionSession(project, { id: 'live', status: 'running' })
         const gone = yield* provisionSession(project, { id: 'gone', ...ENDED })
         yield* seedSession(project.id, { id: 'bare', status: 'created' })
-        yield* manager.destroy(gone, { force: true })
+        yield* manager.destroy('gone', gone, { force: true })
         const shared = { projectId: project.id, baseRef: 'main' }
         assert.deepStrictEqual(yield* manager.list(project.id), [
           {
@@ -8980,7 +9493,7 @@ it.layer(TestLayer)('WorkspaceManager prune', (suite) => {
         retained: {
           fresh: 'younger than 7 days',
           live: 'session is running',
-          'old-ahead': 'commits not merged or pushed',
+          'old-ahead': 'commits not on origin',
         },
       })
     }),
@@ -9667,6 +10180,7 @@ import type { WorkspaceHandle, WorkspaceStatus } from '@bytebureau/plugin-api'
 import { Clock, Effect } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import type { StoreError, WorkspaceError } from '../errors.js'
+import { RETAINED } from './retain-reasons.js'
 import { loadWorkspaces, type Workspace } from './workspace-records.js'
 
 export interface PruneReport {
@@ -9674,13 +10188,19 @@ export interface PruneReport {
   readonly retained: readonly { readonly path: string; readonly reason: string }[]
 }
 
+// What destroy did: the worktree went, or it stayed for the reason given
+export type DestroyOutcome =
+  | { readonly removed: true }
+  | { readonly removed: false; readonly reason: string }
+
 // What pruning asks of the manager it belongs to
-interface Actions {
+export interface Actions {
   readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
   readonly destroy: (
+    sessionId: string,
     handle: WorkspaceHandle,
     options: { readonly force: boolean },
-  ) => Effect.Effect<void, WorkspaceError | StoreError>
+  ) => Effect.Effect<DestroyOutcome, WorkspaceError | StoreError>
 }
 
 type Verdict =
@@ -9707,21 +10227,23 @@ const staleReason = (workspace: Workspace, now: number): string | undefined => {
   return endedLongAgo(workspace, now) ? undefined : `younger than ${workspace.retainDays} days`
 }
 
-// What git says: work that is saved nowhere else
+// What git says: work that is saved nowhere else; a pushed branch, or one merged on the remote, is saved there
 const unsavedReason = (current: WorkspaceStatus): string | undefined => {
   if (current.dirty) {
-    return 'uncommitted changes'
+    return RETAINED.uncommitted
   }
-  return current.ahead > 0 ? 'commits not merged or pushed' : undefined
+  return current.ahead > 0 && !current.pushed ? RETAINED.notOnRemote : undefined
 }
 
-// A worktree the runtime refuses to remove stays, with the runtime's reason
+// Destroy checks again, so a worktree that changed since the status stays; one the runtime refuses to remove stays with the runtime's reason
 const removeOrKeep = (
   actions: Actions,
-  handle: WorkspaceHandle,
+  { sessionId, handle }: Workspace,
 ): Effect.Effect<Verdict, StoreError> =>
-  actions.destroy(handle, { force: false }).pipe(
-    Effect.as(removed(handle.path)),
+  actions.destroy(sessionId, handle, { force: false }).pipe(
+    Effect.map((outcome) =>
+      outcome.removed ? removed(handle.path) : retained(handle.path, outcome.reason),
+    ),
     Effect.catchTag('WorkspaceError', (failure) =>
       Effect.succeed(retained(handle.path, failure.reason)),
     ),
@@ -9740,14 +10262,14 @@ const pruneOne = (
     }
     const unsaved = yield* actions.status(handle).pipe(
       Effect.match({
-        onFailure: () => 'status unavailable',
+        onFailure: () => RETAINED.statusUnavailable,
         onSuccess: (current) => unsavedReason(current),
       }),
     )
     if (unsaved !== undefined) {
       return retained(handle.path, unsaved)
     }
-    return yield* removeOrKeep(actions, handle)
+    return yield* removeOrKeep(actions, workspace)
   })
 
 const reportOf = (verdicts: readonly Verdict[]): PruneReport => ({
@@ -9793,8 +10315,9 @@ import {
   WorkspaceRuntimes,
   type WorkspaceRuntimesShape,
 } from './runtimes.js'
+import { RETAINED } from './retain-reasons.js'
 import { makeProvision, type ProvisionInput } from './workspace-provision.js'
-import { makePrune, type PruneReport } from './workspace-prune.js'
+import { makePrune, type DestroyOutcome, type PruneReport } from './workspace-prune.js'
 import { listWorkspaces, type WorkspaceInfo } from './workspace-records.js'
 
 export type { ProvisionInput } from './workspace-provision.js'
@@ -9806,10 +10329,12 @@ export interface WorkspaceManagerShape {
     input: ProvisionInput,
   ) => Effect.Effect<WorkspaceHandle, WorkspaceError | StoreError>
   readonly status: (handle: WorkspaceHandle) => Effect.Effect<WorkspaceStatus, WorkspaceError>
+  // The session id is the one the manager knows, never read back from the handle a runtime returned
   readonly destroy: (
+    sessionId: string,
     handle: WorkspaceHandle,
     options?: { readonly force?: boolean },
-  ) => Effect.Effect<void, WorkspaceError | StoreError>
+  ) => Effect.Effect<DestroyOutcome, WorkspaceError | StoreError>
   readonly lock: (sessionId: string) => Effect.Effect<void>
   readonly unlock: (sessionId: string) => Effect.Effect<void>
   readonly list: (projectId?: string) => Effect.Effect<readonly WorkspaceInfo[], StoreError>
@@ -9830,10 +10355,10 @@ const makeStatus =
 // A running session keeps its worktree, whatever force says
 const refuseLocked = (
   locks: ReadonlySet<string>,
-  handle: WorkspaceHandle,
+  sessionId: string,
 ): Effect.Effect<void, WorkspaceError> =>
-  locks.has(handle.id)
-    ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${handle.id} is running` }))
+  locks.has(sessionId)
+    ? Effect.fail(new WorkspaceError({ code: 'locked', reason: `session ${sessionId} is running` }))
     : Effect.void
 
 // Without force a worktree goes only when its status says that nothing in it is lost
@@ -9843,44 +10368,39 @@ const keepReason = (
 ): Effect.Effect<string | undefined> =>
   statusOn(runtime, handle).pipe(
     Effect.match({
-      onFailure: () => 'status unavailable',
-      onSuccess: (current) => (current.dirty ? 'uncommitted changes' : undefined),
+      onFailure: () => RETAINED.statusUnavailable,
+      onSuccess: (current) => (current.dirty ? RETAINED.uncommitted : undefined),
     }),
   )
 
 // A kept worktree is announced with its reason; force skips the status and the runtime still refuses a locked worktree
+// The outcome says whether the worktree went, so a caller that checked the status before cannot report it gone when it stayed
 const makeDestroy =
   (
     log: EventLogShape,
     runtimes: WorkspaceRuntimesShape,
     locks: ReadonlySet<string>,
   ): WorkspaceManagerShape['destroy'] =>
-  (handle, options = {}) =>
+  (sessionId, handle, options = {}) =>
     Effect.gen(function* destroyWorkspace() {
-      yield* refuseLocked(locks, handle)
+      yield* refuseLocked(locks, sessionId)
       const runtime = yield* runtimeFor(runtimes, handle.runtimeId)
       const reason = options.force === true ? undefined : yield* keepReason(runtime, handle)
       if (reason !== undefined) {
-        yield* log.publish({
-          type: 'workspace.retained',
-          sessionId: handle.id,
-          payload: { path: handle.path, reason },
-        })
-        return
+        const payload = { path: handle.path, reason }
+        yield* log.publish({ type: 'workspace.retained', sessionId, payload })
+        return { removed: false, reason } as const
       }
       yield* destroyOn(runtime, handle, options)
-      yield* log.publish({
-        type: 'workspace.destroyed',
-        sessionId: handle.id,
-        payload: { path: handle.path },
-      })
+      yield* log.publish({ type: 'workspace.destroyed', sessionId, payload: { path: handle.path } })
+      return { removed: true } as const
     })
 
 const make = Effect.gen(function* makeWorkspaceManager() {
   const sql = yield* SqlClient.SqlClient
   const log = yield* EventLog
   const runtimes = yield* WorkspaceRuntimes
-  // Sessions that are running; the set lives as long as the layer
+  // The sessions that are running, by session id; the set belongs to this process and lives as long as the layer
   const locks = new Set<string>()
   const status = makeStatus(runtimes)
   const destroy = makeDestroy(log, runtimes, locks)
@@ -10137,6 +10657,20 @@ it.effect('does not run a terminal again that has failed while a hook waited for
     assert.deepStrictEqual(calls, ['terminal'])
   }),
 )
+
+it.effect('passes a terminal defect through the hooks that passed on without blaming them', () =>
+  Effect.gen(function* passesDefectOn() {
+    const records = yield* warnings
+    const bus = new HookBus(['bb', 'test'])
+    bus.register('a', SEND, passOn)
+    bus.register('b', SEND, passOn)
+    const exit = yield* Effect.exit(
+      bus.run(SEND, prompt('x'), () => Effect.die(new Error('terminal died'))),
+    )
+    assert.isTrue(Exit.hasDies(exit))
+    assert.deepStrictEqual(records, [])
+  }),
+)
 ```
 `packages/kernel/src/plugins/plugin-host.test.ts`:
 ```ts
@@ -10289,12 +10823,13 @@ it.layer(hostOver({ extraPlugins: [good] }))('PluginHost before load', (suite) =
 ```
 `packages/kernel/src/plugins/plugin-context.test.ts`:
 ```ts
-import type { PluginEvents } from '@bytebureau/plugin-api'
+import type { EventEnvelope, PluginEvents } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Fiber } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { flush } from '../sessions/session-helper-fixtures.js'
 import { rejected, resolved, takeFrom } from './plugin-call-fixtures.js'
 import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
 
@@ -10382,6 +10917,15 @@ it.layer(hostOver({ extraPlugins, secrets: store }))('plugin context secrets', (
   )
 })
 
+// A subscription to everything of the session sub-1 and one to its warnings, taking two and one
+const listenTo = (
+  events: PluginEvents,
+): Effect.Effect<readonly [readonly EventEnvelope[], readonly EventEnvelope[]]> => {
+  const whole = events.subscribe({ sessionId: 'sub-1' })
+  const typed = events.subscribe({ types: ['session.warning'], sessionId: 'sub-1' })
+  return Effect.all([takeFrom(whole, 2), takeFrom(typed, 1)], { concurrency: 2 })
+}
+
 // Two events in one session, one of them a warning, and one in another session
 const seed = (events: PluginEvents): Effect.Effect<void> =>
   Effect.gen(function* seedsEvents() {
@@ -10415,22 +10959,21 @@ it.layer(hostOver({ extraPlugins }))('plugin context events', (suite) => {
     Effect.gen(function* deliversEnvelopes() {
       yield* loadedHost
       const { events } = alpha.context()
-      yield* seed(events)
-      const whole = yield* takeFrom(events.subscribe({ sessionId: 'sub-1' }), 2)
-      const typed = yield* takeFrom(
-        events.subscribe({ types: ['session.warning'], sessionId: 'sub-1' }),
-        1,
-      )
+      const listening = yield* Effect.forkChild(listenTo(events))
+      yield* Effect.andThen(flush, seed(events))
+      const [wholeEvents, typedEvents] = yield* Fiber.join(listening)
       assert.deepStrictEqual(
-        whole.map((envelope) => envelope.type),
+        wholeEvents.map((envelope) => envelope.type),
         [USER, 'session.warning'],
       )
       assert.deepStrictEqual(
-        typed.map((envelope) => envelope.payload),
+        typedEvents.map((envelope) => envelope.payload),
         [{ kind: 'k', message: 'm' }],
       )
       assert.isTrue(
-        whole.every((envelope) => envelope.seq > 0 && envelope.id !== '' && envelope.ts !== ''),
+        wholeEvents.every(
+          (envelope) => envelope.seq > 0 && envelope.id !== '' && envelope.ts !== '',
+        ),
       )
     }),
   )
@@ -10444,7 +10987,7 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { IDLE, withEnv } from '../process/supervisor-fixtures.js'
 import { linesOf, nodeExec, resolved } from './plugin-call-fixtures.js'
-import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
+import { hostOver, loadedHost, probe, startHost } from './plugin-fixtures.js'
 import type { PluginHost } from './plugin-host.js'
 
 const spawner = probe('spawner')
@@ -10501,6 +11044,19 @@ it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
       }),
     )
 
+    suite.effect('sets no timer for a timeout that is not positive', () =>
+      Effect.gen(function* ignoresNonPositiveTimeout() {
+        const script = 'setTimeout(() => process.exit(0), 50)'
+        const zero = yield* spawn(script, { timeoutMs: 0 })
+        const negative = yield* spawn(script, { timeoutMs: -1 })
+        const exits = [yield* resolved(zero.exited), yield* resolved(negative.exited)]
+        assert.deepStrictEqual(exits, [
+          { code: 0, signal: null },
+          { code: 0, signal: null },
+        ])
+      }),
+    )
+
     suite.effect('leaves a command alone that ends before its timeout', () =>
       Effect.gen(function* leavesQuickCommand() {
         const handle = yield* spawn('process.exit(0)', { timeoutMs: 60_000 })
@@ -10543,6 +11099,20 @@ it.layer(hostOver({ extraPlugins: [spawner.plugin] }), live)(
       }),
     )
   },
+)
+
+const orphan = probe('orphan')
+
+it.live(
+  'ends a command of a plugin when the host shuts down, though the plugin gave no signal',
+  () =>
+    Effect.gen(function* endsWithHost() {
+      const { host, stop } = yield* startHost({ extraPlugins: [orphan.plugin] })
+      yield* host.load()
+      const handle = yield* resolved(orphan.context().process.spawn(nodeExec(IDLE)))
+      yield* stop
+      assert.deepStrictEqual(yield* resolved(handle.exited), { code: null, signal: 'SIGINT' })
+    }),
 )
 ```
 `packages/kernel/src/plugins/plugin-host-config.test.ts`:
@@ -11338,12 +11908,12 @@ import { Effect, type Scope } from 'effect'
 import { vi } from 'vitest'
 import { configureLogging, resetLogging } from '../logging/logging.js'
 
-// LogTape is global: the warnings of the test are collected until its scope closes, and kept off the console
+// LogTape is global: the warnings of the test are collected until its scope closes, and kept off stderr, where the console sink writes
 export const warnings: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = Effect.map(
   Effect.acquireRelease(
     Effect.promise(async () => {
       const records: LogRecord[] = []
-      const spy = vi.spyOn(globalThis.console, 'warn').mockReturnValue()
+      const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
       await configureLogging({
         level: 'warn',
         json: true,
@@ -11508,17 +12078,23 @@ export class HookChain<Input, Output> {
     return this.attempt(entry, current, (value) => this.from(index + 1, value, terminal))
   }
 
+  // A failure that came from further down the chain is not the hook's own, so it is passed on and never reported as one
   private attempt(
     entry: Entry<Input, Output>,
     current: Input,
     rest: Rest<Input, Output>,
   ): Effect.Effect<Output> {
     const passedOn: Promise<Output>[] = []
+    const downstreamFailed = { value: false }
     const next = async (value: Input): Promise<Output> => {
       const downstream = Effect.runPromise(rest(value))
       passedOn.push(downstream)
-      const result = await downstream
-      return result
+      try {
+        return await downstream
+      } catch (error) {
+        downstreamFailed.value = true
+        throw error
+      }
     }
     const call = Effect.tryPromise({
       try: async () => {
@@ -11529,7 +12105,9 @@ export class HookChain<Input, Output> {
     })
     return Effect.matchEffect(call, {
       onFailure: (failure) => {
-        this.report(entry, failure)
+        if (!downstreamFailed.value) {
+          this.report(entry, failure)
+        }
         return resumed(passedOn.at(-1), () => rest(current))
       },
       onSuccess: (result) => Effect.succeed(result),
@@ -11598,10 +12176,15 @@ export class PortRegistry {
     return this.runtimes.get(id)
   }
 
+  // A port another plugin holds, or one the registration offers twice, cannot be taken
   private heldPorts(registration: PluginRegistration): readonly string[] {
-    return identified(registration).flatMap((port) => {
+    const ports = identified(registration)
+    return ports.flatMap((port, index) => {
       const owner = this.owners.get(port)
-      return owner === undefined ? [] : [`${port} is already provided by plugin ${owner}`]
+      if (owner !== undefined) {
+        return [`${port} is already provided by plugin ${owner}`]
+      }
+      return ports.indexOf(port) === index ? [] : [`${port} is offered twice by one registration`]
     })
   }
 
@@ -11624,6 +12207,8 @@ import type { Plugin, PluginRegistration } from '@bytebureau/plugin-api'
 import { HOST_API_VERSION } from './bundled.js'
 import { createPluginContext, type ContextDeps } from './plugin-context.js'
 import { satisfiesMajor } from './semver-major.js'
+
+export { identityOf, shapeProblem, type Identity } from './plugin-shape.js'
 
 type Path = readonly (PropertyKey | { readonly key: PropertyKey })[] | undefined
 
@@ -11685,7 +12270,7 @@ import { PluginError } from '../errors.js'
 import { kernelLogger } from '../logging/logging.js'
 import { HookBus } from './hooks.js'
 import type { ContextDeps } from './plugin-context.js'
-import { setUpPlugin } from './plugin-setup.js'
+import { identityOf, setUpPlugin, shapeProblem, type Identity } from './plugin-setup.js'
 import { PortRegistry, portsOf } from './port-registry.js'
 import { reasonOf } from './reason.js'
 
@@ -11739,28 +12324,37 @@ export class PluginLoader {
     return Effect.result(this.admit(plugin)).pipe(
       Effect.flatMap((outcome) =>
         Result.isFailure(outcome)
-          ? this.refuse(plugin, outcome.failure)
+          ? this.refuse(identityOf(plugin), outcome.failure)
           : this.accept(plugin, outcome.success),
       ),
     )
   }
 
+  // Nothing is read of the plugin until the admission runs, so a plugin of any shape is refused and never kills the load
   private admit(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
-    const { name } = plugin.manifest
-    if (this.loaded.some((entry) => entry.name === name)) {
-      const reason = `a plugin named ${name} is already loaded`
-      return Effect.fail(new PluginError({ plugin: name, reason }))
-    }
-    return this.setUp(plugin).pipe(
-      Effect.flatMap((registration) => this.register(plugin, registration)),
-    )
+    return Effect.suspend(() => {
+      const { name } = identityOf(plugin)
+      const problem = shapeProblem(plugin)
+      if (problem !== undefined) {
+        return Effect.fail(new PluginError({ plugin: name, reason: problem }))
+      }
+      if (this.loaded.some((entry) => entry.name === name)) {
+        const reason = `a plugin named ${name} is already loaded`
+        return Effect.fail(new PluginError({ plugin: name, reason }))
+      }
+      return this.setUp(plugin).pipe(
+        Effect.flatMap((registration) => this.register(plugin, registration)),
+      )
+    })
   }
 
+  // The configuration of the plugin is its own entry, never an inherited property such as constructor
   private setUp(plugin: Plugin): Effect.Effect<PluginRegistration, PluginError> {
     const { name } = plugin.manifest
+    const config = Object.hasOwn(this.configs, name) ? this.configs[name] : undefined
     return Effect.tryPromise({
       try: async () => {
-        const registration = await setUpPlugin(plugin, this.configs[name], this.deps)
+        const registration = await setUpPlugin(plugin, config, this.deps)
         return registration
       },
       catch: (failure) => new PluginError({ plugin: name, reason: reasonOf(failure) }),
@@ -11790,8 +12384,7 @@ export class PluginLoader {
     return this.announce({ type: 'plugin.loaded', payload: { name, version, ports } })
   }
 
-  private refuse(plugin: Plugin, failure: PluginError): Effect.Effect<void> {
-    const { name, version } = plugin.manifest
+  private refuse({ name, version }: Identity, failure: PluginError): Effect.Effect<void> {
     const { reason } = failure
     this.statuses.push({ name, version, state: 'failed', reason, ports: [] })
     this.logger.warn('plugin failed', { plugin: name, reason })
@@ -11866,6 +12459,7 @@ import type {
 } from '@bytebureau/plugin-api'
 import { Effect, Exit, Scope, Stream } from 'effect'
 import type { SqlClient } from 'effect/sql'
+import { toStoreError, type StoreError } from '../errors.js'
 import type { EventLogShape } from '../events/event-log.js'
 import { kernelLogger } from '../logging/logging.js'
 import type { ManagedProcess, SpawnSpec, Supervisor } from '../process/supervisor.js'
@@ -11893,44 +12487,103 @@ const namespaced = (secrets: SecretStore, plugin: string): SecretStore => ({
   },
 })
 
-const eventsOf = (log: EventLogShape): PluginEvents => ({
+// The seq of the newest durable event, 0 when there is none
+const latestSeq = (sql: SqlClient.SqlClient): Effect.Effect<number, StoreError> =>
+  sql<{ readonly seq: number | null }>`SELECT MAX(seq) AS seq FROM events`.pipe(
+    Effect.map(([row]) => (row === undefined ? null : row.seq) ?? 0),
+    Effect.mapError(toStoreError),
+  )
+
+// A plugin hears what happens from the moment it subscribes: the filter of the plugin API has no since, so nothing is replayed
+const eventsOf = (log: EventLogShape, sql: SqlClient.SqlClient): PluginEvents => ({
   publish: async (event) => {
     await Effect.runPromise(log.publish(event))
   },
-  subscribe: (filter) =>
-    Stream.toAsyncIterable(log.subscribe({ types: filter.types, sessionId: filter.sessionId })),
+  subscribe: (filter) => {
+    const live = Effect.map(latestSeq(sql), (since) =>
+      log.subscribe({ types: filter.types, sessionId: filter.sessionId, since }),
+    )
+    return Stream.toAsyncIterable(Stream.unwrap(live))
+  },
 })
+
+// A failure of the store of a plugin names the plugin and the key
+const keyed = async <Value>(
+  where: { readonly plugin: string; readonly key: string },
+  what: string,
+  work: () => Promise<Value>,
+): Promise<Value> => {
+  try {
+    return await work()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`plugin ${where.plugin} could not ${what} ${where.key}: ${reason}`, {
+      cause: error,
+    })
+  }
+}
+
+// Only what JSON can hold is stored: undefined, a function or a symbol would be lost, a bigint or a cycle cannot be written
+const jsonOf = (plugin: string, key: string, value: unknown): string => {
+  try {
+    const json: unknown = JSON.stringify(value)
+    if (typeof json === 'string') {
+      return json
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new TypeError(`plugin ${plugin} cannot store ${key}: ${reason}`, { cause: error })
+  }
+  throw new TypeError(`plugin ${plugin} cannot store ${key}: a ${typeof value} is not JSON`)
+}
 
 const kvOf = (sql: SqlClient.SqlClient, plugin: string): PluginKv => ({
   get: async (key) => {
-    const rows = await Effect.runPromise(
-      sql<{
-        readonly value_json: string
-      }>`SELECT value_json FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
-    )
+    const rows = await keyed({ plugin, key }, 'read', async () => {
+      const read = await Effect.runPromise(
+        sql<{
+          readonly value_json: string
+        }>`SELECT value_json FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
+      )
+      return read
+    })
     const [row] = rows
-    const value: unknown = row === undefined ? undefined : JSON.parse(row.value_json)
+    const value: unknown =
+      row === undefined
+        ? undefined
+        : await keyed({ plugin, key }, 'decode', async () => {
+            const parsed: unknown = await Promise.resolve(JSON.parse(row.value_json))
+            return parsed
+          })
     return value
   },
   set: async (key, value) => {
-    await Effect.runPromise(
-      sql`INSERT INTO plugin_kv (plugin_id, key, value_json) VALUES (${plugin}, ${key}, ${JSON.stringify(value)}) ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json`,
-    )
+    const json = jsonOf(plugin, key, value)
+    await keyed({ plugin, key }, 'store', async () => {
+      await Effect.runPromise(
+        sql`INSERT INTO plugin_kv (plugin_id, key, value_json) VALUES (${plugin}, ${key}, ${json}) ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json`,
+      )
+    })
   },
   delete: async (key) => {
-    await Effect.runPromise(sql`DELETE FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`)
+    await keyed({ plugin, key }, 'delete', async () => {
+      await Effect.runPromise(
+        sql`DELETE FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
+      )
+    })
   },
 })
 
 // A plugin's own env is what it declared, so it passes the allowlist by name
-const specOf = (spec: Exec): SpawnSpec => ({
+// The process ends when the plugin aborts its signal or the host aborts its own, so no plugin process outlives the host
+const specOf = (spec: Exec, hostSignal: AbortSignal): SpawnSpec => ({
   kind: 'helper',
   command: spec.command,
   args: spec.args,
   cwd: spec.cwd,
   env: spec.env ?? {},
   passEnv: Object.keys(spec.env ?? {}),
-  signal: spec.signal,
+  signal: spec.signal === undefined ? hostSignal : AbortSignal.any([spec.signal, hostSignal]),
 })
 
 const handleOf = (managed: ManagedProcess): ExecHandle => ({
@@ -11943,21 +12596,28 @@ const handleOf = (managed: ManagedProcess): ExecHandle => ({
   },
 })
 
+interface SpawnDeps {
+  readonly supervisor: Supervisor['Service']
+  readonly signal: AbortSignal
+}
+
 // The process lives in a scope of its own that closes once it has exited; the timeout is a fiber of that scope
-const spawnHandle = (supervisor: Supervisor['Service'], spec: Exec): Effect.Effect<ExecHandle> =>
+// A timeout that is not positive sets no timer
+const spawnHandle = ({ supervisor, signal }: SpawnDeps, spec: Exec): Effect.Effect<ExecHandle> =>
   Effect.gen(function* spawnsHandle() {
     const scope = yield* Scope.make()
-    const managed = yield* Effect.provideService(supervisor.spawn(specOf(spec)), Scope.Scope, scope)
+    const spawning = supervisor.spawn(specOf(spec, signal))
+    const managed = yield* Effect.provideService(spawning, Scope.Scope, scope)
     yield* Effect.forkDetach(Effect.andThen(managed.exit, Scope.close(scope, Exit.void)))
-    if (spec.timeoutMs !== undefined) {
+    if (spec.timeoutMs !== undefined && spec.timeoutMs > 0) {
       yield* Effect.forkIn(Effect.andThen(Effect.sleep(spec.timeoutMs), managed.kill()), scope)
     }
     return handleOf(managed)
   })
 
-const spawnerOf = (supervisor: Supervisor['Service']): ProcessSpawner => ({
+const spawnerOf = (deps: SpawnDeps): ProcessSpawner => ({
   spawn: async (spec) => {
-    const handle = await Effect.runPromise(spawnHandle(supervisor, spec))
+    const handle = await Effect.runPromise(spawnHandle(deps, spec))
     return handle
   },
 })
@@ -11971,10 +12631,10 @@ export function createPluginContext(
     config,
     project: null,
     logger: kernelLogger(['bb', 'plugin', name]),
-    events: eventsOf(deps.log),
+    events: eventsOf(deps.log, deps.sql),
     secrets: namespaced(deps.secrets, name),
     kv: kvOf(deps.sql, name),
-    process: spawnerOf(deps.supervisor),
+    process: spawnerOf(deps),
     http: fetch,
     signal: deps.signal,
   }
@@ -13619,7 +14279,7 @@ it.layer(ForgetfulLayer)('AskService with a log that fails', (suite) => {
 `packages/kernel/src/asks/ask-service-open-failure.test.ts`:
 ```ts
 import { assert, it } from '@effect/vitest'
-import { Effect, Fiber, Latch, Layer } from 'effect'
+import { Effect, Exit, Fiber, Latch, Layer } from 'effect'
 import { TestClock } from 'effect/testing'
 import { StoreTest } from '../store/store-test.js'
 import { request } from './ask-fixtures.js'
@@ -13627,6 +14287,7 @@ import { AskService, AskServiceLive, type AskServiceShape } from './ask-service.
 import {
   askIdsOf,
   codeOf,
+  dyingLog,
   eventsOf,
   flush,
   holdingLog,
@@ -13666,6 +14327,32 @@ it.layer(DeafLayer)('AskService with a log that cannot announce a request', (sui
       const error = yield* Effect.flip(asks.await(askId))
       assert.strictEqual(codeOf(error), 'not_pending')
       assert.deepStrictEqual(yield* eventsOf('open-fail-2'), [])
+    }),
+  )
+})
+
+// An event log that dies while it announces a request
+const BrokenLayer = AskServiceLive.pipe(
+  Layer.provideMerge(dyingLog(['ask.requested'])),
+  Layer.provideMerge(StoreTest),
+)
+
+it.layer(BrokenLayer)('AskService with a log that dies announcing a request', (suite) => {
+  suite.effect('passes the defect on and leaves no pending ask, parked waiter or armed timer', () =>
+    Effect.gen(function* cleansUpAfterDefect() {
+      yield* seedSession('open-defect')
+      const asks = yield* AskService
+      const opened = yield* Effect.exit(asks.open(request('open-defect', autonomous)))
+      const [askId = ''] = yield* askIdsOf('open-defect')
+      const waited = yield* Effect.flip(asks.await(askId))
+      yield* TestClock.adjust('30 minutes')
+      yield* flush
+      assert.isTrue(Exit.hasDies(opened))
+      assert.deepStrictEqual(
+        [codeOf(waited), (yield* rowOf(askId)).status],
+        ['not_pending', 'cancelled'],
+      )
+      assert.deepStrictEqual(yield* eventsOf('open-defect'), [])
     }),
   )
 })
@@ -13923,24 +14610,11 @@ export const askOf = Schema.decodeUnknownSync(Ask)
 `packages/kernel/src/asks/ask-log-fixtures.ts`:
 ```ts
 import type { LogRecord } from '@logtape/logtape'
-import { Effect, type Scope } from 'effect'
-import { vi } from 'vitest'
+import type { Effect, Scope } from 'effect'
 import { warnings } from '../plugins/log-fixtures.js'
 
-// The warnings fixture keeps console.warn quiet; an error record would reach console.error
-const quietErrors: Effect.Effect<void, never, Scope.Scope> = Effect.acquireRelease(
-  Effect.sync(() => vi.spyOn(globalThis.console, 'error').mockReturnValue()),
-  (spy) =>
-    Effect.sync(() => {
-      spy.mockRestore()
-    }),
-).pipe(Effect.asVoid)
-
-// Everything the asks log, errors included, until the scope of the test closes
-export const logged: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = Effect.andThen(
-  quietErrors,
-  warnings,
-)
+// Everything the asks log, errors included, until the scope of the test closes; the fixture keeps it off stderr
+export const logged: Effect.Effect<readonly LogRecord[], never, Scope.Scope> = warnings
 ```
 `packages/kernel/src/asks/ask-open-fixtures.ts`:
 ```ts
@@ -14007,6 +14681,22 @@ export const refusingLog = (
           types.includes(event.type)
             ? Effect.fail(new StoreError({ cause: 'the log is full' }))
             : log.publish(event),
+      })
+    }),
+  ).pipe(Layer.provide(EventLogLive))
+
+// The real event log, except that recording the events of these types dies, as a defect of the log would
+export const dyingLog = (
+  types: readonly string[],
+): Layer.Layer<EventLog, never, SqlClient.SqlClient> =>
+  Layer.effect(
+    EventLog,
+    Effect.gen(function* makesDyingLog() {
+      const log = yield* EventLog
+      return EventLog.of({
+        ...log,
+        publish: (event) =>
+          types.includes(event.type) ? Effect.die(new Error('the log broke')) : log.publish(event),
       })
     }),
   ).pipe(Layer.provide(EventLogLive))
@@ -14173,6 +14863,7 @@ export const flush: Effect.Effect<void> = Effect.forEach(
 ```ts
 import path from 'node:path'
 import type { PermissionMode } from '@bytebureau/protocol'
+import { isReadOnly, isUnder, placesOf, removesOutside, type Place } from './policy-command.js'
 
 const { posix } = path
 
@@ -14190,10 +14881,11 @@ export interface PermissionRecommendation {
 interface Facts {
   readonly name: string
   readonly command: string
+  // What the command names, resolved against the workspace
+  readonly places: readonly Place[]
   // The file as the tool names it, and the file it lands on once `.` and `..` are resolved
   readonly filePath: string
   readonly target: string
-  readonly workspacePath: string
   // The workspace when it is an absolute path, else empty: nothing is inside a workspace that is not one
   readonly root: string
   readonly mode: PermissionMode
@@ -14206,15 +14898,9 @@ interface Rule {
 }
 
 const FORCE_PUSH = /\bgit push\b.*(?:--force|-f\b|\+)/u
-const RECURSIVE_REMOVE = /\brm\s+-[a-z]*r[a-z]*f?\b/u
-// A listed command named in full: its word ends at a space or at the end of the command; find is not listed, its -delete and -exec remove and run
-const READ_ONLY =
-  /^(?:git (?:status|log|diff|show|branch|rev-parse)|ls|cat|head|tail|rg|grep|wc|pwd|echo)(?:[ \t]|$)/u
-// What makes a command more than one simple command, or more than a read: a pipe, a list, a background job, a redirection, a substitution (parentheses cover $(), <() and zsh =()) or a line break
-const SHELL_SYNTAX = /[|;&<>`(\n\r]/u
-// A .env file or one of its .env.* variants, a certificate, a private key, a credentials file, anything under .ssh
+// A .env file or one of its .env.* variants, a certificate, a private key, a credentials file, anything under .ssh, in any case
 const SECRETS =
-  /(?:^|\/)\.env(?:\.|$)|\.pem$|(?:^|\/)(?:id_(?:rsa|ed25519)|\.npmrc|\.netrc)$|(?:^|\/)\.ssh\//u
+  /(?:^|\/)\.env(?:\.|$)|\.pem$|(?:^|\/)(?:id_(?:rsa|ed25519)|\.npmrc|\.netrc)$|(?:^|\/)\.ssh\/|(?:^|\/)\.aws\/credentials$/iu
 const NETWORK_TOOLS = new Set(['WebFetch', 'WebSearch', 'curl', 'wget'])
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -14225,20 +14911,15 @@ const field = (input: unknown, key: string): string => {
   return typeof value === 'string' ? value : ''
 }
 
-// Read-only is a property of the whole command, not of its first word
-const isReadOnly = (command: string): boolean =>
-  READ_ONLY.test(command) && !SHELL_SYNTAX.test(command)
-
-// Strictly under the root: neither the root itself nor a path that climbs out of it
-const isUnder = (root: string, target: string): boolean => {
-  const relation = posix.relative(root, target)
-  return relation !== '' && relation !== '..' && !relation.startsWith('../')
-}
-
 // The check is lexical: a symlink inside the workspace that points out of it cannot be told from a plain path, only the file system knows
 // With no absolute workspace nothing is inside it, whatever the path looks like
 const inWorkspace = ({ root, target }: Facts): boolean =>
   root !== '' && target !== '' && isUnder(root, target)
+
+const namesSecret = ({ filePath, target, places }: Facts): boolean =>
+  SECRETS.test(filePath) ||
+  SECRETS.test(target) ||
+  places.some((place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''))
 
 // Rules are evaluated top-down and the first match decides, so the deny rules come first
 const RULES: readonly Rule[] = [
@@ -14246,21 +14927,19 @@ const RULES: readonly Rule[] = [
   {
     id: 'rm-outside-workspace',
     verdict: 'deny',
-    // Without a workspace every recursive removal is outside it
-    applies: ({ command, workspacePath }) =>
-      RECURSIVE_REMOVE.test(command) && (workspacePath === '' || !command.includes(workspacePath)),
+    applies: ({ command, root }) => removesOutside(command, root),
   },
-  {
-    id: 'secrets-path',
-    verdict: 'deny',
-    applies: ({ filePath, target }) => SECRETS.test(filePath) || SECRETS.test(target),
-  },
+  { id: 'secrets-path', verdict: 'deny', applies: namesSecret },
   {
     id: 'network-in-supervised',
     verdict: 'deny',
     applies: ({ mode, name }) => mode === 'supervised' && NETWORK_TOOLS.has(name),
   },
-  { id: 'read-only-command', verdict: 'allow', applies: ({ command }) => isReadOnly(command) },
+  {
+    id: 'read-only-command',
+    verdict: 'allow',
+    applies: ({ command, root }) => command !== '' && isReadOnly(command, root),
+  },
   {
     id: 'in-workspace-read',
     verdict: 'allow',
@@ -14272,24 +14951,33 @@ const RULES: readonly Rule[] = [
 export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
 
 // A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
-const resolveTarget = (filePath: string, workspacePath: string): string => {
+const resolveTarget = (filePath: string, root: string): string => {
   if (filePath === '') {
     return ''
   }
-  return posix.isAbsolute(workspacePath)
-    ? posix.resolve(workspacePath, filePath)
-    : posix.normalize(filePath)
+  return root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
+}
+
+// A glob searches its pattern below its path, so the two together say where it reaches
+const filePathOf = ({ name, input }: ToolCall): string => {
+  const pattern = field(input, 'pattern')
+  if (name === 'Glob' && pattern !== '') {
+    return posix.isAbsolute(pattern) ? pattern : posix.join(field(input, 'path') || '.', pattern)
+  }
+  return field(input, 'file_path') || field(input, 'path')
 }
 
 const factsOf = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): Facts => {
-  const filePath = field(toolCall.input, 'file_path') || field(toolCall.input, 'path')
+  const root = posix.isAbsolute(workspacePath) ? workspacePath : ''
+  const command = field(toolCall.input, 'command')
+  const filePath = filePathOf(toolCall)
   return {
     name: toolCall.name,
-    command: field(toolCall.input, 'command'),
+    command,
+    places: placesOf(command, root),
     filePath,
-    target: resolveTarget(filePath, workspacePath),
-    workspacePath,
-    root: posix.isAbsolute(workspacePath) ? workspacePath : '',
+    target: resolveTarget(filePath, root),
+    root,
     mode,
   }
 }
@@ -14626,7 +15314,7 @@ export const announceCancel = (
 ```
 `packages/kernel/src/asks/ask-settle.ts`:
 ```ts
-import type { Ask, AskRecord } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, AskRecord } from '@bytebureau/protocol'
 import { Effect, Exit } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { AskError, type StoreError } from '../errors.js'
@@ -14687,31 +15375,41 @@ export const expire = (deps: AskDeps, ask: Ask): Effect.Effect<void, StoreError>
   )
 
 // An ask that cannot be answered is told apart: one that never existed, or one that is not pending any more
-const refusal = (
-  sql: SqlClient.SqlClient,
-  askId: string,
-): Effect.Effect<never, AskError | StoreError> =>
-  loadAsk(sql, askId).pipe(
-    Effect.flatMap((record) =>
-      Effect.fail(
-        record === undefined
-          ? new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
-          : new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` }),
-      ),
-    ),
-  )
+const refusalOf = (askId: string, record: AskRecord | undefined): AskError =>
+  record === undefined
+    ? new AskError({ code: 'not_found', reason: `ask ${askId} does not exist` })
+    : new AskError({ code: 'not_pending', reason: `ask ${askId} is ${record.status}` })
 
+// An answer picks options the ask offers, or words of its own where a question allows them
+const invalidity = (ask: Ask, answer: AskAnswer): string | undefined => {
+  if (answer.selected === 'other') {
+    const open = ask.questions.some((question) => question.allowOther)
+    return open ? undefined : `ask ${ask.id} takes no answer of its own`
+  }
+  const offered = new Set(
+    ask.questions.flatMap((question) => question.options.map((option) => option.id)),
+  )
+  const unknown = answer.selected.filter((id) => !offered.has(id))
+  return unknown.length === 0 ? undefined : `ask ${ask.id} has no option ${unknown.join(', ')}`
+}
+
+// The ask is read first, so a refusal or an answer that does not fit changes nothing; the claim still decides a race
 export const answerAsk = (
   deps: AskDeps,
   askId: string,
   settlement: Settlement,
 ): Effect.Effect<AskRecord, AskError | StoreError> =>
   Effect.gen(function* answersAsk() {
-    const record = yield* settle(deps, askId, settlement)
-    if (record === undefined) {
-      return yield* refusal(deps.sql, askId)
+    const current = yield* loadAsk(deps.sql, askId)
+    if (current === undefined || current.status !== 'pending') {
+      return yield* refusalOf(askId, current)
     }
-    return record
+    const invalid = invalidity(current, settlement.answer)
+    if (invalid !== undefined) {
+      return yield* new AskError({ code: 'invalid_answer', reason: invalid })
+    }
+    const record = yield* settle(deps, askId, settlement)
+    return record ?? (yield* refusalOf(askId, yield* loadAsk(deps.sql, askId)))
   })
 
 // Cancelling an ask that is not pending does nothing; a waiter fails with the cancellation, even when it cannot be announced
@@ -14784,7 +15482,7 @@ export const closeWaiters = (waiters: Waiters): Effect.Effect<void> => {
 `packages/kernel/src/asks/ask-open.ts`:
 ```ts
 import type { Ask, AskRecord } from '@bytebureau/protocol'
-import { Effect, Fiber, Latch, type Scope } from 'effect'
+import { Cause, Effect, Fiber, Latch, type Scope } from 'effect'
 import type { StoreError } from '../errors.js'
 import { kernelLogger } from '../logging/logging.js'
 import { buildAsk, timeoutMs, unrecommendedQuestions, type OpenAskInput } from './ask-build.js'
@@ -14843,15 +15541,29 @@ export const armTimer = (
   return Effect.map(Effect.forkIn(guarded, deps.scope), (timer) => Fiber.interrupt(timer))
 }
 
-// The timer is armed before the request is announced; when the announcement fails there is no pending ask left behind
-// The ask is cancelled and its timer stopped, best effort, and the caller gets the failure of the announcement
+// Taking back an ask that was never announced is best effort; a failure of it is told, the caller still gets the first one
+const withdraw = (deps: OpenDeps, ask: Ask, disarm: Effect.Effect<void>): Effect.Effect<void> =>
+  Effect.andThen(disarm, withdrawAsk(deps, ask.id)).pipe(
+    Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        logger.error('an ask that was not announced could not be withdrawn', {
+          askId: ask.id,
+          sessionId: ask.sessionId,
+          cause: Cause.pretty(cause),
+        })
+      }),
+    ),
+  )
+
+// The timer is armed before the request is announced; when the announcement fails or dies there is no pending ask left behind
+// The ask is cancelled and its timer stopped, and the caller gets the failure, or the defect, of the announcement
 export const announce = (
   deps: OpenDeps,
   ask: Ask,
   disarm: Effect.Effect<void>,
 ): Effect.Effect<void, StoreError> =>
-  announceRequest(deps.log, ask).pipe(
-    Effect.tapError(() => Effect.ignore(Effect.andThen(disarm, withdrawAsk(deps, ask.id)))),
+  Effect.suspend(() => announceRequest(deps.log, ask)).pipe(
+    Effect.onError(() => withdraw(deps, ask, disarm)),
   )
 
 // The waiter is parked before anything is announced, so an answer that comes at once has someone to reach
@@ -14936,7 +15648,7 @@ git commit -m "feat(kernel): broker questions and permissions with recommended o
 ### Task 13: Sessions — state machine, `SessionManager`, `UsageService`, the fake agent provider
 
 **Files:**
-- Create (as shipped — the lint caps split the brief's session manager into cohesive modules under `packages/kernel/src/sessions/`, listed by group; the repository is the source of truth for the ones not embedded below): `state-machine.ts`, `types.ts`, `translate.ts`, `session-manager.ts` (the service and layer); records and decoders `session-records.ts`, `session-shape.ts`; status moves `session-status.ts`; turns and tools `session-turns.ts`, `session-tools.ts`; the ask path `session-ask.ts`; provider connection and pump `session-connect.ts`, `session-provider.ts`, `session-pump.ts`, `session-agent.ts`, `live-sessions.ts`, `session-live.ts`; event handling `session-apply-event.ts`, `session-event-handlers.ts`, `session-events.ts`, `session-announce.ts`; lifecycle `session-create.ts`, `session-new.ts`, `session-project.ts`, `session-prompt.ts`, `session-send.ts`, `session-end.ts`, `session-interrupt.ts`, `employee-of.ts`; composition `session-deps.ts`, `session-collect.ts`, `session-logger.ts`; test support `session-layer-fixtures.ts` (the session test layer over Task 14's `KernelTest`, with the `SessionServices` type) and `session-helper-fixtures.ts`; `packages/kernel/src/usage/usage-service.ts`; the fake provider `packages/kernel/src/testing/{fake-agent-provider,fake-agent-session,fake-agent-plugin,fake-ask,event-queue,scripted-provider,repo-config}.ts`; fixtures `session-*-fixtures.ts`; tests `state-machine`, `translate`, `employee-of`, `session-records`, `session-turns`, `session-events`, `session-create`, `session-lifecycle`, `session-manager`, `session-provider`, `session-agent-asks`, `session-agent-gone`, `session-failures`, `session-concurrency`, `session-gate`, `session-timeouts`, `session-start-timeout`, `session-reporting`, `session-worktree`, `live-sessions`, `fake-agent-provider`, `usage-service`
+- Create (as shipped — the lint caps split the brief's session manager into cohesive modules under `packages/kernel/src/sessions/`, listed by group; the repository is the source of truth for the ones not embedded below): `state-machine.ts`, `types.ts`, `translate.ts`, `session-manager.ts` (the service and layer); records and decoders `session-records.ts`, `session-shape.ts`; status moves `session-status.ts`; turns and tools `session-turns.ts`, `session-tools.ts`; the ask path `session-ask.ts`; provider connection and pump `session-connect.ts`, `session-start.ts`, `session-provider.ts`, `session-pump.ts`, `session-agent.ts`, `live-sessions.ts`, `session-live.ts`; event handling `session-apply-event.ts`, `session-event-handlers.ts`, `session-events.ts`, `session-announce.ts`; lifecycle `session-create.ts`, `session-new.ts`, `session-project.ts`, `session-prompt.ts`, `session-send.ts`, `session-end.ts`, `session-interrupt.ts`, `employee-of.ts`; composition `session-deps.ts`, `session-collect.ts`, `session-logger.ts`; test support `session-layer-fixtures.ts` (the session test layer over Task 14's `KernelTest`, with the `SessionServices` type) and `session-helper-fixtures.ts`; `packages/kernel/src/usage/usage-service.ts`; the fake provider `packages/kernel/src/testing/{fake-agent-provider,fake-agent-session,fake-agent-plugin,fake-ask,event-queue,scripted-provider,repo-config}.ts`; fixtures `session-*-fixtures.ts`; tests `state-machine`, `translate`, `employee-of`, `session-records`, `session-turns`, `session-events`, `session-create`, `session-lifecycle`, `session-manager`, `session-provider`, `session-agent-asks`, `session-agent-gone`, `session-failures`, `session-concurrency`, `session-gate`, `session-timeouts`, `session-start-timeout`, `session-reporting`, `session-worktree`, `live-sessions`, `fake-agent-provider`, `usage-service`
 - Modify: `packages/kernel/src/plugins/bundled.ts` (`BUNDLED_PLUGINS = [localWorkspacePlugin, fakeAgentPlugin]`), `packages/kernel/src/index.ts`, `packages/kernel/package.json` (devDependency `fast-check` 4.10.2)
 
 **Interfaces:**
@@ -15013,6 +15725,8 @@ const EDGES: readonly Edge[] = [
   ['waiting_for_human', 'stop', 'stopped'],
   ['paused_usage_limit', 'stop', 'stopped'],
   ['provisioning', 'stop', 'stopped'],
+  ['created', 'stop', 'stopped'],
+  ['created', 'crash', 'errored'],
   ['running', 'crash', 'errored'],
   ['waiting_for_human', 'crash', 'errored'],
   ['provisioning', 'crash', 'errored'],
@@ -15204,8 +15918,8 @@ import { SessionError } from '../errors.js'
 import { SessionManager } from './session-manager.js'
 import { answerPending, collectUntilCompleted } from './session-ask-fixtures.js'
 import { registerRepo, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { helloFileOf, workspaceOf } from './session-helpers.js'
-import { sessionLayer } from './session-layers.js'
+import { helloFileOf, workspaceOf } from './session-helper-fixtures.js'
+import { sessionLayer } from './session-layer-fixtures.js'
 
 const PROMPT = 'Create src/hello.ts exporting hello()\r\nwith čeština and an emoji 🚀'
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
@@ -15373,13 +16087,20 @@ const EDGES: Readonly<
   rate_limit: { running: 'paused_usage_limit' },
   limit_reset: { paused_usage_limit: 'running' },
   stop: {
+    created: 'stopped',
     ready: 'stopped',
     running: 'stopped',
     waiting_for_human: 'stopped',
     paused_usage_limit: 'stopped',
     provisioning: 'stopped',
   },
-  crash: { running: 'errored', waiting_for_human: 'errored', provisioning: 'errored' },
+  // A session can die before it is provisioned, and be ended then
+  crash: {
+    created: 'errored',
+    running: 'errored',
+    waiting_for_human: 'errored',
+    provisioning: 'errored',
+  },
   complete: { ready: 'completed' },
   resume: { stopped: 'ready', errored: 'ready' },
 }
@@ -15761,9 +16482,10 @@ export function translate(
 
 `packages/kernel/src/sessions/session-manager.ts`:
 ```ts
-import { Context, Effect, Layer } from 'effect'
+import { Context, Effect, Layer, type Scope } from 'effect'
+import { LiveSessions } from './live-sessions.js'
 import { collectDeps, type SessionRequirements } from './session-collect.js'
-import type { SessionDeps } from './session-deps.js'
+import type { KernelEnv, SessionDeps } from './session-deps.js'
 import { makeCreate } from './session-create.js'
 import { makeComplete, makeInterrupt, makeResume, makeStop } from './session-end.js'
 import { dispose, releaseFibers } from './session-live.js'
@@ -15778,29 +16500,42 @@ export class SessionManager extends Context.Service<SessionManager, SessionManag
 ) {}
 
 // Releasing the layer lets every provider session go, so no agent outlives the kernel
-// The agents are closed before the pumps are interrupted: the events of an agent end when it closes, and a pump waits for them
+// The agents are closed together, each within its own bound, and before the pumps are interrupted: the events of an agent end when it closes, and a pump waits for them
 const closeAll = (deps: SessionDeps): Effect.Effect<void> =>
-  Effect.forEach(deps.live.all(), (live) => dispose(deps, live), { discard: true }).pipe(
-    Effect.andThen(releaseFibers(deps.scope)),
-  )
+  Effect.forEach(deps.live.all(), (live) => dispose(deps, live), {
+    discard: true,
+    concurrency: 'unbounded',
+  }).pipe(Effect.andThen(releaseFibers(deps.scope)))
 
-const make = Effect.gen(function* makeSessionManager() {
-  const deps = yield* collectDeps
-  yield* Effect.addFinalizer(() => closeAll(deps))
-  return SessionManager.of({
-    create: makeCreate(deps),
-    prompt: makePrompt(deps),
-    interrupt: makeInterrupt(deps),
-    stop: makeStop(deps),
-    complete: makeComplete(deps),
-    resume: makeResume(deps),
-    list: () => listSessions(deps.sql),
-    get: (id) => loadSession(deps.sql, id),
+export interface SessionManagerOptions {
+  // The environment of the kernel, which a session's configuration is read with; empty when absent
+  readonly env?: KernelEnv | undefined
+}
+
+// The record of running sessions starts empty with every layer
+const make = (
+  options: SessionManagerOptions,
+): Effect.Effect<SessionManagerShape, never, SessionRequirements | Scope.Scope> =>
+  Effect.gen(function* makeSessionManager() {
+    const collected = yield* collectDeps
+    const deps: SessionDeps = { ...collected, env: options.env ?? {}, live: new LiveSessions() }
+    yield* Effect.addFinalizer(() => closeAll(deps))
+    return SessionManager.of({
+      create: makeCreate(deps),
+      prompt: makePrompt(deps),
+      interrupt: makeInterrupt(deps),
+      stop: makeStop(deps),
+      complete: makeComplete(deps),
+      resume: makeResume(deps),
+      list: () => listSessions(deps.sql),
+      get: (id) => loadSession(deps.sql, id),
+    })
   })
-})
 
-export const SessionManagerLive: Layer.Layer<SessionManager, never, SessionRequirements> =
-  Layer.effect(SessionManager, make)
+export const SessionManagerLive = (
+  options: SessionManagerOptions = {},
+): Layer.Layer<SessionManager, never, SessionRequirements> =>
+  Layer.effect(SessionManager, make(options))
 ```
 Verified in Effect 4.0.0: `Effect.repeat(effect, { until })`, `Stream.takeUntil`, `Stream.fromAsyncIterable`, `Effect.forkIn`, `Effect.catch`; `Effect.yieldNow` is a value. The shipped tests wait on the event log and on latches instead of polling under the `TestClock`.
 
@@ -15834,10 +16569,10 @@ Semantics (as shipped): `KernelLayer(options)` composes every `KernelServices` m
 import { existsSync } from 'node:fs'
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
-import { QUIET } from './facade-fixtures.js'
+import { QUIET } from './facade/facade-fixtures.js'
 import { createKernelFrom, type Kernel } from './facade.js'
 import { KernelTest } from './kernel-test.js'
-import { helloFileOf } from './sessions/session-helpers.js'
+import { helloFileOf } from './sessions/session-helper-fixtures.js'
 import type { Session } from './sessions/types.js'
 import { createTempRepo, tempDir } from './testing/temp-repo.js'
 
@@ -15907,12 +16642,12 @@ describe(createKernelFrom, () => {
   })
 })
 ```
-`packages/kernel/src/facade-areas.test.ts`:
+`packages/kernel/src/facade/facade-areas.test.ts`:
 ```ts
 import { describe, expect, it } from 'vitest'
-import { AskError, ConfigError, SessionError, WorkspaceError } from './errors.js'
+import { AskError, ConfigError, SessionError, WorkspaceError } from '../errors.js'
 import { openKernel, startFakeSession } from './facade-fixtures.js'
-import { createTempRepo } from './testing/temp-repo.js'
+import { createTempRepo } from '../testing/temp-repo.js'
 
 describe('the projects of the facade', () => {
   it('registers a repository, lists and reads it, and removes it again', async () => {
@@ -16015,14 +16750,14 @@ describe('the failures of the facade', () => {
   })
 })
 ```
-`packages/kernel/src/facade-close.test.ts`:
+`packages/kernel/src/facade/facade-close.test.ts`:
 ```ts
 import type { Plugin } from '@bytebureau/plugin-api'
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { eventsUntil, openKernel } from './facade-fixtures.js'
-import { manifestOf, providerOf } from './plugins/plugin-fixtures.js'
-import { createTempRepo } from './testing/temp-repo.js'
+import { manifestOf, providerOf } from '../plugins/plugin-fixtures.js'
+import { createTempRepo } from '../testing/temp-repo.js'
 
 const failing: Plugin = {
   manifest: manifestOf('failing'),
@@ -16056,8 +16791,8 @@ describe('closing the kernel', () => {
     const kernel = await openKernel()
     await kernel.close()
     await kernel.close()
-    await expect(kernel.projects.list()).rejects.toBeDefined()
-    await expect(kernel.sessions.list()).rejects.toBeDefined()
+    await expect(kernel.projects.list()).rejects.toBeInstanceOf(Error)
+    await expect(kernel.sessions.list()).rejects.toBeInstanceOf(Error)
   })
 })
 
@@ -16085,28 +16820,24 @@ describe('starting the kernel', () => {
   })
 })
 ```
-`packages/kernel/src/facade-logging.test.ts`:
+`packages/kernel/src/facade/facade-logging.test.ts`:
 ```ts
-import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
-import { createKernelFrom, type KernelOptions } from './facade.js'
-import { KernelTest } from './kernel-test.js'
-import { kernelLogger } from './logging/logging.js'
-import { tempDir } from './testing/temp-repo.js'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { createKernelFrom, type KernelOptions } from '../facade.js'
+import { KernelTest } from '../kernel-test.js'
+import { kernelLogger } from '../logging/logging.js'
+import { tempDir } from '../testing/temp-repo.js'
 
 const probe = kernelLogger(['bb', 'probe'])
 
-// The console method, kept from printing for the rest of the test
-function mute(method: 'debug' | 'info'): MockInstance {
-  const spy = vi.spyOn(console, method).mockReturnValue()
+// What the kernel writes to stderr from here on, where every log record goes, kept from printing for the rest of the test
+function stderrLines(): () => readonly string[] {
+  const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
   onTestFinished(() => {
     spy.mockRestore()
   })
-  return spy
+  return () => spy.mock.calls.map((call) => String(call[0]))
 }
-
-// What the console was given, as text
-const linesOf = (spy: MockInstance): readonly string[] =>
-  spy.mock.calls.map((call) => String(call[0]))
 
 // A kernel opened with the logging, which the process is configured with; the console shows what is logged afterwards
 async function openLogging(logging?: KernelOptions['logging']): Promise<void> {
@@ -16120,53 +16851,56 @@ async function openLogging(logging?: KernelOptions['logging']): Promise<void> {
 describe('the logging of the facade', () => {
   it('logs from the level it is given on, as JSON lines when asked to', async () => {
     expect.hasAssertions()
-    const debug = mute('debug')
+    const written = stderrLines()
     await openLogging({ level: 'debug', json: true })
     probe.debug('probe debug')
-    const lines = linesOf(debug)
+    const lines = written().filter((line) => line.includes('probe'))
     expect(lines).toStrictEqual([expect.stringContaining('probe debug')])
     expect(JSON.parse(lines.join(''))).toMatchObject({ level: 'DEBUG', message: 'probe debug' })
   })
 
   it('prints text, not JSON lines, when told not to use them', async () => {
     expect.hasAssertions()
-    const debug = mute('debug')
+    const written = stderrLines()
     await openLogging({ level: 'debug', json: false })
     probe.debug('probe text')
-    const lines = linesOf(debug)
+    const lines = written().filter((line) => line.includes('probe'))
     expect(lines).toStrictEqual([expect.stringContaining('probe text')])
     expect(lines.join('')).not.toMatch(/^\{/u)
   })
 
   it('logs from info on when it is given no logging at all', async () => {
     expect.hasAssertions()
-    const [debug, info] = [mute('debug'), mute('info')]
+    const written = stderrLines()
     await openLogging()
     probe.debug('below info')
     probe.info('at info')
-    expect(linesOf(debug)).toStrictEqual([])
-    expect(linesOf(info)).toStrictEqual([expect.stringContaining('at info')])
+    expect(written().filter((line) => line.includes('info'))).toStrictEqual([
+      expect.stringContaining('at info'),
+    ])
   })
 
   it('debugs the categories it is told to, whatever the level', async () => {
     expect.hasAssertions()
-    const debug = mute('debug')
+    const written = stderrLines()
     await openLogging({ level: 'error', json: true, debug: 'bb.probe' })
     probe.debug('selected')
     kernelLogger(['bb', 'other']).debug('not selected')
-    expect(linesOf(debug)).toStrictEqual([expect.stringContaining('selected')])
+    expect(written().filter((line) => line.includes('selected'))).toStrictEqual([
+      expect.stringContaining('"selected"'),
+    ])
   })
 })
 ```
-`packages/kernel/src/facade-boot.test.ts`:
+`packages/kernel/src/facade/facade-boot.test.ts`:
 ```ts
 import { Effect, Layer } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { QUIET } from './facade-fixtures.js'
-import { createKernelFrom } from './facade.js'
-import { KernelTest } from './kernel-test.js'
-import { PluginHost } from './plugins/plugin-host.js'
-import { tempDir } from './testing/temp-repo.js'
+import { createKernelFrom } from '../facade.js'
+import { KernelTest } from '../kernel-test.js'
+import { PluginHost } from '../plugins/plugin-host.js'
+import { tempDir } from '../testing/temp-repo.js'
 
 // Notes in the journal that its layer was released, which happens when the runtime is disposed
 const releasing = (journal: string[]): Layer.Layer<never> =>
@@ -16180,6 +16914,11 @@ const releasing = (journal: string[]): Layer.Layer<never> =>
 
 // Everything the kernel stands on is up when the layer that dies is built
 const dying = Layer.effectDiscard(Effect.die(new Error('this layer cannot be built')))
+
+// A layer whose release fails, so disposing the runtime rejects as well
+const failingRelease = Layer.effectDiscard(
+  Effect.addFinalizer(() => Effect.die(new Error('this layer cannot be released'))),
+)
 
 // The plugins cannot be loaded, however the kernel was composed
 const failingLoad = Layer.effect(
@@ -16214,6 +16953,17 @@ describe('a kernel that cannot start', () => {
     const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
     await expect(starting).rejects.toThrow('the plugins cannot be loaded')
     expect(journal).toStrictEqual(['released'])
+  })
+
+  it('rejects with the failure of the start even when disposing the runtime fails too', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const layer = failingLoad.pipe(
+      Layer.provideMerge(failingRelease),
+      Layer.provideMerge(KernelTest({ home })),
+    )
+    const starting = createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    await expect(starting).rejects.toThrow('the plugins cannot be loaded')
   })
 
   it('keeps the layers of a kernel that starts until it is closed', async () => {
@@ -16315,15 +17065,15 @@ it.effect('offers the usage service a test swaps in', () =>
   }),
 )
 ```
-`packages/kernel/src/facade-fixtures.ts` (shared fixtures):
+`packages/kernel/src/facade/facade-fixtures.ts` (shared fixtures):
 ```ts
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
-import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
-import type { KernelLayerOptions } from './kernel-live.js'
-import { KernelTest } from './kernel-test.js'
-import type { Session } from './sessions/types.js'
-import { createTempRepo, tempDir } from './testing/temp-repo.js'
+import { createKernelFrom, type Kernel, type KernelOptions } from '../facade.js'
+import type { KernelLayerOptions } from '../kernel-live.js'
+import { KernelTest } from '../kernel-test.js'
+import type { Session } from '../sessions/types.js'
+import { createTempRepo, tempDir } from '../testing/temp-repo.js'
 
 type Extras = Pick<KernelLayerOptions, 'extraPlugins'> & Partial<Pick<KernelOptions, 'env'>>
 
@@ -16366,6 +17116,111 @@ export async function eventsUntil(
   return seen
 }
 ```
+`packages/kernel/src/facade/facade-log-level.test.ts`:
+```ts
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { createKernelFrom, type KernelOptions } from '../facade.js'
+import { KernelTest } from '../kernel-test.js'
+import { kernelLogger } from '../logging/logging.js'
+import { tempDir } from '../testing/temp-repo.js'
+
+const probe = kernelLogger(['bb', 'probe'])
+
+interface Opened {
+  readonly env?: KernelOptions['env']
+  readonly userFile?: unknown
+  readonly level?: string
+}
+
+// Whether a debug record of the probe reaches stderr once a kernel has started with the environment, the user file and the flag
+async function debugReaches({ env = {}, userFile, level }: Opened): Promise<boolean> {
+  const home = tempDir('bb-home-')
+  if (userFile !== undefined) {
+    writeFileSync(path.join(home, 'config.json'), JSON.stringify(userFile))
+  }
+  const written = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+  onTestFinished(() => {
+    written.mockRestore()
+  })
+  const logging = { json: true, ...(level === undefined ? {} : { level }) }
+  const kernel = await createKernelFrom(KernelTest({ home }), { home, env, logging })
+  onTestFinished(async () => {
+    await kernel.close()
+  })
+  probe.debug('probe debug')
+  return written.mock.calls.some((call) => String(call[0]).includes('probe debug'))
+}
+
+describe('the log level of a kernel without a --log-level flag', () => {
+  it('comes from BYTEBUREAU_LOG_LEVEL', async () => {
+    expect.hasAssertions()
+    await expect(debugReaches({ env: { BYTEBUREAU_LOG_LEVEL: 'debug' } })).resolves.toBe(true)
+  })
+
+  it('comes from the logging section of the user file', async () => {
+    expect.hasAssertions()
+    await expect(debugReaches({ userFile: { logging: { level: 'debug' } } })).resolves.toBe(true)
+  })
+
+  it('is info when neither says anything, or the user file cannot be read', async () => {
+    expect.hasAssertions()
+    await expect(debugReaches({})).resolves.toBe(false)
+    await expect(debugReaches({ userFile: { logging: { level: 'loud' } } })).resolves.toBe(false)
+  })
+})
+
+describe('the --log-level flag', () => {
+  it('wins over the environment and the user file', async () => {
+    expect.hasAssertions()
+    const both = {
+      env: { BYTEBUREAU_LOG_LEVEL: 'debug' },
+      userFile: { logging: { level: 'debug' } },
+    }
+    await expect(debugReaches({ ...both, level: 'info' })).resolves.toBe(false)
+  })
+})
+```
+`packages/kernel/src/facade/boot-logging.ts`:
+```ts
+import type { ProjectConfig } from '@bytebureau/protocol'
+import { Effect } from 'effect'
+import { Config, ConfigLive } from '../config/config.js'
+import { configureLogging, parseLogLevel, type KernelLogLevel } from '../logging/logging.js'
+import type { KernelOptions } from './types.js'
+
+const levelOf = ({ logging }: ProjectConfig): KernelLogLevel =>
+  logging === undefined || logging.level === undefined ? 'info' : logging.level
+
+// The level a kernel logs at: the flag when one is given, else the user file and BYTEBUREAU_LOG_LEVEL, else info
+// A configuration that cannot be read does not stop the kernel: the commands that read it report the problem
+export async function bootLevel(options: KernelOptions): Promise<KernelLogLevel> {
+  const { level } = options.logging ?? {}
+  if (level !== undefined) {
+    return parseLogLevel(level)
+  }
+  const configured = Config.use((config) => config.load({ env: options.env })).pipe(
+    Effect.match({
+      onFailure: (): KernelLogLevel => 'info',
+      onSuccess: (resolved) => levelOf(resolved.project),
+    }),
+    Effect.provide(ConfigLive(options.home)),
+  )
+  const resolved = await Effect.runPromise(configured)
+  return resolved
+}
+
+// Records go to stderr, so their format follows stderr: pretty at a terminal, JSON lines otherwise
+export async function configureKernelLogging(options: KernelOptions): Promise<void> {
+  const { json, debug } = options.logging ?? {}
+  await configureLogging({
+    level: await bootLevel(options),
+    json: json ?? !process.stderr.isTTY,
+    debug,
+  })
+}
+```
 
 - [ ] **Step 2: Layers and facade**
 
@@ -16387,7 +17242,10 @@ import type { WorkspaceRuntimes } from './workspace/runtimes.js'
 import { WorkspaceManagerLive, type WorkspaceManager } from './workspace/workspace-manager.js'
 
 export interface KernelLayerOptions
-  extends FoundationOptions, Pick<PluginHostOptions, 'extraPlugins' | 'pluginConfig'> {}
+  extends FoundationOptions, Pick<PluginHostOptions, 'extraPlugins' | 'pluginConfig'> {
+  // The environment of the kernel: a session reads its configuration with it, so BYTEBUREAU_* overrides reach a run
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
+}
 
 export type KernelServices =
   | FoundationServices
@@ -16411,7 +17269,7 @@ export const composeKernel = (
   const registry = Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive).pipe(
     Layer.provideMerge(plugins),
   )
-  return SessionManagerLive.pipe(Layer.provideMerge(registry))
+  return SessionManagerLive({ env: options.env }).pipe(Layer.provideMerge(registry))
 }
 
 // Everything except the store; the caller provides SqlClient (StoreLive in the binary)
@@ -16479,19 +17337,14 @@ import { projectsApi } from './facade/projects.js'
 import { promisedBy, type Runtime, type Services } from './facade/promised.js'
 import { asksApi, sessionsApi, usageApi } from './facade/sessions.js'
 import type { Kernel, KernelOptions } from './facade/types.js'
+import { configureKernelLogging } from './facade/boot-logging.js'
 import { workspacesApi } from './facade/workspaces.js'
-import { configureLogging, parseLogLevel } from './logging/logging.js'
 
 export type { Kernel, KernelOptions } from './facade/types.js'
 
 // The steps that can fail while a kernel starts
 async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {
-  const { level, json, debug } = options.logging ?? {}
-  await configureLogging({
-    level: parseLogLevel(level),
-    json: json ?? !process.stdout.isTTY,
-    debug,
-  })
+  await configureKernelLogging(options)
   const promised = promisedBy(runtime)
   // Captured once, so that an event stream can run outside the runtime
   const services = await runtime.runPromise(Effect.context<Services>())
@@ -16511,8 +17364,11 @@ async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {
   }
 }
 
-// A kernel over a layer that brings its own store, with its plugins loaded
-// One that fails to start is disposed before the failure is passed on, so no handle or fiber stays behind
+/**
+ * A kernel over a layer that brings its own store, with its plugins loaded.
+ * The log level (logging.level, else the user file and BYTEBUREAU_LOG_LEVEL) configures LogTape only: Effect drops its own records below the logLevel the layer was built with, which createKernel sets from the same level.
+ * A kernel that fails to start is disposed before the failure is passed on, so no handle or fiber stays behind, and the failure of the start is what rejects even when disposing fails as well.
+ */
 export async function createKernelFrom(
   layer: Layer.Layer<Services>,
   options: KernelOptions,
@@ -16521,7 +17377,7 @@ export async function createKernelFrom(
   try {
     return await boot(runtime, options)
   } catch (error) {
-    await runtime.dispose()
+    await Promise.allSettled([runtime.dispose()])
     throw error
   }
 }
@@ -16576,6 +17432,10 @@ export interface Kernel {
     readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
   }
   readonly events: {
+    /**
+     * Replays the durable events after filter.since, all of them when since is left out, and then follows them live.
+     * Pass the last seq a consumer has seen as since to resume without a gap or a duplicate.
+     */
     readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope>
     readonly read: (
       filter: EventFilter,
@@ -16611,12 +17471,16 @@ export type Promised = <Id extends Services, Shape, Args extends readonly unknow
   call: (shape: Shape, ...args: Args) => Effect.Effect<Value, unknown>,
 ) => (...args: Args) => Promise<Value>
 
+// A runtime that is disposed rejects with a bare string; a caller always gets an Error
 export const promisedBy =
   (runtime: Runtime): Promised =>
   (service, call) =>
   async (...args) => {
-    const value = await runtime.runPromise(service.use((shape) => call(shape, ...args)))
-    return value
+    try {
+      return await runtime.runPromise(service.use((shape) => call(shape, ...args)))
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(String(error))
+    }
   }
 ```
 `packages/kernel/src/facade/projects.ts`:
@@ -16737,25 +17601,32 @@ Verified in Effect 4.0.0: `Effect.context<R>()`, `Stream.provideContext`, `Manag
 
 `packages/kernel/src/bun.ts`:
 ```ts
-import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { Layer } from 'effect'
+import { bootLevel } from './facade/boot-logging.js'
 import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 import { KernelLayer } from './kernel-live.js'
-import { parseLogLevel } from './logging/logging.js'
+import { effectLevelOf } from './logging/logging.js'
+import { prepareHome, restrictDatabase } from './store/home.js'
 import { StoreLive } from './store/store-live.js'
 
 export { StoreLive } from './store/store-live.js'
 export type { Kernel, KernelOptions } from './facade.js'
 
-// The kernel of the binary: its store is the database under the home of the user
+// The kernel of the binary: its store is the database under the home of the user, which only the user can read
+// The log level is resolved once, so LogTape and Effect's own minimum agree; --debug lowers Effect's minimum to debug
 export async function createKernel(options: KernelOptions): Promise<Kernel> {
-  const dataDir = path.join(options.home, 'data')
-  mkdirSync(dataDir, { recursive: true })
-  const { level } = options.logging ?? {}
-  const layer = KernelLayer({ ...options, logLevel: parseLogLevel(level) })
-  const store = StoreLive(path.join(dataDir, 'bytebureau.db'))
-  const kernel = await createKernelFrom(layer.pipe(Layer.provideMerge(store)), options)
+  const database = path.join(prepareHome(options.home), 'bytebureau.db')
+  const level = await bootLevel(options)
+  const debug = options.logging === undefined ? undefined : options.logging.debug
+  const layer = KernelLayer({ ...options, logLevel: effectLevelOf(level, debug) })
+  const store = StoreLive(database)
+  const logging = { ...options.logging, level }
+  const kernel = await createKernelFrom(layer.pipe(Layer.provideMerge(store)), {
+    ...options,
+    logging,
+  })
+  restrictDatabase(database)
   return kernel
 }
 ```
@@ -16805,9 +17676,75 @@ Semantics (as shipped): `--json` prints NDJSON only (durable events — the stre
 
 `apps/bytebureau/src/context.ts` — extend `globalArgs` with:
 ```ts
-  yes: { type: 'boolean', description: 'Answer every ask with the recommended option', default: false },
-  debug: { type: 'string', description: 'Debug logging; optionally a category list (bb.agent,!bb.store)' },
-  logLevel: { type: 'string', description: 'Log level: debug, info, warn or error' },
+import { isatty } from 'node:tty'
+import { m, setLocale } from '@bytebureau/i18n'
+import { resolveLocale } from './locale.js'
+import { colorEnabled, createOutput, type Output } from './output.js'
+
+export const globalArgs = {
+  lang: { type: 'string', description: 'UI language: en or cs' },
+  json: { type: 'boolean', description: 'Machine-readable JSON output', default: false },
+  color: {
+    type: 'boolean',
+    description: 'Colour output; pass --no-color to disable',
+    default: true,
+  },
+  yes: {
+    type: 'boolean',
+    description: 'Answer every ask that has a recommended option with it',
+    default: false,
+  },
+  debug: {
+    type: 'string',
+    description:
+      'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
+  },
+  'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
+} as const
+
+export interface GlobalArgs {
+  readonly lang?: string | undefined
+  readonly json: boolean
+  readonly color: boolean
+  readonly yes: boolean
+  readonly debug?: string | undefined
+  readonly 'log-level'?: string | undefined
+}
+
+export interface Context {
+  readonly output: Output
+  readonly interactive: boolean
+  readonly logging: {
+    readonly debug: string | undefined
+    readonly level: string | undefined
+  }
+}
+
+export function createContext(
+  args: GlobalArgs,
+  env: Readonly<Record<string, string | undefined>>,
+  stdoutIsTTY: boolean,
+): Context {
+  const { locale, unsupported } = resolveLocale({ flag: args.lang, env })
+  setLocale(locale)
+  const output = createOutput({
+    json: args.json,
+    color: colorEnabled(env, !args.color, stdoutIsTTY),
+  })
+  if (unsupported !== undefined) {
+    output.warn(m.cli_unknown_locale({ locale: unsupported }))
+  }
+  return {
+    output,
+    interactive: stdoutIsTTY && !args.json,
+    logging: { debug: args.debug, level: args['log-level'] },
+  }
+}
+
+// The context of the running process: its environment, and whether its stdout is a terminal
+export function processContext(args: GlobalArgs): Context {
+  return createContext(args, process.env, isatty(process.stdout.fd))
+}
 ```
 and `GlobalArgs` with `readonly yes: boolean; readonly debug?: string | undefined; readonly logLevel?: string | undefined`. `createContext` passes `debug`/`logLevel` through unchanged in a new `logging: { debug, level }` field of `Context`.
 
@@ -16867,19 +17804,24 @@ export async function withKernel<Result>(
 `apps/bytebureau/src/render/transcript.test.ts`:
 ```ts
 import { setLocale } from '@bytebureau/i18n'
-import type { EventEnvelope, KernelEventPayload } from '@bytebureau/protocol'
+import {
+  EventPayloadError,
+  type EventEnvelope,
+  type KernelEventPayload,
+} from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createOutput } from '../output.js'
 import { event } from '../testing/events.js'
 import { completionLine, readOrSkip, summarizeRun, titleOf, transcriptLine } from './transcript.js'
 
 const ESCAPE = '\u001B'
+const TOOL_STARTED = 'tool.started'
 
 const PLAIN = createOutput({ json: false, color: false })
 const COLOURED = createOutput({ json: false, color: true })
 
 function toolStarted(input: unknown): EventEnvelope {
-  return event('tool.started', { id: 't1', name: 'Write', kind: 'builtin', input })
+  return event(TOOL_STARTED, { id: 't1', name: 'Write', kind: 'builtin', input })
 }
 
 describe(transcriptLine, () => {
@@ -17015,20 +17957,32 @@ function malformed(type: string, seq: number): EventEnvelope {
   return { ...event('session.ready', { status: 'ready' }, seq), type }
 }
 
+// A read that fails for a reason of its own, such as a bug of the renderer
+function broken(): string {
+  throw new RangeError('a bug in the renderer')
+}
+
+// A read that finds the payload does not fit, as decodeEventPayload throws it
 function unreadable(): string {
-  throw new Error('bad payload')
+  throw new EventPayloadError(TOOL_STARTED, 'bad payload')
 }
 
 describe(readOrSkip, () => {
   it('hands the result of a read that works on, and warns of nothing', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(readOrSkip(malformed('tool.started', 4), PLAIN, () => 'read')).toBe('read')
+    expect(readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, () => 'read')).toBe('read')
     expect(warned).not.toHaveBeenCalled()
   })
 
-  it('skips an event whose read throws, with one warning that names its type and seq', () => {
+  it('lets a failure that is not about the payload go on, and warns of nothing', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(readOrSkip(malformed('tool.started', 4), PLAIN, unreadable)).toBeUndefined()
+    expect(() => readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, broken)).toThrow(RangeError)
+    expect(warned).not.toHaveBeenCalled()
+  })
+
+  it('skips an event whose payload does not fit, with one warning that names its type and seq', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed(TOOL_STARTED, 4), PLAIN, unreadable)).toBeUndefined()
     expect(warned.mock.calls).toStrictEqual([
       ['Skipped the tool.started event (seq 4): its payload does not fit its type'],
     ])
@@ -17050,7 +18004,7 @@ describe(readOrSkip, () => {
 describe('transcriptLine and summarizeRun with an event that does not fit its type', () => {
   it('prints no line for the event, and warns once', () => {
     const warned = vi.spyOn(console, 'error').mockReturnValue()
-    expect(transcriptLine(malformed('tool.started', 6), PLAIN)).toBeUndefined()
+    expect(transcriptLine(malformed(TOOL_STARTED, 6), PLAIN)).toBeUndefined()
     expect(transcriptLine(malformed('workspace.provisioned', 7), PLAIN)).toBeUndefined()
     expect(warned).toHaveBeenCalledTimes(2)
   })
@@ -17142,6 +18096,7 @@ Run: `bunx vitest run --project bytebureau` → FAIL.
 import { m } from '@bytebureau/i18n'
 import {
   decodeEventPayload,
+  EventPayloadError,
   type EventEnvelope,
   type KernelEventPayload,
 } from '@bytebureau/protocol'
@@ -17192,7 +18147,7 @@ function assistantLine(text: string): string | undefined {
   return text === '' ? undefined : text
 }
 
-// An event whose payload does not fit its type is skipped, with one warning that names it
+// An event whose payload does not fit its type is skipped, with one warning that names it; any other failure is not the event's
 export function readOrSkip<Result>(
   event: EventEnvelope,
   output: Output,
@@ -17200,7 +18155,10 @@ export function readOrSkip<Result>(
 ): Result | undefined {
   try {
     return read()
-  } catch {
+  } catch (error) {
+    if (!(error instanceof EventPayloadError)) {
+      throw error
+    }
     output.warn(m.run_event_skipped({ type: event.type, seq: event.seq }))
     return undefined
   }
@@ -17322,8 +18280,8 @@ function recommendedAnswer(ask: Ask): AskAnswer | undefined {
   return picks.every((pick) => pick !== undefined) ? { selected: picks } : undefined
 }
 
-// An agent often marks the label it recommends itself, in English or in Czech: one marker is enough
-const MARKED = /\((?:recommended|doporučeno)\)\s*$/iu
+// An agent often marks the label it recommends itself, in English or in Czech, in parentheses or brackets, anywhere in the label: one marker is enough
+const MARKED = /[([](?:recommended|doporučeno|doporučený|doporučená)[)\]]/iu
 
 function labelOf(option: AskOption): string {
   const needsMarker = option.recommended && !MARKED.test(option.label)
@@ -17445,27 +18403,17 @@ import {
   type EventEnvelope,
   type PromptInput,
 } from '@bytebureau/protocol'
-import { intro, log, outro } from '@clack/prompts'
 import type { Context } from '../context.js'
 import type { Output } from '../output.js'
 import { promptAsk } from '../render/ask-prompt.js'
-import {
-  completionLine,
-  readOrSkip,
-  summarizeRun,
-  titleOf,
-  transcriptLine,
-} from '../render/transcript.js'
+import { completionLine, readOrSkip, summarizeRun, titleOf } from '../render/transcript.js'
 import { describeError } from '../errors.js'
+import { closeFrame, EXIT_REFUSED, open, refuse, report, show, type Outcome } from './run-output.js'
 
 const EXIT_COMPLETED = 0
 const EXIT_STOPPED = 3
-const EXIT_PROVIDER_ERROR = 4
 
 const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
-
-// A project path that holds no repository to work in, or is a session worktree itself
-const UNUSABLE_PROJECT = new Set(['not_a_repository', 'is_bytebureau_worktree'])
 
 export interface RunOptions {
   readonly prompt: string
@@ -17499,44 +18447,15 @@ interface Run {
   readonly context: Context
 }
 
-interface Outcome {
-  readonly code: number
-  readonly text: string
-}
-
-// Failures that end a run with exit code 4: no repository to work in, a provider that is missing or fails
+// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
 function isRefusal(error: unknown): boolean {
   if (error instanceof WorkspaceError) {
-    return UNUSABLE_PROJECT.has(error.code)
+    return true
   }
   if (error instanceof SessionError) {
     return error.code === 'provider_missing'
   }
   return error instanceof ProviderError
-}
-
-// A terminal gets a frame: the session opens it, and every way out of the run closes it
-function open({ output, interactive }: Context, prompt: string): void {
-  if (interactive) {
-    const title = titleOf(prompt)
-    intro(output.colors.bold(m.run_intro({ title })))
-  }
-}
-
-function closeFrame({ interactive }: Context): void {
-  if (interactive) {
-    outro()
-  }
-}
-
-// A refusal ends the run with exit code 4: its text is the closing line of the frame, or goes to stderr
-function refuse({ output, interactive }: Context, text: string): number {
-  if (interactive) {
-    outro(text)
-  } else {
-    output.warn(text)
-  }
-  return EXIT_PROVIDER_ERROR
 }
 
 // A named provider is checked before anything is registered or created
@@ -17545,23 +18464,6 @@ function unknownProvider(kernel: RunKernel, provider: string | undefined): strin
   return provider === undefined || available.includes(provider)
     ? undefined
     : m.run_provider_missing({ provider, available: available.join(', ') })
-}
-
-// JSON output is the events themselves; text output the lines worth reading, decorated at a terminal
-function show(event: EventEnvelope, { output, interactive }: Context): void {
-  if (output.json) {
-    output.emit(event)
-    return
-  }
-  const line = transcriptLine(event, output)
-  if (line === undefined) {
-    return
-  }
-  if (interactive) {
-    log.message(line)
-  } else {
-    output.print(line)
-  }
 }
 
 // An ask nobody can answer is left to the kernel policy; the person is told the session waits
@@ -17646,7 +18548,7 @@ function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: 
       return { code: EXIT_STOPPED, text: m.run_stopped() }
     }
     case 'session.errored': {
-      return { code: EXIT_PROVIDER_ERROR, text: m.run_errored({ message: reasonOf(last, output) }) }
+      return { code: EXIT_REFUSED, text: m.run_errored({ message: reasonOf(last, output) }) }
     }
     default: {
       return {
@@ -17654,16 +18556,6 @@ function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: 
         text: output.json ? '' : completionLine(summarizeRun(seen, output)),
       }
     }
-  }
-}
-
-function report({ code, text }: Outcome, { output, interactive }: Context): void {
-  if (interactive) {
-    outro(text)
-  } else if (code === EXIT_PROVIDER_ERROR) {
-    output.warn(text)
-  } else {
-    output.print(text)
   }
 }
 
@@ -17708,7 +18600,7 @@ async function runOrRefuse(
   return code
 }
 
-// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project or provider refused
+// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project, worktree or provider refused
 // A failure that has no exit code of its own closes the frame and goes on to the runner
 export async function runSession(
   kernel: RunKernel,
@@ -17729,6 +18621,26 @@ export async function runSession(
 ```
 `apps/bytebureau/src/errors.ts`:
 ```ts
+import {
+  AskError,
+  ConfigError,
+  PluginError,
+  ProviderError,
+  SessionError,
+  StoreError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
+
+const KERNEL_ERRORS = [
+  ConfigError,
+  StoreError,
+  WorkspaceError,
+  ProviderError,
+  AskError,
+  PluginError,
+  SessionError,
+] as const
+
 function field(error: Error, key: string): string | undefined {
   const value: unknown = Reflect.get(error, key)
   return typeof value === 'string' ? value : undefined
@@ -17751,7 +18663,12 @@ function whereOf(error: Error): string | undefined {
   return field(error, 'code') ?? field(error, 'kind')
 }
 
-// The tagged errors of the kernel have an empty message: their name and fields say what went wrong
+// A tagged error of the kernel says what went wrong through its name and fields; its message is only the reason
+// An error with no message at all is told the same way
+function isTyped(error: Error): boolean {
+  return error.message === '' || KERNEL_ERRORS.some((type) => error instanceof type)
+}
+
 function describeTyped(error: Error, describeCause: Describe): string {
   const reason = reasonOf(error, describeCause)
   const head = reason === undefined ? error.name : `${error.name}: ${reason}`
@@ -17765,7 +18682,7 @@ function describeChain(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error)
   }
-  if (error.message === '') {
+  if (isTyped(error)) {
     return describeTyped(error, describeChain)
   }
   if (error.cause === undefined) {
@@ -17781,7 +18698,7 @@ export function describeError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error)
   }
-  return error.message === '' ? describeTyped(error, describeChain) : error.message
+  return isTyped(error) ? describeTyped(error, describeChain) : error.message
 }
 ```
 `apps/bytebureau/src/kernel-home.ts`:
@@ -17790,9 +18707,12 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 // An empty BYTEBUREAU_HOME names no directory: taken as it is it would put the data in ./data
+// A relative one is resolved against the working directory once, so the kernel never depends on where it later runs
 export function kernelHome(env: Readonly<Record<string, string | undefined>>): string {
   const home = env['BYTEBUREAU_HOME']
-  return home === undefined || home === '' ? path.join(homedir(), '.bytebureau') : home
+  return home === undefined || home === ''
+    ? path.join(homedir(), '.bytebureau')
+    : path.resolve(home)
 }
 ```
 `run.ts` (the citty runner from SP0) maps a thrown error to exit 2 and now formats typed kernel errors through `errors.ts`; the `run` command sets `process.exitCode` for 0/3/4 and `main.ts` ends with `process.exit((await run(main, process.argv.slice(2))) || (process.exitCode ?? 0))`.
@@ -17900,6 +18820,7 @@ export const configCommand = defineCommand({
 `apps/bytebureau/src/commands/projects.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
+import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
 import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
@@ -17952,9 +18873,19 @@ const rm = defineCommand({
   args: { ...globalArgs, id: { type: 'positional', description: 'Project id', required: true } },
   async run({ args }) {
     const context = processContext(args)
-    await withKernel(context, process.env, async (kernel) => {
-      await kernel.projects.remove(args.id)
-    })
+    try {
+      await withKernel(context, process.env, async (kernel) => {
+        await kernel.projects.remove(args.id)
+      })
+    } catch (error) {
+      // A project that sessions still belong to is a refusal, not a failure: its reason and exit code 1
+      if (!(error instanceof WorkspaceError && error.code === 'has_sessions')) {
+        throw error
+      }
+      context.output.warn(error.reason)
+      process.exitCode = 1
+      return
+    }
     context.output.emit({ command: 'projects.rm', id: args.id })
     context.output.print(m.projects_removed({ id: args.id }))
   },
@@ -18030,6 +18961,7 @@ export const workspacesCommand = defineCommand({
 
 `apps/bytebureau/src/commands/run.test.ts` (spawns the CLI as a subprocess like `cli.test.ts` does, with `BYTEBUREAU_HOME` pointing at a temp dir and a temp git repository from the workspace-local test helper — import `createTempRepo` from `@bytebureau/workspace-local/testing` is not allowed (nothing imports a plugin's internals); copy the 20-line helper into `apps/bytebureau/src/testing/temp-repo.ts` instead):
 ```ts
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -18134,6 +19066,21 @@ describe('bytebureau run when it cannot start', () => {
       `WorkspaceError: ${directory} is not inside a git repository (not_a_repository)`,
     )
     expect(readdirSync(directory)).toStrictEqual([])
+  })
+})
+
+describe('bytebureau run on a repository without a commit', () => {
+  it('exits 4 with the one-line reason of the worktree that cannot be provisioned', async () => {
+    expect.hasAssertions()
+    const repo = tempDir('bb-empty-')
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
+    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
+    expect(result.code).toBe(4)
+    const lines = result.stderr.trim().split('\n')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^WorkspaceError: .*invalid reference: main.* \(git_failed\)$/u)
   })
 })
 
