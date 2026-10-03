@@ -153,5 +153,15 @@
       "files": ["packages/plugin-api/src/**"],
       "rules": { "typescript/method-signature-style": "off" },
     },
+    {
+      // The protocol's wire types and SQLite columns carry null for "absent"; the kernel side has to produce it
+      "files": [
+        "packages/protocol/src/**",
+        "packages/kernel/src/**",
+        "packages/plugin-api/src/**",
+        "plugins/*/src/**",
+      ],
+      "rules": { "unicorn/no-null": "off" },
+    },
   ],
 }
