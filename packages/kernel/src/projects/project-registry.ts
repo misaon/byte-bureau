@@ -1,22 +1,24 @@
 import path from 'node:path'
-import { decodeProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
+import type { ProjectConfig } from '@bytebureau/protocol'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { Config, type ConfigShape } from '../config/config.js'
-import { toStoreError, WorkspaceError, type ConfigError, type StoreError } from '../errors.js'
+import { WorkspaceError, type ConfigError, type StoreError } from '../errors.js'
 import { EventLog, type EventLogShape } from '../events/event-log.js'
 import { nowIso, uuidv7 } from '../ids.js'
 import { defaultBranchOf, findGitRoot, isByteBureauWorktree } from './git-root.js'
+import {
+  deleteProject,
+  findByPath,
+  getProject,
+  insertProject,
+  listProjects,
+  updateProject,
+  type Project,
+  type Row,
+} from './project-records.js'
 
-export interface Project {
-  readonly id: string
-  readonly name: string
-  readonly path: string
-  readonly defaultBranch: string
-  readonly config: ProjectConfig
-  readonly createdAt: string
-  readonly updatedAt: string
-}
+export type { Project } from './project-records.js'
 
 export interface ProjectRegistryShape {
   readonly register: (
@@ -24,33 +26,13 @@ export interface ProjectRegistryShape {
   ) => Effect.Effect<Project, WorkspaceError | ConfigError | StoreError>
   readonly list: () => Effect.Effect<readonly Project[], StoreError>
   readonly get: (id: string) => Effect.Effect<Project | undefined, StoreError>
-  readonly remove: (id: string) => Effect.Effect<void, StoreError>
+  // A project that sessions still belong to is refused with WorkspaceError has_sessions
+  readonly remove: (id: string) => Effect.Effect<void, StoreError | WorkspaceError>
 }
 
 export class ProjectRegistry extends Context.Service<ProjectRegistry, ProjectRegistryShape>()(
   'bb/ProjectRegistry',
 ) {}
-
-interface Row {
-  readonly id: string
-  readonly name: string
-  readonly path: string
-  readonly default_branch: string
-  readonly config_json: string
-  readonly created_at: string
-  readonly updated_at: string
-}
-
-// The snapshot is decoded again, so a row that no longer fits the schema fails loudly
-const fromRow = (row: Row): Project => ({
-  id: row.id,
-  name: row.name,
-  path: row.path,
-  defaultBranch: row.default_branch,
-  config: decodeProjectConfig(JSON.parse(row.config_json)),
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-})
 
 interface Deps {
   readonly sql: SqlClient.SqlClient
@@ -87,35 +69,6 @@ const snapshotOf = (config: ConfigShape, root: string): Effect.Effect<Snapshot, 
     defaultBranch: project.project.defaultBranch ?? defaultBranchOf(root),
     config: project,
   }))
-
-const findByPath = (
-  sql: SqlClient.SqlClient,
-  root: string,
-): Effect.Effect<Row | undefined, StoreError> =>
-  sql<Row>`SELECT * FROM projects WHERE path = ${root}`.pipe(
-    Effect.map(([row]) => row),
-    Effect.mapError(toStoreError),
-  )
-
-const insertProject = (
-  sql: SqlClient.SqlClient,
-  project: Project,
-): Effect.Effect<void, StoreError> =>
-  sql`
-    INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at)
-    VALUES (${project.id}, ${project.name}, ${project.path}, ${project.defaultBranch}, ${JSON.stringify(project.config)}, ${project.createdAt}, ${project.updatedAt})`.pipe(
-    Effect.asVoid,
-    Effect.mapError(toStoreError),
-  )
-
-const updateProject = (
-  sql: SqlClient.SqlClient,
-  project: Project,
-): Effect.Effect<void, StoreError> =>
-  sql`
-    UPDATE projects
-    SET name = ${project.name}, default_branch = ${project.defaultBranch}, config_json = ${JSON.stringify(project.config)}, updated_at = ${project.updatedAt}
-    WHERE id = ${project.id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
 
 const announce = (
   log: EventLogShape,
@@ -186,29 +139,15 @@ const makeRegister =
       return yield* refreshProject(deps, existing, snapshot)
     })
 
-const makeList =
-  (sql: SqlClient.SqlClient): ProjectRegistryShape['list'] =>
-  () =>
-    sql<Row>`SELECT * FROM projects ORDER BY name`.pipe(
-      Effect.map((rows) => rows.map((row) => fromRow(row))),
-      Effect.mapError(toStoreError),
-    )
-
-const makeGet =
-  (sql: SqlClient.SqlClient): ProjectRegistryShape['get'] =>
-  (id) =>
-    sql<Row>`SELECT * FROM projects WHERE id = ${id}`.pipe(
-      Effect.map(([row]) => (row === undefined ? undefined : fromRow(row))),
-      Effect.mapError(toStoreError),
-    )
-
-// Removing an id nobody holds is not an error: the announcement still goes out
+// Removing an id nobody holds is not an error, and announces nothing
 const makeRemove =
   ({ sql, log }: Deps): ProjectRegistryShape['remove'] =>
   (id) =>
     Effect.gen(function* removeProject() {
-      yield* sql`DELETE FROM projects WHERE id = ${id}`.pipe(Effect.mapError(toStoreError))
-      yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
+      const removed = yield* deleteProject(sql, id)
+      if (removed) {
+        yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
+      }
     })
 
 const make = Effect.gen(function* makeProjectRegistry() {
@@ -218,8 +157,8 @@ const make = Effect.gen(function* makeProjectRegistry() {
   const deps: Deps = { sql, log, config }
   return ProjectRegistry.of({
     register: makeRegister(deps),
-    list: makeList(sql),
-    get: makeGet(sql),
+    list: () => listProjects(sql),
+    get: (id) => getProject(sql, id),
     remove: makeRemove(deps),
   })
 })

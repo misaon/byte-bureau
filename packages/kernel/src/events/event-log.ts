@@ -1,7 +1,7 @@
 import { type EventEnvelope, isEphemeral, type KernelEvent } from '@bytebureau/protocol'
 import { Context, Effect, Layer, PubSub, Stream } from 'effect'
 import { SqlClient, type Statement } from 'effect/sql'
-import { toStoreError, type StoreError } from '../errors.js'
+import { StoreError, toStoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
 
 export interface EventFilter {
@@ -52,17 +52,41 @@ interface Row {
   readonly payload_json: string
 }
 
+const unreadable =
+  (seq: number): ((cause: unknown) => StoreError) =>
+  (cause) =>
+    new StoreError({ cause: new Error(`the payload of event ${seq} is not JSON`, { cause }) })
+
 // The protocol declares the ids optional keys, so an absent one is left out and never set to undefined
-const fromRow = (row: Row): EventEnvelope => ({
-  seq: row.seq,
-  id: row.id,
-  ts: row.ts,
-  type: row.type,
-  ...(row.project_id === null ? {} : { projectId: row.project_id }),
-  ...(row.session_id === null ? {} : { sessionId: row.session_id }),
-  ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
-  payload: JSON.parse(row.payload_json),
-})
+// A row whose payload is not JSON is a failure of the store that names the row, not a defect
+const fromRow = (row: Row): Effect.Effect<EventEnvelope, StoreError> =>
+  Effect.try({
+    try: (): unknown => JSON.parse(row.payload_json),
+    catch: unreadable(row.seq),
+  }).pipe(
+    Effect.map((payload) => ({
+      seq: row.seq,
+      id: row.id,
+      ts: row.ts,
+      type: row.type,
+      ...(row.project_id === null ? {} : { projectId: row.project_id }),
+      ...(row.session_id === null ? {} : { sessionId: row.session_id }),
+      ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+      payload,
+    })),
+  )
+
+// A payload JSON cannot hold, such as a bigint or a cycle, is refused before anything is stored
+const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
+  Effect.try({
+    try: () => JSON.stringify(event.payload),
+    catch: (cause) =>
+      new StoreError({
+        cause: new Error(`the payload of a ${event.type} event cannot be stored as JSON`, {
+          cause,
+        }),
+      }),
+  })
 
 // RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
 const insertEvent = (
@@ -70,13 +94,15 @@ const insertEvent = (
   event: KernelEvent,
   stamp: { readonly id: string; readonly ts: string },
 ): Effect.Effect<number, StoreError> =>
-  sql<Pick<Row, 'seq'>>`
-    INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
-    VALUES (${stamp.id}, ${stamp.ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${JSON.stringify(event.payload)})
-    RETURNING seq`.pipe(
-    Effect.flatMap(([row]) => Effect.fromNullishOr(row)),
-    Effect.map((row) => row.seq),
-    Effect.mapError(toStoreError),
+  Effect.flatMap(payloadJson(event), (json) =>
+    sql<Pick<Row, 'seq'>>`
+      INSERT INTO events (id, ts, type, project_id, session_id, turn_id, payload_json)
+      VALUES (${stamp.id}, ${stamp.ts}, ${event.type}, ${event.projectId ?? null}, ${event.sessionId ?? null}, ${event.turnId ?? null}, ${json})
+      RETURNING seq`.pipe(
+      Effect.flatMap(([row]) => Effect.fromNullishOr(row)),
+      Effect.map((row) => row.seq),
+      Effect.mapError(toStoreError),
+    ),
   )
 
 // Session and project narrow the query itself, so the (session_id, seq) and (project_id, seq) indexes serve it
@@ -97,12 +123,12 @@ const makeRead =
     sql<Row>`
       SELECT seq, id, ts, type, project_id, session_id, turn_id, payload_json FROM events
       WHERE ${sql.and(conditions(sql, filter, range))} ORDER BY seq`.pipe(
-      Effect.map((rows) =>
-        rows.map((row) => fromRow(row)).filter((event) => matches(filter, event)),
-      ),
       Effect.mapError(toStoreError),
+      Effect.flatMap((rows) => Effect.all(rows.map((row) => fromRow(row)))),
+      Effect.map((events) => events.filter((event) => matches(filter, event))),
     )
 
+// Nothing may interrupt the steps from the insert on: a stored row that no live subscriber is offered would be seen only by a replay
 const makePublish =
   (sql: SqlClient.SqlClient, hub: PubSub.PubSub<EventEnvelope>): EventLogShape['publish'] =>
   (event) =>
@@ -120,10 +146,11 @@ const makePublish =
       }
       yield* PubSub.publish(hub, envelope)
       return envelope
-    })
+    }).pipe(Effect.uninterruptible)
 
 // The subscription opens before the replay is read, so nothing published meanwhile is lost
 // An event can then arrive twice; the live part drops those the replay already carried
+// An ephemeral event published during the replay waits in the subscription, so it arrives after the replayed rows
 const makeSubscribe =
   (read: EventLogShape['read'], hub: PubSub.PubSub<EventEnvelope>): EventLogShape['subscribe'] =>
   (filter) =>

@@ -1,4 +1,5 @@
 import { m } from '@bytebureau/i18n'
+import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
 import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
@@ -51,9 +52,19 @@ const rm = defineCommand({
   args: { ...globalArgs, id: { type: 'positional', description: 'Project id', required: true } },
   async run({ args }) {
     const context = processContext(args)
-    await withKernel(context, process.env, async (kernel) => {
-      await kernel.projects.remove(args.id)
-    })
+    try {
+      await withKernel(context, process.env, async (kernel) => {
+        await kernel.projects.remove(args.id)
+      })
+    } catch (error) {
+      // A project that sessions still belong to is a refusal, not a failure: its reason and exit code 1
+      if (!(error instanceof WorkspaceError && error.code === 'has_sessions')) {
+        throw error
+      }
+      context.output.warn(error.reason)
+      process.exitCode = 1
+      return
+    }
     context.output.emit({ command: 'projects.rm', id: args.id })
     context.output.print(m.projects_removed({ id: args.id }))
   },

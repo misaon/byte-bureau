@@ -99,3 +99,4 @@ tokeny
 doporučeno
 giget
 seqno
+NOCASE

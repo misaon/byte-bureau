@@ -139,22 +139,21 @@ it.layer(TestLayer)('ProjectRegistry list, get and remove', (suite) => {
     }),
   )
 
-  suite.effect('removes a project and announces it, also for an id nobody holds', () =>
-    Effect.gen(function* removesProject() {
-      const registry = yield* ProjectRegistry
-      const log = yield* EventLog
-      const project = yield* registry.register(createTempRepo())
-      yield* registry.remove(project.id)
-      yield* registry.remove('unknown')
-      assert.strictEqual(yield* registry.get(project.id), undefined)
-      const known = yield* log.read({ projectId: project.id }, { from: 0 })
-      const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
-      const types = [known, unknown].map((events) => events.map((event) => event.type))
-      assert.deepStrictEqual(types, [
-        ['project.registered', 'project.removed'],
-        ['project.removed'],
-      ])
-    }),
+  suite.effect(
+    'removes a project and announces it, and announces nothing for an id nobody holds',
+    () =>
+      Effect.gen(function* removesProject() {
+        const registry = yield* ProjectRegistry
+        const log = yield* EventLog
+        const project = yield* registry.register(createTempRepo())
+        yield* registry.remove(project.id)
+        yield* registry.remove('unknown')
+        assert.strictEqual(yield* registry.get(project.id), undefined)
+        const known = yield* log.read({ projectId: project.id }, { from: 0 })
+        const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
+        const types = [known, unknown].map((events) => events.map((event) => event.type))
+        assert.deepStrictEqual(types, [['project.registered', 'project.removed'], []])
+      }),
   )
 })
 

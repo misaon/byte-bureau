@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
@@ -53,13 +54,16 @@ describe('bytebureau projects when it cannot do what it is asked', () => {
     expect(listed.stdout.trim()).toBe('No projects registered')
   })
 
-  it('does not remove a project that has sessions, and says why', async () => {
+  it('does not remove a project that has sessions, says why in one line and exits 1', async () => {
     expect.hasAssertions()
     const bench = workbench()
     await fakeRun(bench)
     const id = await projectIdIn(bench.home)
-    const removed = await runCli(['projects', 'rm', id], { BYTEBUREAU_HOME: bench.home })
-    expect(removed.code).toBe(2)
-    expect(removed.stderr).toMatch(/^StoreError: /u)
+    const env = { BYTEBUREAU_HOME: bench.home }
+    const removed = await runCli(['projects', 'rm', id], env)
+    expect(removed.code).toBe(1)
+    expect(removed.stderr.trim()).toBe(`project ${path.basename(bench.repo)} still has 1 session`)
+    const listed = await runCli(['projects', 'ls', '--json'], env)
+    expect(jsonLines(listed.stdout)).toMatchObject([{ projects: [{ id }] }])
   })
 })
