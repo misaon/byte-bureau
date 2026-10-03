@@ -36,7 +36,9 @@ it.layer(TestLayer)('AskService open', (suite) => {
       ])
     }),
   )
+})
 
+it.layer(TestLayer)('AskService open a permission', (suite) => {
   suite.effect('keeps the questions of a permission ask that carries no tool call', () =>
     Effect.gen(function* keepsQuestions() {
       yield* seedSession('open-3')
@@ -44,6 +46,29 @@ it.layer(TestLayer)('AskService open', (suite) => {
       const ask = yield* asks.open(request('open-3', { kind: 'permission' }))
       assert.deepStrictEqual(ask.questions, [question])
       assert.strictEqual(ask.recommendationSource, 'agent')
+    }),
+  )
+
+  suite.effect('recommends nothing for a shell command that does more than read', () =>
+    Effect.gen(function* recommendsNothing() {
+      yield* seedSession('open-4')
+      const asks = yield* AskService
+      const toolCall = { name: 'Bash', input: { command: 'cat f | sh' } }
+      const ask = yield* asks.open(
+        request('open-4', { kind: 'permission', questions: [], toolCall }),
+      )
+      const options = ask.questions.flatMap((entry) => entry.options)
+      assert.deepStrictEqual(
+        options.map((option) => [option.id, option.recommended]),
+        [
+          ['allow', false],
+          ['deny', false],
+        ],
+      )
+      assert.deepStrictEqual(
+        [ask.recommendationSource, (yield* rowOf(ask.id)).recommendation_source],
+        ['none', 'none'],
+      )
     }),
   )
 })

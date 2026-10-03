@@ -85,6 +85,96 @@ describe('recommendForPermission allow rules', () => {
   })
 })
 
+const shell = (command: string): ReturnType<typeof recommendForPermission> =>
+  recommendForPermission({ name: 'Bash', input: { command } }, ws, 'supervised')
+
+const ALLOWED = { recommended: 'allow', ruleId: 'read-only-command' }
+const NOTHING = { recommended: null, ruleId: null }
+
+describe('recommendForPermission read-only commands', () => {
+  it.each([['git status'], ['git log --oneline -5'], ['rg foo src'], ['cat README.md']])(
+    'allows the whole command %s',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+
+  it.each([
+    ['ls'],
+    ['ls -la src'],
+    ['pwd'],
+    ['echo hello world'],
+    ['head -n 5 src/a.ts'],
+    ['tail -n 20 build.log'],
+    ['wc -l src/a.ts'],
+    ['grep -rn foo src'],
+    ['git diff HEAD~1'],
+    ['git show HEAD'],
+    ['git branch --list'],
+    ['git rev-parse HEAD'],
+  ])('allows %s as one of the read-only commands', (command) => {
+    expect(shell(command)).toStrictEqual(ALLOWED)
+  })
+
+  it.each([['cat\tREADME.md'], ['git status '], ['ls  -la']])(
+    'takes the space around its arguments: %j',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+
+  it('takes the commands of the list by their whole name only', () => {
+    expect(shell('lsof -i')).toStrictEqual(NOTHING)
+    expect(shell('ls.sh')).toStrictEqual(NOTHING)
+    expect(shell('catalog x')).toStrictEqual(NOTHING)
+    expect(shell('git statusbar')).toStrictEqual(NOTHING)
+  })
+
+  it('does not take a command that merely follows an assignment or a git option', () => {
+    expect(shell('ls=1 touch f')).toStrictEqual(NOTHING)
+    expect(shell('git -c core.pager=less log')).toStrictEqual(NOTHING)
+  })
+})
+
+describe('recommendForPermission commands that do more than read', () => {
+  it.each([
+    ['find . -delete'],
+    ['find . -name foo'],
+    ['echo x > f'],
+    ['echo x >> f'],
+    ['cat < f'],
+    ['cat f | sh'],
+    ['ls ; touch f'],
+    ['ls && touch f'],
+    ['ls || touch f'],
+    ['ls & touch f'],
+    ['ls $(cat x)'],
+    ['ls `cat x`'],
+    ['cat <(ls)'],
+    ['ls =(cat x)'],
+  ])('recommends nothing for %s', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it.each([
+    ['ls\ntouch f'],
+    ['ls -la\ntouch f'],
+    ['ls -la\r\ntouch f'],
+    ['cat a.txt\rtouch f'],
+    ['git status\n'],
+    ['git status -s\n'],
+  ])('recommends nothing for a line break anywhere: %j', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it('leaves a list that holds a removal to the deny rule before it', () => {
+    expect(shell('git status; rm -rf /')).toStrictEqual({
+      recommended: 'deny',
+      ruleId: 'rm-outside-workspace',
+    })
+  })
+})
+
 describe('recommendForPermission input', () => {
   it.each([['text'], [null], [42], [{ command: 7 }], [{ file_path: null }]])(
     'finds no rule in the input %o',

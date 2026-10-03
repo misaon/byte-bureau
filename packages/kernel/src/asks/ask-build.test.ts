@@ -95,15 +95,18 @@ describe('buildAsk for a permission', () => {
     ])
   })
 
-  it('recommends nothing for a tool call no rule knows', () => {
-    const ask = build({ kind: 'permission', toolCall: { name: 'Mystery', input: {} } })
-    const options = ask.questions.flatMap((entry) => entry.options)
-    expect(ask.recommendationSource).toBe('none')
-    expect(options.map((entry) => [entry.id, entry.recommended])).toStrictEqual([
-      ['allow', false],
-      ['deny', false],
-    ])
-  })
+  it.each([[{ name: 'Mystery', input: {} }], [{ name: 'Bash', input: { command: 'cat f | sh' } }]])(
+    'recommends nothing for the tool call %o',
+    (toolCall) => {
+      const ask = build({ kind: 'permission', toolCall })
+      const options = ask.questions.flatMap((entry) => entry.options)
+      expect(ask.recommendationSource).toBe('none')
+      expect(options.map((entry) => [entry.id, entry.recommended])).toStrictEqual([
+        ['allow', false],
+        ['deny', false],
+      ])
+    },
+  )
 
   it('keeps the questions of a permission ask that has no tool call', () => {
     const ask = build({ kind: 'permission', questions: [question] })
