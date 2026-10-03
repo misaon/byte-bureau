@@ -33,6 +33,7 @@
   "devDependencies": {
     "@bytebureau/tsconfig": "workspace:*",
     "@effect/sql-sqlite-node": "4.0.0",
-    "@effect/vitest": "4.0.0"
+    "@effect/vitest": "4.0.0",
+    "fast-check": "4.10.2"
   }
 }

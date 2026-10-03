@@ -74,3 +74,18 @@ export {
   type AskServiceShape,
 } from './asks/ask-service.js'
 export { recommendForPermission, parseDuration } from './asks/policy.js'
+export {
+  SessionManager,
+  SessionManagerLive,
+  type SessionManagerShape,
+} from './sessions/session-manager.js'
+export { transition, SESSION_EVENTS, type SessionEvent } from './sessions/state-machine.js'
+export type { Session, Turn, CreateSessionInput } from './sessions/types.js'
+export {
+  UsageService,
+  UsageServiceLive,
+  type SessionUsage,
+  type UsageSnapshot,
+} from './usage/usage-service.js'
+export { FakeAgentProvider } from './testing/fake-agent-provider.js'
+export { fakeAgentPlugin } from './testing/fake-agent-plugin.js'

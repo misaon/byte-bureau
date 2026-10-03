@@ -43,7 +43,8 @@ const StoredHandle = Schema.Struct({
   baseRef: Schema.String,
 })
 
-const decodeHandle = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredHandle))
+// The handle of a session as its row keeps it, read back from the JSON text of the column
+export const decodeHandle = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredHandle))
 
 const unreadable =
   (sessionId: string): ((cause: unknown) => StoreError) =>
