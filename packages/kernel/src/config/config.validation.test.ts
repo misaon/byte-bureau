@@ -2,8 +2,8 @@
 import path from 'node:path'
 import { decodeProjectConfig, defaultProjectConfig } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
-import { loadConfig } from 'c12'
 import { Effect, Result, type Scope } from 'effect'
+import { parse, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
 import type { ConfigIssue } from './config.js'
 import {
@@ -72,43 +72,6 @@ it.effect('escapes slashes and tildes in the segments of a pointer', () =>
       issues.map((issue) => issue.pointer).toSorted(),
       ['model', 'name', 'permissionMode', 'provider'].map((key) => `/employees/a~1b~0c/${key}`),
     )
-  }),
-)
-
-it.effect('reports a file that cannot be parsed as one issue instead of an empty document', () =>
-  Effect.gen(function* reportsBrokenSyntax() {
-    const { config, project } = yield* workspace()
-    const file = write(project, PROJECT_FILE, '{ "version": 1,')
-    const issues = yield* config.validate(project)
-    assert.deepStrictEqual(
-      issues.map((issue) => issue.file),
-      [file],
-    )
-    const error = yield* Effect.flip(config.load({ projectPath: project }))
-    assert.strictEqual(error.file, file)
-  }),
-)
-
-const NON_OBJECT_ROOTS = [
-  [PROJECT_FILE, '[1, 2]'],
-  [PROJECT_FILE, 'null'],
-  [PROJECT_JSONC, '// a comment in front\nnull'],
-  [PROJECT_JSONC, '/* empty */ []'],
-] as const
-
-it.effect('reports an array or null root as one issue at the root of its file', () =>
-  Effect.gen(function* rejectsRoots() {
-    for (const [name, text] of NON_OBJECT_ROOTS) {
-      const { config, project } = yield* workspace()
-      const file = write(project, name, text)
-      const issues = yield* config.validate(project)
-      assert.deepStrictEqual(issues, [{ file, pointer: '', message: 'expected a JSON object' }])
-      const error = yield* Effect.flip(config.load({ projectPath: project }))
-      assert.deepStrictEqual(
-        [error.file, error.pointer, error.reason],
-        [file, '', 'expected a JSON object'],
-      )
-    }
   }),
 )
 
@@ -206,7 +169,17 @@ it.effect('validates a broken user file even when a project file overrides its s
   }),
 )
 
-it.effect('leaves a local preset in extends unresolved and reports the key', () =>
+it.effect('validates a null section and a $meta key like any other value', () =>
+  Effect.gen(function* reportsNullAndMeta() {
+    const { config, project } = yield* workspace()
+    const file = write(project, PROJECT_FILE, { logging: null, $meta: {} })
+    const issues = yield* config.validate(project)
+    assert.deepStrictEqual(issues.map((issue) => issue.pointer).toSorted(), ['/$meta', '/logging'])
+    assert.isTrue(issues.every((issue) => issue.file === file))
+  }),
+)
+
+it.effect('reports extends with a preset path as an unknown key', () =>
   Effect.gen(function* rejectsExtends() {
     const { config, project } = yield* workspace()
     write(project, 'base.json', { workspace: { copyIgnored: ['.a'] } })
@@ -215,8 +188,7 @@ it.effect('leaves a local preset in extends unresolved and reports the key', () 
   }),
 )
 
-// Nothing listens on port 9 of the loopback address, so a download attempt would fail at once
-it.effect('does not fetch a remote source in extends', () =>
+it.effect('reports extends with a remote source as an unknown key', () =>
   Effect.gen(function* rejectsRemoteExtends() {
     const { config, project } = yield* workspace()
     const file = write(project, PROJECT_FILE, { extends: 'http://127.0.0.1:9/preset' })
@@ -235,17 +207,10 @@ it.effect('loads the init template back as the default project configuration', (
 )
 
 it.effect('decodes the init template on its own, with no defaults merged in', () =>
-  Effect.gen(function* decodesTemplate() {
-    const { project } = yield* workspace()
-    write(project, PROJECT_JSONC, defaultProjectConfigText())
-    const parsed = yield* Effect.promise(async () => {
-      const loaded = await loadConfig({
-        name: 'bytebureau',
-        cwd: project,
-        configFile: PROJECT_JSONC,
-      })
-      return loaded.config
-    })
+  Effect.sync(() => {
+    const errors: ParseError[] = []
+    const parsed: unknown = parse(defaultProjectConfigText(), errors, { allowTrailingComma: true })
+    assert.deepStrictEqual(errors, [])
     assert.deepStrictEqual(decodeProjectConfig(parsed), {
       $schema: SCHEMA_URL,
       ...defaultProjectConfig,

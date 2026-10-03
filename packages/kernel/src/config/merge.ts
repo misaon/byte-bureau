@@ -7,7 +7,7 @@ export interface ConfigLayer {
   readonly fromFile: boolean
 }
 
-const isPlain = (value: unknown): value is Plain =>
+export const isPlain = (value: unknown): value is Plain =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const sectionOf = (value: unknown): Plain => (isPlain(value) ? value : {})

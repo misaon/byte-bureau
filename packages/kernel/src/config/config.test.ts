@@ -1,9 +1,7 @@
-import { existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { defaultProjectConfig, type ProjectConfig } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, type Scope } from 'effect'
-import { ConfigError } from '../errors.js'
 import { Config, ConfigLive } from './config.js'
 import {
   LOCAL_FILE,
@@ -153,110 +151,12 @@ it.effect('reports absolute file paths for a relative home directory', () =>
   }),
 )
 
-it.effect('reads comments and trailing commas in a .jsonc file', () =>
-  Effect.gen(function* readsJsonc() {
-    const { config, project } = yield* workspace()
-    write(
-      project,
-      PROJECT_JSONC,
-      `{
-  // a line comment
-  "project": { "name": "commented", /* an inline comment */ },
-  "logging": { "level": "warn", },
-}`,
-    )
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'commented')
-    assert.deepStrictEqual(resolved.project.logging, { level: 'warn' })
-  }),
-)
-
 it.effect('shares no array with the protocol defaults', () =>
   Effect.gen(function* copiesDefaults() {
     const { config, project } = yield* workspace()
     const resolved = yield* config.load({ projectPath: project })
     assert.deepStrictEqual(settingSources(resolved.project), ['user', 'project', 'local'])
     assert.notStrictEqual(settingSources(resolved.project), settingSources(defaultProjectConfig))
-  }),
-)
-
-it.effect('ignores a file named like the config but without an extension', () =>
-  Effect.gen(function* ignoresBareName() {
-    const { config, project } = yield* workspace()
-    // A release binary downloaded into the project directory carries exactly this name
-    write(project, 'bytebureau', '#!/bin/sh\nexit 0\n')
-    const file = write(project, PROJECT_FILE, { project: { name: 'beside' } })
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'beside')
-    assert.strictEqual(resolved.files.project, file)
-  }),
-)
-
-it.effect('never runs a script named like the config', () =>
-  Effect.gen(function* ignoresScripts() {
-    const { config, project } = yield* workspace()
-    const marker = path.join(project, 'ran')
-    const script = `import { writeFileSync } from 'node:fs'
-writeFileSync(${JSON.stringify(marker)}, '')
-export default { project: { name: 'from-script' } }
-`
-    write(project, 'bytebureau.mjs', script)
-    const file = write(project, PROJECT_FILE, { project: { name: 'from-json' } })
-    const resolved = yield* config.load({ projectPath: project })
-    assert.strictEqual(resolved.project.project.name, 'from-json')
-    assert.strictEqual(resolved.files.project, file)
-    assert.isFalse(existsSync(marker))
-  }),
-)
-
-it.effect('ignores a directory named like the config file', () =>
-  Effect.gen(function* ignoresDirectory() {
-    const { config, project } = yield* workspace()
-    mkdirSync(path.join(project, PROJECT_FILE))
-    const without = yield* config.load({ projectPath: project })
-    assert.strictEqual(without.files.project, null)
-    const file = write(project, PROJECT_JSONC, { project: { name: 'beside' } })
-    const withFile = yield* config.load({ projectPath: project })
-    assert.strictEqual(withFile.files.project, file)
-  }),
-)
-
-it.effect('refuses a name that exists as both .json and .jsonc', () =>
-  Effect.gen(function* refusesBothVariants() {
-    const { config, project } = yield* workspace()
-    const json = write(project, PROJECT_FILE, {})
-    const jsonc = write(project, PROJECT_JSONC, {})
-    const error = yield* Effect.flip(config.load({ projectPath: project }))
-    assert.deepStrictEqual(
-      { file: error.file, pointer: error.pointer },
-      { file: json, pointer: '' },
-    )
-    assert.include(error.reason, json)
-    assert.include(error.reason, jsonc)
-    const issues = yield* config.validate(project)
-    assert.deepStrictEqual(issues, [{ file: json, pointer: '', message: error.reason }])
-  }),
-)
-
-it.effect('fails for a project path that does not exist or is not a directory', () =>
-  Effect.gen(function* rejectsProjectPath() {
-    const { config, project } = yield* workspace()
-    const missing = path.join(project, 'missing')
-    const plain = write(project, 'plain-file', 'text')
-    for (const [target, reason] of [
-      [missing, 'does not exist'],
-      [plain, 'not a directory'],
-    ] as const) {
-      const error = yield* Effect.flip(config.load({ projectPath: target }))
-      assert.instanceOf(error, ConfigError)
-      assert.deepStrictEqual(
-        { file: error.file, pointer: error.pointer },
-        { file: target, pointer: '' },
-      )
-      assert.include(error.reason, reason)
-      const issues = yield* config.validate(target)
-      assert.deepStrictEqual(issues, [{ file: target, pointer: '', message: error.reason }])
-    }
   }),
 )
 

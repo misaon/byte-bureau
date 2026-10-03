@@ -1,49 +1,94 @@
-import { readFileSync, statSync, type Stats } from 'node:fs'
+import { lstatSync, readFileSync, statSync, type Stats } from 'node:fs'
 import path from 'node:path'
-import { loadConfig } from 'c12'
 import { Effect } from 'effect'
+import { parse, printParseErrorCode, type ParseError } from 'jsonc-parser'
 import { ConfigError } from '../errors.js'
-import type { Plain } from './merge.js'
+import { isPlain, type Plain } from './merge.js'
 
-// Only the parser of c12 is used: no rc files, dotenv, package.json, environment keys, presets or downloads
-const BASE = {
-  name: 'bytebureau',
-  rcFile: false,
-  globalRc: false,
-  dotenv: false,
-  packageJson: false,
-  envName: false,
-  extend: false,
-  giget: false,
-} as const
-
-// Configuration files are data: JSON or JSONC, never a script that c12 would run
+// Configuration files are data: the kernel reads JSON or JSONC as text and parses it with jsonc-parser, nothing is imported or run
 const EXTENSIONS = ['.json', '.jsonc'] as const
+
+const BOM = '\uFEFF'
 
 export interface LoadedFile {
   readonly file: string
   readonly config: Plain
 }
 
+type Entry = 'absent' | 'dangling' | 'file' | 'other'
+
+interface Candidate {
+  readonly file: string
+  readonly entry: Entry
+}
+
 const failure = (file: string, reason: string): ConfigError =>
   new ConfigError({ file, pointer: '', reason })
 
-// Regular files only; the exact name keeps c12 from matching a release binary or the process directory
-function existingFiles(directory: string, name: string): readonly string[] {
-  return EXTENSIONS.map((extension) => path.resolve(directory, `${name}${extension}`)).filter(
-    (candidate) => {
-      const stats = statSync(candidate, { throwIfNoEntry: false })
-      return stats !== undefined && stats.isFile()
-    },
-  )
+// A link to nowhere shows up in lstat but not in stat; a link to a file is followed and read as text
+function entryOf(candidate: string): Entry {
+  if (lstatSync(candidate, { throwIfNoEntry: false }) === undefined) {
+    return 'absent'
+  }
+  const stats = statSync(candidate, { throwIfNoEntry: false })
+  if (stats === undefined) {
+    return 'dangling'
+  }
+  return stats.isFile() ? 'file' : 'other'
 }
 
-const COMMENTS = /\/\/[^\n]*|\/\*[\s\S]*?\*\//gu
+const candidatesOf = (directory: string, name: string): readonly Candidate[] =>
+  EXTENSIONS.map((extension) => {
+    const file = path.resolve(directory, `${name}${extension}`)
+    return { file, entry: entryOf(file) }
+  })
 
-// An array passes through c12 and null crashes it, so the root is checked before the parse
-function hasObjectRoot(text: string): boolean {
-  const body = text.replaceAll(COMMENTS, ' ').trim()
-  return body !== 'null' && !body.startsWith('[')
+// At most one regular file; a link to nowhere or both variants is an error
+function chooseFile(candidates: readonly Candidate[]): Effect.Effect<string | null, ConfigError> {
+  const dangling = candidates.find((candidate) => candidate.entry === 'dangling')
+  if (dangling !== undefined) {
+    return Effect.fail(failure(dangling.file, 'a symbolic link whose target does not exist'))
+  }
+  const [first, second] = candidates.filter((candidate) => candidate.entry === 'file')
+  if (first !== undefined && second !== undefined) {
+    const reason = `${first.file} and ${second.file} both exist; keep one of them`
+    return Effect.fail(failure(first.file, reason))
+  }
+  return Effect.succeed(first === undefined ? null : first.file)
+}
+
+// 1-based line and column of an offset
+function positionOf(text: string, offset: number): string {
+  const before = text.slice(0, offset)
+  return `line ${before.split('\n').length}, column ${offset - before.lastIndexOf('\n')}`
+}
+
+interface Parsed {
+  readonly value: unknown
+  readonly errors: readonly ParseError[]
+}
+
+function parseText(text: string): Parsed {
+  const errors: ParseError[] = []
+  const value: unknown = parse(text, errors, { allowTrailingComma: true, allowEmptyContent: true })
+  return { value, errors }
+}
+
+// The parser recurses, so a pathologically nested file throws instead of returning
+function parseConfig(file: string, raw: string): Effect.Effect<Plain, ConfigError> {
+  const text = raw.startsWith(BOM) ? raw.slice(BOM.length) : raw
+  return Effect.gen(function* parseJson() {
+    const { value, errors } = yield* Effect.try({
+      try: () => parseText(text),
+      catch: (cause) => failure(file, String(cause)),
+    })
+    const [first] = errors
+    if (first !== undefined) {
+      const position = positionOf(text, first.offset)
+      return yield* failure(file, `${printParseErrorCode(first.error)} at ${position}`)
+    }
+    return isPlain(value) ? value : yield* failure(file, 'expected a JSON object')
+  })
 }
 
 const loadFile = (file: string): Effect.Effect<LoadedFile, ConfigError> =>
@@ -52,41 +97,22 @@ const loadFile = (file: string): Effect.Effect<LoadedFile, ConfigError> =>
       try: () => readFileSync(file, 'utf8'),
       catch: (cause) => failure(file, String(cause)),
     })
-    if (!hasObjectRoot(text)) {
-      return yield* failure(file, 'expected a JSON object')
-    }
-    const config = yield* Effect.tryPromise({
-      try: async () => {
-        const loaded = await loadConfig<Plain>({
-          ...BASE,
-          cwd: path.dirname(file),
-          configFile: path.basename(file),
-        })
-        return loaded.config
-      },
-      catch: (cause) => failure(file, String(cause)),
-    })
+    const config = yield* parseConfig(file, text)
     return { file, config }
   })
 
-// `<name>.json` or `<name>.jsonc` in the directory; null when neither exists, an error when both do
+// `<name>.json` or `<name>.jsonc` in the directory, read as text and parsed with jsonc-parser; null when neither exists
 export const readLayer = (
   directory: string,
   name: string,
 ): Effect.Effect<LoadedFile | null, ConfigError> =>
   Effect.gen(function* readJsonLayer() {
-    const found = yield* Effect.try({
-      try: () => existingFiles(directory, name),
+    const candidates = yield* Effect.try({
+      try: () => candidatesOf(directory, name),
       catch: (cause) => failure(directory, String(cause)),
     })
-    const [first, second] = found
-    if (first === undefined) {
-      return null
-    }
-    if (second !== undefined) {
-      return yield* failure(first, `${first} and ${second} both exist; keep one of them`)
-    }
-    return yield* loadFile(first)
+    const file = yield* chooseFile(candidates)
+    return file === null ? null : yield* loadFile(file)
   })
 
 const directoryProblem = (stats: Stats | undefined): string | null => {
