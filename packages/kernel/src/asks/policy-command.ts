@@ -1,5 +1,6 @@
 // CSpell:ignore cdfmtu
 import path from 'node:path'
+import { shellWords, type ShellWord } from './shell-words.js'
 
 const { posix } = path
 
@@ -16,6 +17,9 @@ const BRANCH_WRITES =
 const PREPROCESSOR = /^--pre(?:-glob)?(?:=|$)/u
 const OUTPUT_FILE = /^--output(?:=|$)/u
 const LISTING = new Set(['--list', '-l'])
+// The letters of a cluster of short flags, such as -rf in -rf/etc/passwd
+const SHORT_FLAGS = /^-[a-z]+/iu
+const OPTIONS_END = '--'
 
 // A word of a command, and where it leads once it is resolved against the workspace; null when only the shell knows (~, $VAR) or there is no workspace
 export interface Place {
@@ -23,33 +27,57 @@ export interface Place {
   readonly resolved: string | null
 }
 
-// The words of a simple command with the quotes dropped: good enough to tell what a command names, never to run it
-const wordsOf = (command: string): readonly string[] =>
-  command
-    .split(/\s+/u)
-    .map((word) => word.replaceAll(/["']/gu, ''))
-    .filter((word) => word !== '')
+// What may follow each letter of a cluster of short flags: -rf/etc/passwd is -r -f /etc/passwd, and -f takes the rest
+function attachedTo(flags: string): readonly string[] {
+  const match = SHORT_FLAGS.exec(flags)
+  const end = match === null ? 1 : match[0].length
+  const tails: string[] = []
+  for (let index = 2; index <= end; index += 1) {
+    tails.push(flags.slice(index))
+  }
+  return tails.filter((tail) => tail !== '')
+}
 
-// An argument names itself and a --flag=value its value; any other flag names nothing
+// An operand names itself, a --flag=value its value and a cluster of short flags whatever is attached to it
 const namedBy = (word: string): readonly string[] => {
   if (!word.startsWith('-')) {
     return [word]
   }
+  if (!word.startsWith(OPTIONS_END)) {
+    return attachedTo(word)
+  }
   const equals = word.indexOf('=')
-  return word.startsWith('--') && equals > 0 ? [word.slice(equals + 1)] : []
+  return equals > 0 ? [word.slice(equals + 1)] : []
 }
+
+// After -- every word is an operand, one that starts with a dash too
+function namesOf(words: readonly string[]): readonly string[] {
+  const end = words.indexOf(OPTIONS_END)
+  const options = end === -1 ? words : words.slice(0, end)
+  const operands = end === -1 ? [] : words.slice(end + 1)
+  return [...options.flatMap((word) => namedBy(word)), ...operands]
+}
+
+// A git revision names a path after its colon: HEAD:.env, :0:src/a.ts, -L1,5:file
+const withRevisionPaths = (name: string): readonly string[] => [
+  name,
+  ...[...name.matchAll(/:/gu)].map((colon) => name.slice(colon.index + 1)),
+]
 
 const placeOf = (word: string, root: string): Place => {
   const expanded = word.startsWith('~') || word.includes('$')
   return { word, resolved: expanded || root === '' ? null : posix.resolve(root, word) }
 }
 
+const textsOf = (words: readonly ShellWord[]): readonly string[] => words.map((word) => word.text)
+
 // What the words after the command, and after the subcommand of git, name
-const placesAfter = (words: readonly string[], skip: number, root: string): readonly Place[] =>
-  words
-    .slice(skip)
-    .flatMap((word) => namedBy(word))
-    .map((word) => placeOf(word, root))
+function placesIn(words: readonly string[], root: string): readonly Place[] {
+  const git = words[0] === 'git'
+  const names = namesOf(words.slice(git ? 2 : 1))
+  const named = git ? names.flatMap((name) => withRevisionPaths(name)) : names
+  return named.map((name) => placeOf(name, root))
+}
 
 // Strictly under the root: neither the root itself nor a path that climbs out of it
 export const isUnder = (root: string, target: string): boolean => {
@@ -77,18 +105,22 @@ function writes(words: readonly string[]): boolean {
   return words.some((word) => OUTPUT_FILE.test(word))
 }
 
-// Every place a command names, after the command and the subcommand of git
-export const placesOf = (command: string, root: string): readonly Place[] => {
-  const words = wordsOf(command)
-  return placesAfter(words, words[0] === 'git' ? 2 : 1, root)
-}
+// Every place a command names, after the command and the subcommand of git, with its quotes and escapes removed
+export const placesOf = (command: string, root: string): readonly Place[] =>
+  placesIn(textsOf(shellWords(command)), root)
 
-// Read-only is a property of the whole command: a listed one, alone, with no writing flag, naming nothing outside the workspace
-export const isReadOnly = (command: string, root: string): boolean =>
-  READ_ONLY.test(command) &&
-  !SHELL_SYNTAX.test(command) &&
-  !writes(wordsOf(command)) &&
-  placesOf(command, root).every((place) => isWithin(root, place))
+// Read-only is a property of the whole command: a listed one, alone, with no word the shell expands and no writing flag, naming nothing outside the workspace
+export function isReadOnly(command: string, root: string): boolean {
+  const words = shellWords(command)
+  const texts = textsOf(words)
+  return (
+    READ_ONLY.test(command) &&
+    !SHELL_SYNTAX.test(command) &&
+    words.every((word) => !word.expanded) &&
+    !writes(texts) &&
+    placesIn(texts, root).every((place) => isWithin(root, place))
+  )
+}
 
 // A recursive removal is outside unless everything it names lies strictly inside the workspace; with shell syntax around it nobody can tell
 export const removesOutside = (command: string, root: string): boolean =>

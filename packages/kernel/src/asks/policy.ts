@@ -1,6 +1,7 @@
 import path from 'node:path'
 import type { PermissionMode } from '@bytebureau/protocol'
 import { isReadOnly, isUnder, placesOf, removesOutside, type Place } from './policy-command.js'
+import { globPlaces } from './policy-glob.js'
 
 const { posix } = path
 
@@ -20,9 +21,8 @@ interface Facts {
   readonly command: string
   // What the command names, resolved against the workspace
   readonly places: readonly Place[]
-  // The file as the tool names it, and the file it lands on once `.` and `..` are resolved
-  readonly filePath: string
-  readonly target: string
+  // The files as the tool names them, and where each lands once `.` and `..` are resolved; a glob names one per pattern its braces stand for
+  readonly paths: readonly Place[]
   // The workspace when it is an absolute path, else empty: nothing is inside a workspace that is not one
   readonly root: string
   readonly mode: PermissionMode
@@ -50,13 +50,15 @@ const field = (input: unknown, key: string): string => {
 
 // The check is lexical: a symlink inside the workspace that points out of it cannot be told from a plain path, only the file system knows
 // With no absolute workspace nothing is inside it, whatever the path looks like
-const inWorkspace = ({ root, target }: Facts): boolean =>
-  root !== '' && target !== '' && isUnder(root, target)
+const inWorkspace = ({ root, paths }: Facts): boolean =>
+  root !== '' &&
+  paths.length > 0 &&
+  paths.every((place) => place.resolved !== null && isUnder(root, place.resolved))
 
-const namesSecret = ({ filePath, target, places }: Facts): boolean =>
-  SECRETS.test(filePath) ||
-  SECRETS.test(target) ||
-  places.some((place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''))
+const namesSecret = ({ paths, places }: Facts): boolean =>
+  [...paths, ...places].some(
+    (place) => SECRETS.test(place.word) || SECRETS.test(place.resolved ?? ''),
+  )
 
 // Rules are evaluated top-down and the first match decides, so the deny rules come first
 const RULES: readonly Rule[] = [
@@ -88,32 +90,28 @@ const RULES: readonly Rule[] = [
 export const NO_RECOMMENDATION: PermissionRecommendation = { recommended: null, ruleId: null }
 
 // A relative path is read against the workspace, where the agent works; without an absolute workspace it can only be tidied
-const resolveTarget = (filePath: string, root: string): string => {
-  if (filePath === '') {
-    return ''
-  }
-  return root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
-}
+const resolveTarget = (filePath: string, root: string): string =>
+  root === '' ? posix.normalize(filePath) : posix.resolve(root, filePath)
 
 // A glob searches its pattern below its path, so the two together say where it reaches
-const filePathOf = ({ name, input }: ToolCall): string => {
+const pathsOf = ({ name, input }: ToolCall, root: string): readonly Place[] => {
+  const resolve = (written: string): string => resolveTarget(written, root)
   const pattern = field(input, 'pattern')
   if (name === 'Glob' && pattern !== '') {
-    return posix.isAbsolute(pattern) ? pattern : posix.join(field(input, 'path') || '.', pattern)
+    return globPlaces(pattern, field(input, 'path') || '.', resolve)
   }
-  return field(input, 'file_path') || field(input, 'path')
+  const filePath = field(input, 'file_path') || field(input, 'path')
+  return filePath === '' ? [] : [{ word: filePath, resolved: resolve(filePath) }]
 }
 
 const factsOf = (toolCall: ToolCall, workspacePath: string, mode: PermissionMode): Facts => {
   const root = posix.isAbsolute(workspacePath) ? workspacePath : ''
   const command = field(toolCall.input, 'command')
-  const filePath = filePathOf(toolCall)
   return {
     name: toolCall.name,
     command,
     places: placesOf(command, root),
-    filePath,
-    target: resolveTarget(filePath, root),
+    paths: pathsOf(toolCall, root),
     root,
     mode,
   }

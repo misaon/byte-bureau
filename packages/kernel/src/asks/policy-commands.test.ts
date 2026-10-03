@@ -44,11 +44,11 @@ describe('recommendForPermission read-only commands that reach outside the works
     ['cat $HOME/notes.txt'],
     ['wc -l ~/notes.txt'],
     ['rg --glob=../** secret'],
-  ])('recommends nothing for %s', (command) => {
+  ])('recommends nothing for %s, which reaches outside', (command) => {
     expect(shell(command)).toStrictEqual(NOTHING)
   })
 
-  it.each([['ls .'], ['grep -r TODO .'], [`cat ${ws}/src/a.ts`], ['rg --glob=*.ts hello src']])(
+  it.each([['ls .'], ['grep -r TODO .'], [`cat ${ws}/src/a.ts`], [`rg --glob='*.ts' hello src`]])(
     'still allows %s, which stays inside',
     (command) => {
       expect(shell(command)).toStrictEqual(ALLOWED)
@@ -73,16 +73,109 @@ describe('recommendForPermission read-only commands with a flag that writes or r
     ['git diff --output=/tmp/patch'],
     ['git diff --output patch.txt'],
     ['git log --output=log.txt'],
-  ])('recommends nothing for %s', (command) => {
+  ])('recommends nothing for %s, whose flag writes or runs', (command) => {
     expect(shell(command)).toStrictEqual(NOTHING)
   })
 
-  it.each([['git branch'], ['git branch -a'], ['git branch -vv'], ['git branch --list bb/*']])(
+  it.each([['git branch'], ['git branch -a'], ['git branch -vv'], [`git branch --list 'bb/*'`]])(
     'allows %s, which only lists',
     (command) => {
       expect(shell(command)).toStrictEqual(ALLOWED)
     },
   )
+})
+
+describe('recommendForPermission words the shell expands', () => {
+  it.each([
+    ['cat .env*'],
+    ['cat .e?v'],
+    ['cat .en[v]'],
+    ['cat {.env,}'],
+    ['head -n1 .e*'],
+    [String.raw`cat \/etc/passwd`],
+    ['cat {/etc/passwd,}'],
+    ['wc -c {/etc/passwd,}'],
+    ['rg -uuu password {/Users,}'],
+    [String.raw`git diff --no-index \/etc/passwd x`],
+    ['rg --glob=*.ts hello src'],
+    ['git branch --list bb/*'],
+    ['cat "$HOME/notes.txt"'],
+    ['cat "unterminated'],
+  ])('recommends nothing for %s, which the shell expands', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it.each([[`cat 'src/a*.ts'`], ['cat "src/a?.ts"'], [`grep -r 'a{1,2}' src`]])(
+    'allows %s, whose quotes keep the shell from expanding it',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+
+  it('denies the secret behind an escape, which the shell drops', () => {
+    expect(shell(String.raw`cat \.env`)).toStrictEqual(SECRET)
+  })
+})
+
+describe('recommendForPermission values attached to a short flag', () => {
+  it.each([
+    ['grep -f/etc/passwd x'],
+    ['grep -rf../../etc/passwd x'],
+    ['git log -L1,5:/etc/passwd'],
+  ])('recommends nothing for %s, whose flag value leaves the workspace', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it('denies the secret a flag reads', () => {
+    expect(shell('grep -f.env x')).toStrictEqual(SECRET)
+  })
+
+  it.each([['head -n5 src/a.ts'], ['grep -C2 foo src'], ['ls -la src'], ['ls -1']])(
+    'still allows %s',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+})
+
+describe('recommendForPermission paths of a git revision and after --', () => {
+  it.each([['git show HEAD:.env'], ['git show :0:.env']])('denies the secret of %s', (command) => {
+    expect(shell(command)).toStrictEqual(SECRET)
+  })
+
+  it.each([
+    ['git show HEAD:../../etc/passwd'],
+    ['cat -- -/../../../../etc/passwd'],
+    ['git log -- -/../../../..'],
+  ])('recommends nothing for %s, whose path leaves the workspace', (command) => {
+    expect(shell(command)).toStrictEqual(NOTHING)
+  })
+
+  it.each([['git show HEAD:src/a.ts'], ['git log -- src'], ['git log --format=%h:%s']])(
+    'allows %s, which stays inside',
+    (command) => {
+      expect(shell(command)).toStrictEqual(ALLOWED)
+    },
+  )
+})
+
+const spaced = '/Users/me/My Projects/app/.bytebureau/worktrees/s1'
+
+describe('recommendForPermission quoted words with spaces', () => {
+  it.each([[`rm -rf "${spaced}/node_modules"`], [`rm -rf '${spaced}/build'`]])(
+    'does not blame %s, which stays inside a workspace with a space in its path, on the removal rule',
+    (command) => {
+      expect(shell(command, spaced)).toStrictEqual(NOTHING)
+    },
+  )
+
+  it('allows reading a quoted file of such a workspace', () => {
+    expect(shell(`cat "${spaced}/src/a b.ts"`, spaced)).toStrictEqual(ALLOWED)
+  })
+
+  it('denies a quoted removal outside it', () => {
+    expect(shell('rm -rf "/Users/me/My Projects/other"', spaced)).toStrictEqual(REMOVAL)
+  })
 })
 
 describe('recommendForPermission recursive removals', () => {
