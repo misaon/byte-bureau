@@ -1,9 +1,9 @@
 import { setLocale } from '@bytebureau/i18n'
 import type { EventEnvelope, KernelEventPayload } from '@bytebureau/protocol'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createOutput } from '../output.js'
 import { event } from '../testing/events.js'
-import { completionLine, summarizeRun, titleOf, transcriptLine } from './transcript.js'
+import { completionLine, readOrSkip, summarizeRun, titleOf, transcriptLine } from './transcript.js'
 
 const ESCAPE = '\u001B'
 
@@ -112,7 +112,7 @@ describe(summarizeRun, () => {
       turnCompleted({ inputTokens: 10, outputTokens: 5, costUsd: 0.01 }, 1),
       turnCompleted({ inputTokens: 1, outputTokens: 1 }, 2),
     ]
-    expect(summarizeRun(events)).toStrictEqual({
+    expect(summarizeRun(events, PLAIN)).toStrictEqual({
       turns: 2,
       inputTokens: 11,
       outputTokens: 6,
@@ -126,14 +126,14 @@ describe(summarizeRun, () => {
       event('session.ready', { status: 'ready' }, 2),
       turnCompleted({ inputTokens: 1, outputTokens: 1, costUsd: 0.5 }, 3),
     ]
-    expect(summarizeRun(events).costUsd).toBe(0.75)
+    expect(summarizeRun(events, PLAIN).costUsd).toBe(0.75)
   })
 
   it('reports no cost for a run whose turns reported none, and nothing for no turns', () => {
     expect(
-      summarizeRun([turnCompleted({ inputTokens: 1, outputTokens: 1 }, 1)]).costUsd,
+      summarizeRun([turnCompleted({ inputTokens: 1, outputTokens: 1 }, 1)], PLAIN).costUsd,
     ).toBeUndefined()
-    expect(summarizeRun([])).toStrictEqual({
+    expect(summarizeRun([], PLAIN)).toStrictEqual({
       turns: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -142,13 +142,98 @@ describe(summarizeRun, () => {
   })
 })
 
+// An event of the type whose payload belongs to another type
+function malformed(type: string, seq: number): EventEnvelope {
+  return { ...event('session.ready', { status: 'ready' }, seq), type }
+}
+
+function unreadable(): string {
+  throw new Error('bad payload')
+}
+
+describe(readOrSkip, () => {
+  it('hands the result of a read that works on, and warns of nothing', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed('tool.started', 4), PLAIN, () => 'read')).toBe('read')
+    expect(warned).not.toHaveBeenCalled()
+  })
+
+  it('skips an event whose read throws, with one warning that names its type and seq', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(readOrSkip(malformed('tool.started', 4), PLAIN, unreadable)).toBeUndefined()
+    expect(warned.mock.calls).toStrictEqual([
+      ['Skipped the tool.started event (seq 4): its payload does not fit its type'],
+    ])
+  })
+
+  it('speaks the language that is set', () => {
+    onTestFinished(() => {
+      setLocale('en')
+    })
+    setLocale('cs')
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    readOrSkip(malformed('turn.completed', 9), PLAIN, unreadable)
+    expect(warned.mock.calls).toStrictEqual([
+      ['Událost turn.completed (pořadové číslo 9) byla přeskočena: její obsah neodpovídá typu'],
+    ])
+  })
+})
+
+describe('transcriptLine and summarizeRun with an event that does not fit its type', () => {
+  it('prints no line for the event, and warns once', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    expect(transcriptLine(malformed('tool.started', 6), PLAIN)).toBeUndefined()
+    expect(transcriptLine(malformed('workspace.provisioned', 7), PLAIN)).toBeUndefined()
+    expect(warned).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not count the turn that cannot be read, and counts the others', () => {
+    const warned = vi.spyOn(console, 'error').mockReturnValue()
+    const events = [
+      malformed('turn.completed', 2),
+      turnCompleted({ inputTokens: 4, outputTokens: 2 }, 3),
+    ]
+    expect(summarizeRun(events, PLAIN)).toStrictEqual({
+      turns: 1,
+      inputTokens: 4,
+      outputTokens: 2,
+      costUsd: undefined,
+    })
+    expect(warned.mock.calls).toStrictEqual([
+      ['Skipped the turn.completed event (seq 2): its payload does not fit its type'],
+    ])
+  })
+})
+
+function costed(costUsd: number): string {
+  return completionLine({ turns: 1, inputTokens: 1, outputTokens: 1, costUsd })
+}
+
 describe(completionLine, () => {
   it('states turns and tokens, with the cost when there is one', () => {
     expect(completionLine({ turns: 1, inputTokens: 120, outputTokens: 40, costUsd: 0.016 })).toBe(
-      'Done in 1 turn(s), 120 input and 40 output tokens ($0.02)',
+      'Done — turns: 1, input tokens: 120, output tokens: 40 ($0.02)',
     )
     expect(completionLine({ turns: 2, inputTokens: 3, outputTokens: 4 })).toBe(
-      'Done in 2 turn(s), 3 input and 4 output tokens',
+      'Done — turns: 2, input tokens: 3, output tokens: 4',
+    )
+  })
+
+  it('shows a cost under a cent with four decimals, so that it does not read as nothing', () => {
+    expect(costed(0.002)).toMatch(/ \(\$0\.0020\)$/u)
+    expect(costed(0.0099)).toMatch(/ \(\$0\.0099\)$/u)
+    expect(costed(0)).toMatch(/ \(\$0\.0000\)$/u)
+    expect(costed(0.01)).toMatch(/ \(\$0\.01\)$/u)
+    expect(costed(12.5)).toMatch(/ \(\$12\.50\)$/u)
+  })
+
+  it('speaks Czech when that is the language', () => {
+    onTestFinished(() => {
+      setLocale('en')
+    })
+    setLocale('cs')
+    expect(completionLine({ turns: 1, inputTokens: 120, outputTokens: 40, costUsd: 0.002 })).toBe(
+      'Hotovo — kol: 1, vstupní tokeny: 120, výstupní tokeny: 40 ($0.0020)',
     )
   })
 })

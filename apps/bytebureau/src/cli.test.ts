@@ -66,3 +66,22 @@ describe('bytebureau hello', () => {
     expect(code).toBe(1)
   })
 })
+
+describe('bytebureau global flags', () => {
+  it('shows --log-level, as it is typed, in the help of a command', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['run', '--help'])
+    expect(stdout).toContain('--log-level')
+    expect(stdout).not.toContain('--logLevel')
+  })
+
+  it('keeps a flag that follows a bare --debug a flag', async () => {
+    expect.hasAssertions()
+    const { stdout, code } = await runCli(['hello', '--debug', '--json'])
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout)).toStrictEqual({
+      command: 'hello',
+      message: 'Hello! ByteBureau is ready.',
+    })
+  })
+})

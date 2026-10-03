@@ -51,8 +51,21 @@ function assistantLine(text: string): string | undefined {
   return text === '' ? undefined : text
 }
 
-// One printable line per durable event the user cares about; undefined means "print nothing"
-export function transcriptLine(event: EventEnvelope, output: Output): string | undefined {
+// An event whose payload does not fit its type is skipped, with one warning that names it
+export function readOrSkip<Result>(
+  event: EventEnvelope,
+  output: Output,
+  read: () => Result,
+): Result | undefined {
+  try {
+    return read()
+  } catch {
+    output.warn(m.run_event_skipped({ type: event.type, seq: event.seq }))
+    return undefined
+  }
+}
+
+function lineOf(event: EventEnvelope, output: Output): string | undefined {
   switch (event.type) {
     case 'message.assistant.completed': {
       return assistantLine(decodeEventPayload(event.type, event.payload).text)
@@ -79,6 +92,11 @@ export function transcriptLine(event: EventEnvelope, output: Output): string | u
   }
 }
 
+// One printable line per durable event the user cares about; undefined means "print nothing"
+export function transcriptLine(event: EventEnvelope, output: Output): string | undefined {
+  return readOrSkip(event, output, () => lineOf(event, output))
+}
+
 const NO_TURNS: RunSummary = { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: undefined }
 
 function withTurn(
@@ -93,14 +111,25 @@ function withTurn(
   }
 }
 
-export function summarizeRun(events: readonly EventEnvelope[]): RunSummary {
+// A turn that cannot be read is not counted
+function withEventTurn(summary: RunSummary, event: EventEnvelope, output: Output): RunSummary {
+  const turn = readOrSkip(event, output, () => decodeEventPayload('turn.completed', event.payload))
+  return turn === undefined ? summary : withTurn(summary, turn.usage)
+}
+
+export function summarizeRun(events: readonly EventEnvelope[], output: Output): RunSummary {
   let summary = NO_TURNS
   for (const event of events) {
     if (event.type === 'turn.completed') {
-      summary = withTurn(summary, decodeEventPayload(event.type, event.payload).usage)
+      summary = withEventTurn(summary, event, output)
     }
   }
   return summary
+}
+
+// Under a cent the cost gets four decimals, since it would read as nothing at two
+function costText(costUsd: number): string {
+  return ` ($${costUsd.toFixed(costUsd < 0.01 ? 4 : 2)})`
 }
 
 // The closing line of a run that completed: turns, tokens and, when the provider reports it, the cost
@@ -109,6 +138,6 @@ export function completionLine(summary: RunSummary): string {
     turns: summary.turns,
     input: summary.inputTokens,
     output: summary.outputTokens,
-    cost: summary.costUsd === undefined ? '' : ` ($${summary.costUsd.toFixed(2)})`,
+    cost: summary.costUsd === undefined ? '' : costText(summary.costUsd),
   })
 }

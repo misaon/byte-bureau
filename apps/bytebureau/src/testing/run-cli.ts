@@ -2,12 +2,21 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { onTestFinished } from 'vitest'
+import { tempDir } from './temp-repo.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
 const BASE_ENV = {
   PATH: process.env['PATH'] ?? '',
   HOME: process.env['HOME'] ?? '',
   LANG: 'en_US.UTF-8',
+  // The git of a test never reads the configuration of the person who runs the tests
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+}
+
+// A test that names no home for the CLI gets a throwaway one, never that of the person who runs the tests
+export function childEnv(env: Readonly<Record<string, string>>): Record<string, string> {
+  return { ...BASE_ENV, BYTEBUREAU_HOME: env['BYTEBUREAU_HOME'] ?? tempDir('bb-home-'), ...env }
 }
 
 export interface CliResult {
@@ -57,7 +66,7 @@ export async function runCli(
 ): Promise<CliResult> {
   const child = spawn('bun', ['run', 'src/main.ts', ...args], {
     cwd: CLI_DIRECTORY,
-    env: { ...BASE_ENV, ...env },
+    env: childEnv(env),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   onTestFinished(() => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { askOf, event, option, question } from '../testing/events.js'
 import {
   captureConsole,
@@ -25,7 +25,7 @@ describe(runSession, () => {
       'prompt s1 Fix the build',
       'complete s1',
     ])
-    expect(printed.out()).toStrictEqual(['Done in 1 turn(s), 10 input and 5 output tokens'])
+    expect(printed.out()).toStrictEqual(['Done — turns: 1, input tokens: 10, output tokens: 5'])
   })
 
   it('hands the prompt on as it was typed and takes the first line of it as the title', async () => {
@@ -44,28 +44,6 @@ describe(runSession, () => {
     const { kernel } = scripted([STOPPED])
     await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(3)
     expect(printed.out()).toStrictEqual(['Session stopped'])
-  })
-})
-
-describe('runSession at a terminal', () => {
-  it('decorates the lines and the closing words and prints no plain line', async () => {
-    expect.hasAssertions()
-    const printed = captureConsole()
-    const written: string[] = []
-    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
-      written.push(String(chunk))
-      return true
-    })
-    const toolStarted = event(
-      'tool.started',
-      { id: 't1', name: 'Write', kind: 'builtin', input: { path: 'src/hello.ts' } },
-      1,
-    )
-    const { kernel } = scripted([toolStarted, TURN_DONE, COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf(false, true))).resolves.toBe(0)
-    expect(printed.out()).toStrictEqual([])
-    expect(written.join('')).toContain('⚙ Write src/hello.ts')
-    expect(written.join('')).toContain('Done in 1 turn(s), 10 input and 5 output tokens')
   })
 })
 

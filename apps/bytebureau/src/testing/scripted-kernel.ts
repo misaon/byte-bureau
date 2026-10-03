@@ -128,6 +128,16 @@ export function captureConsole(): { readonly out: () => string[]; readonly err: 
   }
 }
 
+// What the terminal is written: clack draws its frame there, not through the console
+export function captureTerminal(): () => string {
+  const written: string[] = []
+  vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    written.push(String(chunk))
+    return true
+  })
+  return () => written.join('')
+}
+
 export const OPTIONS: RunOptions = { prompt: 'Fix the build', project: '/repo', yes: false }
 
 export const TURN_DONE = event(

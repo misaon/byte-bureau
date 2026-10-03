@@ -1,4 +1,5 @@
 import { runCommand, showUsage, type CommandDef, type Resolvable } from 'citty'
+import { describeError } from './errors.js'
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(['--help', '-h'])
 const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-v'])
@@ -37,69 +38,23 @@ async function printVersion(command: CommandDef): Promise<void> {
   console.log(meta.version)
 }
 
+// A bare --debug debugs every category; as --debug= it takes nothing from the argument after it
+// What follows -- is no flag
+function withBareDebug(argv: readonly string[]): string[] {
+  const end = argv.indexOf('--')
+  return argv.map((arg, index) =>
+    arg === '--debug' && (end === -1 || index < end) ? '--debug=' : arg,
+  )
+}
+
 async function execute(command: CommandDef, argv: readonly string[]): Promise<void> {
   if (argv.some((arg) => HELP_FLAGS.has(arg))) {
     await printUsage(command, argv)
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    await runCommand(command, { rawArgs: [...argv] })
+    await runCommand(command, { rawArgs: withBareDebug(argv) })
   }
-}
-
-function field(error: Error, key: string): string | undefined {
-  const value: unknown = Reflect.get(error, key)
-  return typeof value === 'string' ? value : undefined
-}
-
-type Describe = (error: unknown) => string
-
-// The reason a typed error names, else the story of its cause (a StoreError carries nothing but that)
-function reasonOf(error: Error, describeCause: Describe): string | undefined {
-  const reason = field(error, 'reason')
-  return reason === undefined && error.cause !== undefined ? describeCause(error.cause) : reason
-}
-
-// A file with its JSON pointer, else the code or the kind of the failure
-function whereOf(error: Error): string | undefined {
-  const file = field(error, 'file')
-  if (file !== undefined) {
-    return `${file}${field(error, 'pointer') ?? ''}`
-  }
-  return field(error, 'code') ?? field(error, 'kind')
-}
-
-// The tagged errors of the kernel have an empty message: their name and fields say what went wrong
-function describeTyped(error: Error, describeCause: Describe): string {
-  const reason = reasonOf(error, describeCause)
-  const head = reason === undefined ? error.name : `${error.name}: ${reason}`
-  const where = whereOf(error)
-  return where === undefined ? head : `${head} (${where})`
-}
-
-// An error and the errors behind it: "Failed to execute statement: FOREIGN KEY constraint failed"
-// An error behind that already begins with what this one says is not told twice
-function describeChain(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return String(error)
-  }
-  if (error.message === '') {
-    return describeTyped(error, describeChain)
-  }
-  if (error.cause === undefined) {
-    return error.message
-  }
-  const behind = describeChain(error.cause)
-  const repeated = behind === error.message || behind.startsWith(`${error.message}: `)
-  return repeated ? behind : `${error.message}: ${behind}`
-}
-
-// The one line the runner prints for an error
-export function describeError(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return String(error)
-  }
-  return error.message === '' ? describeTyped(error, describeChain) : error.message
 }
 
 // Exit codes: 0 success, 1 usage error (citty's CLIError), 2 anything else

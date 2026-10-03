@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
 import { tempDir } from '../testing/temp-repo.js'
+
+const JSONC = 'bytebureau.jsonc'
 
 interface FreshProject {
   readonly project: string
@@ -21,7 +23,7 @@ describe('bytebureau config init', () => {
     expect.hasAssertions()
     const { project, env } = inFreshProject()
     const result = await runCli(['config', 'init', '--project', project], env)
-    const file = path.join(project, 'bytebureau.jsonc')
+    const file = path.join(project, JSONC)
     expect(result.code).toBe(0)
     expect(result.stdout.trim()).toBe(`Wrote ${file}`)
     const written = readFileSync(file, 'utf8')
@@ -34,7 +36,7 @@ describe('bytebureau config init', () => {
     const { project, env } = inFreshProject()
     const result = await runCli(['config', 'init', '--project', project, '--json'], env)
     expect(jsonLines(result.stdout)).toStrictEqual([
-      { command: 'config.init', file: path.join(project, 'bytebureau.jsonc') },
+      { command: 'config.init', file: path.join(project, JSONC) },
     ])
   })
 
@@ -42,7 +44,7 @@ describe('bytebureau config init', () => {
     expect.hasAssertions()
     const { project, env } = inFreshProject()
     await runCli(['config', 'init', '--project', project], env)
-    const file = path.join(project, 'bytebureau.jsonc')
+    const file = path.join(project, JSONC)
     writeFileSync(file, '{ "kept": true }\n')
     const again = await runCli(['config', 'init', '--project', project], env)
     expect(again.code).toBe(1)
@@ -58,7 +60,21 @@ describe('bytebureau config init', () => {
     const result = await runCli(['config', 'init', '--project', project], env)
     expect(result.code).toBe(1)
     expect(result.stderr.trim()).toBe(`${existing} already exists`)
-    expect(existsSync(path.join(project, 'bytebureau.jsonc'))).toBe(false)
+    expect(existsSync(path.join(project, JSONC))).toBe(false)
+  })
+})
+
+describe('bytebureau config init creates the file only when nothing is there', () => {
+  it('does not write through a link that is in the way, and says that the file exists', async () => {
+    expect.hasAssertions()
+    const { project, env } = inFreshProject()
+    const elsewhere = path.join(project, 'elsewhere.txt')
+    const file = path.join(project, JSONC)
+    symlinkSync(elsewhere, file)
+    const result = await runCli(['config', 'init', '--project', project], env)
+    expect(result.code).toBe(1)
+    expect(result.stderr.trim()).toBe(`${file} already exists`)
+    expect(existsSync(elsewhere)).toBe(false)
   })
 })
 

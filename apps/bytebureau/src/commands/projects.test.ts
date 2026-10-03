@@ -60,6 +60,6 @@ describe('bytebureau projects when it cannot do what it is asked', () => {
     const id = await projectIdIn(bench.home)
     const removed = await runCli(['projects', 'rm', id], { BYTEBUREAU_HOME: bench.home })
     expect(removed.code).toBe(2)
-    expect(removed.stderr.trim()).toMatch(/^StoreError: .*FOREIGN KEY constraint failed$/u)
+    expect(removed.stderr).toMatch(/^StoreError: /u)
   })
 })

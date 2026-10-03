@@ -4,7 +4,14 @@ import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines, payloadOf } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
 import { tempDir } from '../testing/temp-repo.js'
-import { FAKE, ON_FAKE, PROMPT, workbench, worktreesOf } from '../testing/workbench.js'
+import {
+  configureEmployeeProvider,
+  FAKE,
+  ON_FAKE,
+  PROMPT,
+  workbench,
+  worktreesOf,
+} from '../testing/workbench.js'
 
 describe('bytebureau run (fake provider, no daemon)', () => {
   it('provisions a worktree, streams NDJSON events with increasing seq, answers the ask with --yes and exits 0', async () => {
@@ -72,13 +79,14 @@ describe('bytebureau run when it cannot start', () => {
     expect(jsonLines(projects.stdout)).toStrictEqual([{ command: 'projects.ls', projects: [] }])
   })
 
-  it('exits 4 when the provider of the default employee is not available', async () => {
+  it('exits 4 when the provider of the employee of the project is not available', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
+    configureEmployeeProvider(repo, 'nope')
     const result = await runCli(['run', 'x', '--project', repo], { BYTEBUREAU_HOME: home })
     expect(result.code).toBe(4)
     expect(result.stderr).toContain(
-      'SessionError: provider "claude" is not available; available: fake (provider_missing)',
+      'SessionError: provider "nope" is not available; available: fake (provider_missing)',
     )
     expect(existsSync(worktreesOf(repo))).toBe(false)
   })
@@ -163,7 +171,7 @@ describe('bytebureau run read by a person', () => {
       '⚙ Write src/hello.ts',
       'Created src/hello.ts exporting hello().',
     ])
-    expect(lines.at(-1)).toMatch(/^Done in 1 turn\(s\), 120 input and 40 output tokens/u)
+    expect(lines.at(-1)).toBe('Done — turns: 1, input tokens: 120, output tokens: 40 ($0.0020)')
     expect(result.stdout).not.toContain('│')
   })
 
@@ -176,6 +184,6 @@ describe('bytebureau run read by a person', () => {
     )
     const lines = result.stdout.trim().split('\n')
     expect(lines[0]).toMatch(/^Připravuji pracovní prostor na větvi bb\//u)
-    expect(lines.at(-1)).toMatch(/^Hotovo za 1 kol, 120 vstupních a 40 výstupních tokenů/u)
+    expect(lines.at(-1)).toBe('Hotovo — kol: 1, vstupní tokeny: 120, výstupní tokeny: 40 ($0.0020)')
   })
 })

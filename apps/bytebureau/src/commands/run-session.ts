@@ -14,11 +14,18 @@ import {
   type EventEnvelope,
   type PromptInput,
 } from '@bytebureau/protocol'
-import { log, outro } from '@clack/prompts'
+import { intro, log, outro } from '@clack/prompts'
 import type { Context } from '../context.js'
+import type { Output } from '../output.js'
 import { promptAsk } from '../render/ask-prompt.js'
-import { completionLine, summarizeRun, titleOf, transcriptLine } from '../render/transcript.js'
-import { describeError } from '../run.js'
+import {
+  completionLine,
+  readOrSkip,
+  summarizeRun,
+  titleOf,
+  transcriptLine,
+} from '../render/transcript.js'
+import { describeError } from '../errors.js'
 
 const EXIT_COMPLETED = 0
 const EXIT_STOPPED = 3
@@ -77,6 +84,30 @@ function isRefusal(error: unknown): boolean {
   return error instanceof ProviderError
 }
 
+// A terminal gets a frame: the session opens it, and every way out of the run closes it
+function open({ output, interactive }: Context, prompt: string): void {
+  if (interactive) {
+    const title = titleOf(prompt)
+    intro(output.colors.bold(m.run_intro({ title })))
+  }
+}
+
+function closeFrame({ interactive }: Context): void {
+  if (interactive) {
+    outro()
+  }
+}
+
+// A refusal ends the run with exit code 4: its text is the closing line of the frame, or goes to stderr
+function refuse({ output, interactive }: Context, text: string): number {
+  if (interactive) {
+    outro(text)
+  } else {
+    output.warn(text)
+  }
+  return EXIT_PROVIDER_ERROR
+}
+
 // A named provider is checked before anything is registered or created
 function unknownProvider(kernel: RunKernel, provider: string | undefined): string | undefined {
   const available = kernel.providers.list().map((candidate) => candidate.id)
@@ -112,10 +143,16 @@ async function answerAsk({ kernel, options, context }: Run, ask: Ask): Promise<v
   await kernel.asks.answer(ask.id, answer, 'cli')
 }
 
+// The ask of an ask.requested event, if its payload fits
+function askOf(event: EventEnvelope, output: Output): Ask | undefined {
+  return readOrSkip(event, output, () => decodeEventPayload('ask.requested', event.payload).ask)
+}
+
 // Besides showing an event the CLI answers an ask, and completes the session once its turn is over
 async function react(run: Run, event: EventEnvelope): Promise<void> {
-  if (event.type === 'ask.requested') {
-    await answerAsk(run, decodeEventPayload(event.type, event.payload).ask)
+  const ask = event.type === 'ask.requested' ? askOf(event, run.context.output) : undefined
+  if (ask !== undefined) {
+    await answerAsk(run, ask)
   }
   if (event.type === 'turn.completed') {
     await run.kernel.sessions.complete(run.session.id)
@@ -165,17 +202,26 @@ async function followSession(run: Run): Promise<EventEnvelope[]> {
   }
 }
 
-function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[]): Outcome {
+// The reason of an errored session; the type of the event stands in for a payload that cannot be read
+function reasonOf(last: EventEnvelope, output: Output): string {
+  const reason = readOrSkip(last, output, () => decodeEventPayload('session.errored', last.payload))
+  return reason === undefined ? last.type : reason.message
+}
+
+// The summary is built only for the words that are printed: JSON output has none
+function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: Output): Outcome {
   switch (last.type) {
     case 'session.stopped': {
       return { code: EXIT_STOPPED, text: m.run_stopped() }
     }
     case 'session.errored': {
-      const { message } = decodeEventPayload(last.type, last.payload)
-      return { code: EXIT_PROVIDER_ERROR, text: m.run_errored({ message }) }
+      return { code: EXIT_PROVIDER_ERROR, text: m.run_errored({ message: reasonOf(last, output) }) }
     }
     default: {
-      return { code: EXIT_COMPLETED, text: completionLine(summarizeRun(seen)) }
+      return {
+        code: EXIT_COMPLETED,
+        text: output.json ? '' : completionLine(summarizeRun(seen, output)),
+      }
     }
   }
 }
@@ -195,7 +241,7 @@ function conclude(seen: readonly EventEnvelope[], context: Context): number {
   if (last === undefined || !TERMINAL.has(last.type)) {
     throw new Error('the events ended before the session did')
   }
-  const outcome = outcomeOf(last, seen)
+  const outcome = outcomeOf(last, seen, context.output)
   report(outcome, context)
   return outcome.code
 }
@@ -217,24 +263,35 @@ async function startAndFollow(
   return conclude(seen, context)
 }
 
-// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project or provider refused
-export async function runSession(
+// A named provider is refused before anything is registered or created
+async function runOrRefuse(
   kernel: RunKernel,
   options: RunOptions,
   context: Context,
 ): Promise<number> {
   const refusal = unknownProvider(kernel, options.provider)
   if (refusal !== undefined) {
-    context.output.warn(refusal)
-    return EXIT_PROVIDER_ERROR
+    return refuse(context, refusal)
   }
+  const code = await startAndFollow(kernel, options, context)
+  return code
+}
+
+// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project or provider refused
+// A failure that has no exit code of its own closes the frame and goes on to the runner
+export async function runSession(
+  kernel: RunKernel,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  open(context, options.prompt)
   try {
-    return await startAndFollow(kernel, options, context)
+    return await runOrRefuse(kernel, options, context)
   } catch (error) {
     if (!isRefusal(error)) {
+      closeFrame(context)
       throw error
     }
-    context.output.warn(describeError(error))
-    return EXIT_PROVIDER_ERROR
+    return refuse(context, describeError(error))
   }
 }

@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { jsonLines } from './json-lines.js'
 import { runCli, type CliResult } from './run-cli.js'
@@ -23,6 +24,18 @@ export function workbench(): Workbench {
 
 export function worktreesOf(repo: string): string {
   return path.join(repo, '.bytebureau', 'worktrees')
+}
+
+// The default employee of the repository works with the named provider, through its bytebureau.json
+export function configureEmployeeProvider(repo: string, provider: string): void {
+  const employee = { name: 'Developer', provider, model: 'any', permissionMode: 'supervised' }
+  const config = {
+    version: 1,
+    project: { name: 'fixture' },
+    employees: { developer: employee },
+    defaults: { employee: 'developer' },
+  }
+  writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify(config))
 }
 
 // A whole run of the fake agent on the workbench

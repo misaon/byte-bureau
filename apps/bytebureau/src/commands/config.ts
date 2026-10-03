@@ -19,10 +19,17 @@ function existingConfig(directory: string): string | undefined {
   return CONFIG_FILES.map((name) => path.join(directory, name)).find((file) => existsSync(file))
 }
 
-function writeConfig(directory: string): string {
-  const file = path.join(directory, 'bytebureau.jsonc')
-  writeFileSync(file, defaultProjectConfigText())
-  return file
+// Creates the file unless anything is there (a link to nowhere too): the file is never written through a link
+function createConfig(file: string): boolean {
+  try {
+    writeFileSync(file, defaultProjectConfigText(), { flag: 'wx' })
+    return true
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+      return false
+    }
+    throw error
+  }
 }
 
 const init = defineCommand({
@@ -34,15 +41,15 @@ const init = defineCommand({
   run({ args }) {
     const context = processContext(args)
     const directory = path.resolve(args.project ?? process.cwd())
+    const file = path.join(directory, 'bytebureau.jsonc')
     const existing = existingConfig(directory)
-    if (existing !== undefined) {
-      context.output.warn(m.config_init_exists({ file: existing }))
-      process.exitCode = 1
+    if (existing === undefined && createConfig(file)) {
+      context.output.print(m.config_init_written({ file }))
+      context.output.emit({ command: 'config.init', file })
       return
     }
-    const file = writeConfig(directory)
-    context.output.print(m.config_init_written({ file }))
-    context.output.emit({ command: 'config.init', file })
+    context.output.warn(m.config_init_exists({ file: existing ?? file }))
+    process.exitCode = 1
   },
 })
 

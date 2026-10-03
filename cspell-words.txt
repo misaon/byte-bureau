@@ -95,4 +95,5 @@ MIIE
 NOSYSTEM
 netrc
 oneline
-tokenů
+tokeny
+doporučeno

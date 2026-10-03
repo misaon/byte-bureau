@@ -13,14 +13,14 @@ export const globalArgs = {
   },
   yes: {
     type: 'boolean',
-    description: 'Answer every ask with the recommended option',
+    description: 'Answer every ask that has a recommended option with it',
     default: false,
   },
   debug: {
     type: 'string',
-    description: 'Debug logging; optionally a category list (bb.agent,!bb.store)',
+    description: 'Debug logging; pass --debug=<categories> to pick some (bb.agent,!bb.store)',
   },
-  logLevel: { type: 'string', description: 'Log level: debug, info, warn or error' },
+  'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
 } as const
 
 export interface GlobalArgs {
@@ -29,7 +29,7 @@ export interface GlobalArgs {
   readonly color: boolean
   readonly yes: boolean
   readonly debug?: string | undefined
-  readonly logLevel?: string | undefined
+  readonly 'log-level'?: string | undefined
 }
 
 export interface Context {
@@ -58,7 +58,7 @@ export function createContext(
   return {
     output,
     interactive: stdoutIsTTY && !args.json,
-    logging: { debug: args.debug, level: args.logLevel },
+    logging: { debug: args.debug, level: args['log-level'] },
   }
 }
 

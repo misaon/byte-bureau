@@ -1,9 +1,6 @@
-import { m } from '@bytebureau/i18n'
-import { intro } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { globalArgs, processContext } from '../context.js'
 import { withKernel } from '../kernel.js'
-import { titleOf } from '../render/transcript.js'
 import { runSession } from './run-session.js'
 
 export const runCommand = defineCommand({
@@ -23,10 +20,6 @@ export const runCommand = defineCommand({
   },
   async run({ args }) {
     const context = processContext(args)
-    if (context.interactive) {
-      const title = titleOf(args.prompt)
-      intro(context.output.colors.bold(m.run_intro({ title })))
-    }
     const options = {
       prompt: args.prompt,
       project: args.project ?? process.cwd(),

@@ -1,5 +1,5 @@
 import { m } from '@bytebureau/i18n'
-import type { Ask, AskAnswer, AskQuestion } from '@bytebureau/protocol'
+import type { Ask, AskAnswer, AskOption, AskQuestion } from '@bytebureau/protocol'
 import { isCancel, select, text, type Option } from '@clack/prompts'
 
 export interface AskPromptOptions {
@@ -34,10 +34,18 @@ function recommendedAnswer(ask: Ask): AskAnswer | undefined {
   return picks.every((pick) => pick !== undefined) ? { selected: picks } : undefined
 }
 
+// An agent often marks the label it recommends itself, in English or in Czech: one marker is enough
+const MARKED = /\((?:recommended|doporučeno)\)\s*$/iu
+
+function labelOf(option: AskOption): string {
+  const needsMarker = option.recommended && !MARKED.test(option.label)
+  return needsMarker ? `${option.label} ${m.run_ask_recommended()}` : option.label
+}
+
 function choicesOf(question: AskQuestion): Option<string>[] {
   const choices = question.options.map((option) => ({
     value: option.id,
-    label: option.recommended ? `${option.label} ${m.run_ask_recommended()}` : option.label,
+    label: labelOf(option),
     ...(option.description === undefined ? {} : { hint: option.description }),
   }))
   return question.allowOther ? [...choices, { value: OTHER, label: m.run_ask_other() }] : choices
