@@ -36,8 +36,8 @@ const interruptOrUnmark = (live: Live): Effect.Effect<void> => {
   })
 }
 
-// A session that is there but has no agent at work in this kernel has nothing to interrupt: a refused transition, as for any other command
-// One that is not there is not found
+// A session that is there but has no turn at work in this kernel has nothing to interrupt: a refused transition, as for any other command
+// That holds for an agent still attached after its turn as well; a session that is not there is not found
 const nothingToInterrupt = (
   deps: SessionDeps,
   sessionId: string,
@@ -58,7 +58,7 @@ export const makeInterrupt =
   (sessionId) =>
     Effect.suspend(() => {
       const live = deps.live.get(sessionId)
-      if (live === undefined) {
+      if (live === undefined || live.turn === null) {
         return nothingToInterrupt(deps, sessionId)
       }
       const cancelling = reported({ sessionId, event: 'interrupt' })(cancelAsks(deps, sessionId))
