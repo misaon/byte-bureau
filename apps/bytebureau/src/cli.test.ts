@@ -209,6 +209,16 @@ describe('bytebureau commands that talk to no daemon', () => {
     expect(refused.stderr).toContain(`${command} talks to no daemon: it takes no ${flag}`)
   })
 
+  it('take the value of a flag that names a leaf for the value, and start no daemon for it', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    // Were the value taken for the leaf, prune would run with the flag dropped and start a daemon of the home
+    stoppedWithTheTest(home)
+    const refused = await runCli(['workspaces', '--host', 'prune'], { BYTEBUREAU_HOME: home })
+    expect([refused.code, readServerInfo(home).state]).toStrictEqual([1, 'absent'])
+    expect(refused.stderr).toContain('No command specified.')
+  })
+
   it('leaves the flags that choose a daemon out of the help of serve', async () => {
     expect.hasAssertions()
     const { stdout } = await runCli(['serve', '--help'])

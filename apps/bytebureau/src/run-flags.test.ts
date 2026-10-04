@@ -65,11 +65,14 @@ describe('run with a -- or a bare --debug among the arguments', () => {
     ])
   })
 
-  it('reads no sub-command behind a --, so none runs', async () => {
+  it('reads no sub-command behind a --, and refuses a name there as a usage error', async () => {
     expect.hasAssertions()
-    const { command, given } = tree()
-    await expect(run(command, ['--json', '--', 'projects', 'ls'])).resolves.toBe(0)
-    expect(given).toStrictEqual([])
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    vi.spyOn(console, 'log').mockReturnValue()
+    const { command, given, rooted } = tree()
+    await expect(run(command, ['--json', '--', 'projects', 'ls'])).resolves.toBe(1)
+    expect([given, rooted]).toStrictEqual([[], []])
+    expect(error).toHaveBeenCalledWith('No command specified: a command name goes before --')
   })
 
   it('takes a bare --debug before the sub-command for a flag with no value', async () => {
@@ -106,6 +109,7 @@ describe('run and the usage of a command named after a flag with a value', () =>
     ['--lang', 'cs', 'projects', '--help'],
     ['--debug', 'projects', '--help'],
     ['projects', '--lang', 'cs', '--help'],
+    ['projects', '--lang', 'ls', '--help'],
   ])('prints the usage of the group, not of what the value names: %j', async (...argv) => {
     expect.hasAssertions()
     const log = vi.spyOn(console, 'log').mockReturnValue()
@@ -131,4 +135,34 @@ describe('run and the usage of a command named after a flag with a value', () =>
     ).resolves.toBe(0)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('PROMPT'))
   })
+})
+
+describe('run and the value of a flag that names a leaf of the group before it', () => {
+  it.each([[['projects', '--lang', 'ls']], [['projects', '--host', 'ls']]])(
+    'takes it for the value, and refuses the group named without its leaf: %j',
+    async (argv) => {
+      expect.hasAssertions()
+      const error = vi.spyOn(console, 'error').mockReturnValue()
+      vi.spyOn(console, 'log').mockReturnValue()
+      const { command, given } = tree()
+      await expect(run(command, argv)).resolves.toBe(1)
+      expect(given).toStrictEqual([])
+      expect(error).toHaveBeenCalledWith('No command specified.')
+    },
+  )
+})
+
+describe('run and a name only the prototype of an object has', () => {
+  it.each([[['constructor']], [['projects', 'constructor']], [['--json', 'toString']]])(
+    'refuses %j as an unknown command, where citty would find the prototype',
+    async (argv) => {
+      expect.hasAssertions()
+      const error = vi.spyOn(console, 'error').mockReturnValue()
+      vi.spyOn(console, 'log').mockReturnValue()
+      const { command, given, rooted } = tree()
+      await expect(run(command, argv)).resolves.toBe(1)
+      expect([given, rooted]).toStrictEqual([[], []])
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('Unknown command'))
+    },
+  )
 })

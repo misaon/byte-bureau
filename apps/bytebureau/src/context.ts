@@ -28,7 +28,7 @@ export const commonArgs = {
 } as const
 
 // The flags that choose the daemon a command talks to; a command that talks to none does not take them
-export const bureauArgs = {
+const bureauArgs = {
   daemon: {
     type: 'boolean',
     description:

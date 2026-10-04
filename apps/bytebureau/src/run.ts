@@ -8,6 +8,7 @@ import {
 } from 'citty'
 import { DaemonRunningError } from './bureau/open-local.js'
 import { describeError } from './errors.js'
+import { usageError } from './usage-error.js'
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(['--help', '-h'])
 const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-v'])
@@ -64,6 +65,8 @@ interface Walked {
   readonly flags: readonly string[]
   // What follows the last name
   readonly rest: readonly string[]
+  // A name the command it was given to has no sub-command of
+  readonly unknown?: string | undefined
 }
 
 interface Level {
@@ -93,9 +96,10 @@ async function descend(walked: Walked, above: ArgsDef): Promise<Walked> {
     flags: [...walked.flags, ...walked.rest.slice(0, index)],
     rest: walked.rest.slice(index + 1),
   }
+  // Own names only: citty's lookup would find the prototype's constructor of a name such as constructor
   const subCommand = Object.hasOwn(subCommands, name) ? subCommands[name] : undefined
   if (subCommand === undefined) {
-    return named
+    return { ...named, unknown: name }
   }
   return descend({ ...named, command: await resolved(subCommand), parent: walked.command }, known)
 }
@@ -121,7 +125,7 @@ async function printUsage(command: CommandDef, argv: readonly string[]): Promise
 async function printVersion(command: CommandDef): Promise<void> {
   const meta = command.meta === undefined ? {} : await resolved(command.meta)
   if (meta.version === undefined) {
-    throw Object.assign(new Error('No version specified'), { name: 'CLIError' })
+    throw usageError('No version specified')
   }
   console.log(meta.version)
 }
@@ -135,14 +139,38 @@ function withBareDebug(argv: readonly string[]): string[] {
   )
 }
 
+// What the walk ended at that citty would read otherwise: a name that is no sub-command, a group named without its leaf
+// (so that the value of a flag before it is never taken for a leaf), or a name after -- where no command is named
+async function refusalOf({ command, names, rest, unknown }: Walked): Promise<string | undefined> {
+  if (unknown !== undefined) {
+    return `Unknown command \`${unknown}\``
+  }
+  const subCommands = command.subCommands === undefined ? {} : await resolved(command.subCommands)
+  if (Object.keys(subCommands).length > 0 && command.run === undefined) {
+    return 'No command specified.'
+  }
+  const end = rest.indexOf('--')
+  return names.length === 0 && end !== -1 && end < rest.length - 1
+    ? 'No command specified: a command name goes before --'
+    : undefined
+}
+
+async function runWalked(command: CommandDef, argv: readonly string[]): Promise<void> {
+  const walked = await walk(command, argv)
+  const refusal = await refusalOf(walked)
+  if (refusal !== undefined) {
+    throw usageError(refusal)
+  }
+  await runCommand(command, { rawArgs: [...walked.names, ...walked.flags, ...walked.rest] })
+}
+
 async function execute(command: CommandDef, argv: readonly string[]): Promise<void> {
   if (argv.some((arg) => HELP_FLAGS.has(arg))) {
     await printUsage(command, argv)
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    const rawArgs = await flagsAtLeaf(command, argv)
-    await runCommand(command, { rawArgs })
+    await runWalked(command, argv)
   }
 }
 
