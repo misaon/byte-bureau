@@ -2,26 +2,59 @@ import { SecretsBackend } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import { readLayer, type LoadedFile } from '../config/files.js'
 import { isPlain } from '../config/merge.js'
+import { ConfigError } from '../errors.js'
+import { kernelLogger } from '../logging/logging.js'
 import { secretStoreFor } from '../secrets/secret-store-for.js'
 import type { SecretsShape } from '../secrets/secrets.js'
 import type { KernelOptions } from './types.js'
 
+const logger = kernelLogger(['bb', 'secrets'])
+
 const isBackend = Schema.is(SecretsBackend)
 
-const backendIn = (loaded: LoadedFile | null): SecretsBackend => {
-  const section = loaded === null ? undefined : loaded.config['secrets']
-  const backend = isPlain(section) ? section['backend'] : undefined
-  return isBackend(backend) ? backend : 'auto'
+// The backend the secrets section names, auto where it names none; anything else refuses the start, which auto would hide
+const backendIn = ({ file, config }: LoadedFile): SecretsBackend => {
+  const section = config['secrets']
+  if (section === undefined) {
+    return 'auto'
+  }
+  if (!isPlain(section)) {
+    throw new ConfigError({ file, pointer: '/secrets', reason: 'expected an object' })
+  }
+  const { backend } = section
+  if (backend === undefined || isBackend(backend)) {
+    return backend ?? 'auto'
+  }
+  const reason = `expected "auto", "keychain" or "file", not ${JSON.stringify(backend)}`
+  throw new ConfigError({ file, pointer: '/secrets/backend', reason })
+}
+
+type UserFile = { readonly loaded: LoadedFile | null } | { readonly failure: ConfigError }
+
+const userFile = async (home: string): Promise<UserFile> => {
+  const read = readLayer(home, 'config').pipe(
+    Effect.match({
+      onFailure: (failure): UserFile => ({ failure }),
+      onSuccess: (loaded): UserFile => ({ loaded }),
+    }),
+  )
+  const file = await Effect.runPromise(read)
+  return file
 }
 
 // The secrets section of the user file on its own, so that a mistake in another section does not move the secrets elsewhere
-// A file that cannot be parsed, or a section that names no backend, leaves the choice to auto
+// A file that cannot be parsed leaves the choice to auto, and says so, as the daemon does for its server section
 async function configuredBackend(home: string): Promise<SecretsBackend> {
-  const read = readLayer(home, 'config').pipe(
-    Effect.match({ onFailure: (): SecretsBackend => 'auto', onSuccess: backendIn }),
-  )
-  const backend = await Effect.runPromise(read)
-  return backend
+  const read = await userFile(home)
+  if ('failure' in read) {
+    const { file, reason } = read.failure
+    logger.warn('the user configuration cannot be read: its secrets section is not applied', {
+      file,
+      reason,
+    })
+    return 'auto'
+  }
+  return read.loaded === null ? 'auto' : backendIn(read.loaded)
 }
 
 // The store the options give, else the one the user configuration names

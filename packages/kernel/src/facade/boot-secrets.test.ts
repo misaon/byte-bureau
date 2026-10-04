@@ -1,7 +1,9 @@
 import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ConfigError } from '../errors.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { capturedLogs, linesOf } from '../testing/captured-logs.js'
 import { withoutBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { bootSecrets } from './boot-secrets.js'
@@ -39,14 +41,35 @@ describe(bootSecrets, () => {
     )
     await expect(bootSecrets({ home, env: {} })).rejects.toThrow(/keychain/u)
   })
+})
 
-  it('leaves the backend to auto where the user file cannot be parsed or names no known one', async () => {
+describe('bootSecrets and a secrets section it cannot go by', () => {
+  it('refuses a backend that is none of the three, naming its place and the three', async () => {
     expect.hasAssertions()
-    const broken = await bootSecrets({ home: homeWith('{ "secrets": '), env: {} })
-    const unknown = await bootSecrets({
+    const refused = bootSecrets({
       home: homeWith('{ "secrets": { "backend": "vault" } }'),
       env: {},
     })
-    expect([broken.backend, unknown.backend]).toStrictEqual(['file', 'file'])
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('pointer', '/secrets/backend')
+    await expect(refused).rejects.toThrow(/^expected "auto", "keychain" or "file", not "vault"$/u)
+  })
+
+  it('refuses a secrets section that is no object', async () => {
+    expect.hasAssertions()
+    const refused = bootSecrets({ home: homeWith('{ "secrets": "file" }'), env: {} })
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('pointer', '/secrets')
+  })
+
+  it('leaves the choice to auto where the user file cannot be parsed, and says so', async () => {
+    expect.hasAssertions()
+    const home = homeWith('{ "secrets": ')
+    const logs = await capturedLogs()
+    await expect(bootSecrets({ home, env: {} })).resolves.toHaveProperty('backend', 'file')
+    expect(linesOf(logs, 'bb.secrets')[0]).toStrictEqual([
+      'warning',
+      'the user configuration cannot be read: its secrets section is not applied',
+    ])
   })
 })
