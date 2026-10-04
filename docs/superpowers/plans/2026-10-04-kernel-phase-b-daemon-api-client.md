@@ -4252,6 +4252,8 @@ Verified facts this task relies on (fact sheet §3): `effect@4.0.0` ships SSE na
 
 Semantics: the SSE suite is built with `{ excludeTestServices: true }` so the heartbeat runs on the live clock (`@effect/vitest`'s `it.layer` provides the TestClock otherwise, and handlers see it — Task 4 verified the clock reads 0 under the default layer). A client that passes `since=<seq>` or `Last-Event-ID: <seq>` (the header wins) gets every durable event after that seq replayed from the log in order, then the live ones; the kernel's `EventLog.subscribe` already opens the subscription before reading the replay, so nothing published meanwhile is lost (Phase A Task 6). Ephemeral events (`seq` 0: text deltas, tool progress, heartbeats) carry no `id`, so a browser's automatic reconnect resends the last durable seq. A heartbeat frame goes out every `heartbeat` (15 s by default; tests shorten it) so proxies and clients see a live connection; it is an `event: heartbeat` frame with an envelope of type `heartbeat`, not an SSE comment, because the schema encodes events only. Backpressure (spec §11.1 "drop oldest ephemeral deltas first"): each connection has a `DeliveryBuffer` — durable events are never dropped, ephemeral events are kept up to a capacity (64) and the oldest ephemeral one goes when a new one arrives above it; a client that reads slowly therefore misses deltas, never durable facts. A failure of the subscription ends the stream (the client resumes with its last id); a client that goes away ends the subscription (the stream's scope closes with the response).
 
+Semantics (as shipped, commits 4a7f5aa, d3c090d): the **first heartbeat goes out at once** (no `Stream.drop(1)`), so an idle stream flushes its headers immediately and a client that keeps ephemeral events sees a `heartbeat` envelope before `session.created` (Tasks 7 and 9 filter durable frames or subscribe with `ephemeral: false`); `sinceOf` ignores an empty or non-numeric `Last-Event-ID` (digits only); `types=` entries are trimmed and empty names dropped (`types=` alone means no filter); `buffered` wakes its reader through a one-slot dropping queue (push and offer in one `Effect.sync`, so no wake-up is lost and no durable event is ever dropped) and logs a failed subscription once under `bb.api`; `DeliveryBuffer` pushes then evicts (capacity 0 works); `readSse`/`EPHEMERAL_CAPACITY` are not exported (knip) and the tests use `framesUntil` with a predicate that waits for a heartbeat *after* the expected durable frames; the resume test resumes after the second durable event and then streams a live turn (it cannot pass vacuously); extra tests `buffered.test.ts`, `sse.test.ts`, `testing-sse.test.ts`, `events-ending.test.ts` (a subscription that ends or fails). Known for the whole-branch review: the per-connection durable backlog has no bound and eviction scans it; a resume with an id above the log's head waits until the seq passes it (kernel `replayedTo = since`); a client that loses deltas is not logged. For Task 8: an open SSE stream holds the server's graceful shutdown (`gracefulShutdownTimeout`), and a stream without `since`/`Last-Event-ID` replays from seq 0.
+
 - [ ] **Step 1: Write the failing buffer test**
 
 `packages/api/src/events/delivery-buffer.test.ts`:
@@ -4268,26 +4270,45 @@ const event = (seq: number, type: string): EventEnvelope => ({
   payload: {},
 })
 
+const ephemeral = (id: string): EventEnvelope => ({ ...event(0, 'delta'), id })
+
+// A buffer of the capacity that has been handed the events one after the other
+const filled = (capacity: number, events: readonly EventEnvelope[]): DeliveryBuffer => {
+  const buffer = new DeliveryBuffer(capacity)
+  for (const item of events) {
+    buffer.push(item)
+  }
+  return buffer
+}
+
+const idsOf = (buffer: DeliveryBuffer): string[] => buffer.drain().map((item) => item.id)
+
 describe(DeliveryBuffer, () => {
   it('hands events out in the order they came while nothing is dropped', () => {
-    const buffer = new DeliveryBuffer(3)
-    buffer.push(event(1, 'a'))
-    buffer.push(event(0, 'delta'))
-    buffer.push(event(2, 'b'))
-    expect(buffer.drain().map((item) => item.id)).toStrictEqual(['e1-a', 'e0-delta', 'e2-b'])
+    const buffer = filled(3, [event(1, 'a'), event(0, 'delta'), event(2, 'b')])
+    expect(idsOf(buffer)).toStrictEqual(['e1-a', 'e0-delta', 'e2-b'])
     expect(buffer.drain()).toStrictEqual([])
   })
 
   it('drops the oldest ephemeral event above the capacity and keeps every durable one', () => {
-    const buffer = new DeliveryBuffer(2)
-    buffer.push(event(1, 'a'))
-    buffer.push({ ...event(0, 'delta'), id: 'd1' })
-    buffer.push({ ...event(0, 'delta'), id: 'd2' })
-    buffer.push(event(2, 'b'))
-    buffer.push({ ...event(0, 'delta'), id: 'd3' })
-    buffer.push(event(3, 'c'))
-    expect(buffer.drain().map((item) => item.id)).toStrictEqual(['e1-a', 'd2', 'e2-b', 'd3', 'e3-c'])
+    const arrivals = [event(1, 'a'), ephemeral('d1'), ephemeral('d2'), event(2, 'b')]
+    const buffer = filled(2, [...arrivals, ephemeral('d3'), event(3, 'c')])
+    expect(idsOf(buffer)).toStrictEqual(['e1-a', 'd2', 'e2-b', 'd3', 'e3-c'])
     expect(buffer.dropped).toBe(1)
+  })
+
+  it('keeps no ephemeral event with a capacity of 0, and still every durable one', () => {
+    const buffer = filled(0, [event(1, 'a'), event(0, 'delta'), event(2, 'b')])
+    expect(idsOf(buffer)).toStrictEqual(['e1-a', 'e2-b'])
+    expect(buffer.dropped).toBe(1)
+  })
+
+  it('makes room for ephemeral events again once the ones it holds are taken', () => {
+    const buffer = filled(1, [event(0, 'delta')])
+    buffer.drain()
+    buffer.push(event(0, 'delta'))
+    expect(buffer.drain()).toHaveLength(1)
+    expect(buffer.dropped).toBe(0)
   })
 })
 ```
@@ -4315,13 +4336,13 @@ export class DeliveryBuffer {
   }
 
   public push(event: EventEnvelope): void {
+    this.items.push(event)
     if (event.seq === 0) {
       this.ephemeral += 1
       if (this.ephemeral > this.capacity) {
         this.evictOldestEphemeral()
       }
     }
-    this.items.push(event)
   }
 
   public drain(): readonly EventEnvelope[] {
@@ -4333,11 +4354,9 @@ export class DeliveryBuffer {
 
   private evictOldestEphemeral(): void {
     const index = this.items.findIndex((item) => item.seq === 0)
-    if (index !== -1) {
-      this.items.splice(index, 1)
-      this.ephemeral -= 1
-      this.dropped += 1
-    }
+    this.items.splice(index, 1)
+    this.ephemeral -= 1
+    this.dropped += 1
   }
 }
 ```
@@ -4345,10 +4364,11 @@ export class DeliveryBuffer {
 `packages/api/src/events/buffered.ts`:
 ```ts
 import type { EventEnvelope } from '@bytebureau/protocol'
-import { Effect, Queue, Stream } from 'effect'
+import { Effect, Queue, Stream, type Cause } from 'effect'
+import { logApiWarning } from '../logging.js'
 import { DeliveryBuffer } from './delivery-buffer.js'
 
-export const EPHEMERAL_CAPACITY = 64
+const EPHEMERAL_CAPACITY = 64
 
 // The source is read as fast as it comes into the buffer; the client takes what the buffer holds whenever it is ready
 // A failure of the source is logged and ends the stream: an SSE client resumes from its last id
@@ -4359,19 +4379,24 @@ export const buffered = <Failure>(
   Stream.unwrap(
     Effect.gen(function* startsBuffering() {
       const buffer = new DeliveryBuffer(capacity)
-      const signal = yield* Queue.unbounded<void>()
+      // One pending wake-up says there is something to take; a take empties the buffer, so more would only pile up
+      const wake = yield* Queue.dropping<null, Cause.Done>(1)
       const fill = source.pipe(
         Stream.runForEach((event) =>
           Effect.sync(() => {
             buffer.push(event)
-          }).pipe(Effect.andThen(Queue.offer(signal, undefined))),
+            Queue.offerUnsafe(wake, null)
+          }),
         ),
-        Effect.catchCause((cause) => Effect.logWarning('an event subscription ended with a failure', cause)),
-        Effect.ensuring(Queue.end(signal)),
+        Effect.catchCause((cause) =>
+          logApiWarning('an event subscription ended with a failure', cause),
+        ),
+        Effect.ensuring(Queue.end(wake)),
       )
       yield* Effect.forkScoped(fill)
-      return Stream.fromQueue(signal).pipe(
-        Stream.flatMap(() => Stream.fromIterable(buffer.drain())),
+      return Stream.fromQueue(wake).pipe(
+        Stream.map(() => buffer.drain()),
+        Stream.flattenIterable,
       )
     }),
   )
@@ -4400,26 +4425,45 @@ export const toSseEvent = (envelope: EventEnvelope): SseEvent =>
     : { id: String(envelope.seq), event: envelope.type, data: envelope }
 
 // A heartbeat is an ephemeral envelope of its own type, so every frame of the stream decodes as an event
-export const heartbeatEvent = (): SseEvent => ({
-  event: 'heartbeat',
-  data: { seq: 0, id: uuidv7(), ts: nowIso(), type: 'heartbeat', payload: { at: nowIso() } },
-})
-
-// The header of a resuming client wins over the query; anything that is not a whole number is ignored
-export const sinceOf = (query: EventsQuery, lastEventId: string | undefined): number => {
-  const fromHeader = lastEventId === undefined ? Number.NaN : Number(lastEventId)
-  if (Number.isInteger(fromHeader) && fromHeader >= 0) {
-    return fromHeader
+export const heartbeatEvent = (): SseEvent => {
+  const at = nowIso()
+  return {
+    event: 'heartbeat',
+    data: { seq: 0, id: uuidv7(), ts: at, type: 'heartbeat', payload: { at } },
   }
-  return query.since ?? 0
 }
 
-export const filterOf = (query: EventsQuery, lastEventId: string | undefined): EventFilter => ({
-  since: sinceOf(query, lastEventId),
-  ...(query.session === undefined ? {} : { sessionId: query.session }),
-  ...(query.project === undefined ? {} : { projectId: query.project }),
-  ...(query.types === undefined ? {} : { types: query.types.split(',').filter((type) => type !== '') }),
-})
+// An id this server sent is the digits of a seq; an empty or any other text is no id
+const SEQ = /^\d+$/u
+
+const seqOf = (lastEventId: string | undefined): number | undefined => {
+  if (lastEventId === undefined || !SEQ.test(lastEventId)) {
+    return undefined
+  }
+  const seq = Number(lastEventId)
+  return Number.isSafeInteger(seq) ? seq : undefined
+}
+
+// The header of a resuming client wins over the query; anything that is not a whole number is ignored
+export const sinceOf = (query: EventsQuery, lastEventId: string | undefined): number =>
+  seqOf(lastEventId) ?? query.since ?? 0
+
+// The types are comma-separated, with or without blanks around a name; with none listed the stream is not narrowed by type
+const typesOf = (types: string | undefined): readonly string[] | undefined => {
+  const names = (types ?? '').split(',').map((name) => name.trim())
+  const listed = names.filter((name) => name !== '')
+  return listed.length === 0 ? undefined : listed
+}
+
+export const filterOf = (query: EventsQuery, lastEventId: string | undefined): EventFilter => {
+  const types = typesOf(query.types)
+  return {
+    since: sinceOf(query, lastEventId),
+    ...(query.session === undefined ? {} : { sessionId: query.session }),
+    ...(query.project === undefined ? {} : { projectId: query.project }),
+    ...(types === undefined ? {} : { types }),
+  }
+}
 ```
 
 `packages/api/src/groups/events.ts`:
@@ -4461,11 +4505,9 @@ export const EventsHandlers = HttpApiBuilder.group(BureauApi, 'events', (handler
       const events = buffered(log.subscribe(filterOf(query, headers['last-event-id']))).pipe(
         Stream.map(toSseEvent),
       )
-      // The first tick comes at once and then every heartbeat; the beats stop when the events end, so the response ends with them
-      const beats = Stream.tick(heartbeat).pipe(
-        Stream.drop(1),
-        Stream.map(() => heartbeatEvent()),
-      )
+      // Stream.tick fires at once and then every heartbeat; the first beat leaves with the response, so an idle client has its headers at once
+      // The beats stop when the events end, so the response ends with them
+      const beats = Stream.tick(heartbeat).pipe(Stream.map(() => heartbeatEvent()))
       return Stream.merge(events, beats, { haltStrategy: 'left' })
     }),
   ),
@@ -4477,6 +4519,12 @@ export const EventsHandlers = HttpApiBuilder.group(BureauApi, 'events', (handler
 
 `packages/api/src/testing-sse.ts`:
 ```ts
+import { EventEnvelope } from '@bytebureau/protocol'
+import { Effect, Schema } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { API_PREFIX } from './api.js'
+import { authorized, baseUrl } from './testing.js'
+
 export interface SseFrame {
   readonly id: string | undefined
   readonly event: string
@@ -4490,130 +4538,637 @@ const parseFrame = (block: string): SseFrame => {
     const colon = line.indexOf(':')
     const key = colon === -1 ? line : line.slice(0, colon)
     const value = colon === -1 ? '' : line.slice(colon + 1).replace(/^ /u, '')
-    fields.set(key, fields.has(key) && key === 'data' ? `${fields.get(key) ?? ''}\n${value}` : value)
+    fields.set(
+      key,
+      fields.has(key) && key === 'data' ? `${fields.get(key) ?? ''}\n${value}` : value,
+    )
   }
-  return { id: fields.get('id'), event: fields.get('event') ?? 'message', data: fields.get('data') ?? '' }
+  return {
+    id: fields.get('id'),
+    event: fields.get('event') ?? 'message',
+    data: fields.get('data') ?? '',
+  }
 }
 
-// Reads frames from a text/event-stream response until the predicate says enough; the response is cancelled afterwards
-export async function readSse(
-  response: Response,
-  until: (frames: readonly SseFrame[]) => boolean,
-): Promise<SseFrame[]> {
+const textOf = (response: Response, signal: AbortSignal | undefined): ReadableStream<string> => {
   if (response.body === null) {
     throw new Error('the response has no body')
   }
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  const frames: SseFrame[] = []
+  const options = signal === undefined ? {} : { signal }
+  return response.body.pipeThrough(new TextDecoderStream(), options)
+}
+
+// The frames of a text/event-stream response, each as soon as its blank line has come
+async function* framesOf(
+  response: Response,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<SseFrame> {
   let pending = ''
-  try {
-    while (!until(frames)) {
-      const { value, done } = await reader.read()
-      if (done) {
-        break
-      }
-      pending += decoder.decode(value, { stream: true })
-      const blocks = pending.split('\n\n')
-      pending = blocks.pop() ?? ''
-      frames.push(...blocks.filter((block) => block.trim() !== '').map(parseFrame))
+  for await (const text of textOf(response, signal)) {
+    const blocks = (pending + text).split('\n\n')
+    pending = blocks.pop() ?? ''
+    yield* blocks.filter((block) => block.trim() !== '').map((block) => parseFrame(block))
+  }
+}
+
+// Reads frames until the predicate says enough or the stream ends; leaving the loop cancels the response, which closes the connection
+// An aborted signal stops the reading the same way, so a test that is interrupted leaves no stream open
+async function readSse(
+  response: Response,
+  until: (frames: readonly SseFrame[]) => boolean,
+  signal?: AbortSignal,
+): Promise<SseFrame[]> {
+  const frames: SseFrame[] = []
+  for await (const frame of framesOf(response, signal)) {
+    frames.push(frame)
+    if (until(frames)) {
+      break
     }
-  } finally {
-    await reader.cancel()
   }
   return frames
 }
+
+// The event stream as a client opens it: the answer is there once the server has sent its headers
+// A test that is interrupted while it waits for them aborts the request
+export const opened = (
+  query = '',
+  init: RequestInit = {},
+): Effect.Effect<Response, never, HttpServer.HttpServer> =>
+  Effect.gen(function* opens() {
+    const base = yield* baseUrl
+    const url = `${base}${API_PREFIX}/events${query === '' ? '' : `?${query}`}`
+    return yield* Effect.promise(async (signal) => {
+      const response = await fetch(url, { ...authorized(init), signal })
+      return response
+    })
+  })
+
+// What an open stream sends until the predicate says enough
+export const framesUntil = (
+  response: Response,
+  until: (frames: readonly SseFrame[]) => boolean,
+): Effect.Effect<SseFrame[]> =>
+  Effect.promise(async (signal) => {
+    const frames = await readSse(response, until, signal)
+    return frames
+  })
+
+// The frames that carry an id are the durable events; the rest are ephemeral
+export const durableOf = (frames: readonly SseFrame[]): SseFrame[] =>
+  frames.filter((frame) => frame.id !== undefined)
+
+export const seqNumbersOf = (frames: readonly SseFrame[]): number[] =>
+  durableOf(frames).map((frame) => Number(frame.id))
+
+// What a frame carries as its data, read through the protocol's schema
+export const envelopeOf = (frame: SseFrame): EventEnvelope =>
+  Schema.decodeUnknownSync(Schema.fromJsonString(EventEnvelope))(frame.data)
 ```
 The `??` operators are fine (only `?.` is refused); `max-statements` may ask for the loop body to become a helper.
 
 `packages/api/src/events.test.ts`:
 ```ts
 import { EventLog } from '@bytebureau/kernel'
-import { it } from '@effect/vitest'
+import { decodeEventPayload } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
+import type { HttpServer } from 'effect/http'
+import { API_PREFIX } from './api.js'
+import { ApiTestLayer, baseUrl, bodyOf, fetched, get, post } from './testing.js'
 import { createdSession } from './testing-sessions.js'
-import { readSse, type SseFrame } from './testing-sse.js'
+import {
+  durableOf,
+  envelopeOf,
+  framesUntil,
+  opened,
+  seqNumbersOf,
+  type SseFrame,
+} from './testing-sse.js'
 
-const seqOf = (frame: SseFrame): number => Number(frame.id)
-const typesOf = (frames: readonly SseFrame[]): string[] => frames.map((frame) => frame.event)
+// The suites run on the live clock: under the test clock the Stream.tick of the heartbeat would never tick
+const LIVE = { excludeTestServices: true }
+const BEATING = ApiTestLayer({ heartbeat: '100 millis' })
 
-describe('GET /api/v1/events', () => {
-  // The test layer would otherwise run on the TestClock (Task 4 found handlers see it), and Stream.tick never ticks there
-  it.layer(ApiTestLayer({ heartbeat: '100 millis' }), { excludeTestServices: true })('over the fake provider', (it) => {
-    it.effect('replays the durable events of a session with their seq as id, then streams the live ones', () =>
-      Effect.gen(function* streams() {
-        const base = yield* baseUrl
-        const { session } = yield* createdSession
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/events?session=${session.id}&since=0`, authorized()),
-        )
-        expect(response.status).toBe(200)
-        expect(response.headers.get('content-type')).toContain('text/event-stream')
-        yield* Effect.promise(() => fetch(`${base}/api/v1/sessions/${session.id}/prompt`, json({ text: 'go' })))
-        const frames = yield* Effect.promise(() =>
-          readSse(response, (seen) => seen.some((frame) => frame.event === 'turn.started')),
-        )
-        const durable = frames.filter((frame) => frame.id !== undefined)
-        expect(typesOf(durable).slice(0, 3)).toStrictEqual(['session.created', 'session.provisioning', 'workspace.provisioned'])
-        expect(durable.map(seqOf)).toStrictEqual([...durable.map(seqOf)].sort((left, right) => left - right))
-        expect(JSON.parse(durable[0]?.data ?? '{}')).toMatchObject({ type: 'session.created', sessionId: session.id })
-      }),
-    )
+const hasEvent =
+  (type: string) =>
+  (seen: readonly SseFrame[]): boolean =>
+    seen.some((frame) => frame.event === type)
 
-    it.effect('sends a heartbeat frame without an id while nothing happens', () =>
-      Effect.gen(function* beats() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/events?since=1000000`, authorized()),
-        )
-        const frames = yield* Effect.promise(() =>
-          readSse(response, (seen) => seen.some((frame) => frame.event === 'heartbeat')),
-        )
-        const beat = frames.find((frame) => frame.event === 'heartbeat')
-        expect(beat).toBeDefined()
-        expect(beat === undefined ? 'x' : beat.id).toBeUndefined()
-        expect(JSON.parse(beat === undefined ? '{}' : beat.data)).toMatchObject({ type: 'heartbeat', seq: 0, payload: { at: expect.any(String) } })
-      }),
-    )
+const beats = hasEvent('heartbeat')
 
-    it.effect('resumes from Last-Event-ID without a gap and without a duplicate', () =>
-      Effect.gen(function* resumes() {
-        const base = yield* baseUrl
-        const { session } = yield* createdSession
-        const first = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/events?session=${session.id}`, authorized()),
-        )
-        const head = yield* Effect.promise(() => readSse(first, (seen) => seen.filter((frame) => frame.id !== undefined).length >= 2))
-        const lastSeen = Math.max(...head.filter((frame) => frame.id !== undefined).map(seqOf))
-        const second = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/events?session=${session.id}`, authorized({ headers: { 'last-event-id': String(lastSeen) } })),
-        )
-        const log = yield* EventLog
-        const all = yield* log.read({ sessionId: session.id }, { from: 0 })
-        const tail = yield* Effect.promise(() =>
-          readSse(second, (seen) => seen.filter((frame) => frame.id !== undefined).length >= all.length - head.filter((frame) => frame.id !== undefined).length),
-        )
-        const resumed = tail.filter((frame) => frame.id !== undefined).map(seqOf)
-        expect(resumed).toStrictEqual(all.map((event) => event.seq).filter((seq) => seq > lastSeen))
-      }),
-    )
+const beatsOf = (frames: readonly SseFrame[]): SseFrame[] =>
+  frames.filter((frame) => frame.event === 'heartbeat')
 
-    it.effect('refuses a missing token with 401 and a since that is no number with 400', () =>
-      Effect.gen(function* refuses() {
-        const base = yield* baseUrl
-        const noToken = yield* Effect.promise(() => fetch(`${base}/api/v1/events`))
-        expect(noToken.status).toBe(401)
-        const badSince = yield* Effect.promise(() => fetch(`${base}/api/v1/events?since=soon`, authorized()))
-        expect(badSince.status).toBe(400)
-        expect(yield* Effect.promise(() => badSince.json())).toMatchObject({ code: 'request_invalid' })
-      }),
-    )
+const firstOf = (frames: readonly SseFrame[], type: string): SseFrame | undefined =>
+  frames.find((frame) => frame.event === type)
+
+const CREATED = ['session.created', 'session.provisioning', 'workspace.provisioned']
+
+const endsWithBeat = (seen: readonly SseFrame[]): boolean => {
+  const latest = seen.at(-1)
+  return latest !== undefined && latest.event === 'heartbeat'
+}
+
+// Read until the durable events have come and a heartbeat has followed them, which shows that nothing else is on its way
+// The first heartbeat leaves at once, so having seen one says nothing about the end of the replay: the latest frame has to be one
+const replayedWithBeat =
+  (count: number) =>
+  (seen: readonly SseFrame[]): boolean =>
+    seqNumbersOf(seen).length >= count && endsWithBeat(seen)
+
+// The time a heartbeat says it was made at, read the way a client reads it: a payload with nothing but that field
+const beatTime = (frame: SseFrame): number =>
+  Date.parse(decodeEventPayload('heartbeat', envelopeOf(frame).payload).at)
+
+// The seq numbers the log holds for a session
+const loggedSeqNumbers = (sessionId: string): Effect.Effect<number[], never, EventLog> =>
+  EventLog.use((log) => log.read({ sessionId }, { from: 0 })).pipe(
+    Effect.map((events) => events.map((event) => event.seq)),
+    Effect.orDie,
+  )
+
+// A prompt starts a turn; the frames of the stream are read up to its start
+const throughTurn = (
+  sessionId: string,
+  response: Response,
+): Effect.Effect<SseFrame[], never, HttpServer.HttpServer> =>
+  Effect.gen(function* prompts() {
+    yield* post(`/sessions/${sessionId}/prompt`, { text: 'go' })
+    return yield* framesUntil(response, hasEvent('turn.started'))
   })
+
+it.layer(BEATING, LIVE)('GET /api/v1/events over the fake provider', (suite) => {
+  suite.effect(
+    'replays the durable events of a session with their seq as id, then the live ones',
+    () =>
+      Effect.gen(function* streams() {
+        const { session } = yield* createdSession
+        const response = yield* opened(`session=${session.id}&since=0`)
+        assert.strictEqual(response.status, 200)
+        assert.include(response.headers.get('content-type'), 'text/event-stream')
+        const frames = yield* throughTurn(session.id, response)
+        const durable = durableOf(frames).map((frame) => frame.event)
+        assert.deepStrictEqual(durable.slice(0, 3), CREATED)
+        const logged = yield* loggedSeqNumbers(session.id)
+        assert.deepStrictEqual(seqNumbersOf(frames), logged.slice(0, seqNumbersOf(frames).length))
+        assert.isAbove(seqNumbersOf(frames).length, 4)
+      }),
+  )
+
+  suite.effect(
+    'sends the envelope as the data of each frame, and no id with an ephemeral one',
+    () =>
+      Effect.gen(function* streamsDeltas() {
+        const { session } = yield* createdSession
+        const response = yield* opened(`session=${session.id}`)
+        yield* post(`/sessions/${session.id}/prompt`, { text: 'go' })
+        const frames = yield* framesUntil(response, hasEvent('tool.started'))
+        const delta = yield* Effect.fromNullishOr(firstOf(frames, 'message.assistant.delta'))
+        assert.isUndefined(delta.id)
+        assert.strictEqual(envelopeOf(delta).seq, 0)
+        for (const frame of durableOf(frames)) {
+          assert.containSubset(envelopeOf(frame), { type: frame.event, seq: Number(frame.id) })
+        }
+      }),
+  )
+})
+
+// How a client says where it resumes: the query, the header, both with the header winning, or a header that says nothing
+const RESUMING: [string, (seq: number) => { query: string; headers: Record<string, string> }][] = [
+  ['the since query', (seq) => ({ query: `&since=${seq}`, headers: {} })],
+  ['the Last-Event-ID header', (seq) => ({ query: '', headers: { 'last-event-id': String(seq) } })],
+  [
+    'the header over the query',
+    (seq) => ({ query: '&since=0', headers: { 'last-event-id': String(seq) } }),
+  ],
+  [
+    'the query beside a header of no number',
+    (seq) => ({ query: `&since=${seq}`, headers: { 'last-event-id': 'soon' } }),
+  ],
+]
+
+it.layer(BEATING, LIVE)('GET /api/v1/events resumes a client', (suite) => {
+  suite.effect('from its Last-Event-ID after a lost connection, without a gap or a duplicate', () =>
+    Effect.gen(function* resumes() {
+      const { session } = yield* createdSession
+      const first = yield* opened(`session=${session.id}`)
+      const head = yield* framesUntil(first, (seen) => seqNumbersOf(seen).length >= 2)
+      const lastSeen = yield* Effect.fromNullishOr(seqNumbersOf(head).at(1))
+      const headers = { 'last-event-id': String(lastSeen) }
+      const second = yield* opened(`session=${session.id}`, { headers })
+      const tail = yield* throughTurn(session.id, second)
+      const expected = (yield* loggedSeqNumbers(session.id)).filter((seq) => seq > lastSeen)
+      assert.deepStrictEqual(seqNumbersOf(tail), expected.slice(0, seqNumbersOf(tail).length))
+      assert.isAbove(seqNumbersOf(tail).length, 2)
+    }),
+  )
+
+  suite.effect.each(RESUMING)('replays what follows the seq it is given by %s', ([, resume]) =>
+    Effect.gen(function* replays() {
+      const { session } = yield* createdSession
+      const logged = yield* loggedSeqNumbers(session.id)
+      const seen = yield* Effect.fromNullishOr(logged.at(1))
+      const { query, headers } = resume(seen)
+      const response = yield* opened(`session=${session.id}${query}`, { headers })
+      const unseen = logged.slice(2)
+      const frames = yield* framesUntil(response, replayedWithBeat(unseen.length))
+      assert.deepStrictEqual(seqNumbersOf(frames), unseen)
+    }),
+  )
+})
+
+// The heartbeat test stays first: with other requests before it, closing the Node server at the end of this suite waited 3 s on a keep-alive connection (a bare http server and fetch do the same)
+it.layer(BEATING, LIVE)('GET /api/v1/events beats and narrows', (suite) => {
+  suite.effect('sends heartbeat frames without an id, one interval apart', () =>
+    Effect.gen(function* beating() {
+      const response = yield* opened('since=1000000')
+      const frames = yield* framesUntil(response, (seen) => beatsOf(seen).length >= 2)
+      const first = yield* Effect.fromNullishOr(beatsOf(frames).at(0))
+      const second = yield* Effect.fromNullishOr(beatsOf(frames).at(1))
+      assert.isUndefined(first.id)
+      assert.containSubset(envelopeOf(first), { type: 'heartbeat', seq: 0 })
+      assert.isAtLeast(beatTime(second) - beatTime(first), 90)
+    }),
+  )
+
+  suite.effect('carries only the project and the types it is asked for', () =>
+    Effect.gen(function* narrows() {
+      const { project, session } = yield* createdSession
+      yield* createdSession
+      const response = yield* opened(`project=${project.id}&types=session.created,session.ready`)
+      const durable = durableOf(yield* framesUntil(response, replayedWithBeat(2)))
+      assert.deepStrictEqual(
+        durable.map((frame) => frame.event),
+        ['session.created', 'session.ready'],
+      )
+      const sessions = durable.map((frame) => envelopeOf(frame).sessionId)
+      assert.deepStrictEqual(sessions, [session.id, session.id])
+    }),
+  )
+})
+
+// A heartbeat an hour apart: only a first beat that leaves at once answers an idle client in time
+const IDLE = ApiTestLayer({ heartbeat: '1 hour' })
+
+it.layer(IDLE, LIVE)('GET /api/v1/events of a client that has nothing to replay', (suite) => {
+  suite.effect('has its headers and a first heartbeat at once, without waiting an interval', () =>
+    Effect.gen(function* opensAtOnce() {
+      const response = yield* opened('since=1000000').pipe(Effect.timeout('5 seconds'))
+      assert.strictEqual(response.status, 200)
+      const frames = yield* framesUntil(response, beats).pipe(Effect.timeout('5 seconds'))
+      assert.deepStrictEqual(
+        frames.map((frame) => frame.event),
+        ['heartbeat'],
+      )
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('GET /api/v1/events refuses', (suite) => {
+  suite.effect('a missing token with 401, and a since that is no number with 400', () =>
+    Effect.gen(function* refuses() {
+      const base = yield* baseUrl
+      const noToken = yield* fetched(`${base}${API_PREFIX}/events`)
+      assert.strictEqual(noToken.status, 401)
+      assert.containSubset(yield* bodyOf(noToken), { code: 'unauthorized' })
+      const badSince = yield* get('/events?since=soon')
+      assert.strictEqual(badSince.status, 400)
+      assert.containSubset(badSince.body, { code: 'request_invalid' })
+    }),
+  )
 })
 ```
 `authorized({ headers })` merges its own header into the given ones (Task 3 wrote it so); the `?.`/`??` pairs on `durable[0]` need the lint-friendly form (`const [firstFrame] = durable; if (firstFrame === undefined) throw …`). The exact first three durable types come from the kernel's create path (`session.created`, `session.provisioning`, `workspace.provisioned`, `session.ready`, …): read what `EventLog.read` returns once and pin that order.
+
+`packages/api/src/events/buffered.test.ts` (added during execution):
+```ts
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect, Latch, Logger, References, Stream } from 'effect'
+import { buffered } from './buffered.js'
+
+const event = (seq: number, id: string): EventEnvelope => ({
+  seq,
+  id,
+  ts: '2026-10-04T00:00:00.000Z',
+  type: seq === 0 ? 'message.assistant.delta' : 'turn.started',
+  payload: {},
+})
+
+const idsOf = (events: readonly EventEnvelope[]): string[] => events.map((item) => item.id)
+
+interface LogLine {
+  readonly level: string
+  readonly category: unknown
+}
+
+it.effect('hands on the events of its source in their order and ends with the source', () =>
+  Effect.gen(function* passesOn() {
+    const source = Stream.make(event(1, 'a'), event(0, 'd1'), event(2, 'b'))
+    const read = yield* Stream.runCollect(buffered(source))
+    assert.deepStrictEqual(idsOf(read), ['a', 'd1', 'b'])
+  }),
+)
+
+it.effect('drops the oldest ephemeral events a reader has not taken, and no durable one', () =>
+  Effect.gen(function* outruns() {
+    // A source that gives all its events in one go is read to the end before the reader runs
+    const events = [event(1, 'a'), event(0, 'd1'), event(0, 'd2'), event(0, 'd3'), event(2, 'b')]
+    const read = yield* Stream.runCollect(buffered(Stream.fromIterable(events), 2))
+    assert.deepStrictEqual(idsOf(read), ['a', 'd2', 'd3', 'b'])
+  }),
+)
+
+it.effect('ends instead of failing when its source fails, and logs the failure under bb.api', () =>
+  Effect.gen(function* survives() {
+    const lines: LogLine[] = []
+    const logger = Logger.make((options) => {
+      const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
+      lines.push({ level: options.logLevel, category })
+    })
+    const failure = Stream.fail(new Error('gone'))
+    const source = Stream.make(event(1, 'a')).pipe(Stream.concat(failure))
+    const logging = Logger.layer([logger])
+    const read = yield* Stream.runCollect(buffered(source)).pipe(Effect.provide(logging))
+    assert.deepStrictEqual(idsOf(read), ['a'])
+    assert.deepStrictEqual(lines, [{ level: 'Warn', category: 'bb.api' }])
+  }),
+)
+
+it.effect('stops reading its source once the reader is gone', () =>
+  Effect.gen(function* stops() {
+    const stopped = yield* Latch.make()
+    const source = Stream.make(event(1, 'a')).pipe(
+      Stream.concat(Stream.never),
+      Stream.ensuring(stopped.open),
+    )
+    const firstOnly = buffered(source).pipe(Stream.take(1))
+    const read = yield* Stream.runCollect(firstOnly)
+    assert.deepStrictEqual(idsOf(read), ['a'])
+    assert.isTrue(Latch.isOpen(stopped))
+  }),
+)
+```
+`packages/api/src/events/sse.test.ts` (added during execution):
+```ts
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { describe, expect, it } from 'vitest'
+import { filterOf, heartbeatEvent, sinceOf, toSseEvent } from './sse.js'
+
+const envelope = (seq: number): EventEnvelope => ({
+  seq,
+  id: 'e1',
+  ts: '2026-10-04T00:00:00.000Z',
+  type: 'turn.started',
+  payload: {},
+})
+
+describe(toSseEvent, () => {
+  it('names a durable event by its seq and gives an ephemeral one no id', () => {
+    const durable = { id: '7', event: 'turn.started', data: envelope(7) }
+    expect(toSseEvent(envelope(7))).toStrictEqual(durable)
+    expect(toSseEvent(envelope(0))).toStrictEqual({ event: 'turn.started', data: envelope(0) })
+  })
+})
+
+describe(heartbeatEvent, () => {
+  it('is an ephemeral envelope of the type heartbeat, stamped with the time of the beat', () => {
+    const { id, event, data } = heartbeatEvent()
+    expect(id).toBeUndefined()
+    expect(event).toBe('heartbeat')
+    expect(data).toMatchObject({ seq: 0, type: 'heartbeat', payload: { at: data.ts } })
+  })
+})
+
+describe(sinceOf, () => {
+  it.each([
+    { given: 'nothing', query: {}, header: undefined, expected: 0 },
+    { given: 'the query alone', query: { since: 5 }, header: undefined, expected: 5 },
+    { given: 'the header over the query', query: { since: 5 }, header: '3', expected: 3 },
+    { given: 'a header of 0 over the query', query: { since: 5 }, header: '0', expected: 0 },
+    { given: 'the header alone', query: {}, header: '12', expected: 12 },
+    { given: 'a header that is no number', query: { since: 5 }, header: 'soon', expected: 5 },
+    { given: 'an empty header', query: { since: 5 }, header: '', expected: 5 },
+    { given: 'a negative header', query: { since: 5 }, header: '-1', expected: 5 },
+    { given: 'a header with a fraction', query: { since: 5 }, header: '2.5', expected: 5 },
+    { given: 'a header too big', query: { since: 5 }, header: '9007199254740993', expected: 5 },
+  ])('reads $given', ({ query, header, expected }) => {
+    expect(sinceOf(query, header)).toBe(expected)
+  })
+})
+
+describe(filterOf, () => {
+  it('maps the query to the filter of the kernel, the header deciding where the stream resumes', () => {
+    const query = { since: 4, session: 's1', project: 'p1', types: 'turn.started,,session.ready,' }
+    expect(filterOf(query, '9')).toStrictEqual({
+      since: 9,
+      sessionId: 's1',
+      projectId: 'p1',
+      types: ['turn.started', 'session.ready'],
+    })
+  })
+
+  it.each([
+    {
+      given: 'names with blanks around them',
+      query: { types: ' session.created, session.ready ,tool.started' },
+      header: undefined,
+      expected: { since: 0, types: ['session.created', 'session.ready', 'tool.started'] },
+    },
+    { given: 'nothing', query: {}, header: undefined, expected: { since: 0 } },
+    {
+      given: 'a list of no type',
+      query: { types: ',' },
+      header: undefined,
+      expected: { since: 0 },
+    },
+    {
+      given: 'a list of blanks',
+      query: { types: ' , ' },
+      header: undefined,
+      expected: { since: 0 },
+    },
+  ])('maps $given to the filter of the kernel', ({ query, header, expected }) => {
+    expect(filterOf(query, header)).toStrictEqual(expected)
+  })
+})
+```
+`packages/api/src/testing-sse.test.ts` (added during execution):
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { framesUntil } from './testing-sse.js'
+
+interface Served {
+  readonly response: Response
+  readonly cancelled: () => boolean
+}
+
+// A response whose body arrives in the chunks given; with open set it never ends by itself
+const served = (chunks: readonly string[], open = false): Served => {
+  const encoder = new TextEncoder()
+  let wasCancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller): void {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk))
+      }
+      if (!open) {
+        controller.close()
+      }
+    },
+    cancel(): void {
+      wasCancelled = true
+    },
+  })
+  return { response: new Response(body), cancelled: () => wasCancelled }
+}
+
+const never = (): boolean => false
+
+it.effect('reads the frames whatever the chunks they arrive in', () =>
+  Effect.gen(function* reads() {
+    const { response } = served([
+      'id: 7\neve',
+      'nt: turn.started\nda',
+      'ta: {"a":"é"}\n',
+      '\nid: 8\n\n',
+    ])
+    const frames = yield* framesUntil(response, never)
+    assert.deepStrictEqual(frames, [
+      { id: '7', event: 'turn.started', data: '{"a":"é"}' },
+      { id: '8', event: 'message', data: '' },
+    ])
+  }),
+)
+
+it.effect('joins the lines of data and reads a line without a colon as an empty field', () =>
+  Effect.gen(function* joins() {
+    const { response } = served(['data: one\ndata: two\n\nevent\ndata\n\n'])
+    const frames = yield* framesUntil(response, never)
+    assert.deepStrictEqual(frames, [
+      { id: undefined, event: 'message', data: 'one\ntwo' },
+      { id: undefined, event: '', data: '' },
+    ])
+  }),
+)
+
+it.effect('stops at the frame that is enough and cancels the response', () =>
+  Effect.gen(function* stops() {
+    const { response, cancelled } = served(['id: 1\ndata: a\n\nid: 2\ndata: b\n\n'], true)
+    const frames = yield* framesUntil(response, (seen) => seen.length === 1)
+    assert.deepStrictEqual(frames, [{ id: '1', event: 'message', data: 'a' }])
+    assert.isTrue(cancelled())
+  }),
+)
+
+it.effect('refuses a response without a body', () =>
+  Effect.gen(function* refuses() {
+    const attempt = framesUntil(new Response(null), never)
+    const failure = yield* Effect.flip(Effect.sandbox(attempt))
+    assert.include(String(failure), 'the response has no body')
+  }),
+)
+```
+`packages/api/src/events-ending.test.ts` (added during execution):
+```ts
+import { createServer } from 'node:http'
+import { EventLog, StoreError } from '@bytebureau/kernel'
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { NodeHttpServer } from '@effect/platform-node'
+import { assert, it } from '@effect/vitest'
+import { Effect, Layer, Logger, References, Stream } from 'effect'
+import { serveApi } from './layer.js'
+import { testOptions, type ApiTestLayer } from './testing.js'
+import { BootedKernel } from './testing-kernel.js'
+import { framesUntil, opened, seqNumbersOf } from './testing-sse.js'
+
+const envelope = (seq: number): EventEnvelope => ({
+  seq,
+  id: `e${seq}`,
+  ts: '2026-10-04T00:00:00.000Z',
+  type: 'turn.started',
+  payload: {},
+})
+
+interface LogLine {
+  readonly level: string
+  readonly category: unknown
+}
+
+// A logger of its own for each suite, and the lines it has been given: the level and the category (the listening lines among them)
+const collecting = (): { logger: Logger.Logger<unknown, void>; lines: LogLine[] } => {
+  const lines: LogLine[] = []
+  const logger = Logger.make((options) => {
+    const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
+    lines.push({ level: options.logLevel, category })
+  })
+  return { logger, lines }
+}
+
+const warningsOf = (lines: readonly LogLine[]): LogLine[] =>
+  lines.filter((line) => line.level === 'Warn')
+
+// The API over a log whose subscription is the one given; the logger sits next to the API, where its requests see it
+const over = (
+  subscription: Stream.Stream<EventEnvelope, StoreError>,
+  logger: Logger.Logger<unknown, void>,
+): ReturnType<typeof ApiTestLayer> => {
+  const log = Layer.succeed(
+    EventLog,
+    EventLog.of({
+      publish: () => Effect.die('the stream publishes nothing'),
+      read: () => Effect.die('the stream reads only through its subscription'),
+      subscribe: () => subscription,
+    }),
+  )
+  return serveApi(testOptions({ heartbeat: '100 millis' })).pipe(
+    Layer.provide(Logger.layer([logger])),
+    Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
+    Layer.provideMerge(log),
+    Layer.provideMerge(BootedKernel),
+  )
+}
+
+// The frames of the whole response, which has to end by itself
+const wholeStream = Effect.gen(function* reads() {
+  const response = yield* opened()
+  return yield* framesUntil(response, () => false).pipe(Effect.timeout('5 seconds'))
+})
+
+const live = { excludeTestServices: true }
+
+const ended = collecting()
+const endingSubscription = Stream.make(envelope(1), envelope(2))
+
+it.layer(over(endingSubscription, ended.logger), live)(
+  'GET /api/v1/events when the subscription ends',
+  (suite) => {
+    suite.effect('ends the response with it, after the events it gave, without a word', () =>
+      Effect.gen(function* ends() {
+        assert.deepStrictEqual(seqNumbersOf(yield* wholeStream), [1, 2])
+        assert.deepStrictEqual(warningsOf(ended.lines), [])
+      }),
+    )
+  },
+)
+
+const failed = collecting()
+const gone = new StoreError({ cause: new Error('the store is gone') })
+const failingSubscription = Stream.make(envelope(1)).pipe(Stream.concat(Stream.fail(gone)))
+
+it.layer(over(failingSubscription, failed.logger), live)(
+  'GET /api/v1/events when the subscription fails',
+  (suite) => {
+    suite.effect('ends the response after the events it gave, and logs the failure', () =>
+      Effect.gen(function* fails() {
+        assert.deepStrictEqual(seqNumbersOf(yield* wholeStream), [1])
+        assert.deepStrictEqual(warningsOf(failed.lines), [{ level: 'Warn', category: 'bb.api' }])
+      }),
+    )
+  },
+)
+```
 
 - [ ] **Step 6: Run the tests, regenerate the document, run the gates**
 
@@ -5555,7 +6110,7 @@ describe('@bytebureau/client against the API', () => {
 ```
 `interrupt` on a `ready` session and `remove` of a project with sessions are refusals the test ignores on purpose: the point is that every method is wired; `sessions.test.ts` of Task 4 asserts their semantics.
 
-`packages/api/src/client-events.test.ts`: over `ApiTestLayer(home, { heartbeat: '100 millis' })`, `client.events.subscribe({ sessionId, since: 0 }, { signal })` yields the durable events of a created session in seq order and then a live `turn.started` after a prompt; a second subscription with `{ ephemeral: false }` yields no `heartbeat`; `client.rpc.connect()` then `call('projects.register', { path })` resolves with the project, `stream('events.subscribe', { sessionId, since: 0 }, signal)` yields `session.created` first and ends when the signal aborts, `call` without a valid token (a second `connectRpc` with `token: 'bad'`) rejects with `ApiError` 401.
+`packages/api/src/client-events.test.ts`: over `ApiTestLayer({ heartbeat: '100 millis' })` built with `{ excludeTestServices: true }`, `client.events.subscribe({ sessionId, since: 0 }, { signal })` yields the durable events of a created session in seq order (the first envelope is a `heartbeat` — assert on the frames with `seq !== 0`) and then a live `turn.started` after a prompt; a second subscription with `{ ephemeral: false }` yields no `heartbeat`; `client.rpc.connect()` then `call('projects.register', { path })` resolves with the project, `stream('events.subscribe', { sessionId, since: 0 }, signal)` yields `session.created` first and ends when the signal aborts, `call` without a valid token (a second `connectRpc` with `token: 'bad'`) rejects with `ApiError` 401.
 
 - [ ] **Step 6: Run everything**
 
@@ -7292,7 +7847,7 @@ Every smoke job (`build-smoke` x64, `smoke-arm64`, `smoke-macos`) gains, after t
 
 - [ ] **Step 2: Docs**
 
-`apps/docs/src/content/docs/daemon-and-api.md` (English; the Czech site has only the introduction today, so the sidebar entry gets a Czech label only): title "Daemon and API"; sections — *The daemon* (`bytebureau serve`, detached by default, `--no-daemonize`, `--stop`, `--host`/`--port`, `server.json` with its fields and mode, the log at `~/.bytebureau/logs/daemon.log`, one daemon per home, what happens to running sessions at a restart); *Talking to it* (bearer token from `server.json`, `--host`/`--port`/`--token-file` for a daemon elsewhere, `--no-daemon` and when it is refused); *The API* (base path, the groups and endpoints table of Task 4, problem details with the code list, rate limit, body limit, `/api/v1/openapi.json`, `/api/v1/health` without a token); *Events over SSE* (`since`, `Last-Event-ID`, ids, heartbeat, what a slow client misses); *RPC over WebSocket* (the envelopes, the token in request headers, acks, interrupts, origin check); *The client package* (`createBureauClient`, `subscribeEvents`, `connectRpc`, regenerating with `bun run generate:client`). `apps/docs/astro.config.mjs`: add `'daemon-and-api'` after `'architecture'` with `translations: { cs: 'Démon a API' }` in the item form the sidebar uses for labels (`{ label: 'Daemon and API', translations: { cs: 'Démon a API' }, link: '/daemon-and-api/' }`).
+`apps/docs/src/content/docs/daemon-and-api.md` (English; the Czech site has only the introduction today, so the sidebar entry gets a Czech label only): title "Daemon and API"; sections — *The daemon* (`bytebureau serve`, detached by default, `--no-daemonize`, `--stop`, `--host`/`--port`, `server.json` with its fields and mode, the log at `~/.bytebureau/logs/daemon.log`, one daemon per home, what happens to running sessions at a restart); *Talking to it* (bearer token from `server.json`, `--host`/`--port`/`--token-file` for a daemon elsewhere, `--no-daemon` and when it is refused); *The API* (base path, the groups and endpoints table of Task 4, problem details with the code list, rate limit, body limit, `/api/v1/openapi.json`, `/api/v1/health` without a token); *Events over SSE* (`since`, `Last-Event-ID`, ids, the heartbeat — the first one leaves at once, then every 15 s — what a slow client misses); *RPC over WebSocket* (the envelopes, the token in request headers, acks, interrupts, origin check); *The client package* (`createBureauClient`, `subscribeEvents`, `connectRpc`, regenerating with `bun run generate:client`). `apps/docs/astro.config.mjs`: add `'daemon-and-api'` after `'architecture'` with `translations: { cs: 'Démon a API' }` in the item form the sidebar uses for labels (`{ label: 'Daemon and API', translations: { cs: 'Démon a API' }, link: '/daemon-and-api/' }`).
 
 `apps/docs/src/content/docs/architecture.md`: the package table gains `packages/api` (FSL, "the HTTP API, SSE and RPC adapters over the kernel") and `packages/client` (MIT, "the generated client, the event subscription and the RPC connection; no Effect at runtime") and `tools/client-codegen`; the run flow paragraph says the CLI talks to the daemon by default and runs the kernel in-process with `--no-daemon`; a "Phase B decisions" list: health at `/api/v1/health` without a token (the one exception), problems per status with literal statuses, the token kept across restarts, `stopped` for sessions a restart interrupted (spec §14), payload redaction at publish (ADR-0012), `effect/rpc` with JSON envelopes and a plain client (ADR-0013), hey-api from a TypeScript 6 tools workspace, `--no-daemon` refused while a daemon runs, `serve --stop`, the bare command as status, heartbeat as an event rather than a comment; the "Deferred to later phases" list is rewritten: the supervisor restart policy (Phase C), profile variables and the `profiles` group (Phase C), the `^0` host API semver policy and `publint`/`arethetypeswrong` (before the first publish), the shared test-support package (the kernel's `testing` export now serves the API; the CLI and the plugin keep their copies until a fifth copy would appear), Scalar docs UI (development only, later), CORS beyond an empty list (SP2), `extends` for configuration presets, timer restoration for asks left pending (sessions a restart interrupted are stopped instead), WebSocket authentication for browsers (first message or ticket, SP2); `plugins add`/`plugins rm` (installing third-party plugins, with the manifest capabilities shown and confirmed) and `doctor`, `diag bundle`, `service`, `upgrade`, `completions` (Phase D); `--output-format` and `--log-file` (Phase D with the full logging).
 
