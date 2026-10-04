@@ -68,7 +68,7 @@ export const defaultProfileOf = (
   )
 
 // The oldest profile of a provider, which inherits the default when the default goes
-export const oldestProfileOf = (
+const oldestProfileOf = (
   sql: SqlClient.SqlClient,
   providerId: string,
 ): Effect.Effect<Profile | undefined, StoreError> =>
