@@ -55,5 +55,9 @@
   "serve_timeout": "The daemon did not come up in time; see {log}",
   "serve_lan_warning": "Listening on {host}: anyone on the network with the token can use this daemon",
   "bureau_daemon_running": "A daemon is running on {url} (pid {pid}); drop --no-daemon or stop it with bytebureau serve --stop",
-  "bureau_token_file_unreadable": "Cannot read the token file {file}"
+  "bureau_token_file_unreadable": "Cannot read the token file {file}",
+  "bureau_token_hint": "{detail} (pass the token of that daemon with --token-file)",
+  "serve_failed": "The daemon failed to start; see {log}",
+  "serve_lock_stuck": "The lock {lock} names pid {pid}, which does not answer as a daemon of this home; if none is running, clear the lock with bytebureau serve --stop",
+  "serve_lock_cleared": "Cleared the stale lock of pid {pid}, which is not a daemon of this home"
 }
