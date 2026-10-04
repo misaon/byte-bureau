@@ -2086,8 +2086,8 @@ git commit -m "feat(kernel): keep secrets in the keychain through bun.secrets, o
 ### Task 3: The kernel's `ProfileService` — profiles in the store, the profile a session runs under, provider options in the request
 
 **Files:**
-- Create: `packages/kernel/src/profiles/profile-ids.ts`, `packages/kernel/src/profiles/profile-dirs.ts`, `packages/kernel/src/profiles/profile-records.ts`, `packages/kernel/src/profiles/profile-service.ts`, `packages/kernel/src/profiles/profile-status.ts`, `packages/kernel/src/profiles/profile-service.test.ts`, `packages/kernel/src/profiles/profile-resolve.test.ts`, `packages/kernel/src/sessions/session-profile.ts`, `packages/kernel/src/facade/profiles.ts`
-- Modify: `packages/kernel/src/errors.ts` (`ProfileError`), `packages/kernel/src/kernel-live.ts` (`ProfileServiceLive`), `packages/kernel/src/sessions/session-deps.ts` (`profiles`, `home`), `packages/kernel/src/sessions/session-create.ts` (the profile resolved at creation, `profile_id` stored), `packages/kernel/src/sessions/session-start.ts` (`providerConfig`, the profile variables), `packages/kernel/src/facade/types.ts` (`Kernel.profiles`, `providers.list` with `supportsApiKey`), `packages/kernel/src/facade.ts`, `packages/kernel/src/index.ts`, `packages/kernel/src/testing/fake-agent-session.ts` (announces whether its API-key variable is set, as a warning without the value), `packages/kernel/src/sessions/session-create.test.ts`
+- Create: `packages/kernel/src/profiles/profile-types.ts` (the `Profile`, `AddProfileInput`, `ProfileStatus`, `ResolvedProfile` shapes), `packages/kernel/src/profiles/profile-ids.ts`, `packages/kernel/src/profiles/profile-dirs.ts`, `packages/kernel/src/profiles/profile-keys.ts` (the secret key `@bytebureau/profiles/<id>/api_key`, outside the plugin-name grammar), `packages/kernel/src/profiles/profile-records.ts`, `packages/kernel/src/profiles/profile-add.ts`, `packages/kernel/src/profiles/profile-remove.ts`, `packages/kernel/src/profiles/profile-resolve.ts`, `packages/kernel/src/profiles/profile-status.ts`, `packages/kernel/src/profiles/profile-operations.ts`, `packages/kernel/src/profiles/profile-service.ts` (the service, its tag and its layer), `packages/kernel/src/sessions/session-profile.ts`, `packages/kernel/src/facade/profiles.ts`, `packages/kernel/src/facade/provider-areas.ts`; tests `profile-service.test.ts`, `profile-resolve.test.ts`, `profile-sessions.test.ts`, `session-profile.test.ts`, with the fixtures `profile-fixtures.ts` and `failing-fixtures.ts`
+- Modify: `packages/kernel/src/errors.ts` (`ProfileError`), `packages/kernel/src/kernel-live.ts` (`ProfileServiceLive({ home })` after the plugin host), `packages/kernel/src/sessions/{session-deps,session-create,session-new,session-start,session-connect,session-agent,session-collect,session-project,session-shape}.ts` (the profile resolved at creation and stored, the request built effectfully with the profile part and `providerConfig`, the start and its abandon handler in one uninterruptible step), `packages/kernel/src/facade/{types,apis,promised}.ts` (`Kernel.profiles`), `packages/kernel/src/index.ts`, `packages/kernel/src/testing/{fake-agent-provider,fake-agent-session,scripted-provider}.ts` (the fake announces whether its key variable is set and echoes `providerConfig` in a `raw` event, without values), the kernel and CLI tests that count the fake's events
 - Test: the new test files; `session-create.test.ts` gains the profile cases
 
 **Interfaces:**
@@ -2111,109 +2111,338 @@ Semantics: a profile id is `<providerId>/<name>` (readable in the CLI, unique pe
 
 ```ts
 import { existsSync, statSync } from 'node:fs'
+import path from 'node:path'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { it } from '@effect/vitest'
 import { EventLog } from '../events/event-log.js'
+import { resolved } from '../plugins/plugin-call-fixtures.js'
+import { probe } from '../plugins/plugin-fixtures.js'
 import { Secrets } from '../secrets/secrets.js'
-import { KernelTest } from '../kernel-test.js'
-import { tempDir } from '../testing/temp-repo.js'
-import { ProfileService } from './profile-service.js'
+import { doubtingPlugin, refusingSecrets } from './failing-fixtures.js'
+import { codeOf, loadedProfiles, profileWorld } from './profile-fixtures.js'
 
-const home = tempDir('bb-home-')
-const layer = KernelTest({ home })
+const world = profileWorld([doubtingPlugin])
+const CANARY = 'sk-canary-1'
+const KERNEL_KEY = '@bytebureau/profiles/fake/key/api_key'
 
-describe('the profiles of a home', () => {
-  it.layer(layer)('ProfileService', (it) => {
-    it.effect('adds a login profile with its own directory, makes the first one the default and lists it', () =>
-      Effect.gen(function* () {
-        const profiles = yield* ProfileService
-        const added = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
-        expect(added.id).toBe('fake/work')
-        expect(added.isDefault).toBe(true)
-        expect(added.configDir).toBe(`${home}/profiles/fake/work`)
-        expect(statSync(added.configDir ?? '').mode & 0o777).toBe(0o700)
-        const listed = yield* profiles.list()
-        expect(listed.map((profile) => profile.id)).toStrictEqual(['fake/work'])
-        const events = yield* EventLog.use((log) => log.read({}, { from: 0 }))
-        expect(events.map((event) => event.type)).toContain('profile.added')
-      }),
-    )
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
 
-    it.effect('keeps an API key in the secret store only, refuses a second profile of the same name and a key for a login profile', () =>
-      Effect.gen(function* () {
-        const profiles = yield* ProfileService
-        const keyed = yield* profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'sk-canary-1' })
-        expect(keyed.configDir).toBeNull()
-        const secrets = yield* Secrets
-        expect(yield* Effect.promise(() => secrets.get('profiles/fake/key/api_key'))).toBe('sk-canary-1')
-        expect(JSON.stringify(yield* profiles.list())).not.toContain('sk-canary-1')
-        const twice = yield* Effect.flip(profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'x' }))
-        const keyedLogin = yield* Effect.flip(profiles.add({ providerId: 'fake', name: 'l', kind: 'login', apiKey: 'x' }))
-        const noKey = yield* Effect.flip(profiles.add({ providerId: 'fake', name: 'n', kind: 'api_key' }))
-        const noProvider = yield* Effect.flip(profiles.add({ providerId: 'ghost', name: 'g', kind: 'login' }))
-        expect([twice, keyedLogin, noKey, noProvider].map((failure) => failure._tag === 'ProfileError' ? failure.code : failure._tag)).toStrictEqual(['exists', 'invalid', 'invalid', 'SessionError'])
-      }),
-    )
+const workDir = (): string => path.join(world.home, 'profiles', 'fake', 'work')
 
-    it.effect('moves the default, removes a profile with its secret, and purges its directory only when asked', () =>
-      Effect.gen(function* () {
-        const profiles = yield* ProfileService
-        yield* profiles.setDefault('fake/key')
-        const [work, key] = yield* profiles.list()
-        expect([work?.isDefault, key?.isDefault]).toStrictEqual([false, true])
-        yield* profiles.remove('fake/key')
-        const secrets = yield* Secrets
-        expect(yield* Effect.promise(() => secrets.get('profiles/fake/key/api_key'))).toBeUndefined()
-        const [left] = yield* profiles.list()
-        expect(left?.isDefault).toBe(true)
-        const dir = left?.configDir ?? ''
-        yield* profiles.remove('fake/work')
-        expect(existsSync(dir)).toBe(true)
-        const again = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
-        yield* profiles.remove(again.id, { purge: true })
-        expect(existsSync(dir)).toBe(false)
-        const gone = yield* Effect.flip(profiles.remove('fake/work'))
-        expect(gone._tag === 'ProfileError' && gone.code).toBe('not_found')
-      }),
-    )
+// Everything the log holds, as one text a secret must not appear in
+const logText = Effect.map(
+  EventLog.use((log) => log.read({}, { from: 0 })),
+  (events) => JSON.stringify(events),
+)
+
+const addsLoginProfile = Effect.gen(function* addsLoginProfile() {
+  const profiles = yield* loadedProfiles
+  const added = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+  assert.deepStrictEqual(
+    [added.id, added.isDefault, added.configDir],
+    ['fake/work', true, workDir()],
+  )
+  assert.strictEqual(modeOf(workDir()), 0o700)
+  const listed = yield* profiles.list()
+  assert.deepStrictEqual(
+    listed.map((profile) => profile.id),
+    ['fake/work'],
+  )
+  assert.include(yield* logText, '"type":"profile.added"')
+})
+
+const keepsKey = Effect.gen(function* keepsKey() {
+  const profiles = yield* loadedProfiles
+  const keyed = yield* profiles.add({
+    providerId: 'fake',
+    name: 'key',
+    kind: 'api_key',
+    apiKey: CANARY,
   })
+  const secrets = yield* Secrets
+  assert.deepStrictEqual([keyed.configDir, keyed.isDefault], [null, false])
+  assert.strictEqual(yield* resolved(secrets.get(KERNEL_KEY)), CANARY)
+  assert.notInclude(JSON.stringify(yield* profiles.list()), CANARY)
+  assert.notInclude(yield* logText, CANARY)
+})
+
+const refusesProfiles = Effect.gen(function* refusesProfiles() {
+  const profiles = yield* loadedProfiles
+  const refused = yield* Effect.all([
+    codeOf(profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'x' })),
+    codeOf(profiles.add({ providerId: 'fake', name: 'l', kind: 'login', apiKey: 'x' })),
+    codeOf(profiles.add({ providerId: 'fake', name: 'n', kind: 'api_key' })),
+    codeOf(profiles.add({ providerId: 'fake', name: 'e', kind: 'api_key', apiKey: '' })),
+    codeOf(profiles.add({ providerId: 'doubting', name: 'd', kind: 'api_key', apiKey: 'x' })),
+    codeOf(profiles.add({ providerId: 'fake', name: 'Not/Ok', kind: 'login' })),
+    codeOf(profiles.add({ providerId: 'ghost', name: 'g', kind: 'login' })),
+  ])
+  assert.deepStrictEqual(refused, [
+    'exists',
+    'invalid',
+    'invalid',
+    'invalid',
+    'invalid',
+    'invalid',
+    'SessionError',
+  ])
+  assert.strictEqual((yield* profiles.list()).length, 2)
+  assert.isFalse(existsSync(path.join(world.home, 'profiles', 'fake', 'l')))
+})
+
+const movesDefault = Effect.gen(function* movesDefault() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.setDefault('fake/key')
+  const listed = yield* profiles.list()
+  assert.deepStrictEqual(
+    listed.map((profile) => [profile.id, profile.isDefault]),
+    [
+      ['fake/work', false],
+      ['fake/key', true],
+    ],
+  )
+  assert.strictEqual(yield* codeOf(profiles.setDefault('fake/nope')), 'not_found')
+})
+
+const removesProfile = Effect.gen(function* removesProfile() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.remove('fake/key')
+  const secrets = yield* Secrets
+  assert.isUndefined(yield* resolved(secrets.get(KERNEL_KEY)))
+  const listed = yield* profiles.list()
+  assert.deepStrictEqual(
+    listed.map((profile) => [profile.id, profile.isDefault]),
+    [['fake/work', true]],
+  )
+  assert.include(yield* logText, '"type":"profile.removed"')
+})
+
+const purgesDirectory = Effect.gen(function* purgesDirectory() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.remove('fake/work')
+  assert.isTrue(existsSync(workDir()))
+  const again = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+  yield* profiles.remove(again.id, { purge: true })
+  assert.isFalse(existsSync(workDir()))
+  assert.strictEqual(yield* codeOf(profiles.remove('fake/work')), 'not_found')
+  assert.deepStrictEqual(yield* profiles.list(), [])
+})
+
+it.layer(world.layer)('ProfileService', (suite) => {
+  suite.effect(
+    'adds a login profile with its own directory, makes the first one the default and lists it',
+    () => addsLoginProfile,
+  )
+  suite.effect(
+    'keeps an API key in the secret store only, under a key no plugin can name',
+    () => keepsKey,
+  )
+  suite.effect(
+    'refuses a name twice, a key for a login profile, an api_key profile without a key or for a provider that takes none, a bad name and an unknown provider',
+    () => refusesProfiles,
+  )
+  suite.effect('moves the default to the profile that is made the default', () => movesDefault)
+  suite.effect(
+    'removes a profile with its key and passes the default to the oldest one left',
+    () => removesProfile,
+  )
+  suite.effect(
+    'keeps the directory of a removed login profile unless it is purged, and refuses an id nobody holds',
+    () => purgesDirectory,
+  )
+})
+
+const named = probe('profiles')
+const shared = profileWorld([named.plugin])
+
+it.layer(shared.layer)('ProfileService beside a plugin named profiles', (suite) => {
+  suite.effect('keeps the key of a profile out of the reach of the secrets of that plugin', () =>
+    Effect.gen(function* keepsKeyApart() {
+      const profiles = yield* loadedProfiles
+      yield* profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: CANARY })
+      const { secrets } = named.context()
+      assert.isUndefined(yield* resolved(secrets.get('fake/key/api_key')))
+      yield* resolved(secrets.set('fake/key/api_key', 'planted'))
+      const found = yield* profiles.resolve('fake', 'fake/key')
+      assert.deepStrictEqual(found.apiKey, { env: 'BYTEBUREAU_FAKE_API_KEY', value: CANARY })
+    }),
+  )
+})
+
+const locked = profileWorld([], refusingSecrets)
+
+it.layer(locked.layer)('ProfileService over a secret store that refuses the key', (suite) => {
+  suite.effect('fails as the store and keeps nothing of the profile', () =>
+    Effect.gen(function* keepsNothing() {
+      const profiles = yield* loadedProfiles
+      const input = { providerId: 'fake', name: 'key', kind: 'api_key', apiKey: CANARY } as const
+      const failure = yield* Effect.flip(profiles.add(input))
+      assert.deepStrictEqual(
+        [failure.name, failure.message],
+        ['StoreError', 'the keychain is locked'],
+      )
+      assert.deepStrictEqual(yield* profiles.list(), [])
+      assert.notInclude(yield* logText, 'profile.added')
+      assert.deepStrictEqual(yield* profiles.resolve('fake', null), {
+        ref: { id: 'default', providerId: 'fake', kind: 'login' },
+      })
+    }),
+  )
 })
 ```
 
 `packages/kernel/src/profiles/profile-resolve.test.ts` — `resolve` and `status`:
 
 ```ts
-it.effect('resolves the explicit profile, else the default, else the nameless login ref, and refuses a mismatch', () =>
-  Effect.gen(function* () {
-    const profiles = yield* ProfileService
-    const none = yield* profiles.resolve('fake', null)
-    expect(none).toStrictEqual({ ref: { id: 'default', providerId: 'fake', kind: 'login' } })
-    const keyed = yield* profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'sk-canary-2' })
-    const byDefault = yield* profiles.resolve('fake', undefined)
-    expect(byDefault.ref.id).toBe(keyed.id)
-    expect(byDefault.apiKey).toStrictEqual({ env: 'BYTEBUREAU_FAKE_API_KEY', value: 'sk-canary-2' })
-    const mismatch = yield* Effect.flip(profiles.resolve('claude', keyed.id))
-    expect(mismatch._tag === 'ProfileError' && mismatch.code).toBe('invalid')
-    const unknown = yield* Effect.flip(profiles.resolve('fake', 'fake/nope'))
-    expect(unknown._tag === 'ProfileError' && unknown.code).toBe('not_found')
-  }),
-)
+import { rmSync } from 'node:fs'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { EventLog } from '../events/event-log.js'
+import { resolved } from '../plugins/plugin-call-fixtures.js'
+import { Secrets } from '../secrets/secrets.js'
+import { doubtingPlugin } from './failing-fixtures.js'
+import { codeOf, loadedProfiles, profileWorld } from './profile-fixtures.js'
 
-it.effect('tells a login profile whose directory is gone as logged out with the hint, and asks the provider otherwise', () =>
-  Effect.gen(function* () {
-    const profiles = yield* ProfileService
-    const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
-    const fine = yield* profiles.status(work.id)
-    expect(fine.state).toBe('loggedIn')
-    rmSync(work.configDir ?? '', { recursive: true, force: true })
-    const gone = yield* profiles.status(work.id)
-    expect(gone.state).toBe('loggedOut')
-    expect(gone.hint).toContain(work.configDir)
-    const events = yield* EventLog.use((log) => log.read({}, { from: 0 }))
-    expect(events.filter((event) => event.type === 'profile.status')).toHaveLength(2)
-  }),
-)
+const CANARY = 'sk-canary-2'
+const KEY_ENV = 'BYTEBUREAU_FAKE_API_KEY'
+
+const resolvesProfiles = Effect.gen(function* resolvesProfiles() {
+  const profiles = yield* loadedProfiles
+  const none = yield* profiles.resolve('fake', null)
+  const keyed = yield* profiles.add({
+    providerId: 'fake',
+    name: 'key',
+    kind: 'api_key',
+    apiKey: CANARY,
+  })
+  const byDefault = yield* profiles.resolve('fake', null)
+  assert.deepStrictEqual(none, { ref: { id: 'default', providerId: 'fake', kind: 'login' } })
+  assert.deepStrictEqual(byDefault, {
+    ref: { id: keyed.id, providerId: 'fake', kind: 'api_key' },
+    apiKey: { env: KEY_ENV, value: CANARY },
+  })
+  const refused = yield* Effect.all([
+    codeOf(profiles.resolve('claude', keyed.id)),
+    codeOf(profiles.resolve('fake', 'fake/nope')),
+  ])
+  assert.deepStrictEqual(refused, ['invalid', 'not_found'])
+})
+
+const resolvesLogin = Effect.gen(function* resolvesLogin() {
+  const profiles = yield* loadedProfiles
+  const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+  const found = yield* profiles.resolve('fake', work.id)
+  assert.deepStrictEqual<unknown>(found, {
+    ref: { id: 'fake/work', providerId: 'fake', kind: 'login', configDir: work.configDir },
+  })
+})
+
+const refusesLostKey = Effect.gen(function* refusesLostKey() {
+  const profiles = yield* loadedProfiles
+  const secrets = yield* Secrets
+  yield* resolved(secrets.delete('@bytebureau/profiles/fake/key/api_key'))
+  const named = yield* Effect.flip(profiles.resolve('fake', 'fake/key'))
+  assert.deepStrictEqual(
+    [named.name, named.message],
+    [
+      'ProfileError',
+      'the key of profile "fake/key" is not in the secret store; remove the profile and add it again',
+    ],
+  )
+  assert.strictEqual(yield* codeOf(profiles.resolve('fake', null)), 'invalid')
+})
+
+const resolving = profileWorld()
+
+it.layer(resolving.layer)('ProfileService resolve', (suite) => {
+  suite.effect(
+    'resolves the explicit profile, else the default, else the nameless login ref, and refuses a mismatch',
+    () => resolvesProfiles,
+  )
+  suite.effect(
+    'resolves a login profile to its ref with its directory and no key',
+    () => resolvesLogin,
+  )
+  suite.effect(
+    'refuses an api_key profile whose key is no longer in the secret store, by name and as the default',
+    () => refusesLostKey,
+  )
+})
+
+const tellsStatus = Effect.gen(function* tellsStatus() {
+  const profiles = yield* loadedProfiles
+  const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+  const fine = yield* profiles.status(work.id)
+  const dir = work.configDir ?? ''
+  rmSync(dir, { recursive: true, force: true })
+  const gone = yield* profiles.status(work.id)
+  assert.deepStrictEqual(
+    [fine.state, gone.state, gone.hint],
+    ['loggedIn', 'loggedOut', `the directory ${dir} is gone; remove the profile and add it again`],
+  )
+  const told = yield* EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
+  assert.deepStrictEqual(
+    told.map((event) => event.payload),
+    [
+      { profileId: 'fake/work', state: 'loggedIn' },
+      { profileId: 'fake/work', state: 'loggedOut' },
+    ],
+  )
+})
+
+const tellsUnknown = Effect.gen(function* tellsUnknown() {
+  const profiles = yield* loadedProfiles
+  const doubted = yield* profiles.add({ providerId: 'doubting', name: 'd', kind: 'login' })
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`INSERT INTO profiles (id, provider_id, name, kind, created_at) VALUES ('ghost/g', 'ghost', 'g', 'login', 't')`
+  const failing = yield* profiles.status(doubted.id)
+  const unloaded = yield* profiles.status('ghost/g')
+  assert.deepStrictEqual(
+    [failing.state, failing.hint, unloaded.state, unloaded.hint],
+    ['unknown', 'the account check failed', 'unknown', 'provider "ghost" is not loaded'],
+  )
+  assert.strictEqual(yield* codeOf(profiles.status('fake/nope')), 'not_found')
+})
+
+// An api_key profile whose key has left the secret store is logged out, whatever its provider would say
+const tellsLostKey = Effect.gen(function* tellsLostKey() {
+  const profiles = yield* loadedProfiles
+  const keyed = yield* profiles.add({
+    providerId: 'fake',
+    name: 'key',
+    kind: 'api_key',
+    apiKey: CANARY,
+  })
+  const kept = yield* profiles.status(keyed.id)
+  yield* resolved((yield* Secrets).delete('@bytebureau/profiles/fake/key/api_key'))
+  const lost = yield* profiles.status(keyed.id)
+  assert.deepStrictEqual(
+    [kept.state, lost.state, lost.hint],
+    [
+      'loggedIn',
+      'loggedOut',
+      'the key of profile "fake/key" is not in the secret store; remove the profile and add it again',
+    ],
+  )
+})
+
+const checking = profileWorld([doubtingPlugin])
+
+it.layer(checking.layer)('ProfileService status', (suite) => {
+  suite.effect(
+    'tells a login profile whose directory is gone as logged out with the hint, and asks the provider otherwise',
+    () => tellsStatus,
+  )
+  suite.effect(
+    'tells unknown with the reason when the provider cannot say, or is not loaded, and refuses an id nobody holds',
+    () => tellsUnknown,
+  )
+  suite.effect(
+    'tells an api_key profile whose key is gone from the secret store as logged out, without asking its provider',
+    () => tellsLostKey,
+  )
+})
 ```
 
 `packages/kernel/src/sessions/session-create.test.ts` — add: a session created with `profileId: 'fake/key'` runs its fake agent with `BYTEBUREAU_FAKE_API_KEY` set (the fake announces `session.warning { kind: 'env', message: 'api key: present' }` — never the value) and the stored session has `profileId: 'fake/key'`; a session with `profileId: 'fake/nope'` fails with `ProfileError not_found`; a session for a provider with a default profile gets it without naming one; the request's `providerConfig` carries the project's `providers.fake` section without `passEnv` (write `providers: { fake: { passEnv: ['X'], flavour: 'slow' } }` into the test repo's `bytebureau.json` through `writeConfig`, and have the fake record `providerConfig` in a `raw` event or pick its script from `providerConfig.flavour` when `BYTEBUREAU_FAKE_SCRIPT` is unset).
@@ -2228,31 +2457,57 @@ Expected: FAIL — `ProfileService` does not exist; `profileId` of a created ses
 `packages/kernel/src/profiles/profile-ids.ts`:
 
 ```ts
-export const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/u
+import type { ProfileRef } from '@bytebureau/plugin-api'
 
+// A name is a path segment of the profiles directory, so the pattern of AddProfileBody holds here too
+const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/u
+
+export const isProfileName = (name: string): boolean => PROFILE_NAME.test(name)
+
+// Readable on the command line and unique per provider: a name holds no slash, so the last one parts the two
 export const profileIdOf = (providerId: string, name: string): string => `${providerId}/${name}`
 
-// The id is the provider and the name; a name is a path segment, so the pattern of AddProfileBody holds here too
-export const isProfileName = (name: string): boolean => PROFILE_NAME.test(name)
+// The ref of a session whose provider has no profile is the nameless login of Phase A; no profile id is it, as each holds a slash
+export const NAMELESS_PROFILE_ID = 'default'
+
+export const namelessRefOf = (providerId: string): ProfileRef => ({
+  id: NAMELESS_PROFILE_ID,
+  providerId,
+  kind: 'login',
+})
 ```
 
 `packages/kernel/src/profiles/profile-dirs.ts`:
 
 ```ts
-import { mkdirSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
+import { Effect } from 'effect'
+import { toStoreError, type StoreError } from '../errors.js'
 
-// A provider id may hold a colon (acp:codex); the directory name may not on every file system
+// A provider id may hold a colon (acp:codex), which not every file system takes in a name
 export const profileDirOf = (home: string, providerId: string, name: string): string =>
   path.join(home, 'profiles', providerId.replaceAll(':', '-'), name)
 
-export const ensureProfileDir = (dir: string): void => {
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
-}
+// The directory holds a login, so the one this call creates is the user's alone whatever the umask
+// One that exists, such as the login of a profile added again, keeps its mode
+export const ensureProfileDir = (dir: string): Effect.Effect<void, StoreError> =>
+  Effect.try({
+    try: () => {
+      if (mkdirSync(dir, { recursive: true, mode: 0o700 }) !== undefined) {
+        chmodSync(dir, 0o700)
+      }
+    },
+    catch: toStoreError,
+  })
 
-export const removeProfileDir = (dir: string): void => {
-  rmSync(dir, { recursive: true, force: true })
-}
+export const removeProfileDir = (dir: string): Effect.Effect<void, StoreError> =>
+  Effect.try({
+    try: () => {
+      rmSync(dir, { recursive: true, force: true })
+    },
+    catch: toStoreError,
+  })
 ```
 
 `packages/kernel/src/profiles/profile-records.ts` — the SQL, in the style of `session-records.ts`:
@@ -2260,8 +2515,8 @@ export const removeProfileDir = (dir: string): void => {
 ```ts
 import { Effect } from 'effect'
 import type { SqlClient } from 'effect/sql'
-import { StoreError } from '../errors.js'
-import type { Profile } from './profile-service.js'
+import { ProfileError, toStoreError, type StoreError } from '../errors.js'
+import type { Profile } from './profile-types.js'
 
 interface Row {
   readonly id: string
@@ -2283,55 +2538,154 @@ const profileOf = (row: Row): Profile => ({
   createdAt: row.created_at,
 })
 
-const stored = <Value>(what: string, query: Effect.Effect<Value, unknown>): Effect.Effect<Value, StoreError> =>
-  Effect.mapError(query, (cause) => new StoreError({ operation: what, cause }))
+// The profile of the first row; a query that finds none has none
+const firstProfile = (rows: readonly Row[]): Profile | undefined => {
+  const [row] = rows
+  return row === undefined ? undefined : profileOf(row)
+}
 
-export const listProfiles = (sql: SqlClient.SqlClient): Effect.Effect<readonly Profile[], StoreError> =>
-  stored('listing profiles', sql<Row>`SELECT * FROM profiles ORDER BY provider_id, created_at, id`).pipe(
-    Effect.map((rows) => rows.map(profileOf)),
+const missing = (id: string): ProfileError =>
+  new ProfileError({ code: 'not_found', reason: `no profile "${id}"` })
+
+// By provider, then in the order they were added; the rowid parts two added within one millisecond
+export const listProfiles = (
+  sql: SqlClient.SqlClient,
+): Effect.Effect<readonly Profile[], StoreError> =>
+  sql<Row>`SELECT * FROM profiles ORDER BY provider_id, created_at, rowid`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map((rows) => rows.map((row) => profileOf(row))),
   )
 
-export const loadProfile = (sql: SqlClient.SqlClient, id: string): Effect.Effect<Profile | undefined, StoreError> =>
-  stored('loading a profile', sql<Row>`SELECT * FROM profiles WHERE id = ${id}`).pipe(
-    Effect.map((rows) => (rows[0] === undefined ? undefined : profileOf(rows[0]))),
+export const loadProfile = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<Profile | undefined, StoreError> =>
+  sql<Row>`SELECT * FROM profiles WHERE id = ${id}`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(firstProfile),
   )
 
-export const defaultProfileOf = (sql: SqlClient.SqlClient, providerId: string): Effect.Effect<Profile | undefined, StoreError> =>
-  stored('loading the default profile', sql<Row>`SELECT * FROM profiles WHERE provider_id = ${providerId} AND is_default = 1`).pipe(
-    Effect.map((rows) => (rows[0] === undefined ? undefined : profileOf(rows[0]))),
+export const requireProfile = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<Profile, ProfileError | StoreError> =>
+  Effect.flatMap(loadProfile(sql, id), (profile) =>
+    profile === undefined ? Effect.fail(missing(id)) : Effect.succeed(profile),
   )
 
-export const insertProfile = (sql: SqlClient.SqlClient, profile: Profile): Effect.Effect<void, StoreError> =>
-  stored(
-    'inserting a profile',
-    sql`INSERT INTO profiles (id, provider_id, name, kind, config_dir, is_default, created_at) VALUES (${profile.id}, ${profile.providerId}, ${profile.name}, ${profile.kind}, ${profile.configDir}, ${profile.isDefault ? 1 : 0}, ${profile.createdAt})`,
-  ).pipe(Effect.asVoid)
-
-// One default per provider: every other profile of the provider loses the flag in the same statement pair
-export const markDefault = (sql: SqlClient.SqlClient, providerId: string, id: string): Effect.Effect<void, StoreError> =>
-  stored(
-    'setting the default profile',
-    Effect.andThen(
-      sql`UPDATE profiles SET is_default = 0 WHERE provider_id = ${providerId}`,
-      sql`UPDATE profiles SET is_default = 1 WHERE id = ${id}`,
-    ),
-  ).pipe(Effect.asVoid)
-
-export const deleteProfile = (sql: SqlClient.SqlClient, id: string): Effect.Effect<void, StoreError> =>
-  stored('deleting a profile', sql`DELETE FROM profiles WHERE id = ${id}`).pipe(Effect.asVoid)
-
-// The sessions of a profile that have not ended; a profile they run under cannot go
-export const openSessionsOf = (sql: SqlClient.SqlClient, profileId: string): Effect.Effect<number, StoreError> =>
-  stored(
-    'counting the sessions of a profile',
-    sql<{ readonly count: number }>`SELECT COUNT(*) AS count FROM sessions WHERE profile_id = ${profileId} AND status NOT IN ('completed', 'stopped', 'errored')`,
-  ).pipe(Effect.map((rows) => rows[0]?.count ?? 0))
+export const defaultProfileOf = (
+  sql: SqlClient.SqlClient,
+  providerId: string,
+): Effect.Effect<Profile | undefined, StoreError> =>
+  sql<Row>`SELECT * FROM profiles WHERE provider_id = ${providerId} AND is_default = 1 ORDER BY created_at, rowid`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(firstProfile),
+  )
 
 // The oldest profile of a provider, which inherits the default when the default goes
-export const oldestProfileOf = (sql: SqlClient.SqlClient, providerId: string): Effect.Effect<Profile | undefined, StoreError> =>
-  stored('loading the oldest profile', sql<Row>`SELECT * FROM profiles WHERE provider_id = ${providerId} ORDER BY created_at, id LIMIT 1`).pipe(
-    Effect.map((rows) => (rows[0] === undefined ? undefined : profileOf(rows[0]))),
+const oldestProfileOf = (
+  sql: SqlClient.SqlClient,
+  providerId: string,
+): Effect.Effect<Profile | undefined, StoreError> =>
+  sql<Row>`SELECT * FROM profiles WHERE provider_id = ${providerId} ORDER BY created_at, rowid LIMIT 1`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(firstProfile),
   )
+
+// The row claims the id, not yet as the default; a second profile of the id inserts nothing, which the result tells
+export const claimProfile = (
+  sql: SqlClient.SqlClient,
+  profile: Profile,
+): Effect.Effect<boolean, StoreError> =>
+  sql`
+    INSERT INTO profiles (id, provider_id, name, kind, config_dir, is_default, created_at)
+    VALUES (${profile.id}, ${profile.providerId}, ${profile.name}, ${profile.kind}, ${profile.configDir}, 0, ${profile.createdAt})
+    ON CONFLICT (id) DO NOTHING RETURNING id`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map((rows) => rows.length > 0),
+  )
+
+// The row of a profile whose key or directory could not be kept
+export const forgetProfile = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<void, StoreError> =>
+  sql`DELETE FROM profiles WHERE id = ${id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
+
+// One default per provider: the one statement sets the flag on this profile and clears it on every other
+export const markDefault = (
+  sql: SqlClient.SqlClient,
+  providerId: string,
+  id: string,
+): Effect.Effect<void, StoreError> =>
+  sql`UPDATE profiles SET is_default = (id = ${id}) WHERE provider_id = ${providerId}`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
+  )
+
+export const makeDefault = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<void, ProfileError | StoreError> =>
+  Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id))
+
+// The sessions under a profile that run or can still resume: every one but a completed session, as a stopped or errored one resumes
+const holdingSessionsOf = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<number, StoreError> =>
+  sql<{
+    readonly holding: number
+  }>`SELECT COUNT(*) AS holding FROM sessions WHERE profile_id = ${id} AND status <> 'completed'`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(([row]) => (row === undefined ? 0 : row.holding)),
+  )
+
+const inUse = (id: string, holding: number): ProfileError =>
+  new ProfileError({
+    code: 'in_use',
+    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete or remove them first`,
+  })
+
+// The default passes to the oldest profile left of the provider, when the removed one held it
+const passDefault = (
+  sql: SqlClient.SqlClient,
+  removed: Profile,
+): Effect.Effect<void, StoreError> =>
+  removed.isDefault
+    ? Effect.flatMap(oldestProfileOf(sql, removed.providerId), (next) =>
+        next === undefined ? Effect.void : markDefault(sql, removed.providerId, next.id),
+      )
+    : Effect.void
+
+// A session that runs or can resume keeps its profile; the completed ones let go of it, as the store refers to no profile that is gone
+// The count, the release, the delete and the passing of the default share one transaction: a session created in between cannot slip past, and two removals cannot leave a provider without its default
+export const deleteProfile = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<Profile, ProfileError | StoreError> =>
+  sql
+    .withTransaction(
+      Effect.gen(function* deletesProfile() {
+        const holding = yield* holdingSessionsOf(sql, id)
+        if (holding > 0) {
+          return yield* inUse(id, holding)
+        }
+        yield* sql`UPDATE sessions SET profile_id = NULL WHERE profile_id = ${id} AND status = 'completed'`.pipe(
+          Effect.mapError(toStoreError),
+        )
+        const deleted = yield* sql<Row>`DELETE FROM profiles WHERE id = ${id} RETURNING *`.pipe(
+          Effect.mapError(toStoreError),
+          Effect.map(firstProfile),
+        )
+        if (deleted === undefined) {
+          return yield* missing(id)
+        }
+        yield* passDefault(sql, deleted)
+        return deleted
+      }),
+    )
+    .pipe(Effect.catchTag('SqlError', (failure) => Effect.fail(toStoreError(failure))))
 ```
 
 (Use `sql.withTransaction` around `markDefault`'s two statements if the shipped `StoreError` constructor differs, follow `session-records.ts` for its exact fields; `rows[0]?.count` is forbidden by the lint — write `const [row] = rows; return row === undefined ? 0 : row.count`.)
@@ -2341,12 +2695,119 @@ export const oldestProfileOf = (sql: SqlClient.SqlClient, providerId: string): E
 `packages/kernel/src/errors.ts` — add after `AskError`:
 
 ```ts
-export class ProfileError extends Data.TaggedError('ProfileError')<{
-  readonly code: 'not_found' | 'exists' | 'invalid' | 'in_use'
-  readonly reason: string
-}> {
-  public override get message(): string { return reasonMessage.call(this) }
+import { Data } from 'effect'
+
+const fieldOf = (error: unknown, key: string): unknown =>
+  typeof error === 'object' && error !== null ? Reflect.get(error, key) : undefined
+
+// The message of a typed error is its reason
+function reasonMessage(this: unknown): string {
+  const reason = fieldOf(this, 'reason')
+  return typeof reason === 'string' ? reason : ''
 }
+
+// A store failure has no reason of its own; the message is what its cause says
+function causeMessage(this: unknown): string {
+  const cause = fieldOf(this, 'cause')
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+// Effect builds a tagged error with an empty message; the getter on its prototype gives it one, so every printer of an Error says why
+function described<Constructor extends object>(
+  constructor: Constructor,
+  message: (this: unknown) => string,
+): Constructor {
+  const prototype: unknown = Reflect.get(constructor, 'prototype')
+  if (typeof prototype === 'object' && prototype !== null) {
+    Reflect.defineProperty(prototype, 'message', { get: message, configurable: true })
+  }
+  return constructor
+}
+
+export const ConfigError = described(
+  Data.TaggedError('ConfigError')<{
+    readonly file: string
+    readonly pointer: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type ConfigError = InstanceType<typeof ConfigError>
+
+// A configuration that cannot be used, in one line: where, then why; a reason that names the place already is not prefixed again
+export const configErrorLine = ({ file, pointer, reason }: ConfigError): string => {
+  const where = `${file}${pointer}`
+  return reason.startsWith(`${where}: `) ? reason : `${where}: ${reason}`
+}
+
+export const StoreError = described(
+  Data.TaggedError('StoreError')<{ readonly cause: unknown }>,
+  causeMessage,
+)
+export type StoreError = InstanceType<typeof StoreError>
+
+// Wraps a failure of the store layer, for Effect.mapError
+export const toStoreError = (cause: unknown): StoreError => new StoreError({ cause })
+
+export const WorkspaceError = described(
+  Data.TaggedError('WorkspaceError')<{
+    readonly code: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type WorkspaceError = InstanceType<typeof WorkspaceError>
+
+export const ProviderError = described(
+  Data.TaggedError('ProviderError')<{
+    readonly kind: 'auth' | 'ratelimit' | 'crash' | 'protocol' | 'missing'
+    readonly reason: string
+    readonly retryable: boolean
+  }>,
+  reasonMessage,
+)
+export type ProviderError = InstanceType<typeof ProviderError>
+
+export const AskError = described(
+  Data.TaggedError('AskError')<{
+    readonly code: 'not_found' | 'not_pending' | 'invalid_answer'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type AskError = InstanceType<typeof AskError>
+
+export const ProfileError = described(
+  Data.TaggedError('ProfileError')<{
+    readonly code: 'not_found' | 'exists' | 'invalid' | 'in_use'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type ProfileError = InstanceType<typeof ProfileError>
+
+export const PluginError = described(
+  Data.TaggedError('PluginError')<{
+    readonly plugin: string
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type PluginError = InstanceType<typeof PluginError>
+
+export const SessionError = described(
+  Data.TaggedError('SessionError')<{
+    readonly code:
+      | 'not_found'
+      | 'invalid_transition'
+      | 'provider_missing'
+      | 'yolo_refused'
+      | 'employee_missing'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type SessionError = InstanceType<typeof SessionError>
 ```
 
 (mirror exactly how the other errors in the file attach `reasonMessage` — the file shows `reasonMessage,` in an options object; copy that form.)
@@ -2357,9 +2818,12 @@ export class ProfileError extends Data.TaggedError('ProfileError')<{
 import { existsSync } from 'node:fs'
 import type { AgentProvider, AuthStatus, ProfileRef } from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
+import type { ProfileError, StoreError } from '../errors.js'
 import { nowIso } from '../ids.js'
 import { reasonOf } from '../plugins/reason.js'
-import type { Profile, ProfileStatus } from './profile-service.js'
+import { lostKeyReason, usableKeyOf } from './profile-keys.js'
+import { requireProfile } from './profile-records.js'
+import type { Profile, ProfileDeps, ProfileStatus } from './profile-types.js'
 
 export const refOf = (profile: Profile): ProfileRef => ({
   id: profile.id,
@@ -2368,28 +2832,94 @@ export const refOf = (profile: Profile): ProfileRef => ({
   ...(profile.configDir === null ? {} : { configDir: profile.configDir }),
 })
 
-// A login directory that is gone cannot hold a login: the answer is known before the provider is asked
-const directoryGone = (profile: Profile): boolean =>
+// The directory of a login profile when it is gone, which holds no login: the answer is known whatever the provider says
+const goneDirectoryOf = (profile: Profile): string | undefined =>
   profile.kind === 'login' && profile.configDir !== null && !existsSync(profile.configDir)
+    ? profile.configDir
+    : undefined
 
+// What the provider says; one that cannot say is unknown, with its reason as the hint
 const asked = (provider: AgentProvider, ref: ProfileRef): Effect.Effect<AuthStatus> =>
-  Effect.tryPromise({ try: () => provider.authStatus(ref), catch: reasonOf }).pipe(
-    Effect.catch((reason) => Effect.succeed<AuthStatus>({ state: 'unknown', hint: String(reason) })),
+  Effect.tryPromise({
+    try: async () => {
+      const status = await provider.authStatus(ref)
+      return status
+    },
+    catch: reasonOf,
+  }).pipe(
+    Effect.match({
+      onFailure: (reason): AuthStatus => ({ state: 'unknown', hint: reason }),
+      onSuccess: (status) => status,
+    }),
   )
 
-// Where the login is to be performed, as the provider would say it; the directory is the one fact the kernel knows
-const goneHint = (provider: AgentProvider, profile: Profile): Effect.Effect<string | undefined> =>
-  asked(provider, refOf(profile)).pipe(Effect.map((status) => status.hint ?? `the directory ${profile.configDir} is gone; add the profile again`))
+// Where to log in again: the provider's words when it says logged out too, else the directory the kernel knows
+const goneHint = (status: AuthStatus, directory: string): string =>
+  status.state === 'loggedOut' && status.hint !== undefined
+    ? status.hint
+    : `the directory ${directory} is gone; remove the profile and add it again`
 
-export const statusOf = (provider: AgentProvider, profile: Profile): Effect.Effect<ProfileStatus> =>
-  Effect.gen(function* checksStatus() {
-    const checkedAt = nowIso()
-    if (directoryGone(profile)) {
-      const hint = yield* goneHint(provider, profile)
-      return { profileId: profile.id, state: 'loggedOut', hint, checkedAt }
+const loggedOut = (profile: Profile, hint: string): ProfileStatus => ({
+  profileId: profile.id,
+  state: 'loggedOut',
+  hint,
+  checkedAt: nowIso(),
+})
+
+const statusOf = (provider: AgentProvider, profile: Profile): Effect.Effect<ProfileStatus> =>
+  Effect.map(asked(provider, refOf(profile)), (status): ProfileStatus => {
+    const gone = goneDirectoryOf(profile)
+    if (gone !== undefined) {
+      return loggedOut(profile, goneHint(status, gone))
     }
-    const status = yield* asked(provider, refOf(profile))
-    return { profileId: profile.id, checkedAt, state: status.state, ...(status.hint === undefined ? {} : { hint: status.hint }), ...(status.account === undefined ? {} : { account: status.account }) }
+    return {
+      profileId: profile.id,
+      state: status.state,
+      ...(status.hint === undefined ? {} : { hint: status.hint }),
+      ...(status.account === undefined ? {} : { account: status.account }),
+      checkedAt: nowIso(),
+    }
+  })
+
+// An api_key profile whose key has left the secret store cannot sign in, whatever its provider would say
+const keyLost = (deps: ProfileDeps, profile: Profile): Effect.Effect<boolean, StoreError> =>
+  profile.kind === 'api_key'
+    ? Effect.map(usableKeyOf(deps.secrets, profile.id), (value) => value === undefined)
+    : Effect.succeed(false)
+
+// A provider that is not loaded cannot be asked
+const unloaded = (profile: Profile): ProfileStatus => ({
+  profileId: profile.id,
+  state: 'unknown',
+  hint: `provider "${profile.providerId}" is not loaded`,
+  checkedAt: nowIso(),
+})
+
+// What the kernel knows is told without asking the provider: a lost key, a provider that is not loaded
+const checkedStatus = (
+  deps: ProfileDeps,
+  profile: Profile,
+): Effect.Effect<ProfileStatus, StoreError> =>
+  Effect.gen(function* checksStatus() {
+    if (yield* keyLost(deps, profile)) {
+      return loggedOut(profile, lostKeyReason(profile.id))
+    }
+    const provider = deps.host.agentProvider(profile.providerId)
+    return provider === undefined ? unloaded(profile) : yield* statusOf(provider, profile)
+  })
+
+export const profileStatus = (
+  deps: ProfileDeps,
+  id: string,
+): Effect.Effect<ProfileStatus, ProfileError | StoreError> =>
+  Effect.gen(function* tellsStatus() {
+    const profile = yield* requireProfile(deps.sql, id)
+    const checked = yield* checkedStatus(deps, profile)
+    yield* deps.log.publish({
+      type: 'profile.status',
+      payload: { profileId: id, state: checked.state },
+    })
+    return checked
   })
 ```
 
@@ -2398,19 +2928,138 @@ export const statusOf = (provider: AgentProvider, profile: Profile): Effect.Effe
 `packages/kernel/src/profiles/profile-service.ts`:
 
 ```ts
-import type { ProfileRef } from '@bytebureau/plugin-api'
-import type { AuthState } from '@bytebureau/protocol'
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
-import { ProfileError, SessionError, type StoreError } from '../errors.js'
 import { EventLog } from '../events/event-log.js'
-import { nowIso } from '../ids.js'
 import { PluginHost } from '../plugins/plugin-host.js'
 import { Secrets } from '../secrets/secrets.js'
-import { ensureProfileDir, profileDirOf, removeProfileDir } from './profile-dirs.js'
-import { isProfileName, profileIdOf } from './profile-ids.js'
-import * as records from './profile-records.js'
-import { statusOf } from './profile-status.js'
+import { profileOperations } from './profile-operations.js'
+import type { ProfileServiceShape } from './profile-types.js'
+
+export type {
+  AddProfileInput,
+  Profile,
+  ProfileServiceShape,
+  ProfileStatus,
+  ResolvedProfile,
+} from './profile-types.js'
+
+// The named auth profiles per provider: the store's profiles table is their one source of truth, their keys live in the secret store
+export class ProfileService extends Context.Service<ProfileService, ProfileServiceShape>()(
+  'bb/ProfileService',
+) {}
+
+export interface ProfileServiceOptions {
+  // The login directories of the profiles are made under <home>/profiles
+  readonly home: string
+}
+
+export const ProfileServiceLive = (
+  options: ProfileServiceOptions,
+): Layer.Layer<ProfileService, never, SqlClient.SqlClient | EventLog | PluginHost | Secrets> =>
+  Layer.effect(
+    ProfileService,
+    Effect.gen(function* makesProfiles() {
+      return ProfileService.of(
+        profileOperations({
+          sql: yield* SqlClient.SqlClient,
+          log: yield* EventLog,
+          host: yield* PluginHost,
+          secrets: yield* Secrets,
+          home: options.home,
+        }),
+      )
+    }),
+  )
+```
+
+(Split the file at the lint caps: `profile-add.ts` for `checkedInput`/`add`, `profile-remove.ts` for `remove`/`passDefault`, `profile-resolve.ts` for `resolved`/`resolve`; the service file keeps the types, the class and the layer. `deps.log.publish` takes whatever shape `EventLog.publish` has in Phase A — look at `project-registry.ts` for the envelope builder and use the same.)
+
+- [ ] **Step 5: The profile of a session and the provider options**
+
+`packages/kernel/src/sessions/session-deps.ts`: `SessionDeps` gains `readonly profiles: ProfileService['Service']`; `SessionManagerLive` yields `ProfileService` and passes it. `packages/kernel/src/kernel-live.ts`: `ProfileServiceLive({ home: options.home })` joins the `registry` merge (after `PluginHostLive`, before `SessionManagerLive`); `KernelServices` gains `ProfileService`.
+
+`packages/kernel/src/sessions/session-profile.ts`:
+
+```ts
+import type { ProfileRef } from '@bytebureau/plugin-api'
+import { Effect } from 'effect'
+import type { ConfigError, ProfileError, SessionError, StoreError } from '../errors.js'
+import { namelessRefOf } from '../profiles/profile-ids.js'
+import type { SessionDeps } from './session-deps.js'
+import { currentProject, providerOptionsOf, requireProject } from './session-project.js'
+import type { Session } from './types.js'
+
+// What the profile adds to the start: the ref the provider sees, and the key in the variable the provider named
+interface ProfilePart {
+  readonly profile: ProfileRef
+  readonly env: Readonly<Record<string, string>>
+}
+
+// The profile of a session is the one of its creation: a session created without one runs under the nameless login for its whole life, whatever default its provider has since
+// A named one is resolved again at each start, so a key that has left the secret store since is noticed
+export const profilePartOf = (
+  deps: SessionDeps,
+  session: Session,
+): Effect.Effect<ProfilePart, ProfileError | StoreError> =>
+  session.profileId === null
+    ? Effect.succeed({ profile: namelessRefOf(session.providerId), env: {} })
+    : Effect.map(
+        deps.profiles.resolve(session.providerId, session.profileId),
+        ({ ref, apiKey }) => ({
+          profile: ref,
+          env: apiKey === undefined ? {} : { [apiKey.env]: apiKey.value },
+        }),
+      )
+
+// The providers.<id> section of the project as it stands now, as the passEnv names of a resumed session are read
+export const providerConfigOf = (
+  deps: SessionDeps,
+  session: Session,
+): Effect.Effect<Readonly<Record<string, unknown>>, SessionError | ConfigError | StoreError> =>
+  Effect.gen(function* readsProviderConfig() {
+    const registered = yield* requireProject(deps, session.projectId)
+    const project = yield* currentProject(deps, registered)
+    return providerOptionsOf(project, session.providerId)
+  })
+```
+
+`packages/kernel/src/sessions/session-start.ts`: `requestOf` becomes an Effect that yields `profilePartOf` and `providerConfigOf` and builds `{ …, profile: part.profile, providerConfig, env: { ...allowlistEnv(process.env, passEnv), ...bytebureauEnv(extra), ...part.env, BYTEBUREAU_SESSION_ID: session.id } }`; its failure (`ProfileError`) is mapped to `ProviderError({ kind: 'auth', reason, retryable: false })` so the start fails as an auth refusal (the API answers 502 `provider_auth`; the CLI exits 4). `session-create.ts`: after `employeeOf`, `yield* deps.profiles.resolve(input.providerId ?? employee.provider, input.profileId)` and store `profile_id` = `resolved.ref.id === 'default' ? null : resolved.ref.id`; `ProfileError` passes through `create`'s error type (the API maps it in Task 4).
+
+`packages/kernel/src/testing/fake-agent-session.ts`: at the start of `runHello`/`runSlow`, push `{ type: 'session.warning', kind: 'env', message: \`api key: ${request.env['BYTEBUREAU_FAKE_API_KEY'] === undefined ? 'absent' : 'present'}\` }` and `{ type: 'raw', providerEvent: { providerConfig: request.providerConfig } }` once (the canary of Task 5 reads the first, the create test the second). `scriptOf` prefers `BYTEBUREAU_FAKE_SCRIPT`, else `providerConfig.flavour === 'slow'`.
+
+`packages/kernel/src/facade/profiles.ts`:
+
+```ts
+import { ProfileService } from '../profiles/profile-service.js'
+import type { Promised } from './promised.js'
+import type { Kernel } from './types.js'
+
+export const profilesApi = (promised: Promised): Kernel['profiles'] => ({
+  list: promised(ProfileService, (profiles) => profiles.list()),
+  get: promised(ProfileService, (profiles, id) => profiles.get(id)),
+  add: promised(ProfileService, (profiles, input) => profiles.add(input)),
+  remove: promised(ProfileService, (profiles, id, options) => profiles.remove(id, options)),
+  setDefault: promised(ProfileService, (profiles, id) => profiles.setDefault(id)),
+  status: promised(ProfileService, (profiles, id) => profiles.status(id)),
+})
+```
+
+`facade/types.ts`: `readonly profiles: { list(): Promise<readonly Profile[]>; add(input: AddProfileInput): Promise<Profile>; remove(id: string, options?: { readonly purge?: boolean }): Promise<void>; setDefault(id: string): Promise<void>; status(id: string): Promise<ProfileStatus> }`; `providers.list()` returns `{ id, displayName, supportsApiKey: provider.apiKeyEnv !== undefined }`. `facade.ts` wires `profilesApi`. `index.ts` exports `ProfileService`, `ProfileServiceLive`, the types, `ProfileError` (through `errors.ts`).
+
+**Added files (as shipped):**
+
+`packages/kernel/src/profiles/profile-types.ts` (as shipped):
+
+```ts
+import type { ProfileRef } from '@bytebureau/plugin-api'
+import type { AuthState } from '@bytebureau/protocol'
+import type { Effect } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { ProfileError, SessionError, StoreError } from '../errors.js'
+import type { EventLogShape } from '../events/event-log.js'
+import type { PluginHostShape } from '../plugins/plugin-host.js'
+import type { SecretsShape } from '../secrets/secrets.js'
 
 export interface Profile {
   readonly id: string
@@ -2430,11 +3079,12 @@ export interface AddProfileInput {
   readonly makeDefault?: boolean | undefined
 }
 
+// The optional fields are left out rather than undefined, as the API's ProfileStatusDto has them
 export interface ProfileStatus {
   readonly profileId: string
   readonly state: AuthState
-  readonly hint?: string | undefined
-  readonly account?: string | undefined
+  readonly hint?: string
+  readonly account?: string
   readonly checkedAt: string
 }
 
@@ -2444,227 +3094,659 @@ export interface ResolvedProfile {
   readonly apiKey?: { readonly env: string; readonly value: string } | undefined
 }
 
-export interface ProfileServiceShape {
-  readonly list: () => Effect.Effect<readonly Profile[], StoreError>
-  readonly get: (id: string) => Effect.Effect<Profile | undefined, StoreError>
-  readonly add: (input: AddProfileInput) => Effect.Effect<Profile, ProfileError | SessionError | StoreError>
-  readonly remove: (id: string, options?: { readonly purge?: boolean }) => Effect.Effect<void, ProfileError | StoreError>
-  readonly setDefault: (id: string) => Effect.Effect<void, ProfileError | StoreError>
-  readonly status: (id: string) => Effect.Effect<ProfileStatus, ProfileError | StoreError>
-  readonly resolve: (providerId: string, profileId: string | null | undefined) => Effect.Effect<ResolvedProfile, ProfileError | StoreError>
+export interface Removal {
+  // The login directory goes as well; without it a profile added again under the name finds its login
+  readonly purge?: boolean
 }
 
-export class ProfileService extends Context.Service<ProfileService, ProfileServiceShape>()('bb/ProfileService') {}
-
-const secretKeyOf = (profileId: string): string => `profiles/${profileId}/api_key`
-
-// The ref of a profile that has no row: Phase A's nameless login
-const namelessRef = (providerId: string): ProfileRef => ({ id: 'default', providerId, kind: 'login' })
-
-interface Deps {
+// What the operations of the service work with
+export interface ProfileDeps {
   readonly sql: SqlClient.SqlClient
-  readonly log: EventLog['Service']
-  readonly host: PluginHost['Service']
-  readonly secrets: Secrets['Service']
+  readonly log: EventLogShape
+  readonly host: PluginHostShape
+  readonly secrets: SecretsShape
   readonly home: string
 }
 
+export interface ProfileServiceShape {
+  readonly list: () => Effect.Effect<readonly Profile[], StoreError>
+  readonly get: (id: string) => Effect.Effect<Profile | undefined, StoreError>
+  // An unknown provider is refused as a session would be, with SessionError provider_missing
+  readonly add: (
+    input: AddProfileInput,
+  ) => Effect.Effect<Profile, ProfileError | SessionError | StoreError>
+  readonly remove: (id: string, removal?: Removal) => Effect.Effect<void, ProfileError | StoreError>
+  readonly setDefault: (id: string) => Effect.Effect<void, ProfileError | StoreError>
+  readonly status: (id: string) => Effect.Effect<ProfileStatus, ProfileError | StoreError>
+  // The profile a session of the provider runs under: the one named, else the default, else the nameless login
+  readonly resolve: (
+    providerId: string,
+    profileId: string | null | undefined,
+  ) => Effect.Effect<ResolvedProfile, ProfileError | StoreError>
+}
+```
+
+`packages/kernel/src/profiles/profile-keys.ts` (as shipped):
+
+```ts
+import { Effect } from 'effect'
+import { toStoreError, type StoreError } from '../errors.js'
+import type { SecretsShape } from '../secrets/secrets.js'
+
+// The kernel's keys start with @bytebureau/, which no plugin name can: a plugin's are <plugin>/<key>, its name a kebab-case word
+export const secretKeyOf = (profileId: string): string =>
+  `@bytebureau/profiles/${profileId}/api_key`
+
+// What to say of an api_key profile whose key has left the secret store
+export const lostKeyReason = (profileId: string): string =>
+  `the key of profile "${profileId}" is not in the secret store; remove the profile and add it again`
+
+// A secret store that fails has failed like the store, not like the kernel
+const readKey = (
+  secrets: SecretsShape,
+  profileId: string,
+): Effect.Effect<string | undefined, StoreError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const value = await secrets.get(secretKeyOf(profileId))
+      return value
+    },
+    catch: toStoreError,
+  })
+
+// The key of a profile as the secret store holds it; one that is gone, or empty, is none
+export const usableKeyOf = (
+  secrets: SecretsShape,
+  profileId: string,
+): Effect.Effect<string | undefined, StoreError> =>
+  Effect.map(readKey(secrets, profileId), (value) => (value === '' ? undefined : value))
+
+export const writeKey = (
+  secrets: SecretsShape,
+  profileId: string,
+  value: string,
+): Effect.Effect<void, StoreError> =>
+  Effect.tryPromise({
+    try: async () => {
+      await secrets.set(secretKeyOf(profileId), value)
+    },
+    catch: toStoreError,
+  })
+
+export const dropKey = (
+  secrets: SecretsShape,
+  profileId: string,
+): Effect.Effect<void, StoreError> =>
+  Effect.tryPromise({
+    try: async () => {
+      await secrets.delete(secretKeyOf(profileId))
+    },
+    catch: toStoreError,
+  })
+```
+
+`packages/kernel/src/profiles/profile-add.ts` (as shipped):
+
+```ts
+import { Effect } from 'effect'
+import { ProfileError, type SessionError, type StoreError } from '../errors.js'
+import { nowIso } from '../ids.js'
+import { requireProvider } from '../sessions/session-provider.js'
+import { ensureProfileDir, profileDirOf } from './profile-dirs.js'
+import { isProfileName, profileIdOf } from './profile-ids.js'
+import { writeKey } from './profile-keys.js'
+import { claimProfile, defaultProfileOf, forgetProfile, markDefault } from './profile-records.js'
+import type { AddProfileInput, Profile, ProfileDeps } from './profile-types.js'
+
 const invalid = (reason: string): ProfileError => new ProfileError({ code: 'invalid', reason })
 
-// What add refuses before anything is written: the provider, the name, the kind against the key
-const checkedInput = (deps: Deps, input: AddProfileInput): Effect.Effect<string, ProfileError | SessionError> =>
-  Effect.gen(function* checksInput() {
-    const provider = deps.host.agentProvider(input.providerId)
-    if (provider === undefined) {
-      return yield* new SessionError({ code: 'provider_missing', reason: `provider "${input.providerId}" is not available` })
-    }
-    if (!isProfileName(input.name)) {
-      return yield* invalid(`"${input.name}" is not a profile name (lower-case letters, digits and dashes, 1 to 32)`)
-    }
-    if (input.kind === 'api_key' && (input.apiKey === undefined || input.apiKey === '')) {
-      return yield* invalid('an api_key profile needs its key')
-    }
-    if (input.kind === 'api_key' && provider.apiKeyEnv === undefined) {
-      return yield* invalid(`provider "${input.providerId}" takes no API-key profile`)
-    }
-    if (input.kind === 'login' && input.apiKey !== undefined) {
-      return yield* invalid('a login profile takes no key')
-    }
-    return profileIdOf(input.providerId, input.name)
-  })
-
-const add = (deps: Deps, input: AddProfileInput): Effect.Effect<Profile, ProfileError | SessionError | StoreError> =>
-  Effect.gen(function* addsProfile() {
-    const id = yield* checkedInput(deps, input)
-    if ((yield* records.loadProfile(deps.sql, id)) !== undefined) {
-      return yield* new ProfileError({ code: 'exists', reason: `profile "${id}" exists` })
-    }
-    const first = (yield* records.defaultProfileOf(deps.sql, input.providerId)) === undefined
-    const configDir = input.kind === 'login' ? profileDirOf(deps.home, input.providerId, input.name) : null
-    const profile: Profile = { id, providerId: input.providerId, name: input.name, kind: input.kind, configDir, isDefault: first || input.makeDefault === true, createdAt: nowIso() }
-    if (configDir !== null) {
-      ensureProfileDir(configDir)
-    }
-    if (input.apiKey !== undefined) {
-      yield* Effect.promise(() => deps.secrets.set(secretKeyOf(id), input.apiKey ?? ''))
-    }
-    yield* records.insertProfile(deps.sql, profile)
-    if (profile.isDefault) {
-      yield* records.markDefault(deps.sql, input.providerId, id)
-    }
-    yield* deps.log.publish({ type: 'profile.added', payload: { profileId: id, providerId: input.providerId } })
-    return profile
-  })
-
-const required = (deps: Deps, id: string): Effect.Effect<Profile, ProfileError | StoreError> =>
-  Effect.flatMap(records.loadProfile(deps.sql, id), (profile) =>
-    profile === undefined ? Effect.fail(new ProfileError({ code: 'not_found', reason: `no profile "${id}"` })) : Effect.succeed(profile),
-  )
-
-// The default passes to the oldest profile left of the provider, when the removed one held it
-const passDefault = (deps: Deps, removed: Profile): Effect.Effect<void, StoreError> =>
-  removed.isDefault
-    ? Effect.flatMap(records.oldestProfileOf(deps.sql, removed.providerId), (next) =>
-        next === undefined ? Effect.void : records.markDefault(deps.sql, removed.providerId, next.id),
-      )
-    : Effect.void
-
-const remove = (deps: Deps, id: string, options: { readonly purge?: boolean } = {}): Effect.Effect<void, ProfileError | StoreError> =>
-  Effect.gen(function* removesProfile() {
-    const profile = yield* required(deps, id)
-    const open = yield* records.openSessionsOf(deps.sql, id)
-    if (open > 0) {
-      return yield* new ProfileError({ code: 'in_use', reason: `profile "${id}" has ${open} session(s) that have not ended` })
-    }
-    yield* records.deleteProfile(deps.sql, id)
-    yield* Effect.promise(() => deps.secrets.delete(secretKeyOf(id)))
-    if (options.purge === true && profile.configDir !== null) {
-      removeProfileDir(profile.configDir)
-    }
-    yield* passDefault(deps, profile)
-    yield* deps.log.publish({ type: 'profile.removed', payload: { profileId: id } })
-  })
-
-const setDefault = (deps: Deps, id: string): Effect.Effect<void, ProfileError | StoreError> =>
-  Effect.flatMap(required(deps, id), (profile) => records.markDefault(deps.sql, profile.providerId, id))
-
-const status = (deps: Deps, id: string): Effect.Effect<ProfileStatus, ProfileError | StoreError> =>
-  Effect.gen(function* tellsStatus() {
-    const profile = yield* required(deps, id)
-    const provider = deps.host.agentProvider(profile.providerId)
-    const checked: ProfileStatus = provider === undefined
-      ? { profileId: id, state: 'unknown', hint: `provider "${profile.providerId}" is not loaded`, checkedAt: nowIso() }
-      : yield* statusOf(provider, profile)
-    yield* deps.log.publish({ type: 'profile.status', payload: { profileId: id, state: checked.state } })
-    return checked
-  })
-
-// The key of an api_key profile travels in the provider's variable; a login profile travels as its ref alone
-const resolved = (deps: Deps, profile: Profile): Effect.Effect<ResolvedProfile, ProfileError> =>
-  Effect.gen(function* resolvesProfile() {
-    const ref = refOf(profile)
-    if (profile.kind === 'login') {
-      return { ref }
-    }
-    const provider = deps.host.agentProvider(profile.providerId)
-    const env = provider === undefined ? undefined : provider.apiKeyEnv
-    const value = yield* Effect.promise(() => deps.secrets.get(secretKeyOf(profile.id)))
-    if (env === undefined || value === undefined) {
-      return yield* invalid(`the key of profile "${profile.id}" is not in the secret store; add the profile again`)
-    }
-    return { ref, apiKey: { env, value } }
-  })
-
-const resolve = (deps: Deps, providerId: string, profileId: string | null | undefined): Effect.Effect<ResolvedProfile, ProfileError | StoreError> =>
-  Effect.gen(function* findsProfile() {
-    if (profileId !== null && profileId !== undefined) {
-      const profile = yield* required(deps, profileId)
-      if (profile.providerId !== providerId) {
-        return yield* invalid(`profile "${profileId}" belongs to provider "${profile.providerId}", not "${providerId}"`)
-      }
-      return yield* resolved(deps, profile)
-    }
-    const fallback = yield* records.defaultProfileOf(deps.sql, providerId)
-    return fallback === undefined ? { ref: namelessRef(providerId) } : yield* resolved(deps, fallback)
-  })
-
-export const ProfileServiceLive = (options: { readonly home: string }): Layer.Layer<ProfileService, never, SqlClient.SqlClient | EventLog | PluginHost | Secrets> =>
-  Layer.effect(
-    ProfileService,
-    Effect.gen(function* makesProfiles() {
-      const deps: Deps = { sql: yield* SqlClient.SqlClient, log: yield* EventLog, host: yield* PluginHost, secrets: yield* Secrets, home: options.home }
-      return {
-        list: () => records.listProfiles(deps.sql),
-        get: (id) => records.loadProfile(deps.sql, id),
-        add: (input) => add(deps, input),
-        remove: (id, removal) => remove(deps, id, removal),
-        setDefault: (id) => setDefault(deps, id),
-        status: (id) => status(deps, id),
-        resolve: (providerId, profileId) => resolve(deps, providerId, profileId),
-      }
-    }),
-  )
-```
-
-(Split the file at the lint caps: `profile-add.ts` for `checkedInput`/`add`, `profile-remove.ts` for `remove`/`passDefault`, `profile-resolve.ts` for `resolved`/`resolve`; the service file keeps the types, the class and the layer. `deps.log.publish` takes whatever shape `EventLog.publish` has in Phase A — look at `project-registry.ts` for the envelope builder and use the same.)
-
-- [ ] **Step 5: The profile of a session and the provider options**
-
-`packages/kernel/src/sessions/session-deps.ts`: `SessionDeps` gains `readonly profiles: ProfileService['Service']`; `SessionManagerLive` yields `ProfileService` and passes it. `packages/kernel/src/kernel-live.ts`: `ProfileServiceLive({ home: options.home })` joins the `registry` merge (after `PluginHostLive`, before `SessionManagerLive`); `KernelServices` gains `ProfileService`.
-
-`packages/kernel/src/sessions/session-profile.ts`:
-
-```ts
-import type { CreateSessionRequest } from '@bytebureau/plugin-api'
-import { Effect } from 'effect'
-import type { ConfigError, ProfileError, SessionError, StoreError } from '../errors.js'
-import type { SessionDeps } from './session-deps.js'
-import { currentProject, requireProject } from './session-project.js'
-import type { Session } from './types.js'
-
-// What the profile adds to the request: the ref the provider sees, and the key in the variable the provider named
-export interface ProfilePart {
-  readonly profile: CreateSessionRequest['profile']
-  readonly env: Readonly<Record<string, string>>
+// What the name and the kind of a profile allow: a login has no key, an api_key profile has one and a provider that takes it
+const refusalOf = (
+  input: AddProfileInput,
+  apiKeyEnv: string | undefined,
+): ProfileError | undefined => {
+  if (!isProfileName(input.name)) {
+    return invalid(
+      `"${input.name}" is not a profile name: lower-case letters, digits and dashes, 1 to 32 of them`,
+    )
+  }
+  if (input.kind === 'login') {
+    return input.apiKey === undefined ? undefined : invalid('a login profile takes no key')
+  }
+  if (apiKeyEnv === undefined) {
+    return invalid(`provider "${input.providerId}" takes no API-key profile`)
+  }
+  return input.apiKey === undefined || input.apiKey === ''
+    ? invalid('an api_key profile needs its key')
+    : undefined
 }
 
-export const profilePartOf = (deps: SessionDeps, session: Session): Effect.Effect<ProfilePart, ProfileError | StoreError> =>
-  Effect.map(deps.profiles.resolve(session.providerId, session.profileId), ({ ref, apiKey }) => ({
-    profile: ref,
-    env: apiKey === undefined ? {} : { [apiKey.env]: apiKey.value },
-  }))
+// What add refuses before anything is written; the id of the profile otherwise
+const checkedId = (
+  deps: ProfileDeps,
+  input: AddProfileInput,
+): Effect.Effect<string, ProfileError | SessionError> =>
+  Effect.flatMap(requireProvider(deps.host, input.providerId), (provider) => {
+    const refusal = refusalOf(input, provider.apiKeyEnv)
+    return refusal === undefined
+      ? Effect.succeed(profileIdOf(input.providerId, input.name))
+      : Effect.fail(refusal)
+  })
 
-// The providers.<id> section of the project as the provider gets it: everything but passEnv, which is the kernel's
-export const providerConfigOf = (deps: SessionDeps, session: Session): Effect.Effect<Readonly<Record<string, unknown>>, SessionError | StoreError | ConfigError> =>
-  Effect.gen(function* readsProviderConfig() {
-    const registered = yield* requireProject(deps, session.projectId)
-    const project = yield* currentProject(deps, registered)
-    const section = project.config.providers === undefined ? undefined : project.config.providers[session.providerId]
-    if (section === undefined) {
-      return {}
+// What a profile keeps outside its row: the directory of a login, or the key of an api_key profile
+const keep = (
+  deps: ProfileDeps,
+  profile: Profile,
+  apiKey: string | undefined,
+): Effect.Effect<void, StoreError> =>
+  profile.configDir === null
+    ? writeKey(deps.secrets, profile.id, apiKey ?? '')
+    : ensureProfileDir(profile.configDir)
+
+// The row claims the id first, so a second add of the profile neither overwrites its key nor shares its directory
+// A profile whose key or directory cannot be kept is not added: its row goes again
+const claim = (
+  deps: ProfileDeps,
+  profile: Profile,
+  apiKey: string | undefined,
+): Effect.Effect<void, ProfileError | StoreError> =>
+  Effect.flatMap(
+    claimProfile(deps.sql, profile),
+    (claimed): Effect.Effect<void, ProfileError | StoreError> =>
+      claimed
+        ? keep(deps, profile, apiKey).pipe(
+            Effect.tapError(() => Effect.ignore(forgetProfile(deps.sql, profile.id))),
+          )
+        : Effect.fail(
+            new ProfileError({ code: 'exists', reason: `profile "${profile.id}" exists` }),
+          ),
+  )
+
+// The first profile of a provider becomes its default, and makeDefault moves the default to the new one
+export const addProfile = (
+  deps: ProfileDeps,
+  input: AddProfileInput,
+): Effect.Effect<Profile, ProfileError | SessionError | StoreError> =>
+  Effect.gen(function* addsProfile() {
+    const id = yield* checkedId(deps, input)
+    const first = (yield* defaultProfileOf(deps.sql, input.providerId)) === undefined
+    const profile: Profile = {
+      id,
+      providerId: input.providerId,
+      name: input.name,
+      kind: input.kind,
+      configDir:
+        input.kind === 'login' ? profileDirOf(deps.home, input.providerId, input.name) : null,
+      isDefault: first || input.makeDefault === true,
+      createdAt: nowIso(),
     }
-    const { passEnv: _kernelOwn, ...rest } = section
-    return rest
+    yield* claim(deps, profile, input.apiKey)
+    if (profile.isDefault) {
+      yield* markDefault(deps.sql, profile.providerId, id)
+    }
+    const payload = { profileId: id, providerId: profile.providerId }
+    yield* deps.log.publish({ type: 'profile.added', payload })
+    return profile
   })
 ```
 
-`packages/kernel/src/sessions/session-start.ts`: `requestOf` becomes an Effect that yields `profilePartOf` and `providerConfigOf` and builds `{ …, profile: part.profile, providerConfig, env: { ...allowlistEnv(process.env, passEnv), ...bytebureauEnv(extra), ...part.env, BYTEBUREAU_SESSION_ID: session.id } }`; its failure (`ProfileError`) is mapped to `ProviderError({ kind: 'auth', reason, retryable: false })` so the start fails as an auth refusal (the API answers 502 `provider_auth`; the CLI exits 4). `session-create.ts`: after `employeeOf`, `yield* deps.profiles.resolve(input.providerId ?? employee.provider, input.profileId)` and store `profile_id` = `resolved.ref.id === 'default' ? null : resolved.ref.id`; `ProfileError` passes through `create`'s error type (the API maps it in Task 4).
-
-`packages/kernel/src/testing/fake-agent-session.ts`: at the start of `runHello`/`runSlow`, push `{ type: 'session.warning', kind: 'env', message: \`api key: ${request.env['BYTEBUREAU_FAKE_API_KEY'] === undefined ? 'absent' : 'present'}\` }` and `{ type: 'raw', providerEvent: { providerConfig: request.providerConfig } }` once (the canary of Task 5 reads the first, the create test the second). `scriptOf` prefers `BYTEBUREAU_FAKE_SCRIPT`, else `providerConfig.flavour === 'slow'`.
-
-`packages/kernel/src/facade/profiles.ts`:
+`packages/kernel/src/profiles/profile-remove.ts` (as shipped):
 
 ```ts
-export const profilesApi = (promised: Promised): Kernel['profiles'] => ({
-  list: promised(ProfileService, (profiles) => profiles.list()),
-  add: promised(ProfileService, (profiles, input) => profiles.add(input)),
-  remove: promised(ProfileService, (profiles, id, options) => profiles.remove(id, options)),
-  setDefault: promised(ProfileService, (profiles, id) => profiles.setDefault(id)),
-  status: promised(ProfileService, (profiles, id) => profiles.status(id)),
+import { Effect } from 'effect'
+import type { ProfileError, StoreError } from '../errors.js'
+import { kernelLogger } from '../logging/logging.js'
+import { removeProfileDir } from './profile-dirs.js'
+import { dropKey, secretKeyOf } from './profile-keys.js'
+import { deleteProfile } from './profile-records.js'
+import type { Profile, ProfileDeps, Removal } from './profile-types.js'
+
+const logger = kernelLogger(['bb', 'profiles'])
+
+// What a removed profile leaves when it cannot be discarded is told, and the removal stands
+const leftBehind =
+  (message: string, left: Readonly<Record<string, string>>) =>
+  (failure: StoreError): Effect.Effect<void> =>
+    Effect.sync(() => {
+      logger.warn(message, { ...left, reason: failure.message })
+    })
+
+// What the profile kept outside its row goes after it: its key, and its directory when it is purged
+const discard = (deps: ProfileDeps, profile: Profile, removal: Removal): Effect.Effect<void> =>
+  Effect.gen(function* discardsProfile() {
+    if (profile.kind === 'api_key') {
+      const key = secretKeyOf(profile.id)
+      const told = leftBehind('a removed profile left its key in the secret store', {
+        profileId: profile.id,
+        key,
+      })
+      yield* dropKey(deps.secrets, profile.id).pipe(Effect.catchTag('StoreError', told))
+    }
+    if (removal.purge === true && profile.configDir !== null) {
+      const directory = profile.configDir
+      const told = leftBehind('a removed profile left its directory', {
+        profileId: profile.id,
+        directory,
+      })
+      yield* removeProfileDir(directory).pipe(Effect.catchTag('StoreError', told))
+    }
+  })
+
+// The row goes, and the default with it to the next profile, in one transaction; the removal is told once that holds
+export const removeProfile = (
+  deps: ProfileDeps,
+  id: string,
+  removal: Removal = {},
+): Effect.Effect<void, ProfileError | StoreError> =>
+  Effect.gen(function* removesProfile() {
+    const removed = yield* deleteProfile(deps.sql, id)
+    yield* deps.log.publish({ type: 'profile.removed', payload: { profileId: id } })
+    yield* discard(deps, removed, removal)
+  })
+```
+
+`packages/kernel/src/profiles/profile-resolve.ts` (as shipped):
+
+```ts
+import { Effect } from 'effect'
+import { ProfileError, type StoreError } from '../errors.js'
+import { namelessRefOf } from './profile-ids.js'
+import { lostKeyReason, usableKeyOf } from './profile-keys.js'
+import { defaultProfileOf, requireProfile } from './profile-records.js'
+import { refOf } from './profile-status.js'
+import type { Profile, ProfileDeps, ResolvedProfile } from './profile-types.js'
+
+const invalid = (reason: string): ProfileError => new ProfileError({ code: 'invalid', reason })
+
+// The variable the provider of the profile takes a key in; a provider that is gone, or took it back, takes none
+const keyEnvOf = (deps: ProfileDeps, profile: Profile): Effect.Effect<string, ProfileError> => {
+  const provider = deps.host.agentProvider(profile.providerId)
+  const env = provider === undefined ? undefined : provider.apiKeyEnv
+  return env === undefined
+    ? Effect.fail(invalid(`provider "${profile.providerId}" takes no API-key profile`))
+    : Effect.succeed(env)
+}
+
+// The key of an api_key profile; one the secret store no longer holds refuses the profile
+const keyOfProfile = (
+  deps: ProfileDeps,
+  profile: Profile,
+): Effect.Effect<string, ProfileError | StoreError> =>
+  Effect.flatMap(usableKeyOf(deps.secrets, profile.id), (value) =>
+    value === undefined ? Effect.fail(invalid(lostKeyReason(profile.id))) : Effect.succeed(value),
+  )
+
+// A login profile travels as its ref alone; an api_key profile with its key, in the variable its provider declared
+const resolved = (
+  deps: ProfileDeps,
+  profile: Profile,
+): Effect.Effect<ResolvedProfile, ProfileError | StoreError> =>
+  profile.kind === 'login'
+    ? Effect.succeed({ ref: refOf(profile) })
+    : Effect.map(
+        Effect.all({ env: keyEnvOf(deps, profile), value: keyOfProfile(deps, profile) }),
+        (apiKey) => ({ ref: refOf(profile), apiKey }),
+      )
+
+export const resolveProfile = (
+  deps: ProfileDeps,
+  providerId: string,
+  profileId: string | null | undefined,
+): Effect.Effect<ResolvedProfile, ProfileError | StoreError> =>
+  Effect.gen(function* findsProfile() {
+    if (profileId === null || profileId === undefined) {
+      const fallback = yield* defaultProfileOf(deps.sql, providerId)
+      return fallback === undefined
+        ? { ref: namelessRefOf(providerId) }
+        : yield* resolved(deps, fallback)
+    }
+    const profile = yield* requireProfile(deps.sql, profileId)
+    if (profile.providerId !== providerId) {
+      const reason = `profile "${profileId}" belongs to provider "${profile.providerId}", not "${providerId}"`
+      return yield* invalid(reason)
+    }
+    return yield* resolved(deps, profile)
+  })
+```
+
+`packages/kernel/src/profiles/profile-operations.ts` (as shipped):
+
+```ts
+import { addProfile } from './profile-add.js'
+import { listProfiles, loadProfile, makeDefault } from './profile-records.js'
+import { removeProfile } from './profile-remove.js'
+import { resolveProfile } from './profile-resolve.js'
+import { profileStatus } from './profile-status.js'
+import type { ProfileDeps, ProfileServiceShape } from './profile-types.js'
+
+// The operations of the service over what it works with
+export const profileOperations = (deps: ProfileDeps): ProfileServiceShape => ({
+  list: () => listProfiles(deps.sql),
+  get: (id) => loadProfile(deps.sql, id),
+  add: (input) => addProfile(deps, input),
+  remove: (id, removal) => removeProfile(deps, id, removal),
+  setDefault: (id) => makeDefault(deps.sql, id),
+  status: (id) => profileStatus(deps, id),
+  resolve: (providerId, profileId) => resolveProfile(deps, providerId, profileId),
 })
 ```
 
-`facade/types.ts`: `readonly profiles: { list(): Promise<readonly Profile[]>; add(input: AddProfileInput): Promise<Profile>; remove(id: string, options?: { readonly purge?: boolean }): Promise<void>; setDefault(id: string): Promise<void>; status(id: string): Promise<ProfileStatus> }`; `providers.list()` returns `{ id, displayName, supportsApiKey: provider.apiKeyEnv !== undefined }`. `facade.ts` wires `profilesApi`. `index.ts` exports `ProfileService`, `ProfileServiceLive`, the types, `ProfileError` (through `errors.ts`).
+`packages/kernel/src/facade/provider-areas.ts` (as shipped):
+
+```ts
+import type { PluginStatus } from '../plugins/plugin-host.js'
+import type { AddProfileInput, Profile, ProfileStatus } from '../profiles/profile-service.js'
+
+// What the plugins bring to the facade: their status, the agent providers they offer and the profiles those run under
+export interface ProviderAreas {
+  readonly profiles: {
+    readonly list: () => Promise<readonly Profile[]>
+    readonly get: (id: string) => Promise<Profile | undefined>
+    // An unknown provider rejects with a SessionError provider_missing, as a session of it would
+    readonly add: (input: AddProfileInput) => Promise<Profile>
+    readonly remove: (id: string, options?: { readonly purge?: boolean }) => Promise<void>
+    readonly setDefault: (id: string) => Promise<void>
+    readonly status: (id: string) => Promise<ProfileStatus>
+  }
+  readonly providers: {
+    readonly list: () => readonly {
+      readonly id: string
+      readonly displayName: string
+      readonly supportsApiKey: boolean
+    }[]
+  }
+  readonly plugins: { readonly list: () => readonly PluginStatus[] }
+}
+```
+
+`packages/kernel/src/profiles/profile-fixtures.ts` (as shipped):
+
+```ts
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import type { Plugin } from '@bytebureau/plugin-api'
+import { Effect, Layer } from 'effect'
+import { ProfileError } from '../errors.js'
+import { KernelTest } from '../kernel-test.js'
+import { PluginHost } from '../plugins/plugin-host.js'
+import type { SecretsShape } from '../secrets/secrets.js'
+import { ProfileService, type ProfileServiceShape } from './profile-service.js'
+
+// A kernel over an in-memory store and a home of its own, which is removed with the layer
+export interface ProfileWorld {
+  readonly home: string
+  readonly layer: ReturnType<typeof KernelTest>
+}
+
+export const profileWorld = (
+  plugins: readonly Plugin[] = [],
+  secrets?: SecretsShape,
+): ProfileWorld => {
+  const created = mkdtempSync(path.join(tmpdir(), 'bb-home-'))
+  const home = realpathSync(created)
+  const removal = Layer.effectDiscard(
+    Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        rmSync(home, { recursive: true, force: true })
+      }),
+    ),
+  )
+  return {
+    home,
+    layer: KernelTest({ home, extraPlugins: plugins, secrets }).pipe(Layer.provideMerge(removal)),
+  }
+}
+
+// The profile service once the plugins have loaded, so that their providers are known
+export const loadedProfiles: Effect.Effect<
+  ProfileServiceShape,
+  never,
+  PluginHost | ProfileService
+> = Effect.gen(function* loadsProfiles() {
+  yield* (yield* PluginHost).load()
+  return yield* ProfileService
+})
+
+// What a refused attempt says: the code of a profile error, else the name of the error; one that succeeds fails the test
+export const codeOf = <Value>(attempt: Effect.Effect<Value, Error>): Effect.Effect<string, Value> =>
+  Effect.map(Effect.flip(attempt), (failure) =>
+    failure instanceof ProfileError ? failure.code : failure.name,
+  )
+```
+
+`packages/kernel/src/profiles/failing-fixtures.ts` (as shipped):
+
+```ts
+import {
+  definePlugin,
+  type AgentProvider,
+  type AuthStatus,
+  type Plugin,
+} from '@bytebureau/plugin-api'
+import { manifestOf, providerOf } from '../plugins/plugin-fixtures.js'
+import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import type { SecretsShape } from '../secrets/secrets.js'
+
+const failingStatus = async (): Promise<AuthStatus> => {
+  await Promise.resolve()
+  throw new Error('the account check failed')
+}
+
+// A provider whose account check throws, and which takes no API-key profile
+export const doubtingPlugin: Plugin = definePlugin({
+  manifest: manifestOf('doubting', { contributes: { agentProviders: ['doubting'] } }),
+  setup: () => {
+    const provider: AgentProvider = { ...providerOf('doubting'), authStatus: failingStatus }
+    return { agentProviders: [provider] }
+  },
+})
+
+const lockedStore = new InMemorySecretStore()
+
+// A secret store that refuses to keep a secret, as a locked keychain would
+export const refusingSecrets: SecretsShape = {
+  backend: 'keychain',
+  get: async (key) => {
+    const value = await lockedStore.get(key)
+    return value
+  },
+  set: async () => {
+    await Promise.resolve()
+    throw new Error('the keychain is locked')
+  },
+  delete: async (key) => {
+    await lockedStore.delete(key)
+  },
+}
+
+const stickyStore = new InMemorySecretStore()
+
+// A secret store that keeps what it is given and refuses to let it go, as a file it cannot rewrite would
+export const stickySecrets: SecretsShape = {
+  backend: 'file',
+  get: async (key) => {
+    const value = await stickyStore.get(key)
+    return value
+  },
+  set: async (key, value) => {
+    await stickyStore.set(key, value)
+  },
+  delete: async () => {
+    await Promise.resolve()
+    throw new Error('the secrets file cannot be written')
+  },
+}
+```
+
+`packages/kernel/src/profiles/profile-sessions.test.ts` (as shipped):
+
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { sessionOf, startSession } from '../sessions/session-fixtures.js'
+import { sessionLayer } from '../sessions/session-layer-fixtures.js'
+import { SessionManager } from '../sessions/session-manager.js'
+import { codeOf, loadedProfiles } from './profile-fixtures.js'
+
+const IN_USE =
+  'profile "fake/work" is in use: 1 session(s) still run under it or can resume; complete or remove them first'
+
+// The repository of the session goes with the test, so the whole life of the session is one test
+const heldUntilCompleted = Effect.gen(function* heldUntilCompleted() {
+  const profiles = yield* loadedProfiles
+  const sessions = yield* SessionManager
+  yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+  const session = yield* startSession({ profileId: 'fake/work' })
+  const ready = yield* Effect.flip(profiles.remove('fake/work'))
+  const stopped = yield* Effect.andThen(
+    sessions.stop(session.id),
+    codeOf(profiles.remove('fake/work')),
+  )
+  yield* Effect.andThen(sessions.resume(session.id), sessions.complete(session.id))
+  yield* profiles.remove('fake/work')
+  assert.deepStrictEqual(
+    [ready.message, stopped, yield* profiles.list(), (yield* sessionOf(session.id)).profileId],
+    [IN_USE, 'in_use', [], null],
+  )
+})
+
+it.layer(sessionLayer())('ProfileService and the sessions that run under a profile', (suite) => {
+  suite.effect(
+    'holds a profile while its session runs or is stopped and can resume, and lets it go once the session is completed',
+    () => heldUntilCompleted,
+  )
+})
+```
+
+`packages/kernel/src/sessions/session-profile.test.ts` (as shipped):
+
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { ProviderError } from '../errors.js'
+import { resolved } from '../plugins/plugin-call-fixtures.js'
+import { loadedProfiles } from '../profiles/profile-fixtures.js'
+import { Secrets } from '../secrets/secrets.js'
+import { sessionOf, startSession } from './session-fixtures.js'
+import { SessionManager } from './session-manager.js'
+import { prompted } from './session-prompted-fixtures.js'
+import { driven } from './session-script-fixtures.js'
+
+const CANARY = 'sk-canary-start'
+const KEY_ENV = 'SCRIPTED_API_KEY'
+const SCRIPTED = { providerId: 'scripted' } as const
+const CONFIG = {
+  version: 1,
+  project: { name: 'options' },
+  employees: {
+    developer: {
+      name: 'Developer',
+      provider: 'scripted',
+      model: 'm',
+      permissionMode: 'supervised',
+    },
+  },
+  providers: { scripted: { passEnv: ['BB_PASSED'], flavour: 'slow', depth: 2 } },
+}
+
+const world = driven({ apiKeyEnv: KEY_ENV })
+
+const handsKey = Effect.gen(function* handsKey() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.add({ ...SCRIPTED, name: 'key', kind: 'api_key', apiKey: CANARY })
+  const session = yield* startSession({ ...SCRIPTED, profileId: 'scripted/key' })
+  const { request } = (yield* prompted(world, session)).agent
+  assert.deepStrictEqual(
+    [request.profile, request.env[KEY_ENV]],
+    [{ id: 'scripted/key', providerId: 'scripted', kind: 'api_key' }, CANARY],
+  )
+})
+
+const handsLogin = Effect.gen(function* handsLogin() {
+  const profiles = yield* loadedProfiles
+  const work = yield* profiles.add({ ...SCRIPTED, name: 'work', kind: 'login' })
+  const session = yield* startSession({ ...SCRIPTED, profileId: work.id })
+  const { request } = (yield* prompted(world, session)).agent
+  assert.deepStrictEqual(
+    [request.profile, request.env[KEY_ENV]],
+    [
+      { id: 'scripted/work', providerId: 'scripted', kind: 'login', configDir: work.configDir },
+      undefined,
+    ],
+  )
+})
+
+const handsOptions = Effect.gen(function* handsOptions() {
+  const configured = yield* startSession(SCRIPTED, CONFIG)
+  const plain = yield* startSession(SCRIPTED)
+  const first = (yield* prompted(world, configured)).agent.request
+  const second = (yield* prompted(world, plain)).agent.request
+  assert.deepStrictEqual(
+    [first.providerConfig, second.providerConfig],
+    [{ flavour: 'slow', depth: 2 }, {}],
+  )
+})
+
+const refusesLostKey = Effect.gen(function* refusesLostKey() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.add({ ...SCRIPTED, name: 'lost', kind: 'api_key', apiKey: CANARY })
+  const session = yield* startSession({ ...SCRIPTED, profileId: 'scripted/lost' })
+  yield* resolved((yield* Secrets).delete('@bytebureau/profiles/scripted/lost/api_key'))
+  const error = yield* Effect.flip((yield* SessionManager).prompt(session.id, { text: 'go' }))
+  assert.ok(error instanceof ProviderError)
+  assert.deepStrictEqual(
+    [error.kind, error.retryable, error.reason],
+    [
+      'auth',
+      false,
+      'the key of profile "scripted/lost" is not in the secret store; remove the profile and add it again',
+    ],
+  )
+  assert.strictEqual((yield* sessionOf(session.id)).status, 'ready')
+})
+
+it.layer(world.layer)('SessionManager start under a profile', (suite) => {
+  suite.effect(
+    'hands the agent the ref of its api_key profile and the key in the variable of its provider',
+    () => handsKey,
+  )
+  suite.effect(
+    'hands the agent of a login profile its ref with the directory, and no key',
+    () => handsLogin,
+  )
+  suite.effect(
+    'hands the agent the providers section of its project without passEnv, and nothing without one',
+    () => handsOptions,
+  )
+  suite.effect(
+    'fails the prompt as an auth refusal when the key of its profile is gone, and leaves the session ready',
+    () => refusesLostKey,
+  )
+})
+
+const NAMELESS = { id: 'default', providerId: 'scripted', kind: 'login' }
+const fixed = driven()
+
+const staysNameless = Effect.gen(function* staysNameless() {
+  const sessions = yield* SessionManager
+  const session = yield* startSession(SCRIPTED)
+  yield* (yield* loadedProfiles).add({ ...SCRIPTED, name: 'later', kind: 'login' })
+  const first = (yield* prompted(fixed, session)).agent.request.profile
+  yield* Effect.andThen(sessions.stop(session.id), sessions.resume(session.id))
+  const second = (yield* prompted(fixed, session, { text: 'again' })).agent.request.profile
+  assert.deepStrictEqual([session.profileId, first, second], [null, NAMELESS, NAMELESS])
+})
+
+it.layer(fixed.layer)('SessionManager start of a session created without a profile', (suite) => {
+  suite.effect(
+    'keeps it on the nameless login once its provider has a default, resumed or not',
+    () => staysNameless,
+  )
+})
+```
+
+**Semantics (as shipped, commits 180f7fc, bc7e8c4, b14bce6, 052d675, 888d53e, 39970e0, d208f1a):** `ProfileService` (`bb/ProfileService`, `ProfileServiceLive({ home })`, joining `composeKernel` after the plugin host) keeps named auth profiles per provider in the `profiles` table: an id is `<providerId>/<name>` (the name `^[a-z0-9][a-z0-9-]{0,31}$`), a login profile owns the directory `<home>/profiles/<provider with ':' → '-'>/<name>` (0700 whatever the umask), an api_key profile owns the key `@bytebureau/profiles/<id>/api_key` in `Secrets` (the `@` keeps it outside the plugin-key grammar, so a plugin named `profiles` can neither read nor shadow it). `add` refuses an unknown provider as `SessionError provider_missing` (naming the available providers), a duplicate as `exists`, a bad name, a login with a key, an api_key without a key or with `''`, or an api_key for a provider without `apiKeyEnv` as `invalid`; it claims the row first (`INSERT … ON CONFLICT DO NOTHING RETURNING id`), then writes the key or makes the directory and deletes the row again when that fails, then marks the default in one statement (`is_default = (id = ?)` within the provider) — the first profile of a provider becomes its default and `makeDefault` moves it; `profile.added` is published. `remove` refuses with `in_use` while any session that can still resume refers to the profile (every status but `completed`; the message counts them and says to complete or remove them first); otherwise, in one transaction, it clears `profile_id` of the completed sessions (the foreign key would refuse the delete), deletes the row and passes the default to the oldest remaining profile of the provider; `profile.removed` is published once that commits, and the key and (with `purge`) the directory are discarded afterwards, best effort — a failed discard is logged as a warning naming what is left and does not undo the removal. `setDefault` moves the default within the profile's provider alone; `list()` orders by provider, then creation. `status` answers `not_found`; `loggedOut` with the hint "remove the profile and add it again" for an api_key profile whose key is not in the store and for a login profile whose directory is gone (the provider is asked for its hint only); otherwise the provider's `authStatus` decides (a throwing or unloaded provider is `unknown` with the reason as the hint); `profile.status` publishes the state only. `resolve(providerId, profileId)`: an explicit id must exist (`not_found`) and belong to the provider (`invalid`), `null` takes the provider's default, and no default is the nameless ref `{ id: 'default', providerId, kind: 'login' }`; an api_key profile whose key is gone, or whose provider no longer takes a key, is `invalid`. A session's profile is fixed at creation: `create` resolves it among its checks (after `requireProvider`, before anything is written) and stores the resolved id, `null` for the nameless ref — so a stored `null` means the nameless login for the session's whole life (the start builds that ref itself and never asks `resolve` for it) and a session created while a default existed keeps that default's id. The start builds the request effectfully: `profile: ref`, `env` gaining `[apiKey.env]: value` after the allowlist and the BYTEBUREAU_* extras, `providerConfig` = the project's `providers[providerId]` without `passEnv` (`{}` without a section); a `ProfileError` at the start becomes `ProviderError({ kind: 'auth', retryable: false })` and leaves the session `ready`; `prompt` can now fail with `ConfigError` (a project file broken since creation, 422 `config_invalid` through the API). The start of a provider session begins and installs its abandon handler inside one `Effect.uninterruptibleMask`, only the wait being interruptible (an abandoned start could leave the agent unclosed before). `Kernel.profiles = { list, get, add, remove, setDefault, status }` (promised). The fake agent announces `session.warning { kind: 'env', message: 'api key: present' | 'api key: absent' }` and one `raw { providerEvent: { providerConfig } }` before every `turn.started` (the kernel drops `raw`, so `providerConfig` is pinned through the scripted provider's recorded request and through the fake choosing its slow script from `flavour`). Key canaries in four tests: the key exists only in the secret store, the resolved `apiKey` and the agent's `env`. Heads-up for Task 4: `ProfileError` is not in `toProblem` yet (a refused creation answers 500 until Task 4 maps `not_found` 404, `exists` 409, `in_use` 409, `invalid` 422); the planned list test's order is creation order; the `profile.*` payloads' `profileId` becomes `Schema.String`. For Task 9: the user configuration's `profiles` section is reserved, documented there.
 
 - [ ] **Step 6: Run the kernel suite and the gates**
 
@@ -2684,12 +3766,14 @@ git commit -m "feat(kernel): keep named auth profiles per provider, and run a se
 
 **Files:**
 - Create: `packages/api/src/groups/profiles.ts`, `packages/api/src/handlers/profiles.ts`, `packages/api/src/profiles.test.ts`
-- Modify: `packages/api/src/api.ts` (the group), `packages/api/src/handlers/all.ts`, `packages/api/src/groups/usage.ts` and `handlers/usage.ts` (`GET /usage/profiles/:id`), `packages/api/src/handlers/plugins.ts` (`supportsApiKey`), `packages/api/src/problems.ts` (`ProfileError` → statuses and `profile_*` codes), `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` (regenerated), `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`), `packages/client/src/http.test.ts`, `packages/api/src/rpc.test.ts` (every procedure reached), `packages/api/src/workspaces-plugins.test.ts` (`supportsApiKey` is pinned there already by Task 1)
+- Modify: `packages/protocol/src/events.ts` (`profile.added|removed|status` and `ratelimit.updated` carry `profileId` as `Schema.String` — a profile id is `<provider>/<name>`, not a UUIDv7 — ruled after Task 3), `packages/api/src/api.ts` (the group), `packages/api/src/handlers/all.ts`, `packages/api/src/groups/usage.ts` and `handlers/usage.ts` (`GET /usage/profiles/:id`), `packages/api/src/handlers/plugins.ts` (`supportsApiKey`), `packages/api/src/problems.ts` (`ProfileError` → statuses and `profile_*` codes), `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` (regenerated), `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`), `packages/client/src/http.test.ts`, `packages/api/src/rpc.test.ts` (every procedure reached), `packages/api/src/workspaces-plugins.test.ts` (`supportsApiKey` is pinned there already by Task 1)
 - Test: the new `profiles.test.ts` over `ApiTestLayer`
 
 **Interfaces:**
 - Consumes: Task 1's DTOs and body; Task 3's `ProfileService`, `ProfileError`; Phase B's `Authorization`, `RequestValidation`, `orProblem`, `found`, `KERNEL_STATUSES`, `ApiTestLayer`, `authorized`, `get/post/remove`.
 - Produces: endpoints `GET /api/v1/profiles` → `ProfileDto[]`; `POST /api/v1/profiles` (`AddProfileBody`) → 201 `ProfileDto`, 409 `profile_exists`, 422 `profile_invalid` | `session_provider_missing`; `DELETE /api/v1/profiles/:id?purge=true` → 204, 404 `profile_not_found`, 409 `profile_in_use`; `POST /api/v1/profiles/:id/default` → 204, 404; `GET /api/v1/profiles/:id/status` → `ProfileStatusDto`, 404; `GET /api/v1/usage/profiles/:id` → `UsageSnapshotDto` (404 for an unknown profile; `observedAt: null` and an empty `rateLimit` when no snapshot was recorded); `ProviderDto.supportsApiKey`; the client areas `profiles.{list, add(body), remove(id, { purge? }), setDefault(id), status(id)}` and `usage.profile(id)`; RPC procedures of the same names.
+
+Heads-up from Task 3 (as shipped): `ProfileService` has `get(id)` too; `list()` is in creation order per provider; `ProfileError` reaches the API as a 500 until this task's `toProblem` branch lands; a session created with a profile that does not exist fails `create` with `ProfileError not_found`, one of another provider with `invalid`, so `sessions.test.ts` gains those two refusals (404 `profile_not_found`, 422 `profile_invalid`); `prompt` can fail with `ConfigError` (422 `config_invalid`, mapped already). The removal of a profile is refused with `in_use` while any session of a status other than `completed` refers to it (`profile "<id>" is in use: <n> session(s) still run under it or can resume; complete or remove them first`), so the `in_use` test completes its session (`sessions.complete`) before the removal succeeds.
 
 - [ ] **Step 1: The failing API tests**
 
@@ -2706,7 +3790,7 @@ describe('the profiles of the API', () => {
         expect(keyed.status).toBe(201)
         expect(yield* bodyOf(keyed)).not.toContain('sk-canary-api')
         const listed = yield* json<readonly ProfileDto[]>(get('/profiles'))
-        expect(listed.map((profile) => [profile.id, profile.isDefault])).toStrictEqual([['fake/key', false], ['fake/work', true]])
+        expect(listed.map((profile) => [profile.id, profile.isDefault])).toStrictEqual([['fake/work', true], ['fake/key', false]])
       }),
     )
 
@@ -2853,12 +3937,12 @@ git commit -m "feat(client): add the profiles area and the usage snapshot of a p
 
 **Files:**
 - Create: `apps/bytebureau/src/commands/profiles.ts`, `apps/bytebureau/src/commands/profiles-add.ts`, `apps/bytebureau/src/commands/api-key-input.ts`, `apps/bytebureau/src/commands/api-key-input.test.ts`, `apps/bytebureau/src/commands/profiles.test.ts`, `apps/bytebureau/src/commands/profiles-canary.test.ts`
-- Modify: `apps/bytebureau/src/bureau/bureau.ts` (`profiles` area, `usage.profile`), `apps/bytebureau/src/bureau/local.ts`, `apps/bytebureau/src/bureau/remote.ts`, `apps/bytebureau/src/bureau/remote.test.ts`, `apps/bytebureau/src/testing/scripted-kernel.ts`, `apps/bytebureau/src/testing/recording-client.ts`, `apps/bytebureau/src/commands/run.ts` (`--profile`), `apps/bytebureau/src/commands/run-session.ts` (`profileId` in the body, `RunOptions.profile`), `apps/bytebureau/src/commands/sub-commands.ts`, `apps/bytebureau/src/render/rows.ts` (`profileRows`, `profileStatusRows`), `apps/bytebureau/src/commands/sessions.ts` (`sessions show` prints the profile), `packages/i18n/messages/{en,cs}.json`, `vitest.config.ts` (coverage include for `commands/api-key-input.ts`, `commands/profiles-add.ts`)
+- Modify: `apps/bytebureau/src/bureau/bureau.ts` (`profiles` area, `usage.profile`), `apps/bytebureau/src/bureau/local.ts`, `apps/bytebureau/src/bureau/remote.ts`, `apps/bytebureau/src/bureau/remote.test.ts`, `apps/bytebureau/src/testing/scripted-kernel.ts`, `apps/bytebureau/src/testing/recording-client.ts`, `apps/bytebureau/src/commands/run.ts` (`--profile`), `apps/bytebureau/src/commands/run-session.ts` (`profileId` in the body, `RunOptions.profile`), `apps/bytebureau/src/commands/sub-commands.ts`, `apps/bytebureau/src/render/rows.ts` (`profileRows`, `profileStatusRows`), `apps/bytebureau/src/commands/sessions.ts` (`sessions show` prints the profile; `sessions complete <id>` joins `interrupt|stop|resume` in `steer`, with the message `sessions_completed` — "Completed {id}" / "Dokončeno {id}" — as the way out of `profile_in_use`, ruled after Task 3), `packages/i18n/messages/{en,cs}.json`, `vitest.config.ts` (coverage include for `commands/api-key-input.ts`, `commands/profiles-add.ts`)
 - Test: the new test files (the daemon-backed ones on `testHome()`, whose daemons use the file backend)
 
 **Interfaces:**
 - Consumes: Task 4's client areas (`profiles.list/add/remove/setDefault/status`, `usage.profile`), `ProfileDto`, `ProfileStatusDto`; Phase B's `withBureauRefusable`, `bureauFlags`, `processContext`, `table`, `flat`, `Context.output.{emit,print,warn}`, `promptAsk`'s clack usage in `render/ask-prompt.ts` (for the password prompt and the confirm), `Context.stdoutIsTTY`, the `refusable` exit-1 shape, the i18n `m.*` functions.
-- Produces: commands `profiles ls` (table `id  provider  kind  default  dir`; `profiles_none` when empty; `--json` → `{ command: 'profiles.ls', profiles }`), `profiles add <provider> <name> [--api-key] [--default]` (`--api-key` reads the key — at a TTY through a hidden clack prompt (`profiles_key_prompt`), without one from the first line of stdin; an empty key is the refusal `profiles_key_missing`, exit 1; the key is never an argument), `profiles rm <id> [--purge]`, `profiles use <id>`, `profiles status [<id>]` (one profile or all; table `id  state  account  hint`; `--json` → `{ command: 'profiles.status', statuses }`); `run --profile <id>` → `CreateSessionBody.profileId`; `Bureau.profiles` with the same five calls and `Bureau.usage.profile(id)`; messages `profiles_none`, `profiles_added`, `profiles_added_login` ("Profile {id} added. Log in with: {hint}" / "Profil {id} přidán. Přihlaste se příkazem: {hint}"), `profiles_wait_login` ("Press Enter once you have logged in" / "Až budete přihlášeni, stiskněte Enter"), `profiles_removed`, `profiles_default_set`, `profiles_key_prompt` ("API key for {id}" / "API klíč pro {id}"), `profiles_key_missing` ("--api-key needs a key: type it at the prompt or pipe it on stdin" / "--api-key potřebuje klíč: zadejte ho na výzvu nebo pošlete na stdin"), `profiles_status_none` ("No profiles to check" / "Žádné profily ke kontrole"), `profiles_default_marker` ("default" / "výchozí").
+- Produces: commands `profiles ls` (table `id  provider  kind  default  dir`; `profiles_none` when empty; `--json` → `{ command: 'profiles.ls', profiles }`), `profiles add <provider> <name> [--api-key] [--default]` (`--api-key` reads the key — at a TTY through a hidden clack prompt (`profiles_key_prompt`), without one from the first line of stdin; an empty key is the refusal `profiles_key_missing`, exit 1; the key is never an argument), `profiles rm <id> [--purge]`, `profiles use <id>`, `profiles status [<id>]` (one profile or all; table `id  state  account  hint`; `--json` → `{ command: 'profiles.status', statuses }`); `run --profile <id>` → `CreateSessionBody.profileId`; `Bureau.profiles` with the same five calls and `Bureau.usage.profile(id)`; messages `profiles_none`, `profiles_added`, `profiles_added_login` ("Profile {id} added. Log in with: {hint}" / "Profil {id} přidán. Přihlaste se příkazem: {hint}"), `profiles_wait_login` ("Press Enter once you have logged in" / "Až budete přihlášeni, stiskněte Enter"), `profiles_removed`, `profiles_default_set`, `profiles_key_prompt` ("API key for {id}" / "API klíč pro {id}"), `profiles_key_missing` ("--api-key needs a key: type it at the prompt or pipe it on stdin" / "--api-key potřebuje klíč: zadejte ho na výzvu nebo pošlete na stdin"), `profiles_status_none` ("No profiles to check" / "Žádné profily ke kontrole"), `profiles_default_marker` ("default" / "výchozí").; `sessions complete <id>` (one request, one line: `Completed <id>`; `--json` → `{ command: 'sessions.complete', id }`)
 
 Semantics: `profiles add claude work` creates a `login` profile and prints the login hint the daemon's status returns for it (the Claude adapter's `CLAUDE_CONFIG_DIR=<dir> claude /login`); at a TTY without `--yes` it then waits for Enter (`profiles_wait_login`) and prints the status it finds; without a TTY or with `--yes` it prints the hint and ends. `profiles add acp:codex key --api-key` reads the key and sends it in the body over the loopback connection; the body is the only place the key travels, and the kernel stores it in the secret store. Refusals (`profile_exists`, `profile_invalid`, `profile_in_use`, `profile_not_found`, `session_provider_missing`) end with exit 1 and the detail, as every command but `run` does.
 
@@ -2926,10 +4010,15 @@ describe('the profiles commands', () => {
     await runCli(['profiles', 'add', 'fake', 'key', '--api-key'], { home, stdin: 'sk-1\n' })
     expect((await runCli(['profiles', 'use', 'fake/key'], { home })).code).toBe(0)
     const repo = createTempRepo()
-    const run = await runCli(['run', 'wait', '--project', repo, '--provider', 'fake', '--profile', 'fake/work', '--json'], { home, env: { BYTEBUREAU_FAKE_SCRIPT: 'slow' }, interruption: { afterEvent: 'turn.started', signal: 'SIGINT' } })
+    const run = await runCli(['run', 'wait', '--project', repo, '--provider', 'fake', '--profile', 'fake/work', '--json'], { home, env: { BYTEBUREAU_FAKE_SCRIPT: 'slow' }, interruption: { afterStdout: '"turn.started"', signal: 'SIGINT' } })
     expect(run.code).toBe(3)
-    const busy = await runCli(['profiles', 'rm', 'fake/key'], { home })
-    expect(busy.code).toBe(0)
+    const held = await runCli(['profiles', 'rm', 'fake/work'], { home })
+    expect(held.code).toBe(1)
+    expect(held.stderr).toContain('1 session(s) still run under it or can resume; complete or remove them first')
+    const listed = await runCli(['sessions', 'ls', '--json'], { home })
+    const sessionId = sessionsOf(listed.stdout)[0].id // decode `{ command: 'sessions.ls', sessions }` as the other CLI tests decode `--json` output
+    expect((await runCli(['sessions', 'complete', sessionId], { home })).code).toBe(0)
+    expect((await runCli(['profiles', 'rm', 'fake/key'], { home })).code).toBe(0)
     const removedWork = await runCli(['profiles', 'rm', 'fake/work', '--purge'], { home })
     expect(removedWork.code).toBe(0)
     expect((await runCli(['profiles', 'rm', 'fake/work'], { home })).code).toBe(1)
@@ -2938,7 +4027,7 @@ describe('the profiles commands', () => {
 })
 ```
 
-(The third test's `in_use` case needs a session that has not ended while `rm` runs: start a slow run in the background (`runCli` returns a promise; keep the child running by not awaiting it until after `rm`), assert `rm` exits 1 with `has 1 session(s) that have not ended`, then interrupt the run and assert `rm` succeeds — write it with the `Interruption` helper of Phase B as the `run-daemon-stops.test.ts` does.)
+(The `in_use` case needs no background run: an interrupted run leaves its session `ready`, and every session but a `completed` one holds its profile (ruled after Task 3), so `rm` is refused with `1 session(s) still run under it or can resume; complete or remove them first` until `sessions complete <id>` has run; the `Interruption` helper of Phase B (`afterStdout`, `signal`) signals the CLI once its `--json` stdout shows `"turn.started"`, as `run-daemon-stops.test.ts` does.)
 
 `apps/bytebureau/src/commands/profiles-canary.test.ts` — Review Focus 1:
 
@@ -3702,7 +4791,7 @@ const PROBE_LIMIT_MS = 20_000
 const LOGGED_OUT = /login|auth|credential|unauthori[sz]ed|401|expired/iu
 
 export const loginHint = (profile: ProfileRef): string =>
-  profile.kind === 'api_key' ? 'add the profile again with a valid key' : `${profile.configDir === undefined ? '' : `CLAUDE_CONFIG_DIR=${profile.configDir} `}claude /login`
+  profile.kind === 'api_key' ? 'remove the profile and add it again with a valid key' : `${profile.configDir === undefined ? '' : `CLAUDE_CONFIG_DIR=${profile.configDir} `}claude /login`
 
 const stateOf = (reason: string): AuthStatus['state'] => (/expired/iu.test(reason) ? 'expired' : LOGGED_OUT.test(reason) ? 'loggedOut' : 'unknown')
 
