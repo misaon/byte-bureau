@@ -1,5 +1,7 @@
+import type { CreateSessionBody } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { askOf, event, option, question } from '../testing/events.js'
+import { SESSION } from '../testing/records.js'
 import {
   captureConsole,
   COMPLETED,
@@ -16,8 +18,8 @@ describe(runSession, () => {
   it('registers, creates, prompts and follows the session; completes it after its turn', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel, calls } = scripted([TURN_DONE, COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(0)
+    const { bureau, calls } = scripted([TURN_DONE, COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(0)
     expect(calls).toStrictEqual([
       'register /repo',
       'create Fix the build',
@@ -32,8 +34,8 @@ describe(runSession, () => {
     expect.hasAssertions()
     captureConsole()
     const typed = 'Vytvoř soubor 😀\r\nA druhý řádek'
-    const { kernel, calls } = scripted([COMPLETED])
-    await runSession(kernel, { ...OPTIONS, prompt: typed }, contextOf())
+    const { bureau, calls } = scripted([COMPLETED])
+    await runSession(bureau, { ...OPTIONS, prompt: typed }, contextOf())
     expect(calls).toContain(`prompt s1 ${typed}`)
     expect(calls).toContain('create Vytvoř soubor 😀')
   })
@@ -41,9 +43,41 @@ describe(runSession, () => {
   it('exits 3 when the session was stopped', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel } = scripted([STOPPED])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(3)
+    const { bureau } = scripted([STOPPED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(3)
     expect(printed.out()).toStrictEqual(['Session stopped'])
+  })
+})
+
+describe('runSession and the session it creates', () => {
+  it('names what the options name, with the BYTEBUREAU_* variables of the command', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const bodies: CreateSessionBody[] = []
+    const { bureau } = scripted([COMPLETED], {
+      create: async (body) => {
+        bodies.push(body)
+        await Promise.resolve()
+        return SESSION
+      },
+    })
+    const env = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+    await runSession(bureau, { ...OPTIONS, employee: 'reviewer', branch: 'dev', env }, contextOf())
+    expect(bodies).toStrictEqual([
+      { projectId: 'p1', title: 'Fix the build', employeeId: 'reviewer', branch: 'dev', env },
+    ])
+  })
+})
+
+describe('runSession and its subscription', () => {
+  it('subscribes with a signal of its own and aborts it once the session has ended', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const script = scripted([TURN_DONE, COMPLETED])
+    await runSession(script.bureau, OPTIONS, contextOf())
+    expect(script.signals).toHaveLength(1)
+    expect(script.signals[0]).toBeInstanceOf(AbortSignal)
+    expect(script.signals[0]).toMatchObject({ aborted: true })
   })
 })
 
@@ -51,16 +85,16 @@ describe('runSession when the session ends badly', () => {
   it('exits 4 and says why when the provider errored the session', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel } = scripted([ERRORED])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(4)
+    const { bureau } = scripted([ERRORED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(4)
     expect(printed.err()).toStrictEqual(['The provider failed: the agent died'])
   })
 
   it('fails when the events end before the session does', async () => {
     expect.hasAssertions()
     captureConsole()
-    const { kernel } = scripted([TURN_DONE])
-    await expect(runSession(kernel, OPTIONS, contextOf())).rejects.toThrow(
+    const { bureau } = scripted([TURN_DONE])
+    await expect(runSession(bureau, OPTIONS, contextOf())).rejects.toThrow(
       'the events ended before the session did',
     )
   })
@@ -68,8 +102,8 @@ describe('runSession when the session ends badly', () => {
   it('prints the events as JSON lines and nothing else when the output is machine-readable', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel } = scripted([TURN_DONE, COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf(true))).resolves.toBe(0)
+    const { bureau } = scripted([TURN_DONE, COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf(true))).resolves.toBe(0)
     expect(printed.out()).toStrictEqual([JSON.stringify(TURN_DONE), JSON.stringify(COMPLETED)])
     expect(printed.err()).toStrictEqual([])
   })
@@ -82,16 +116,16 @@ describe('runSession with an ask', () => {
   it('answers with the recommended option when --yes is given', async () => {
     expect.hasAssertions()
     captureConsole()
-    const { kernel, answered } = scripted([asked, STOPPED])
-    await runSession(kernel, { ...OPTIONS, yes: true }, contextOf())
-    expect(answered).toStrictEqual([{ askId: 'a1', answer: { selected: ['yes'] }, via: 'cli' }])
+    const { bureau, answered } = scripted([asked, STOPPED])
+    await runSession(bureau, { ...OPTIONS, yes: true }, contextOf())
+    expect(answered).toStrictEqual([{ askId: 'a1', answer: { selected: ['yes'] } }])
   })
 
   it('leaves the ask unanswered and says that the session waits when nobody can answer it', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel, answered } = scripted([asked, STOPPED])
-    await runSession(kernel, OPTIONS, contextOf())
+    const { bureau, answered } = scripted([asked, STOPPED])
+    await runSession(bureau, OPTIONS, contextOf())
     expect(answered).toStrictEqual([])
     expect(printed.err()).toStrictEqual([
       'The employee is waiting for your answer to "Export style" (not answered automatically)',
@@ -102,11 +136,11 @@ describe('runSession with an ask', () => {
     expect.hasAssertions()
     const printed = captureConsole()
     const unrecommended = askOf([question([option('a', false)])], 'none')
-    const { kernel, answered } = scripted([
+    const { bureau, answered } = scripted([
       event('ask.requested', { ask: unrecommended }, 2),
       STOPPED,
     ])
-    await runSession(kernel, { ...OPTIONS, yes: true }, contextOf())
+    await runSession(bureau, { ...OPTIONS, yes: true }, contextOf())
     expect(answered).toStrictEqual([])
     expect(printed.err()).toHaveLength(1)
   })

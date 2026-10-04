@@ -25,6 +25,13 @@ const FORGED = {
   BYTEBUREAU_FAKE_SCRIPT: 'slow',
 }
 
+// The names of ByteBureau that are the kernel's own: a caller of create may not decide them either
+const KERNEL_OWN = {
+  BYTEBUREAU_HOME: '/another/home',
+  BYTEBUREAU_LOG_LEVEL: 'debug',
+  BYTEBUREAU_WORKSPACE_RUNTIME: 'elsewhere',
+}
+
 const plain = driven()
 
 it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
@@ -83,6 +90,18 @@ it.layer(plain.layer)('SessionManager environment the caller adds', (suite) => {
       const given = names.map((name) => agent.request.env[name])
       assert.deepStrictEqual(
         given,
+        names.map((name) => process.env[name]),
+      )
+    }),
+  )
+
+  suite.effect("keeps the kernel's own names of ByteBureau whatever the caller asks for", () =>
+    Effect.gen(function* keepsKernelNames() {
+      const session = yield* startSession({ providerId: 'scripted', env: KERNEL_OWN })
+      const { agent } = yield* prompted(plain, session)
+      const names = Object.keys(KERNEL_OWN)
+      assert.deepStrictEqual(
+        names.map((name) => agent.request.env[name]),
         names.map((name) => process.env[name]),
       )
     }),

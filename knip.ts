@@ -12,6 +12,12 @@ const config: KnipConfig = {
       entry: ['scripts/*.ts'],
       project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
     },
+    'packages/api': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.ts', 'scripts/**/*.ts'],
+    },
+    // The generated client under src/gen is hey-api's output, committed as it is generated
+    'packages/client': { project: ['src/**/*.ts'], ignore: ['src/gen/**'] },
     'packages/i18n': {
       project: ['src/**/*.ts', 'scripts/**/*.ts'],
       // Loaded by the inlang SDK from project.inlang/settings.json (modules), never imported

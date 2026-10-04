@@ -1,27 +1,31 @@
-import type { AnsweredVia, AskAnswer, EventEnvelope } from '@bytebureau/protocol'
-import { vi } from 'vitest'
+import type { AskAnswer, EventEnvelope } from '@bytebureau/protocol'
+import { onTestFinished, vi } from 'vitest'
+import type { Bureau } from '../bureau/bureau.js'
+import type { RunOptions } from '../commands/run-session.js'
 import { createContext, type Context } from '../context.js'
-import type { RunKernel, RunOptions } from '../commands/run-session.js'
 import { event } from './events.js'
+import { PROJECT, SESSION, TURN } from './records.js'
 
 interface Answered {
   readonly askId: string
   readonly answer: AskAnswer
-  readonly via: AnsweredVia
 }
 
 export interface Scripted {
-  readonly kernel: RunKernel
-  // What the run asked of the kernel, in order
+  readonly bureau: Bureau
+  // What the run asked of the Bureau, in order
   readonly calls: string[]
   readonly answered: Answered[]
+  // The signal of each subscription to the events
+  readonly signals: (AbortSignal | undefined)[]
 }
 
 export interface Overrides {
-  readonly register?: RunKernel['projects']['register']
-  readonly create?: RunKernel['sessions']['create']
-  readonly prompt?: RunKernel['sessions']['prompt']
-  readonly stop?: RunKernel['sessions']['stop']
+  readonly register?: Bureau['projects']['register']
+  readonly create?: Bureau['sessions']['create']
+  readonly prompt?: Bureau['sessions']['prompt']
+  readonly stop?: Bureau['sessions']['stop']
+  readonly getAsk?: Bureau['asks']['get']
   // The events do not come before the gate is open
   readonly gate?: Promise<boolean>
 }
@@ -45,7 +49,7 @@ async function* replay(
   yield* events
 }
 
-// A function that fails the way the kernel does
+// A function that fails the way the kernel or the daemon does
 export function rejecting(failure: Error): () => Promise<never> {
   return async () => {
     await Promise.resolve()
@@ -53,20 +57,24 @@ export function rejecting(failure: Error): () => Promise<never> {
   }
 }
 
-function sessionsOf(calls: string[], overrides: Overrides): RunKernel['sessions'] {
+// What a run never asks of the Bureau
+const notScripted = (): (() => Promise<never>) => rejecting(new Error('not scripted'))
+
+function sessionsOf(calls: string[], overrides: Overrides): Bureau['sessions'] {
   return {
     create:
       overrides.create ??
-      (async (input) => {
-        calls.push(`create ${input.title}`)
+      (async (body) => {
+        calls.push(`create ${body.title}`)
         await Promise.resolve()
-        return { id: 's1' }
+        return SESSION
       }),
     prompt:
       overrides.prompt ??
       (async (sessionId, input) => {
         calls.push(`prompt ${sessionId} ${input.text}`)
         await Promise.resolve()
+        return TURN
       }),
     stop:
       overrides.stop ??
@@ -78,44 +86,85 @@ function sessionsOf(calls: string[], overrides: Overrides): RunKernel['sessions'
       calls.push(`complete ${sessionId}`)
       await Promise.resolve()
     },
+    interrupt: notScripted(),
+    resume: notScripted(),
+    list: notScripted(),
+    get: notScripted(),
   }
 }
 
-// A kernel that records what it is asked and tells the events of the script, whatever the run does
+function projectsOf(calls: string[], overrides: Overrides): Bureau['projects'] {
+  return {
+    register:
+      overrides.register ??
+      (async (path) => {
+        calls.push(`register ${path}`)
+        await Promise.resolve()
+        return PROJECT
+      }),
+    list: notScripted(),
+    get: notScripted(),
+    remove: notScripted(),
+  }
+}
+
+// The rest of a Bureau, which a run asks nothing of but the providers
+const unscripted: Pick<Bureau, 'health' | 'plugins' | 'usage' | 'workspaces' | 'where' | 'close'> =
+  {
+    workspaces: { list: notScripted(), prune: notScripted() },
+    usage: { session: notScripted() },
+    plugins: {
+      list: notScripted(),
+      providers: async () => {
+        await Promise.resolve()
+        return [{ id: 'fake', displayName: 'Fake agent' }]
+      },
+    },
+    health: { check: notScripted() },
+    where: { kind: 'in-process' },
+    close: notScripted(),
+  }
+
+// A Bureau that records what it is asked and tells the events of the script, whatever the run does
 export function scripted(events: readonly EventEnvelope[], overrides: Overrides = {}): Scripted {
   const calls: string[] = []
   const answered: Answered[] = []
-  const kernel: RunKernel = {
-    providers: { list: () => [{ id: 'fake' }] },
-    projects: {
-      register:
-        overrides.register ??
-        (async (path) => {
-          calls.push(`register ${path}`)
-          await Promise.resolve()
-          return { id: 'p1' }
-        }),
-    },
+  const signals: (AbortSignal | undefined)[] = []
+  const bureau: Bureau = {
+    ...unscripted,
+    projects: projectsOf(calls, overrides),
     sessions: sessionsOf(calls, overrides),
     asks: {
-      answer: async (askId, answer, via) => {
-        answered.push({ askId, answer, via })
+      pending: notScripted(),
+      get: overrides.getAsk ?? notScripted(),
+      answer: async (askId, answer) => {
+        answered.push({ askId, answer })
         await Promise.resolve()
       },
     },
     events: {
-      subscribe: (filter) => {
+      subscribe: (filter, signal) => {
         calls.push(`subscribe ${JSON.stringify(filter)}`)
+        signals.push(signal)
         return replay(events, overrides.gate ?? Promise.resolve(true))
       },
     },
   }
-  return { kernel, calls, answered }
+  return { bureau, calls, answered, signals }
 }
 
 // The context of a run: machine-readable or not, at a terminal or not
 export function contextOf(json = false, terminal = false): Context {
   return createContext({ json, color: false, yes: false }, {}, terminal)
+}
+
+// The exit code of the test process is the command's only while the test runs
+export function keepExitCode(): void {
+  const before = process.exitCode
+  onTestFinished(() => {
+    process.exitCode = before
+  })
+  process.exitCode = undefined
 }
 
 // What the run prints; the console is the test's until the test is over
@@ -138,7 +187,12 @@ export function captureTerminal(): () => string {
   return () => written.join('')
 }
 
-export const OPTIONS: RunOptions = { prompt: 'Fix the build', project: '/repo', yes: false }
+export const OPTIONS: RunOptions = {
+  prompt: 'Fix the build',
+  project: '/repo',
+  env: {},
+  yes: false,
+}
 
 export const TURN_DONE = event(
   'turn.completed',
@@ -151,6 +205,12 @@ export const TURN_DONE = event(
   },
   2,
 )
+export const TURN_INTERRUPTED = event(
+  'turn.interrupted',
+  { turnId: 'u1', index: 0, status: 'interrupted' },
+  2,
+)
+export const READY = event('session.ready', { status: 'ready' }, 3)
 export const COMPLETED = event('session.completed', { status: 'completed' }, 3)
 export const STOPPED = event('session.stopped', { status: 'stopped' }, 3)
 export const ERRORED = event(

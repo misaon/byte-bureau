@@ -1,5 +1,6 @@
 import type { AgentSession } from '@bytebureau/plugin-api'
 import { Effect, Semaphore, type Fiber } from 'effect'
+import { uuidv7 } from '../ids.js'
 import type { TurnRef } from './translate.js'
 import type { Session } from './types.js'
 
@@ -38,6 +39,14 @@ export interface SessionEnvironment {
 }
 
 const NO_ENVIRONMENT: SessionEnvironment = { extra: {}, passEnv: [] }
+
+// The kernel the sessions run in: its process, and the id of its layer, since one process can run several kernels in turn
+export interface KernelInstance {
+  readonly pid: number
+  readonly id: string
+}
+
+export const newInstance = (): KernelInstance => ({ pid: process.pid, id: uuidv7() })
 
 interface Lock {
   readonly semaphore: Semaphore.Semaphore
@@ -79,7 +88,7 @@ export class LiveSessions {
     return this.environments.get(sessionId) ?? NO_ENVIRONMENT
   }
 
-  // The session has ended: its environment goes; a resumed session starts its agent without it, as after a restart
+  // The session has ended: its environment goes; a resume reads it back from the record of the session
   public forget(sessionId: string): void {
     this.environments.delete(sessionId)
   }

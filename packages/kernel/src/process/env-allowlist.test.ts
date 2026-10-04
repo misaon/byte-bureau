@@ -68,6 +68,16 @@ describe(bytebureauEnv, () => {
     expect(env).toStrictEqual({ BYTEBUREAU_FAKE_SCRIPT: 'slow', BYTEBUREAU_COLOUR: 'green' })
   })
 
+  it("drops the kernel's own names, which only the kernel's environment gives an agent", () => {
+    const env = bytebureauEnv({
+      BYTEBUREAU_HOME: '/another/home',
+      BYTEBUREAU_LOG_LEVEL: 'debug',
+      BYTEBUREAU_WORKSPACE_RUNTIME: 'elsewhere',
+      BYTEBUREAU_EMPLOYEE: 'reviewer',
+    })
+    expect(env).toStrictEqual({ BYTEBUREAU_EMPLOYEE: 'reviewer' })
+  })
+
   it('drops look-alike names and unset variables', () => {
     const env = bytebureauEnv({
       BYTEBUREAU: 'a',

@@ -55,6 +55,7 @@ const EDGES: readonly Edge[] = [
   ['waiting_for_human', 'answer', 'running'],
   ['running', 'turn_done', 'ready'],
   ['waiting_for_human', 'turn_done', 'ready'],
+  ['paused_usage_limit', 'turn_done', 'ready'],
   ['running', 'rate_limit', 'paused_usage_limit'],
   ['paused_usage_limit', 'limit_reset', 'running'],
   ['running', 'stop', 'stopped'],

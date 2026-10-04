@@ -1,7 +1,13 @@
 /** @type {import('dependency-cruiser').IConfiguration} */
 module.exports = {
   forbidden: [
-    { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },
+    {
+      name: 'no-circular',
+      severity: 'error',
+      // The client hey-api generates has a type-only cycle of its own; it is committed as it is generated
+      from: { pathNot: '^packages/client/src/gen/' },
+      to: { circular: true },
+    },
     {
       name: 'no-orphans',
       severity: 'warn',

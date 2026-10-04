@@ -1,6 +1,8 @@
+import path from 'node:path'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { withKernel } from '../kernel.js'
+import { sessionChoices } from '../bureau/session-env.js'
+import { withBureau } from '../bureau/with-bureau.js'
+import { bureauFlags, globalArgs, processContext } from '../context.js'
 import { runSession } from './run-session.js'
 
 export const runCommand = defineCommand({
@@ -12,24 +14,19 @@ export const runCommand = defineCommand({
     branch: { type: 'string', description: 'Base branch (default: the project default branch)' },
     employee: { type: 'string', description: 'Employee id from bytebureau.json' },
     provider: { type: 'string', description: 'Agent provider id (fake, claude, acp:<preset>)' },
-    'no-daemon': {
-      type: 'boolean',
-      description: 'Run the kernel in-process (the only mode in this phase)',
-      default: true,
-    },
   },
   async run({ args }) {
     const context = processContext(args)
     const options = {
       prompt: args.prompt,
-      project: args.project ?? process.cwd(),
-      branch: args.branch,
-      employee: args.employee,
+      // The daemon would resolve a relative path in its own working directory
+      project: path.resolve(args.project ?? process.cwd()),
       provider: args.provider,
       yes: args.yes,
+      ...sessionChoices(args, context.env),
     }
-    process.exitCode = await withKernel(context, process.env, async (kernel) => {
-      const code = await runSession(kernel, options, context)
+    process.exitCode = await withBureau(context, bureauFlags(args), async (bureau) => {
+      const code = await runSession(bureau, options, context)
       return code
     })
   },

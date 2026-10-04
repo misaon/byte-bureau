@@ -1,10 +1,21 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { m } from '@bytebureau/i18n'
-import { defaultProjectConfigText } from '@bytebureau/kernel'
+import {
+  configReader,
+  defaultProjectConfigText,
+  type ConfigIssue,
+  type ConfigReader,
+} from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { withKernel } from '../kernel.js'
+import {
+  commonArgs,
+  processContext,
+  refuseBureauFlags,
+  type Context,
+  type GlobalArgs,
+} from '../context.js'
+import { kernelHome } from '../kernel-home.js'
 
 const PROJECT_ARG = {
   type: 'string',
@@ -32,14 +43,40 @@ function createConfig(file: string): boolean {
   }
 }
 
+// The configuration is files this process reads: config never talks to a daemon, and opens no store beside one
+const readerOf = (context: Context): ConfigReader =>
+  configReader(kernelHome(context.env), context.env)
+
+// The context of a config command, which talks to no daemon and so takes no flag that chooses one
+const contextOf = (
+  command: string,
+  { args, rawArgs }: { readonly args: GlobalArgs; readonly rawArgs: readonly string[] },
+): Context => {
+  refuseBureauFlags(`config ${command}`, rawArgs)
+  return processContext(args)
+}
+
+// The issues one to a line and their count, exit code 1; or that the configuration is valid
+function tell(context: Context, issues: readonly ConfigIssue[]): void {
+  if (issues.length === 0) {
+    context.output.print(m.config_valid())
+    return
+  }
+  for (const issue of issues) {
+    context.output.print(`${issue.file}${issue.pointer}: ${issue.message}`)
+  }
+  context.output.warn(m.config_invalid({ count: issues.length }))
+  process.exitCode = 1
+}
+
 const init = defineCommand({
   meta: {
     name: 'init',
     description: 'Write a commented bytebureau.jsonc with the default employee',
   },
-  args: { ...globalArgs, project: PROJECT_ARG },
-  run({ args }) {
-    const context = processContext(args)
+  args: { ...commonArgs, project: PROJECT_ARG },
+  run({ args, rawArgs }) {
+    const context = contextOf('init', { args, rawArgs })
     const directory = path.resolve(args.project ?? process.cwd())
     const file = path.join(directory, 'bytebureau.jsonc')
     const existing = existingConfig(directory)
@@ -55,36 +92,21 @@ const init = defineCommand({
 
 const validate = defineCommand({
   meta: { name: 'validate', description: 'Validate the layered configuration for a project' },
-  args: { ...globalArgs, project: PROJECT_ARG },
-  async run({ args }) {
-    const context = processContext(args)
-    const issues = await withKernel(context, process.env, async (kernel) => {
-      const found = await kernel.config.validate(args.project ?? process.cwd())
-      return found
-    })
+  args: { ...commonArgs, project: PROJECT_ARG },
+  async run({ args, rawArgs }) {
+    const context = contextOf('validate', { args, rawArgs })
+    const issues = await readerOf(context).validate(args.project ?? process.cwd())
     context.output.emit({ command: 'config.validate', issues })
-    if (issues.length === 0) {
-      context.output.print(m.config_valid())
-      return
-    }
-    for (const issue of issues) {
-      context.output.print(`${issue.file}${issue.pointer}: ${issue.message}`)
-    }
-    context.output.warn(m.config_invalid({ count: issues.length }))
-    process.exitCode = 1
+    tell(context, issues)
   },
 })
 
 const schema = defineCommand({
   meta: { name: 'schema', description: 'Print the JSON Schema of bytebureau.json' },
-  args: { ...globalArgs },
-  async run({ args }) {
-    const context = processContext(args)
-    const document = await withKernel(context, process.env, async (kernel) => {
-      await Promise.resolve()
-      return kernel.config.schema()
-    })
-    console.log(JSON.stringify(document, undefined, 2))
+  args: { ...commonArgs },
+  run({ args, rawArgs }) {
+    const context = contextOf('schema', { args, rawArgs })
+    console.log(JSON.stringify(readerOf(context).schema(), undefined, 2))
   },
 })
 

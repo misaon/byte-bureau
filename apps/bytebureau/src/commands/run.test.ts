@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines, payloadOf } from '../testing/json-lines.js'
@@ -8,6 +8,7 @@ import { tempDir } from '../testing/temp-repo.js'
 import {
   configureEmployeeProvider,
   FAKE,
+  NO_DAEMON,
   ON_FAKE,
   PROMPT,
   workbench,
@@ -68,7 +69,7 @@ describe('bytebureau run when it cannot start', () => {
     const { repo, home } = workbench()
     const env = { BYTEBUREAU_HOME: home }
     const result = await runCli(
-      ['run', 'x', '--project', repo, '--provider', 'nope', '--json'],
+      ['run', 'x', '--project', repo, '--provider', 'nope', '--json', NO_DAEMON],
       env,
     )
     expect(result.code).toBe(4)
@@ -76,7 +77,7 @@ describe('bytebureau run when it cannot start', () => {
     expect(jsonLines(result.stderr)).toStrictEqual([
       { level: 'warn', message: 'Provider "nope" is not available. Available: fake' },
     ])
-    const projects = await runCli(['projects', 'ls', '--json'], env)
+    const projects = await runCli(['projects', 'ls', '--json', NO_DAEMON], env)
     expect(jsonLines(projects.stdout)).toStrictEqual([{ command: 'projects.ls', projects: [] }])
   })
 
@@ -84,7 +85,9 @@ describe('bytebureau run when it cannot start', () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     configureEmployeeProvider(repo, 'nope')
-    const result = await runCli(['run', 'x', '--project', repo], { BYTEBUREAU_HOME: home })
+    const result = await runCli(['run', 'x', '--project', repo, NO_DAEMON], {
+      BYTEBUREAU_HOME: home,
+    })
     expect(result.code).toBe(4)
     expect(result.stderr).toContain(
       'SessionError: provider "nope" is not available; available: fake (provider_missing)',
@@ -95,7 +98,7 @@ describe('bytebureau run when it cannot start', () => {
   it('exits 4 with a one-line reason, and writes nothing, for a project that is not a repository', async () => {
     expect.hasAssertions()
     const directory = tempDir('bb-plain-')
-    const result = await runCli(['run', 'x', '--project', directory, ...ON_FAKE], {
+    const result = await runCli(['run', 'x', '--project', directory, ...ON_FAKE, NO_DAEMON], {
       BYTEBUREAU_HOME: tempDir('bb-home-'),
     })
     expect(result.code).toBe(4)
@@ -106,12 +109,28 @@ describe('bytebureau run when it cannot start', () => {
   })
 })
 
+describe('bytebureau run with an invalid configuration of its project', () => {
+  it('exits 2 with the place of the error named once, in the process of the command', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    writeFileSync(path.join(repo, 'bytebureau.json'), '{ "version": 2 }\n')
+    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE, NO_DAEMON], {
+      BYTEBUREAU_HOME: home,
+    })
+    expect(result.code).toBe(2)
+    expect(result.stderr.trim()).toMatch(
+      /^ConfigError: \S+\/bytebureau\.json\/version: Expected 1$/u,
+    )
+    expect(result.stderr.split('bytebureau.json/version')).toHaveLength(2)
+  })
+})
+
 describe('bytebureau run on a repository without a commit', () => {
   it('exits 4 with the one-line reason of the worktree that cannot be provisioned', async () => {
     expect.hasAssertions()
     const repo = tempDir('bb-empty-')
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
-    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE], {
+    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE, NO_DAEMON], {
       BYTEBUREAU_HOME: tempDir('bb-home-'),
     })
     expect(result.code).toBe(4)
@@ -148,7 +167,7 @@ describe('bytebureau run when it is interrupted or nobody answers', () => {
       { ...env, ...SLOW },
       { signal: 'SIGINT', afterStdout: '"type":"turn.started"' },
     )
-    const listed = await runCli(['workspaces', 'ls', '--json'], env)
+    const listed = await runCli(['workspaces', 'ls', '--json', NO_DAEMON], env)
     expect(jsonLines(listed.stdout)).toMatchObject([
       { command: 'workspaces.ls', workspaces: [{ sessionStatus: 'stopped', exists: true }] },
     ])
@@ -158,7 +177,7 @@ describe('bytebureau run when it is interrupted or nobody answers', () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const result = await runCli(
-      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--json'],
+      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--json', NO_DAEMON],
       { BYTEBUREAU_HOME: home },
       { signal: 'SIGINT', afterStdout: '"type":"session.waiting"' },
     )
@@ -176,9 +195,10 @@ describe('bytebureau run read by a person', () => {
   it('prints plain lines, without decoration, to a pipe', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
-    const result = await runCli(['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes'], {
-      BYTEBUREAU_HOME: home,
-    })
+    const result = await runCli(
+      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes', NO_DAEMON],
+      { BYTEBUREAU_HOME: home },
+    )
     expect(result.code).toBe(0)
     const lines = result.stdout.trim().split('\n')
     expect(lines[0]).toMatch(/^Preparing the workspace on branch bb\//u)
@@ -195,7 +215,7 @@ describe('bytebureau run read by a person', () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const result = await runCli(
-      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes', '--lang', 'cs'],
+      ['run', PROMPT, '--project', repo, ...ON_FAKE, '--yes', '--lang', 'cs', NO_DAEMON],
       { BYTEBUREAU_HOME: home },
     )
     const lines = result.stdout.trim().split('\n')

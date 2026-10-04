@@ -1,8 +1,7 @@
-import { stripVTControlCharacters } from 'node:util'
 import { SessionError } from '@bytebureau/kernel'
-import { S_BAR_END, S_BAR_START } from '@clack/prompts'
 import { describe, expect, it } from 'vitest'
 import { event } from '../testing/events.js'
+import { frames } from '../testing/frames.js'
 import {
   captureConsole,
   captureTerminal,
@@ -23,20 +22,6 @@ const WRITE = event(
   1,
 )
 
-// The lines that begin with the glyph and the two spaces clack puts after it; the ASCII glyphs of TERM=linux turn up inside the words as well (the end of the frame is an em dash)
-function linesStartingWith(text: string, glyph: string): number {
-  const lines = stripVTControlCharacters(text).split('\n')
-  return lines.filter((line) => line.startsWith(`${glyph}  `)).length
-}
-
-// How often the frame was opened and closed
-function frames(text: string): { readonly starts: number; readonly ends: number } {
-  return {
-    starts: linesStartingWith(text, S_BAR_START),
-    ends: linesStartingWith(text, S_BAR_END),
-  }
-}
-
 // Whether the parts are in the text, one after the other
 function inOrder(text: string, parts: readonly string[]): boolean {
   const places = parts.map((part) => text.indexOf(part))
@@ -53,12 +38,12 @@ interface Ended {
 
 // A run at a terminal: the code it ends with, what was written to the terminal and what went to stderr
 async function endedAtTerminal(
-  scriptedKernel: ReturnType<typeof scripted>,
+  scriptedBureau: ReturnType<typeof scripted>,
   options: RunOptions = OPTIONS,
 ): Promise<Ended> {
   const printed = captureConsole()
   const written = captureTerminal()
-  const code = await runSession(scriptedKernel.kernel, options, AT_A_TERMINAL)
+  const code = await runSession(scriptedBureau.bureau, options, AT_A_TERMINAL)
   return { code, terminal: written(), stdout: printed.out(), stderr: printed.err() }
 }
 
@@ -104,8 +89,8 @@ describe('runSession at a terminal', () => {
     captureConsole()
     const written = captureTerminal()
     const failure = new Error('the store is gone')
-    const { kernel } = scripted([COMPLETED], { create: rejecting(failure) })
-    await expect(runSession(kernel, OPTIONS, AT_A_TERMINAL)).rejects.toBe(failure)
+    const { bureau } = scripted([COMPLETED], { create: rejecting(failure) })
+    await expect(runSession(bureau, OPTIONS, AT_A_TERMINAL)).rejects.toBe(failure)
     expect(frames(written())).toStrictEqual(ONE_FRAME)
     expect(written()).not.toContain('the store is gone')
   })
@@ -116,8 +101,8 @@ describe('runSession to a pipe', () => {
     expect.hasAssertions()
     const printed = captureConsole()
     const written = captureTerminal()
-    const { kernel } = scripted([COMPLETED])
-    await expect(runSession(kernel, { ...OPTIONS, provider: 'nope' }, contextOf())).resolves.toBe(4)
+    const { bureau } = scripted([COMPLETED])
+    await expect(runSession(bureau, { ...OPTIONS, provider: 'nope' }, contextOf())).resolves.toBe(4)
     expect(written()).toBe('')
     expect(printed.err()).toStrictEqual(['Provider "nope" is not available. Available: fake'])
   })

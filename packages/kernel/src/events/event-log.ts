@@ -3,6 +3,7 @@ import { Context, Effect, Layer, PubSub, Stream } from 'effect'
 import { SqlClient, type Statement } from 'effect/sql'
 import { StoreError, toStoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
+import { redactValue } from '../logging/redact-value.js'
 
 export interface EventFilter {
   readonly sessionId?: string | undefined
@@ -76,8 +77,11 @@ const fromRow = (row: Row): Effect.Effect<EventEnvelope, StoreError> =>
     })),
   )
 
+// An event as the log keeps and fans it out: its payload is the redacted copy, which the catalogue no longer types
+type SafeEvent = Omit<KernelEvent, 'payload'> & { readonly payload: unknown }
+
 // A payload JSON cannot hold, such as a bigint or a cycle, is refused before anything is stored
-const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
+const payloadJson = (event: SafeEvent): Effect.Effect<string, StoreError> =>
   Effect.try({
     try: () => JSON.stringify(event.payload),
     catch: (cause) =>
@@ -91,7 +95,7 @@ const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
 // RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
 const insertEvent = (
   sql: SqlClient.SqlClient,
-  event: KernelEvent,
+  event: SafeEvent,
   stamp: { readonly id: string; readonly ts: string },
 ): Effect.Effect<number, StoreError> =>
   Effect.flatMap(payloadJson(event), (json) =>
@@ -129,38 +133,52 @@ const makeRead =
     )
 
 // Nothing may interrupt the steps from the insert on: a stored row that no live subscriber is offered would be seen only by a replay
+// The payload is redacted once, here, before it is stored or fanned out (ADR-0012)
 const makePublish =
   (sql: SqlClient.SqlClient, hub: PubSub.PubSub<EventEnvelope>): EventLogShape['publish'] =>
   (event) =>
     Effect.gen(function* publishEvent() {
+      const safe: SafeEvent = { ...event, payload: redactValue(event.payload) }
       const stamp = { id: uuidv7(), ts: nowIso() }
-      const seq = isEphemeral(event.type) ? 0 : yield* insertEvent(sql, event, stamp)
+      const seq = isEphemeral(safe.type) ? 0 : yield* insertEvent(sql, safe, stamp)
       const envelope: EventEnvelope = {
         seq,
         ...stamp,
-        type: event.type,
-        ...(event.projectId === undefined ? {} : { projectId: event.projectId }),
-        ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
-        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
-        payload: event.payload,
+        type: safe.type,
+        ...(safe.projectId === undefined ? {} : { projectId: safe.projectId }),
+        ...(safe.sessionId === undefined ? {} : { sessionId: safe.sessionId }),
+        ...(safe.turnId === undefined ? {} : { turnId: safe.turnId }),
+        payload: safe.payload,
       }
       yield* PubSub.publish(hub, envelope)
       return envelope
     }).pipe(Effect.uninterruptible)
 
+// The seq of the last durable event stored, 0 for an empty log
+const makeHead = (sql: SqlClient.SqlClient): Effect.Effect<number, StoreError> =>
+  sql<{ readonly head: number }>`SELECT COALESCE(MAX(seq), 0) AS head FROM events`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(([row]) => (row === undefined ? 0 : row.head)),
+  )
+
 // The subscription opens before the replay is read, so nothing published meanwhile is lost
 // An event can then arrive twice; the live part drops those the replay already carried
 // An ephemeral event published during the replay waits in the subscription, so it arrives after the replayed rows
+// With nothing to replay the live part starts after the head of the log, read first: a since above it does not hold back what comes next
 const makeSubscribe =
-  (read: EventLogShape['read'], hub: PubSub.PubSub<EventEnvelope>): EventLogShape['subscribe'] =>
+  (
+    read: EventLogShape['read'],
+    head: Effect.Effect<number, StoreError>,
+    hub: PubSub.PubSub<EventEnvelope>,
+  ): EventLogShape['subscribe'] =>
   (filter) =>
     Stream.unwrap(
       Effect.gen(function* openSubscription() {
         const subscription = yield* PubSub.subscribe(hub)
-        const since = filter.since ?? 0
-        const replayed = yield* read(filter, { from: since })
+        const stored = yield* head
+        const replayed = yield* read(filter, { from: filter.since ?? 0 })
         const last = replayed.at(-1)
-        const replayedTo = last === undefined ? since : last.seq
+        const replayedTo = last === undefined ? stored : last.seq
         const live = Stream.fromSubscription(subscription).pipe(
           Stream.filter(
             (event) => matches(filter, event) && (event.seq === 0 || event.seq > replayedTo),
@@ -176,7 +194,11 @@ const make = Effect.gen(function* makeEventLog() {
   const hub = yield* PubSub.unbounded<EventEnvelope>()
   yield* Effect.addFinalizer(() => PubSub.shutdown(hub))
   const read = makeRead(sql)
-  return EventLog.of({ publish: makePublish(sql, hub), subscribe: makeSubscribe(read, hub), read })
+  return EventLog.of({
+    publish: makePublish(sql, hub),
+    subscribe: makeSubscribe(read, makeHead(sql), hub),
+    read,
+  })
 })
 
 export const EventLogLive: Layer.Layer<EventLog, never, SqlClient.SqlClient> = Layer.effect(

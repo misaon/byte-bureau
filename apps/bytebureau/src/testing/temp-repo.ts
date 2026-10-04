@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { onTestFinished } from 'vitest'
+import { registerScratch } from './sweep-homes.js'
 
 const GIT_ENV = {
   ...process.env,
@@ -19,14 +20,29 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 // Symlinks are resolved, as git reports paths: on macOS /var is a link to /private/var
-// The directory is removed when the running test has finished
+// The directory is removed when the running test has finished, and swept at the end of the run should a daemon have come back to it
 export function tempDir(prefix: string): string {
   const created = mkdtempSync(path.join(tmpdir(), prefix))
   const dir = realpathSync(created)
+  registerScratch(dir)
   onTestFinished(() => {
     rmSync(dir, { recursive: true, force: true })
   })
   return dir
+}
+
+// A home whose daemons listen on a free port, as every daemon of a test must: its config.json says port 0
+export function testHome(): string {
+  const home = tempDir('bb-home-')
+  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify({ server: { port: 0 } })}\n`)
+  return home
+}
+
+// A file holding the token of a daemon named on the command line, removed when the test ends
+export function tokenFile(token: string = 'a'.repeat(64)): string {
+  const file = path.join(tempDir('bb-token-'), 'token')
+  writeFileSync(file, `${token}\n`)
+  return file
 }
 
 // A repository with one commit on `main`

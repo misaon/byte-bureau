@@ -113,6 +113,26 @@ it.layer(TestLayer)('WorkspaceManager records', (suite) => {
   )
 })
 
+it.layer(TestLayer)('WorkspaceManager statuses', (suite) => {
+  suite.effect(
+    'fails with a store error naming the session when its status is none of the protocol',
+    () =>
+      Effect.gen(function* refusesUnknownStatus() {
+        const { project } = yield* registerRepo()
+        const handle = yield* provisionSession(project, { id: 'odd-status', status: 'running' })
+        // A status this version does not know, as a newer one could have written past the check of the table
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA ignore_check_constraints = ON`
+        yield* sql`UPDATE sessions SET status = 'dancing' WHERE id = 'odd-status'`
+        yield* sql`PRAGMA ignore_check_constraints = OFF`
+        const error = yield* Effect.flip((yield* WorkspaceManager).list(project.id))
+        assert.instanceOf(error, StoreError)
+        assert.include(String(error.cause), 'odd-status')
+        assert.isTrue(existsSync(handle.path))
+      }),
+  )
+})
+
 it.layer(TestLayer)('WorkspaceManager store', (suite) => {
   suite.effect('fails with a store error when the store cannot answer', () =>
     Effect.gen(function* failsWithoutStore() {

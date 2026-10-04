@@ -33,10 +33,14 @@ export const newSession = (
   endedAt: null,
 })
 
-// The session exists from here on: its row, and the announcement of it
-export const register = (deps: SessionDeps, session: Session): Effect.Effect<void, StoreError> =>
+// The session exists from here on: its row, with the environment given at creation and this kernel as its owner, and the announcement of it
+export const register = (
+  deps: SessionDeps,
+  session: Session,
+  env: Readonly<Record<string, string>>,
+): Effect.Effect<void, StoreError> =>
   Effect.gen(function* registersSession() {
-    yield* insertSession(deps.sql, session)
+    yield* insertSession(deps.sql, session, { env, owner: deps.instance })
     yield* deps.log.publish({
       type: 'session.created',
       sessionId: session.id,

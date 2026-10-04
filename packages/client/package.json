@@ -1,0 +1,24 @@
+{
+  "name": "@bytebureau/client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau client: the generated API client, the event subscription and the RPC connection (no Effect at runtime)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.lib.json"
+  },
+  "dependencies": {
+    "@bytebureau/protocol": "workspace:*",
+    "eventsource-parser": "4.1.1"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  }
+}

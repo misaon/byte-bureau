@@ -38,6 +38,8 @@ jobs:
           scopes: |
             bytebureau
             docs
+            api
+            client
             i18n
             kernel
             plugin-api

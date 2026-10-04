@@ -1,6 +1,8 @@
+import { ApiError } from '@bytebureau/client'
 import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand, type CommandDef } from 'citty'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
+import { DaemonRunningError } from './bureau/open-local.js'
 import { globalArgs } from './context.js'
 import { run } from './run.js'
 
@@ -89,6 +91,19 @@ describe('run with a typed error of the kernel', () => {
   })
 })
 
+describe('run with --no-daemon beside a live daemon', () => {
+  it('prints the way out without the usage, and returns 1', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const refusal = new DaemonRunningError('A daemon is running on http://127.0.0.1:4747 (pid 42)')
+    await expect(run(failingWith(refusal), [])).resolves.toBe(1)
+    expect(output.error).toHaveBeenCalledWith(
+      'A daemon is running on http://127.0.0.1:4747 (pid 42)',
+    )
+    expect(output.log).not.toHaveBeenCalled()
+  })
+})
+
 describe('run built-in flags', () => {
   it('prints the usage of the named subcommand for --help', async () => {
     expect.hasAssertions()
@@ -163,5 +178,34 @@ describe('run with a bare --debug', () => {
     const { command, given } = listing()
     await run(command, ['projects', 'ls', '--', '--debug'])
     expect(given).toMatchObject([{ rawArgs: ['--', '--debug'], debug: undefined }])
+  })
+})
+
+// The refusal of a token, as a daemon answers it
+const UNAUTHORIZED = new ApiError(401, {
+  type: 'https://bytebureau.dev/problems/unauthorized',
+  title: 'Unauthorized',
+  status: 401,
+  detail: 'a valid API token is required',
+  code: 'unauthorized',
+})
+
+describe('run and a token the daemon refuses', () => {
+  it('tells where the token of a daemon named on the command line goes, and nothing of the kind otherwise', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const command: CommandDef = {
+      meta: { name: 'fake', description: 'Fake command' },
+      args: { host: { type: 'string' }, port: { type: 'string' } },
+      run: vi.fn<() => Promise<void>>().mockRejectedValue(UNAUTHORIZED),
+    }
+    const codes = [await run(command, ['--port=4848']), await run(command, [])]
+    expect([codes, output.error.mock.calls]).toStrictEqual([
+      [2, 2],
+      [
+        ['a valid API token is required (pass the token of that daemon with --token-file)'],
+        ['a valid API token is required (unauthorized)'],
+      ],
+    ])
   })
 })

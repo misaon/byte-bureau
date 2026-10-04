@@ -26,6 +26,11 @@ export default defineConfig({
             { label: 'Introduction', translations: { cs: 'Úvod' }, link: '/' },
             'install',
             'architecture',
+            {
+              label: 'Daemon and API',
+              translations: { cs: 'Démon a API' },
+              link: '/daemon-and-api/',
+            },
             'contributing',
           ],
         },

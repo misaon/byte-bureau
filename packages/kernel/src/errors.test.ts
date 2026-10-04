@@ -4,6 +4,7 @@ import { describe, expect, it as test } from 'vitest'
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   PluginError,
   ProviderError,
   SessionError,
@@ -103,3 +104,19 @@ it.effect('is caught by its tag and by nothing else', () =>
     assert.strictEqual(uncaught, workspace)
   }),
 )
+
+describe(configErrorLine, () => {
+  it('tells where, then why, and a reason that names the place already only once', () => {
+    const issues =
+      'bytebureau.json/employees/x: provider is required; bytebureau.json/version: expected 1'
+    const fromIssues = new ConfigError({
+      file: 'bytebureau.json',
+      pointer: '/employees/x',
+      reason: issues,
+    })
+    expect([configErrorLine(config), configErrorLine(fromIssues)]).toStrictEqual([
+      '/repo/bytebureau.json/x: bad x',
+      issues,
+    ])
+  })
+})

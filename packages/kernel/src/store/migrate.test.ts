@@ -71,6 +71,25 @@ it.layer(StoreTest)('Store', (suite) => {
   )
 })
 
+it.layer(StoreTest)('Store session environment and owner', (suite) => {
+  suite.effect('gives a session an empty environment and no owner unless they are stored', () =>
+    Effect.gen(function* defaultsEnvironment() {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe(PROJECT)
+      yield* sql.unsafe(session('s-env', 'p'))
+      const rows = yield* sql<{
+        readonly env_json: string
+        readonly owner_pid: number | null
+        readonly owner_instance: string | null
+      }>`SELECT env_json, owner_pid, owner_instance FROM sessions WHERE id = 's-env'`
+      assert.deepStrictEqual(
+        rows.map((row) => [row.env_json, row.owner_pid, row.owner_instance]),
+        [['{}', null, null]],
+      )
+    }),
+  )
+})
+
 it.layer(StoreTest)('Store migration runner', (suite) => {
   suite.effect(
     'skips a migration that was recorded meanwhile, checking inside its transaction',

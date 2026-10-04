@@ -16,6 +16,7 @@
     "prepare": "lefthook install",
     "build": "turbo run build",
     "build:i18n": "turbo run build --filter=@bytebureau/i18n",
+    "generate:client": "bun install --frozen-lockfile --cwd tools/client-codegen && bun run --cwd tools/client-codegen generate",
     "typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json",
     "test": "bun run build:i18n && vitest run",
     "test:coverage": "bun run build:i18n && vitest run --coverage",

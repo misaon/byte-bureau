@@ -24,7 +24,8 @@ const EDGES: Readonly<
   prompt: { ready: 'running' },
   ask: { running: 'waiting_for_human' },
   answer: { waiting_for_human: 'running' },
-  turn_done: { running: 'ready', waiting_for_human: 'ready' },
+  // A turn that ends while the session waits for a usage limit leaves it ready too
+  turn_done: { running: 'ready', waiting_for_human: 'ready', paused_usage_limit: 'ready' },
   rate_limit: { running: 'paused_usage_limit' },
   limit_reset: { paused_usage_limit: 'running' },
   stop: {

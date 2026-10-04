@@ -10,6 +10,7 @@ const read = (file: string): string => readFileSync(path.join(root, file), 'utf8
 const MIT_MANIFESTS = new Set([
   'packages/protocol/package.json',
   'packages/plugin-api/package.json',
+  'packages/client/package.json',
 ])
 const expectedLicense = (manifest: string): string =>
   MIT_MANIFESTS.has(manifest) ? 'MIT' : 'FSL-1.1-MIT'

@@ -37,6 +37,12 @@ export const ConfigError = described(
 )
 export type ConfigError = InstanceType<typeof ConfigError>
 
+// A configuration that cannot be used, in one line: where, then why; a reason that names the place already is not prefixed again
+export const configErrorLine = ({ file, pointer, reason }: ConfigError): string => {
+  const where = `${file}${pointer}`
+  return reason.startsWith(`${where}: `) ? reason : `${where}: ${reason}`
+}
+
 export const StoreError = described(
   Data.TaggedError('StoreError')<{ readonly cause: unknown }>,
   causeMessage,

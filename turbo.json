@@ -18,6 +18,11 @@
       "inputs": ["$TURBO_DEFAULT$", "!schemas/**"],
       "outputs": ["schemas/**"]
     },
+    "@bytebureau/api#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!openapi.json"],
+      "outputs": ["openapi.json"]
+    },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "@bytebureau/i18n#typecheck": { "dependsOn": ["@bytebureau/i18n#build"], "outputs": [] },
     "docs:build": {

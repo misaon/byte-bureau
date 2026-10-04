@@ -1,18 +1,21 @@
+import path from 'node:path'
 import { m } from '@bytebureau/i18n'
-import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { withKernel } from '../kernel.js'
+import { bureauFlags, globalArgs, processContext } from '../context.js'
+import { withBureauRefusable } from './refusable.js'
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List registered projects' },
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const projects = await withKernel(context, process.env, async (kernel) => {
-      const listed = await kernel.projects.list()
+    const projects = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const listed = await bureau.projects.list()
       return listed
     })
+    if (projects === undefined) {
+      return
+    }
     context.output.emit({ command: 'projects.ls', projects })
     if (projects.length === 0) {
       context.output.print(m.projects_none())
@@ -34,12 +37,16 @@ const add = defineCommand({
   },
   async run({ args }) {
     const context = processContext(args)
-    const project = await withKernel(context, process.env, async (kernel) => {
-      const registered = await kernel.projects.register(args.path ?? process.cwd())
+    // The daemon would resolve a relative path in its own working directory
+    const directory = path.resolve(args.path ?? process.cwd())
+    const project = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const registered = await bureau.projects.register(directory)
       return registered
     })
-    context.output.emit({ command: 'projects.add', project })
-    context.output.print(m.projects_added({ name: project.name, path: project.path }))
+    if (project !== undefined) {
+      context.output.emit({ command: 'projects.add', project })
+      context.output.print(m.projects_added({ name: project.name, path: project.path }))
+    }
   },
 })
 
@@ -52,21 +59,15 @@ const rm = defineCommand({
   args: { ...globalArgs, id: { type: 'positional', description: 'Project id', required: true } },
   async run({ args }) {
     const context = processContext(args)
-    try {
-      await withKernel(context, process.env, async (kernel) => {
-        await kernel.projects.remove(args.id)
-      })
-    } catch (error) {
-      // A project that sessions still belong to is a refusal, not a failure: its reason and exit code 1
-      if (!(error instanceof WorkspaceError && error.code === 'has_sessions')) {
-        throw error
-      }
-      context.output.warn(error.reason)
-      process.exitCode = 1
-      return
+    // A project that sessions still belong to stays: that is a refusal, with its reason and exit code 1
+    const removed = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      await bureau.projects.remove(args.id)
+      return true
+    })
+    if (removed !== undefined) {
+      context.output.emit({ command: 'projects.rm', id: args.id })
+      context.output.print(m.projects_removed({ id: args.id }))
     }
-    context.output.emit({ command: 'projects.rm', id: args.id })
-    context.output.print(m.projects_removed({ id: args.id }))
   },
 })
 

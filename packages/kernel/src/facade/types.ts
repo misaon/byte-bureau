@@ -1,7 +1,15 @@
-import type { AnsweredVia, Ask, AskAnswer, EventEnvelope, PromptInput } from '@bytebureau/protocol'
+import type {
+  AnsweredVia,
+  AskAnswer,
+  AskRecord,
+  EventEnvelope,
+  PromptInput,
+} from '@bytebureau/protocol'
 import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
 import type { EventFilter } from '../events/event-log.js'
+import type { HealthReport } from '../health/health.js'
 import type { KernelLayerOptions } from '../kernel-live.js'
+import type { PluginStatus } from '../plugins/plugin-host.js'
 import type { Project } from '../projects/project-registry.js'
 import type { CreateSessionInput, Session, Turn } from '../sessions/types.js'
 import type { SessionUsage } from '../usage/usage-service.js'
@@ -40,9 +48,16 @@ export interface Kernel {
     readonly resume: (sessionId: string) => Promise<Session>
     readonly list: () => Promise<readonly Session[]>
     readonly get: (id: string) => Promise<Session | undefined>
+    /**
+     * Stops the sessions left at work by kernels that are gone and resolves with their ids.
+     * Meant for the start of a process: the kernel runs it once as it starts, and a session that a running kernel owns is left alone.
+     */
+    readonly recover: () => Promise<readonly string[]>
   }
   readonly asks: {
-    readonly pending: (sessionId?: string) => Promise<readonly Ask[]>
+    readonly pending: (sessionId?: string) => Promise<readonly AskRecord[]>
+    // An ask pending or settled; nothing for an id nobody holds
+    readonly get: (id: string) => Promise<AskRecord | undefined>
     readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
   }
   readonly events: {
@@ -64,6 +79,8 @@ export interface Kernel {
   readonly providers: {
     readonly list: () => readonly { readonly id: string; readonly displayName: string }[]
   }
+  readonly plugins: { readonly list: () => readonly PluginStatus[] }
+  readonly health: { readonly check: () => Promise<HealthReport> }
   /** Stops the agents and ends the open event subscriptions; a call made after it may reject. */
   readonly close: () => Promise<void>
 }

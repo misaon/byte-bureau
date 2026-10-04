@@ -53,12 +53,16 @@ const make = (
   options: PluginHostOptions,
 ): Effect.Effect<Assembled, never, EventLog | Supervisor | SqlClient.SqlClient | Scope.Scope> =>
   Effect.gen(function* makePluginHost() {
-    const log = yield* EventLog
-    const supervisor = yield* Supervisor
-    const sql = yield* SqlClient.SqlClient
+    const services = yield* Effect.context<EventLog | Supervisor | SqlClient.SqlClient>()
     const controller = new AbortController()
-    const secrets = options.secrets ?? new InMemorySecretStore()
-    const deps = { log, supervisor, sql, secrets, signal: controller.signal }
+    const deps = {
+      log: Context.get(services, EventLog),
+      supervisor: Context.get(services, Supervisor),
+      sql: Context.get(services, SqlClient.SqlClient),
+      secrets: options.secrets ?? new InMemorySecretStore(),
+      signal: controller.signal,
+      services,
+    }
     const loader = new PluginLoader(deps, options.pluginConfig ?? {})
     const load = yield* Effect.cached(
       loader.load([...BUNDLED_PLUGINS, ...(options.extraPlugins ?? [])]),

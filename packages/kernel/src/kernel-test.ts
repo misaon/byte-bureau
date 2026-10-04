@@ -10,3 +10,6 @@ export const KernelTest = (
   usage?: UsageLayer,
 ): Layer.Layer<KernelServices | SqlClient.SqlClient> =>
   composeKernel(options, usage).pipe(Layer.provideMerge(StoreTest))
+
+export { createTempRepo, git, tempDir } from './testing/temp-repo.js'
+export { writeConfig } from './testing/repo-config.js'

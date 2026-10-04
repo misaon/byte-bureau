@@ -1,9 +1,9 @@
 import { Context, Effect, Layer, type Scope } from 'effect'
-import { LiveSessions } from './live-sessions.js'
+import { LiveSessions, newInstance } from './live-sessions.js'
 import { collectDeps, type SessionRequirements } from './session-collect.js'
 import type { KernelEnv, SessionDeps } from './session-deps.js'
 import { makeCreate } from './session-create.js'
-import { makeComplete, makeInterrupt, makeResume, makeStop } from './session-end.js'
+import { makeComplete, makeInterrupt, makeRecover, makeResume, makeStop } from './session-end.js'
 import { dispose, releaseFibers } from './session-live.js'
 import { makePrompt } from './session-prompt.js'
 import { listSessions, loadSession } from './session-records.js'
@@ -28,13 +28,18 @@ export interface SessionManagerOptions {
   readonly env?: KernelEnv | undefined
 }
 
-// The record of running sessions starts empty with every layer
+// The record of running sessions starts empty with every layer, and every layer is an instance of its own
 const make = (
   options: SessionManagerOptions,
 ): Effect.Effect<SessionManagerShape, never, SessionRequirements | Scope.Scope> =>
   Effect.gen(function* makeSessionManager() {
     const collected = yield* collectDeps
-    const deps: SessionDeps = { ...collected, env: options.env ?? {}, live: new LiveSessions() }
+    const deps: SessionDeps = {
+      ...collected,
+      env: options.env ?? {},
+      live: new LiveSessions(),
+      instance: newInstance(),
+    }
     yield* Effect.addFinalizer(() => closeAll(deps))
     return SessionManager.of({
       create: makeCreate(deps),
@@ -44,6 +49,7 @@ const make = (
       complete: makeComplete(deps),
       resume: makeResume(deps),
       list: () => listSessions(deps.sql),
+      recover: makeRecover(deps),
       get: (id) => loadSession(deps.sql, id),
     })
   })

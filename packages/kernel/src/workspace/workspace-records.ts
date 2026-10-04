@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import type { WorkspaceHandle } from '@bytebureau/plugin-api'
+import { SessionStatus } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import type { SqlClient, Statement } from 'effect/sql'
 import { StoreError, toStoreError } from '../errors.js'
@@ -10,7 +11,7 @@ export interface WorkspaceInfo {
   readonly path: string
   readonly branch: string
   readonly baseRef: string
-  readonly sessionStatus: string
+  readonly sessionStatus: SessionStatus
   readonly exists: boolean
 }
 
@@ -18,7 +19,7 @@ export interface WorkspaceInfo {
 export interface Workspace {
   readonly sessionId: string
   readonly projectId: string
-  readonly sessionStatus: string
+  readonly sessionStatus: SessionStatus
   readonly endedAt: string | null
   readonly retainDays: number
   readonly handle: WorkspaceHandle
@@ -46,6 +47,8 @@ const StoredHandle = Schema.Struct({
 // The handle of a session as its row keeps it, read back from the JSON text of the column
 export const decodeHandle = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredHandle))
 
+const decodeStatus = Schema.decodeUnknownEffect(SessionStatus)
+
 const unreadable =
   (sessionId: string): ((cause: unknown) => StoreError) =>
   (cause) =>
@@ -53,13 +56,13 @@ const unreadable =
       cause: new Error(`the workspace record of session ${sessionId} is unreadable`, { cause }),
     })
 
-// A record that does not fit the handle is a failure of the store, not a defect
+// A record that does not fit the handle, or a status that is none of the protocol's, is a failure of the store, not a defect
 const toWorkspace = (row: Row): Effect.Effect<Workspace, StoreError> =>
-  decodeHandle(row.workspace_json).pipe(
-    Effect.map((handle) => ({
+  Effect.all([decodeHandle(row.workspace_json), decodeStatus(row.status)]).pipe(
+    Effect.map(([handle, sessionStatus]) => ({
       sessionId: row.id,
       projectId: row.project_id,
-      sessionStatus: row.status,
+      sessionStatus,
       endedAt: row.ended_at,
       retainDays: row.retain_days,
       handle,

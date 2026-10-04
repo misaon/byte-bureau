@@ -13,7 +13,7 @@ export interface PluginStatus {
   readonly name: string
   readonly version: string
   readonly state: 'loaded' | 'failed'
-  readonly reason?: string | undefined
+  readonly reason?: string
   readonly ports: readonly string[]
 }
 

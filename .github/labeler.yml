@@ -27,12 +27,18 @@
             '.vscode/**',
             '.editorconfig',
           ]
+'area: api':
+  - changed-files:
+      - any-glob-to-any-file: ['packages/api/**']
 'area: ci':
   - changed-files:
       - any-glob-to-any-file: ['.github/**']
 'area: cli':
   - changed-files:
       - any-glob-to-any-file: ['apps/bytebureau/**']
+'area: client':
+  - changed-files:
+      - any-glob-to-any-file: ['packages/client/**', 'tools/client-codegen/**']
 'area: docs':
   - changed-files:
       - any-glob-to-any-file: ['docs/**', 'apps/docs/**', 'README.md', 'README.cs.md']

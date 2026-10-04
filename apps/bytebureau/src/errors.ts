@@ -1,6 +1,7 @@
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   PluginError,
   ProviderError,
   SessionError,
@@ -46,7 +47,11 @@ function isTyped(error: Error): boolean {
   return error.message === '' || KERNEL_ERRORS.some((type) => error instanceof type)
 }
 
+// A configuration error names its place first and once, as the line of a refusal does: its reason may name it already
 function describeTyped(error: Error, describeCause: Describe): string {
+  if (error instanceof ConfigError) {
+    return `${error.name}: ${configErrorLine(error)}`
+  }
   const reason = reasonOf(error, describeCause)
   const head = reason === undefined ? error.name : `${error.name}: ${reason}`
   const where = whereOf(error)

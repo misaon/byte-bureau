@@ -1,5 +1,6 @@
 import { assert, it } from '@effect/vitest'
 import { Effect, Fiber } from 'effect'
+import { uuidv7 } from '../ids.js'
 import { askOf, request } from './ask-fixtures.js'
 import { AskService } from './ask-service.js'
 import { eventsOf, rowOf, seedSession, seedTurn, TestLayer } from './ask-service-fixtures.js'
@@ -122,6 +123,20 @@ it.layer(TestLayer)('AskService answer', (suite) => {
         { type: 'ask.requested', payload: { ask: askOf(ask) } },
         { type: 'ask.answered', payload: answered },
       ])
+    }),
+  )
+})
+
+it.layer(TestLayer)('AskService get', (suite) => {
+  suite.effect('finds an ask pending and answered, and nothing for an id nobody holds', () =>
+    Effect.gen(function* readsAsk() {
+      yield* seedSession('get-1')
+      const asks = yield* AskService
+      const ask = yield* asks.open(request('get-1'))
+      assert.deepStrictEqual(yield* asks.get(ask.id), ask)
+      const answered = yield* asks.answer(ask.id, { selected: ['a'] }, 'cli')
+      assert.deepStrictEqual(yield* asks.get(ask.id), answered)
+      assert.isUndefined(yield* asks.get(uuidv7()))
     }),
   )
 })

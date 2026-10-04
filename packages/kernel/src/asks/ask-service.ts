@@ -5,7 +5,7 @@ import type { AskError, StoreError } from '../errors.js'
 import { EventLog } from '../events/event-log.js'
 import type { OpenAskInput } from './ask-build.js'
 import { openAsk, type OpenDeps } from './ask-open.js'
-import { listPending } from './ask-records.js'
+import { listPending, loadAsk } from './ask-records.js'
 import { answerAsk, cancelAsk } from './ask-settle.js'
 import { awaitAnswer, closeWaiters } from './ask-waiters.js'
 
@@ -21,6 +21,8 @@ export interface AskServiceShape {
   ) => Effect.Effect<AskRecord, AskError | StoreError>
   readonly cancel: (askId: string) => Effect.Effect<void, StoreError>
   readonly pending: (sessionId?: string) => Effect.Effect<readonly AskRecord[], StoreError>
+  // An ask pending or settled, and nothing for an id nobody holds
+  readonly get: (askId: string) => Effect.Effect<AskRecord | undefined, StoreError>
   readonly await: (askId: string) => Effect.Effect<AskAnswer, AskError>
 }
 
@@ -37,6 +39,7 @@ const make = Effect.gen(function* makeAskService() {
     answer: (askId, answer, via) => answerAsk(deps, askId, { answer, via }),
     cancel: (askId) => cancelAsk(deps, askId),
     pending: (sessionId) => listPending(sql, sessionId),
+    get: (askId) => loadAsk(sql, askId),
     await: (askId) => awaitAnswer(deps.waiters, askId),
   })
 })

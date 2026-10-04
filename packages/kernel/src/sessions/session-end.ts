@@ -2,6 +2,7 @@ import { Effect } from 'effect'
 import type { StoreError } from '../errors.js'
 import type { Live } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
+import { storedEnvironment } from './session-environment.js'
 import {
   bestEffort,
   cancelAsks,
@@ -13,11 +14,12 @@ import {
 } from './session-live.js'
 import { requireSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
-import { ensureAllowed, move } from './session-status.js'
+import { ensureAllowed, move, moveAndClaim } from './session-status.js'
 import type { Outcome } from './session-turns.js'
 
 // The commands that end or pause what an agent does, in one place for the manager
 export { makeInterrupt } from './session-interrupt.js'
+export { makeRecover } from './session-recover.js'
 
 // A turn that the caller stopped is interrupted, whatever the provider would have said about it
 const STOPPED: Outcome = { status: 'interrupted', stopReason: 'stopped', usage: null }
@@ -73,7 +75,19 @@ export const makeComplete =
       }),
     )
 
+// The environment is read before the session moves, so a configuration that cannot be read leaves the session stopped
+// The kernel that resumes the session owns it from then on
 export const makeResume =
   (deps: SessionDeps): SessionManagerShape['resume'] =>
   (sessionId) =>
-    deps.live.exclusive(sessionId, move(deps, sessionId, 'resume'))
+    deps.live.exclusive(
+      sessionId,
+      Effect.gen(function* resumesSession() {
+        const stopped = yield* requireSession(deps.sql, sessionId)
+        yield* ensureAllowed(stopped, 'resume')
+        const environment = yield* storedEnvironment(deps, stopped)
+        const session = yield* moveAndClaim(deps, sessionId, 'resume')
+        deps.live.setEnvironment(session.id, environment)
+        return session
+      }),
+    )

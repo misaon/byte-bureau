@@ -1,32 +1,29 @@
 import { Effect, ManagedRuntime, type Layer } from 'effect'
-import { configApi } from './facade/config.js'
-import { eventsApi } from './facade/events.js'
-import { loadPlugins, providersApi } from './facade/plugins.js'
-import { projectsApi } from './facade/projects.js'
-import { promisedBy, type Runtime, type Services } from './facade/promised.js'
-import { asksApi, sessionsApi, usageApi } from './facade/sessions.js'
-import type { Kernel, KernelOptions } from './facade/types.js'
+import { apisOf } from './facade/apis.js'
 import { configureKernelLogging } from './facade/boot-logging.js'
-import { workspacesApi } from './facade/workspaces.js'
+import { loadPlugins } from './facade/plugins.js'
+import { promisedBy, type Runtime, type Services } from './facade/promised.js'
+import type { Kernel, KernelOptions } from './facade/types.js'
+import { kernelLogger } from './logging/logging.js'
+import { SessionManager } from './sessions/session-manager.js'
 
 export type { Kernel, KernelOptions } from './facade/types.js'
 
-// The steps that can fail while a kernel starts
+// The steps that can fail while a kernel starts; the sessions a previous process left at work are stopped once the plugins have loaded
 async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {
   await configureKernelLogging(options)
   const promised = promisedBy(runtime)
   // Captured once, so that an event stream can run outside the runtime
   const services = await runtime.runPromise(Effect.context<Services>())
   await loadPlugins(promised)
+  const recovered = await promised(SessionManager, (sessions) => sessions.recover())()
+  if (recovered.length > 0) {
+    kernelLogger(['bb', 'core']).info('recovered sessions left by a previous process', {
+      sessions: recovered,
+    })
+  }
   return {
-    projects: projectsApi(promised),
-    config: configApi(promised, services, options.env),
-    sessions: sessionsApi(promised),
-    asks: asksApi(promised),
-    events: eventsApi(promised, services),
-    workspaces: workspacesApi(promised),
-    usage: usageApi(promised),
-    providers: providersApi(services),
+    ...apisOf(promised, services, options.env),
     close: async () => {
       await runtime.dispose()
     },

@@ -17,6 +17,7 @@ const start = (deps: SessionDeps, live: Live): Effect.Effect<Live, StoreError> =
   })
 
 // The provider session of a session: started once, and the one that is attached already when there is one
+// The agent runs in this kernel from here on; the move to running names this kernel, so the recovery of another kernel leaves the session alone
 export const attach = (
   deps: SessionDeps,
   session: Session,

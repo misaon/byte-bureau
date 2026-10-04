@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { createContext, globalArgs, type GlobalArgs } from './context.js'
+import {
+  bureauFlags,
+  createContext,
+  globalArgs,
+  refuseBureauFlags,
+  type GlobalArgs,
+} from './context.js'
+import { usageError } from './usage-error.js'
 
 const QUIET: GlobalArgs = { json: false, color: false, yes: false }
 
@@ -31,6 +38,48 @@ describe(createContext, () => {
     expect(createContext({ ...QUIET, json: true }, {}, true).interactive).toBe(false)
     expect(createContext(QUIET, {}, false).interactive).toBe(false)
   })
+
+  it('keeps the environment it was made with, the home of the command among it', () => {
+    const env = { BYTEBUREAU_HOME: '/data/bytebureau' }
+    expect(createContext(QUIET, env, false).env).toStrictEqual(env)
+  })
+})
+
+describe(bureauFlags, () => {
+  it('talks to the daemon unless --no-daemon says otherwise', () => {
+    const none = { daemon: true, host: undefined, port: undefined, tokenFile: undefined }
+    expect(bureauFlags(QUIET)).toStrictEqual(none)
+    expect(bureauFlags({ ...QUIET, daemon: false })).toStrictEqual({ ...none, daemon: false })
+  })
+
+  it('names a daemon by its host, its port as a number and the file of its token', () => {
+    const named = { ...QUIET, daemon: true, host: '10.0.0.5', port: '4800', 'token-file': 't' }
+    expect(bureauFlags(named)).toStrictEqual({
+      daemon: true,
+      host: '10.0.0.5',
+      port: 4800,
+      tokenFile: 't',
+    })
+  })
+
+  it('refuses --token-file without --host or --port, as a usage error', () => {
+    expect(() => bureauFlags({ ...QUIET, 'token-file': 't' })).toThrow(
+      expect.objectContaining({
+        name: 'CLIError',
+        message:
+          '--token-file goes with --host or --port: it holds the token of the daemon they name',
+      }),
+    )
+  })
+
+  it.each(['80a', '-1', '65536', ''])('refuses %j as a port, as a usage error', (port) => {
+    expect(() => bureauFlags({ ...QUIET, port })).toThrow(
+      expect.objectContaining({
+        name: 'CLIError',
+        message: `--port takes a whole number from 0 to 65535, not ${port}`,
+      }),
+    )
+  })
 })
 
 describe('the global flags', () => {
@@ -42,6 +91,10 @@ describe('the global flags', () => {
       'yes',
       'debug',
       'log-level',
+      'daemon',
+      'host',
+      'port',
+      'token-file',
     ])
   })
 
@@ -49,5 +102,29 @@ describe('the global flags', () => {
     expect(globalArgs.yes.description).toBe(
       'Answer every ask that has a recommended option with it',
     )
+  })
+})
+
+describe(refuseBureauFlags, () => {
+  it.each([
+    ['--host', ['--host', 'h']],
+    ['--port', ['--port=4800']],
+    ['--no-daemon', ['--no-daemon']],
+    ['--daemon', ['--daemon']],
+    ['--token-file', ['--token-file', 't']],
+  ])('refuses %s for a command that talks to no daemon, as a usage error', (flag, rawArgs) => {
+    expect(() => {
+      refuseBureauFlags('hello', rawArgs)
+    }).toThrow(usageError(`hello talks to no daemon: it takes no ${flag}`))
+  })
+
+  it('keeps the flags a command takes in a sense of its own, and what follows --', () => {
+    expect(() => {
+      refuseBureauFlags('serve', ['--host', '0.0.0.0', '--port', '0'], ['--host', '--port'])
+      refuseBureauFlags('hello', ['--lang', 'cs', '--', '--host'])
+    }).not.toThrow()
+    expect(() => {
+      refuseBureauFlags('serve', ['--port', '0', '--token-file', 't'], ['--host', '--port'])
+    }).toThrow(usageError('serve talks to no daemon: it takes no --token-file'))
   })
 })

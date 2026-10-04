@@ -1,6 +1,7 @@
 import path from 'node:path'
-import { Layer } from 'effect'
-import { bootLevel } from './facade/boot-logging.js'
+import { Effect, Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { bootLevel, configureKernelLogging } from './facade/boot-logging.js'
 import type { Services } from './facade/promised.js'
 import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 import { KernelLayer } from './kernel-live.js'
@@ -11,6 +12,24 @@ import { StoreLive } from './store/store-live.js'
 export { StoreLive } from './store/store-live.js'
 export type { Kernel, KernelOptions } from './facade.js'
 
+// What could not be made private is a warning: the start goes on
+const warnAll = (warnings: readonly string[]): void => {
+  const logger = kernelLogger(['bb', 'store'])
+  for (const warning of warnings) {
+    logger.warn(warning)
+  }
+}
+
+// The database, its WAL and its shared memory exist once the store has opened and migrated it; they are narrowed to the user then
+const privateStore = (database: string): Layer.Layer<SqlClient.SqlClient> =>
+  StoreLive(database).pipe(
+    Layer.tap(() =>
+      Effect.sync(() => {
+        warnAll(restrictDatabase(database))
+      }),
+    ),
+  )
+
 // The services over the store in the database; Effect drops its records below the level LogTape logs at, or below debug with --debug
 function layerOf(
   options: KernelOptions,
@@ -19,20 +38,22 @@ function layerOf(
 ): Layer.Layer<Services> {
   const debug = options.logging === undefined ? undefined : options.logging.debug
   const layer = KernelLayer({ ...options, logLevel: effectLevelOf(level, debug) })
-  return layer.pipe(Layer.provideMerge(StoreLive(database)))
+  return layer.pipe(Layer.provideMerge(privateStore(database)))
 }
 
-// The kernel of the binary: its store is the database under the home of the user, which only the user can read
+// The layer of the binary and of the daemon: the services over the database under the home of the user, with LogTape configured and the home made private
 // The log level is resolved once, so LogTape and Effect's own minimum agree; what could not be made private is logged once logging is configured
-export async function createKernel(options: KernelOptions): Promise<Kernel> {
+export async function kernelBunLayer(options: KernelOptions): Promise<Layer.Layer<Services>> {
   const home = prepareHome(options.home)
-  const database = path.join(home.data, 'bytebureau.db')
   const level = await bootLevel(options)
-  const logging = { ...options.logging, level }
-  const kernel = await createKernelFrom(layerOf(options, level, database), { ...options, logging })
-  const logger = kernelLogger(['bb', 'store'])
-  for (const warning of [...home.warnings, ...restrictDatabase(database)]) {
-    logger.warn(warning)
-  }
-  return kernel
+  await configureKernelLogging({ ...options, logging: { ...options.logging, level } })
+  warnAll(home.warnings)
+  return layerOf(options, level, path.join(home.data, 'bytebureau.db'))
+}
+
+// The kernel of the binary; the level is resolved before the layer, so the configuration is read once
+export async function createKernel(options: KernelOptions): Promise<Kernel> {
+  const level = await bootLevel(options)
+  const resolved = { ...options, logging: { ...options.logging, level } }
+  return createKernelFrom(await kernelBunLayer(resolved), resolved)
 }

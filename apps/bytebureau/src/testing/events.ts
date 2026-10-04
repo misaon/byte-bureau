@@ -24,6 +24,11 @@ export function event<EventType extends KernelEventType>(
   }
 }
 
+// An event of a turn carries its id; the events of the session as a whole carry none
+export function inTurn(turnId: string, envelope: EventEnvelope): EventEnvelope {
+  return { ...envelope, turnId }
+}
+
 export function option(id: string, recommended: boolean, description?: string): AskOption {
   return {
     id,
