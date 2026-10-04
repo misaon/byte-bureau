@@ -18,7 +18,7 @@
 - Events: durable events are never dropped on the way to a client; ephemeral ones (`seq` 0) may be, oldest first, beyond a per-client capacity of 64; SSE frames carry `id: <seq>` on durable events, `event: <type>`, the envelope as `data`, and an `event: heartbeat` frame every 15 s; `Last-Event-ID` wins over `since`.
 - Daemon: one daemon per home (an exclusive lock file plus `server.json` with a live pid); `serve` detaches by default, `--no-daemonize` stays in the foreground, `--stop` ends the daemon of the home; at start the daemon loads the plugins and recovers sessions a previous process left running (`stopped`, turn `interrupted` with reason `daemon_restart`, asks cancelled); the store has one writer, so `--no-daemon` is refused (exit 1) while a daemon is alive on the same home; a detached daemon logs to `<home>/logs/daemon.log`; the home, the lock, the log and `server.json` are for the user alone (0700/0600).
 - CLI: every command talks to the daemon unless `--no-daemon`; a daemon is started on demand unless `--host`/`--port` name one; `run` exits 0 on completion, 3 when stopped (also on SIGINT, SIGTERM, SIGHUP), 4 when refused (project, worktree, provider; through the daemon the problems `workspace_*`, `provider_*`, `session_provider_missing`) or when the session errors, 2 when the daemon cannot be reached (the line names the URL), 1 when `--no-daemon` is refused; `--json` is NDJSON, a non-TTY run without `--json` is plain text; a request the daemon refuses with a `4xx` problem ends a command with exit 1 and the problem's detail; stdout is drained before the process exits.
-- Session statuses, turn statuses, ask statuses, IDs (UUIDv7), timestamps (ISO-8601 UTC), the SQLite pragmas, the data location (`~/.bytebureau`, override `BYTEBUREAU_HOME`), the worktree rules, the ask contract and the environment allowlist stay as Phase A's Global Constraints say; migrations only add (`0002_session_env`).
+- Session statuses, turn statuses, ask statuses, IDs (UUIDv7), timestamps (ISO-8601 UTC), the SQLite pragmas, the data location (`~/.bytebureau`, override `BYTEBUREAU_HOME`), the worktree rules, the ask contract and the environment allowlist stay as Phase A's Global Constraints say; migrations only add (`0002_session_env_owner`).
 - Logging categories gain `bb.api`; no secrets in events (redacted once at publish, ADR-0012), logs, problems, `--json` output or `server.json`'s siblings; the token never travels in a URL.
 - Tests run under Node (Vitest 5): API tests over `@effect/platform-node`'s server on port 0 and `KernelTest`; CLI tests run the CLI (and the daemon) from source in Bun subprocesses with a temp `BYTEBUREAU_HOME`; no test ever touches `~/.bytebureau`; no real agent is spawned in CI.
 - SP0/SP1 gates stay green on a fresh clone: `bun run check` (oxlint every category at error and type-aware, oxfmt, cspell en+cs, markdownlint, ls-lint, knip, dependency-cruiser, typecheck, Vitest with 80 % line/branch coverage over `packages/*/src`, `plugins/*/src` and the listed CLI modules, ESLint long tail), `bun run lint:actions` when workflows change; exact dependency pins, nothing published in the last day (`minimumReleaseAge` 86400, raised to 259200 at the end of stabilisation); Conventional Commits with the workspace scopes (`api` and `client` are new); comments only where needed and short; every new file passes the lint caps (`max-lines` 300, `max-statements` 10, `max-lines-per-function` 50, `import/max-dependencies` 10, one class per file, no `?.`, no `as` but `as const`, no `!`, named generator functions).
@@ -38,7 +38,9 @@
 ```
 packages/protocol/src/api/{dto,requests,problem,server-info,rpc}.ts      the API contract: DTOs, bodies, RFC 9457 problems, server.json, the RPC group
 packages/kernel/src/health/health.ts                                   Health service (quick_check + plugin counts)
-packages/kernel/src/sessions/{session-recover,session-environment}.ts   recovery at boot; environment restored on resume
+packages/kernel/src/sessions/{session-recover,session-owner,session-environment}.ts   owner-aware recovery at boot; environment restored on resume
+packages/kernel/src/process/pid-alive.ts                               is a pid alive (signal 0; EPERM counts as alive)
+packages/kernel/src/facade/apis.ts                                     the facade's api constructors, grouped for the import cap
 packages/kernel/src/logging/redact-value.ts                            payload redaction (ADR-0012), applied in events/event-log.ts
 packages/kernel/src/facade/health.ts, bun.ts (kernelBunLayer)          facade additions and the Bun layer the daemon composes
 packages/api/{package.json,tsconfig.json,vitest.config.ts,openapi.json}
@@ -635,7 +637,7 @@ git commit -m "feat(protocol): add the API contract: DTOs, requests, problem det
 
 **Files:**
 - Create: `packages/kernel/src/health/health.ts`, `packages/kernel/src/health/health.test.ts`, `packages/kernel/src/sessions/session-recover.ts`, `packages/kernel/src/sessions/session-recover.test.ts`, `packages/kernel/src/sessions/session-environment.ts`, `packages/kernel/src/logging/redact-value.ts`, `packages/kernel/src/logging/redact-value.test.ts`, `packages/kernel/src/events/event-log-redaction.test.ts`, `packages/kernel/src/facade/health.ts`, `docs/decisions/0012-event-payloads-are-redacted-at-publish.md`
-- Modify: `packages/kernel/src/store/migrations.ts` (`0002_session_env`), `packages/kernel/src/store/migrate.test.ts`, `packages/kernel/src/sessions/session-records.ts` (`env_json`, `loadEnvironment`), `packages/kernel/src/sessions/session-new.ts` (passes the creation env to the insert), `packages/kernel/src/sessions/session-end.ts` (`makeResume` restores the environment), `packages/kernel/src/sessions/session-environment.test.ts` (new expectation), `packages/kernel/src/sessions/session-shape.ts` + `session-manager.ts` (`recover`), `packages/kernel/src/events/event-log.ts` (redacts the payload at publish), `packages/kernel/src/plugins/plugin-context.ts` + `plugin-host.ts` (`services` in `ContextDeps`), `packages/kernel/src/kernel-live.ts` (`HealthLive`, `Health` in `KernelServices`), `packages/kernel/src/facade/types.ts`, `packages/kernel/src/facade/plugins.ts`, `packages/kernel/src/facade/sessions.ts`, `packages/kernel/src/facade.ts` (boot recovers), `packages/kernel/src/bun.ts` (`kernelBunLayer`), `packages/kernel/src/kernel-test.ts` (re-exports the temp-dir helpers), `packages/kernel/src/index.ts`, `apps/docs/src/content/docs/architecture.md` (one line under Phase A decisions pointing at ADR-0012; the deferred list is rewritten in Task 11)
+- Modify: `packages/kernel/src/store/migrations.ts` (`0002_session_env_owner`), `packages/kernel/src/store/migrate.test.ts`, `packages/kernel/src/sessions/session-records.ts` (`env_json`, `loadEnvironment`), `packages/kernel/src/sessions/session-new.ts` (passes the creation env to the insert), `packages/kernel/src/sessions/session-end.ts` (`makeResume` restores the environment), `packages/kernel/src/sessions/session-environment.test.ts` (new expectation), `packages/kernel/src/sessions/session-shape.ts` + `session-manager.ts` (`recover`), `packages/kernel/src/events/event-log.ts` (redacts the payload at publish), `packages/kernel/src/plugins/plugin-context.ts` + `plugin-host.ts` (`services` in `ContextDeps`), `packages/kernel/src/kernel-live.ts` (`HealthLive`, `Health` in `KernelServices`), `packages/kernel/src/facade/types.ts`, `packages/kernel/src/facade/plugins.ts`, `packages/kernel/src/facade/sessions.ts`, `packages/kernel/src/facade.ts` (boot recovers), `packages/kernel/src/bun.ts` (`kernelBunLayer`), `packages/kernel/src/kernel-test.ts` (re-exports the temp-dir helpers), `packages/kernel/src/index.ts`, `apps/docs/src/content/docs/architecture.md` (one line under Phase A decisions pointing at ADR-0012; the deferred list is rewritten in Task 11)
 
 **Interfaces:**
 - Consumes: `SessionDeps`, `settle`, `cancelAsks`, `move`, `listSessions`, `insertSession`, `requireProject`, `currentProject`, `passEnvOf`, `bytebureauEnv`, `REDACTED_FIELDS`, `SECRET_PATTERNS`, `PluginHost`, `SqlClient`, `KernelOptions`, `createKernelFrom`, `prepareHome`, `restrictDatabase`, `bootLevel`, `configureKernelLogging` (all Phase A).
@@ -644,6 +646,8 @@ git commit -m "feat(protocol): add the API contract: DTOs, requests, problem det
 Verified facts this task relies on: SQLite's `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT '{}'` is one statement (the migration splitter cuts at `;`); `PRAGMA quick_check` returns one row whose single column reads `ok` on a sound database; `Effect.runPromiseWith(context)(effect)` and `Stream.provideContext(context)` exist in `effect@4.0.0` (`dist/Effect.d.ts` line 16740, `dist/Stream.d.ts` line 13992); `String.prototype.replace` with a global RegExp starts from index 0, so the `g`-flagged `SECRET_PATTERNS` can be reused; `Effect.context<R>()` captures the services of the running layer (Phase A's facade does this already).
 
 Semantics: **Health** — `status` is `ok` when the store answers `quick_check` with `ok` and no plugin failed to load, else `degraded`; the API's `/health` (Task 3) adds the version and the start time. **Recovery** — `recover()` finds every session left in `provisioning`, `running`, `waiting_for_human` or `paused_usage_limit` by a previous process (a session attached in this process is left alone), ends its running turn as `interrupted` with stop reason `daemon_restart`, cancels its pending asks, unlocks its worktree and moves it to `stopped` (publishing `turn.interrupted`, `ask.cancelled` and `session.stopped`), and returns the ids; the Promise facade runs it at boot after the plugins have loaded and logs the ids at info; this is spec §14 "daemon restart" with `stopped` standing in for the spec's "interrupted" (ruling of the plan: `stopped` is the resumable terminal status the state machine already has). **Session environment** — the `BYTEBUREAU_*` entries given at creation are stored in `sessions.env_json` and a resume reads them back, together with `passEnv` of the provider from the current project configuration, so a session resumed by a later process gives its agent the same extra variables as its first start (this reverses Phase A's "a resumed session starts without the environment of its creation"; the test changes accordingly). **Redaction** — every payload goes through `redactValue` once, at `EventLog.publish`, before it is stored or fanned out: a field whose name matches `REDACTED_FIELDS` becomes `[REDACTED]`, a string matching a `SECRET_PATTERNS` pattern is replaced inside, ten levels deep; log sinks keep redacting what they print (defence in depth) — ADR-0012 records the decision. **Plugin context** — the promises a plugin context bridges (`events.publish`, `events.subscribe`, `kv`, `process.spawn`) run with the services captured when the host was built (`Effect.runPromiseWith(deps.services)`, `Stream.provideContext(deps.services)`), so a helper a plugin spawns through the supervisor inherits the kernel's tracer context like any kernel fiber. **Bun layer** — `kernelBunLayer(options)` prepares the home (0700), resolves the log level, configures LogTape and returns the layer of the services over `StoreLive`; `createKernel` is now `createKernelFrom(await kernelBunLayer(options), …)`, and the daemon of Task 8 composes the same layer with the API.
+
+Semantics (as shipped, commits cecde20, 4a88625, 25bd844): recovery is **owner-aware** — the migration `0002_session_env_owner` adds `env_json`, `owner_pid` and `owner_instance` to `sessions`; every kernel layer has one instance id (`live-sessions.ts`), written with the row at registration, claimed on resume (after the environment is read, so a refused resume claims nothing) and claimed by the kernel that attaches the agent on prompt (`session-agent.ts`, inside the session's lock, before the move to `running`); `recover()` (`session-recover.ts`, predicate in `session-owner.ts`, liveness in `process/pid-alive.ts`) selects the five recoverable statuses in SQL (`created` included), stops a session only when nothing of it is attached in this process and its owner is gone (null pid, dead pid, or this pid with another instance id), re-checks under the session lock, logs and skips an unreadable row or a session it cannot settle, and returns the ids it stopped; the tests are `session-recover.test.ts`, `session-recover-owner.test.ts`, `session-recover-failures.test.ts` with `session-recover-fixtures.ts`. The database is made owner-only inside `kernelBunLayer`'s layer right after the store opens it (restricting a file that does not exist yet left a fresh database at 0644); `resume`'s error type gains `ConfigError`; the facade's api constructors live in `facade/apis.ts` (import cap); `health.ts` uses `Effect.match`. Known costs (ledger): a crashed owner's pid reused by an unrelated process keeps its session unrecovered until that pid ends; a session that cannot be settled is retried and skipped at every start; across processes a refused move can leave a stale owner claim in a window of milliseconds (final fix wave: write the owner columns in the same `UPDATE` as the status move); a development home migrated by `cecde20` alone does not open any more (`0002_session_env` was renamed before release — remove that database).
 
 - [ ] **Step 1: Migration and session records**
 
@@ -674,22 +678,194 @@ In `packages/kernel/src/store/migrate.test.ts` add to the `Store` suite:
 
 `packages/kernel/src/sessions/session-records.ts`: add `env_json: Schema.String` to `Stored` (the environment is read by `loadEnvironment`, not carried on `Session`), change `insertSession` to take the environment and store its ByteBureau names only, and add `loadEnvironment`:
 ```ts
+import type { ExternalSessionRef } from '@bytebureau/plugin-api'
+import { EmployeeSpec, SessionStatus } from '@bytebureau/protocol'
+import { Effect, Schema, type Result } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { SessionError, StoreError, toStoreError } from '../errors.js'
+import { nowIso } from '../ids.js'
 import { bytebureauEnv } from '../process/env-allowlist.js'
+import { decodeHandle } from '../workspace/workspace-records.js'
+import type { KernelInstance } from './live-sessions.js'
+import type { Session } from './types.js'
+
+// A session that has no workspace yet carries this record
+const NO_WORKSPACE = '{}'
+
+const ExternalRef = Schema.Struct({ providerId: Schema.String, ref: Schema.String })
+
+// The columns of a session row; the JSON ones are read back with the schemas that wrote them
+const Stored = Schema.Struct({
+  id: Schema.String,
+  project_id: Schema.String,
+  title: Schema.String,
+  employee_json: Schema.fromJsonString(EmployeeSpec),
+  provider_id: Schema.String,
+  profile_id: Schema.NullOr(Schema.String),
+  workspace_json: Schema.String,
+  external_ref: Schema.NullOr(Schema.fromJsonString(ExternalRef)),
+  status: SessionStatus,
+  created_at: Schema.String,
+  started_at: Schema.NullOr(Schema.String),
+  ended_at: Schema.NullOr(Schema.String),
+  env_json: Schema.String,
+  owner_pid: Schema.NullOr(Schema.Number),
+  owner_instance: Schema.NullOr(Schema.String),
+})
+
+const decodeStored = Schema.decodeUnknownEffect(Stored)
 
 const Environment = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String))
 const decodeEnvironment = Schema.decodeUnknownEffect(Environment)
 
+// A row that does not fit the protocol is a failure of the store, not a defect
+const unreadable = (cause: unknown): StoreError =>
+  new StoreError({ cause: new Error('a session record is unreadable', { cause }) })
+
+const workspaceOf = (json: string): ReturnType<typeof decodeHandle> | Effect.Effect<null> =>
+  json === NO_WORKSPACE ? Effect.succeed(null) : decodeHandle(json)
+
+const sessionFrom = (stored: typeof Stored.Type): Effect.Effect<Session, Schema.SchemaError> =>
+  Effect.map(workspaceOf(stored.workspace_json), (workspace) => ({
+    id: stored.id,
+    projectId: stored.project_id,
+    title: stored.title,
+    employee: stored.employee_json,
+    providerId: stored.provider_id,
+    profileId: stored.profile_id,
+    workspace,
+    externalRef: stored.external_ref,
+    status: stored.status,
+    createdAt: stored.created_at,
+    startedAt: stored.started_at,
+    endedAt: stored.ended_at,
+  }))
+
+const toSession = (row: unknown): Effect.Effect<Session, StoreError> =>
+  decodeStored(row).pipe(Effect.flatMap(sessionFrom), Effect.mapError(unreadable))
+
+// Who works on a session: the process and the kernel that registered, resumed or prompted it last; nobody for a row from before owners were recorded
+export interface SessionOwner {
+  readonly pid: number | null
+  readonly instance: string | null
+}
+
+export interface OwnedSession {
+  readonly session: Session
+  readonly owner: SessionOwner
+}
+
+const toOwned = (row: unknown): Effect.Effect<OwnedSession, StoreError> =>
+  decodeStored(row).pipe(
+    Effect.flatMap((stored) =>
+      Effect.map(sessionFrom(stored), (session) => ({
+        session,
+        owner: { pid: stored.owner_pid, instance: stored.owner_instance },
+      })),
+    ),
+    Effect.mapError(unreadable),
+  )
+
+// The session of the first row; a query that finds no row, or an update that claims none, has none
+const firstSession = (rows: readonly unknown[]): Effect.Effect<Session | undefined, StoreError> => {
+  const [row] = rows
+  return row === undefined ? Effect.undefined : toSession(row)
+}
+
+export const loadSession = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+): Effect.Effect<Session | undefined, StoreError> =>
+  sql`SELECT * FROM sessions WHERE id = ${sessionId}`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => firstSession(rows)),
+  )
+
+export const requireSession = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+): Effect.Effect<Session, SessionError | StoreError> =>
+  loadSession(sql, sessionId).pipe(
+    Effect.flatMap((session) =>
+      session === undefined
+        ? Effect.fail(
+            new SessionError({ code: 'not_found', reason: `session ${sessionId} does not exist` }),
+          )
+        : Effect.succeed(session),
+    ),
+  )
+
+// Newest first; the id breaks a tie because uuidv7 ids grow with time
+export const listSessions = (
+  sql: SqlClient.SqlClient,
+): Effect.Effect<readonly Session[], StoreError> =>
+  sql`SELECT * FROM sessions ORDER BY created_at DESC, id DESC`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => Effect.all(rows.map((row) => toSession(row)))),
+  )
+
+// What a session is registered with: the environment given at creation and the kernel that owns it
+export interface Registration {
+  readonly env: Readonly<Record<string, string>>
+  readonly owner: KernelInstance
+}
+
 // The workspace stays empty until provisioning has made one; only the BYTEBUREAU_* names of the environment are kept
+// The owner goes in with the row, so no recovery of another kernel ever sees the session without one
 export const insertSession = (
   sql: SqlClient.SqlClient,
   session: Session,
-  env: Readonly<Record<string, string>>,
+  { env, owner }: Registration,
 ): Effect.Effect<void, StoreError> =>
   sql`
-    INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at, env_json)
-    VALUES (${session.id}, ${session.projectId}, ${session.title}, ${JSON.stringify(session.employee)}, ${session.providerId}, ${session.profileId}, ${NO_WORKSPACE}, ${session.status}, ${session.createdAt}, ${JSON.stringify(bytebureauEnv(env))})`.pipe(
+    INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at, env_json, owner_pid, owner_instance)
+    VALUES (${session.id}, ${session.projectId}, ${session.title}, ${JSON.stringify(session.employee)}, ${session.providerId}, ${session.profileId}, ${NO_WORKSPACE}, ${session.status}, ${session.createdAt}, ${JSON.stringify(bytebureauEnv(env))}, ${owner.pid}, ${owner.id})`.pipe(
     Effect.asVoid,
     Effect.mapError(toStoreError),
+  )
+
+// The kernel that resumes a session, or attaches its agent, owns it from then on
+export const claimOwner = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+  owner: KernelInstance,
+): Effect.Effect<void, StoreError> =>
+  sql`UPDATE sessions SET owner_pid = ${owner.pid}, owner_instance = ${owner.id} WHERE id = ${sessionId}`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
+  )
+
+// A row read on its own: one that does not fit keeps its failure, so it does not hide the others
+export interface OwnedRead {
+  readonly id: string
+  readonly owned: Result.Result<OwnedSession, StoreError>
+}
+
+// The sessions in the statuses, with their owners, oldest first
+export const listOwned = (
+  sql: SqlClient.SqlClient,
+  statuses: readonly SessionStatus[],
+): Effect.Effect<readonly OwnedRead[], StoreError> =>
+  sql<{
+    readonly id: string
+  }>`SELECT * FROM sessions WHERE ${sql.in('status', statuses)} ORDER BY created_at, id`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) =>
+      Effect.all(
+        rows.map((row) =>
+          Effect.map(Effect.result(toOwned(row)), (owned) => ({ id: row.id, owned })),
+        ),
+      ),
+    ),
+  )
+
+export const loadOwned = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+): Effect.Effect<OwnedSession | undefined, StoreError> =>
+  sql`SELECT * FROM sessions WHERE id = ${sessionId}`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap(([row]) => (row === undefined ? Effect.undefined : toOwned(row))),
   )
 
 // The environment stored at creation; a record that does not fit is a failure of the store
@@ -699,8 +875,38 @@ export const loadEnvironment = (
 ): Effect.Effect<Readonly<Record<string, string>>, StoreError> =>
   sql<{ readonly env_json: string }>`SELECT env_json FROM sessions WHERE id = ${sessionId}`.pipe(
     Effect.mapError(toStoreError),
-    Effect.flatMap(([row]) => (row === undefined ? Effect.succeed('{}') : Effect.succeed(row.env_json))),
+    Effect.map(([row]) => (row === undefined ? '{}' : row.env_json)),
     Effect.flatMap((json) => decodeEnvironment(json).pipe(Effect.mapError(unreadable))),
+  )
+
+const ENDED = new Set<string>(['completed', 'stopped', 'errored'])
+
+// The session moves only when it is still in the status the caller saw, so a stale decision claims nothing
+// A session starts when it first runs and ends when it completes, stops or fails; resuming clears the end
+export const claimStatus = (
+  sql: SqlClient.SqlClient,
+  session: Session,
+  next: SessionStatus,
+): Effect.Effect<Session | undefined, StoreError> => {
+  const now = nowIso()
+  const startedAt = next === 'running' ? now : null
+  const endedAt = ENDED.has(next) ? now : null
+  return sql`
+    UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${startedAt}), ended_at = ${endedAt}
+    WHERE id = ${session.id} AND status = ${session.status} RETURNING *`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.flatMap((rows) => firstSession(rows)),
+  )
+}
+
+export const saveExternalRef = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+  ref: ExternalSessionRef,
+): Effect.Effect<void, StoreError> =>
+  sql`UPDATE sessions SET external_ref = ${JSON.stringify(ref)} WHERE id = ${sessionId}`.pipe(
+    Effect.asVoid,
+    Effect.mapError(toStoreError),
   )
 ```
 `bytebureauEnv` is the Phase A filter in `packages/kernel/src/process/env-allowlist.ts` that keeps the `BYTEBUREAU_*` names; if its signature takes `Readonly<Record<string, string | undefined>>`, pass `env` as it is. In `packages/kernel/src/sessions/session-new.ts`, the one call of `insertSession` gains the third argument `input.env ?? {}` (the `Creation` carries `input`). If `session-records.ts` crosses 300 lines, move `insertSession` and `loadEnvironment` to a new `session-environment-records.ts` and import them where `insertSession` was imported.
@@ -710,22 +916,23 @@ export const loadEnvironment = (
 `packages/kernel/src/sessions/session-environment.ts`:
 ```ts
 import { Effect } from 'effect'
-import type { SessionError, StoreError, WorkspaceError, ConfigError } from '../errors.js'
+import type { ConfigError, SessionError, StoreError } from '../errors.js'
+import type { SessionEnvironment } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
 import { currentProject, passEnvOf, requireProject } from './session-project.js'
 import { loadEnvironment } from './session-records.js'
 import type { Session } from './types.js'
 
 // A session resumed by a later process gives its agent what its first start had: the stored BYTEBUREAU_* variables and the passEnv names of its provider as the project configures them now
-export const restoreEnvironment = (
+export const storedEnvironment = (
   deps: SessionDeps,
   session: Session,
-): Effect.Effect<void, SessionError | StoreError | WorkspaceError | ConfigError> =>
-  Effect.gen(function* restoresEnvironment() {
+): Effect.Effect<SessionEnvironment, SessionError | StoreError | ConfigError> =>
+  Effect.gen(function* readsEnvironment() {
     const extra = yield* loadEnvironment(deps.sql, session.id)
     const registered = yield* requireProject(deps, session.projectId)
     const project = yield* currentProject(deps, registered)
-    deps.live.setEnvironment(session.id, { extra, passEnv: passEnvOf(project, session.providerId) })
+    return { extra, passEnv: passEnvOf(project, session.providerId) }
   })
 ```
 If `requireProject`/`currentProject` fail with a type the resume shape does not declare, widen `SessionManagerShape.resume` to `SessionError | StoreError | WorkspaceError | ConfigError` — the facade and the API map every one of them.
@@ -747,6 +954,40 @@ export const makeResume =
 
 `packages/kernel/src/sessions/session-environment.test.ts`: the second test becomes
 ```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { withEnv } from '../process/supervisor-fixtures.js'
+import { startSession } from './session-fixtures.js'
+import { SessionManager } from './session-manager.js'
+import { prompted } from './session-prompted-fixtures.js'
+import { driven } from './session-script-fixtures.js'
+
+const DEVELOPER = {
+  name: 'Developer',
+  provider: 'scripted',
+  model: 'm',
+  permissionMode: 'supervised',
+}
+const CONFIG = {
+  version: 1,
+  project: { name: 'passing' },
+  employees: { developer: DEVELOPER },
+  providers: { scripted: { passEnv: ['BB_PASSED'], other: 'for the plugin' } },
+}
+
+const world = driven()
+
+it.layer(world.layer)('SessionManager passEnv of a provider', (suite) => {
+  suite.effect('passes the variables the provider names in passEnv, and no other', () =>
+    Effect.gen(function* passesNamedVariables() {
+      yield* withEnv('BB_PASSED', 'yes')
+      yield* withEnv('BB_NOT_NAMED', 'no')
+      const session = yield* startSession({ providerId: 'scripted' }, CONFIG)
+      const { env } = (yield* prompted(world, session)).agent.request
+      assert.deepStrictEqual([env['BB_PASSED'], env['BB_NOT_NAMED']], ['yes', undefined])
+    }),
+  )
+
   suite.effect(
     'starts the agent of a session resumed after a stop with the environment of its creation, read back from its record',
     () =>
@@ -760,11 +1001,19 @@ export const makeResume =
         yield* sessions.resume(session.id)
         const second = (yield* prompted(world, session, { text: 'again' })).agent.request.env
         assert.deepStrictEqual(
-          [first['BYTEBUREAU_EXTRA'], first['BB_PASSED'], first['NOT_KEPT'], second['BYTEBUREAU_EXTRA'], second['BB_PASSED'], second['NOT_KEPT']],
+          [
+            first['BYTEBUREAU_EXTRA'],
+            first['BB_PASSED'],
+            first['NOT_KEPT'],
+            second['BYTEBUREAU_EXTRA'],
+            second['BB_PASSED'],
+            second['NOT_KEPT'],
+          ],
           ['1', 'yes', undefined, '1', 'yes', undefined],
         )
       }),
   )
+})
 ```
 
 - [ ] **Step 3: Write the failing recovery test**
@@ -773,77 +1022,100 @@ export const makeResume =
 ```ts
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { SqlClient } from 'effect/sql'
+import { request } from '../asks/ask-fixtures.js'
 import { AskService } from '../asks/ask-service.js'
-import { EventLog } from '../events/event-log.js'
-import { nowIso, uuidv7 } from '../ids.js'
+import { WorkspaceManager } from '../workspace/workspace-manager.js'
 import { turnStatesOf } from './session-db-fixtures.js'
-import { registerRepo } from './session-fixtures.js'
+import { payloadsOf, registerRepo, sessionOf, typesOf } from './session-fixtures.js'
 import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
+import { leftBehind, provisionedLeft, type Left } from './session-recover-fixtures.js'
 
-const EMPLOYEE = JSON.stringify({
-  id: 'developer',
-  name: 'Developer',
-  provider: 'fake',
-  model: 'any',
-  effort: null,
-  systemPrompt: '',
-  tools: { allow: [], deny: [] },
-  permissionMode: 'supervised',
-  skills: [],
-  appearance: {},
+// A session left in each status of work by a process that recorded no owner, the waiting one with its question, and a ready one; then the kernel recovers
+const recovery = Effect.gen(function* recovers() {
+  const project = yield* registerRepo()
+  const left = yield* Effect.all({
+    created: leftBehind(project.id, 'created'),
+    provisioning: leftBehind(project.id, 'provisioning'),
+    running: leftBehind(project.id, 'running'),
+    waiting: leftBehind(project.id, 'waiting_for_human'),
+    paused: leftBehind(project.id, 'paused_usage_limit'),
+  })
+  const ready = yield* leftBehind(project.id, 'ready')
+  const opened = request(left.waiting.sessionId, { turnId: left.waiting.turnId })
+  const ask = yield* AskService.use((asks) => asks.open(opened))
+  const recovered = yield* SessionManager.use((sessions) => sessions.recover())
+  return { left, ready, askId: ask.id, recovered }
 })
 
-// A session and a turn as a previous process left them: nothing of them is attached here
-const leftBehind = (projectId: string, status: string) =>
-  Effect.gen(function* seeds() {
-    const sql = yield* SqlClient.SqlClient
-    const sessionId = uuidv7()
-    const turnId = uuidv7()
-    const now = nowIso()
-    yield* sql`INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at, started_at) VALUES (${sessionId}, ${projectId}, 'left', ${EMPLOYEE}, 'fake', NULL, '{}', ${status}, ${now}, ${now})`
-    yield* sql`INSERT INTO turns (id, session_id, idx, prompt_json, status, started_at) VALUES (${turnId}, ${sessionId}, 0, '{"text":"go"}', 'running', ${now})`
-    return { sessionId, turnId }
-  })
+const statusOf = (left: Left): Effect.Effect<string, unknown, SessionManager> =>
+  Effect.map(sessionOf(left.sessionId), (session) => session.status)
+
+const INTERRUPTED = [['interrupted', 'daemon_restart']] as const
 
 it.layer(sessionLayer())('SessionManager.recover', (suite) => {
-  suite.effect('stops what a previous process left running, interrupts its turn and cancels its asks', () =>
-    Effect.gen(function* recovers() {
+  suite.effect('stops a session left in each status of work, and leaves a ready one alone', () =>
+    Effect.gen(function* stopsLeftBehind() {
+      const { left, ready, recovered } = yield* recovery
+      const atWork = Object.values(left)
+      const statuses = yield* Effect.forEach([...atWork, ready], statusOf)
+      assert.deepStrictEqual(recovered.toSorted(), atWork.map((each) => each.sessionId).toSorted())
+      assert.deepStrictEqual(statuses, [
+        'stopped',
+        'stopped',
+        'stopped',
+        'stopped',
+        'stopped',
+        'ready',
+      ])
+    }),
+  )
+
+  suite.effect('interrupts the running turns for the restart and cancels the pending ask', () =>
+    Effect.gen(function* settlesLeftBehind() {
+      const { left, askId } = yield* recovery
+      const working = [left.running, left.waiting, left.paused]
+      const turns = yield* Effect.all(working.map((each) => turnStatesOf(each.sessionId)))
+      const pending = yield* AskService.use((asks) => asks.pending(left.waiting.sessionId))
+      assert.deepStrictEqual(turns, [INTERRUPTED, INTERRUPTED, INTERRUPTED])
+      assert.deepStrictEqual(pending, [])
+      assert.deepStrictEqual(yield* payloadsOf(left.waiting.sessionId, 'ask.cancelled'), [
+        { askId },
+      ])
+    }),
+  )
+
+  suite.effect('tells of the interrupted turn, the cancelled ask and the stop, in that order', () =>
+    Effect.gen(function* announcesRecovery() {
+      const { left } = yield* recovery
+      assert.deepStrictEqual(yield* typesOf(left.waiting.sessionId), [
+        'ask.requested',
+        'turn.interrupted',
+        'ask.cancelled',
+        'session.stopped',
+      ])
+      assert.deepStrictEqual(yield* typesOf(left.created.sessionId), ['session.stopped'])
+    }),
+  )
+})
+
+it.layer(sessionLayer())('SessionManager.recover, once more and with a worktree', (suite) => {
+  suite.effect('finds nothing left a second time', () =>
+    Effect.gen(function* recoversOnce() {
+      yield* recovery
+      assert.deepStrictEqual(yield* SessionManager.use((sessions) => sessions.recover()), [])
+    }),
+  )
+
+  suite.effect('unlocks the worktree of a session it stops, so the worktree can go', () =>
+    Effect.gen(function* unlocksWorktree() {
       const project = yield* registerRepo()
-      const running = yield* leftBehind(project.id, 'running')
-      const waiting = yield* leftBehind(project.id, 'waiting_for_human')
-      const ready = yield* leftBehind(project.id, 'ready')
-      const asks = yield* AskService
-      const ask = yield* asks.open({
-        sessionId: waiting.sessionId,
-        turnId: waiting.turnId,
-        kind: 'question',
-        title: 'Which?',
-        questions: [{ id: 'q', header: 'Pick', prompt: 'Pick one', options: [{ id: 'a', label: 'A', description: '', recommended: true, evidence: [] }], multiSelect: false, allowOther: false }],
-        policy: { onTimeout: 'wait', timeout: '30m' },
-        recommendationSource: 'agent',
-      })
-      const sessions = yield* SessionManager
-      const log = yield* EventLog
-      const recovered = yield* sessions.recover()
-      assert.deepStrictEqual([...recovered].sort(), [running.sessionId, waiting.sessionId].sort())
-      const after = yield* sessions.list()
-      const statusOf = (id: string): string | undefined => after.find((session) => session.id === id)?.status
-      assert.deepStrictEqual(
-        [statusOf(running.sessionId), statusOf(waiting.sessionId), statusOf(ready.sessionId)],
-        ['stopped', 'stopped', 'ready'],
-      )
-      assert.deepStrictEqual(yield* turnStatesOf(running.sessionId), [{ status: 'interrupted', stopReason: 'daemon_restart' }])
-      const pending = yield* asks.pending(waiting.sessionId)
-      assert.deepStrictEqual(pending.map((record) => record.id), [])
-      const events = yield* log.read({ sessionId: waiting.sessionId }, { from: 0 })
-      assert.deepStrictEqual(
-        events.map((event) => event.type).filter((type) => type !== 'ask.requested'),
-        ['turn.interrupted', 'ask.cancelled', 'session.stopped'],
-      )
-      assert.strictEqual(events.some((event) => event.type === 'ask.cancelled' && event.payload !== undefined && Reflect.get(Object(event.payload), 'askId') === ask.id), true)
-      assert.deepStrictEqual(yield* sessions.recover(), [])
+      const { left, handle } = yield* provisionedLeft(project, 'paused_usage_limit')
+      const workspaces = yield* WorkspaceManager
+      yield* workspaces.lock(left.sessionId)
+      yield* SessionManager.use((sessions) => sessions.recover())
+      const outcome = yield* workspaces.destroy(left.sessionId, handle)
+      assert.deepStrictEqual([yield* statusOf(left), outcome], ['stopped', { removed: true }])
     }),
   )
 })
@@ -859,48 +1131,74 @@ Expected: FAIL — `recover` is not a function of the session manager.
 
 `packages/kernel/src/sessions/session-recover.ts`:
 ```ts
-import { Effect } from 'effect'
+import { Effect, Result } from 'effect'
 import type { SessionError, StoreError } from '../errors.js'
 import type { SessionDeps } from './session-deps.js'
 import { settle } from './session-live.js'
-import { listSessions } from './session-records.js'
+import { logger } from './session-logger.js'
+import { isLeftBehind, RECOVERABLE } from './session-owner.js'
+import { listOwned, loadOwned, type OwnedRead, type OwnedSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
 import { move } from './session-status.js'
 import type { Outcome } from './session-turns.js'
-import type { Session } from './types.js'
-
-// The statuses a previous process can leave a session in while it worked
-const LEFT_RUNNING: ReadonlySet<string> = new Set([
-  'provisioning',
-  'running',
-  'waiting_for_human',
-  'paused_usage_limit',
-])
 
 const DAEMON_RESTART: Outcome = { status: 'interrupted', stopReason: 'daemon_restart', usage: null }
 
-// A session attached in this process is alive and is left alone; the others have nothing attached any more
-const isLeftBehind = (deps: SessionDeps, session: Session): boolean =>
-  LEFT_RUNNING.has(session.status) && deps.live.get(session.id) === undefined
+// A row that cannot be read is told and passed over; the next start finds it again
+const readable = ({ id, owned }: OwnedRead): readonly OwnedSession[] => {
+  if (Result.isSuccess(owned)) {
+    return [owned.success]
+  }
+  logger.warn('a session left at work cannot be read and is not recovered', {
+    sessionId: id,
+    reason: owned.failure.message,
+  })
+  return []
+}
 
+// The decision is taken again under the lock of the session, on its row as it stands now: one that moved or found an owner meanwhile is left alone
 // Its turn is interrupted, its asks are cancelled, its worktree is unlocked and the session is stopped: resumable, as after any stop
-const recoverOne = (deps: SessionDeps, session: Session): Effect.Effect<void, SessionError | StoreError> =>
+const recoverOne = (
+  deps: SessionDeps,
+  sessionId: string,
+): Effect.Effect<boolean, SessionError | StoreError> =>
   deps.live.exclusive(
-    session.id,
+    sessionId,
     Effect.gen(function* recoversOne() {
-      yield* settle(deps, session, DAEMON_RESTART)
-      yield* move(deps, session.id, 'stop')
+      const current = yield* loadOwned(deps.sql, sessionId)
+      if (current === undefined || !isLeftBehind(deps, current)) {
+        return false
+      }
+      yield* settle(deps, current.session, DAEMON_RESTART)
+      yield* move(deps, sessionId, 'stop')
+      return true
     }),
   )
 
+// A session that cannot be recovered is told and passed over, so the others still are
+const attemptOne = (deps: SessionDeps, sessionId: string): Effect.Effect<readonly string[]> =>
+  Effect.match(recoverOne(deps, sessionId), {
+    onFailure: (failure) => {
+      logger.warn('a session left at work could not be recovered', {
+        sessionId,
+        reason: failure.message,
+      })
+      return []
+    },
+    onSuccess: (stopped) => (stopped ? [sessionId] : []),
+  })
+
+// Only the sessions in a status of work are read; the ids of those that were stopped are given back
 export const makeRecover =
   (deps: SessionDeps): SessionManagerShape['recover'] =>
   () =>
     Effect.gen(function* recoversSessions() {
-      const sessions = yield* listSessions(deps.sql)
-      const left = sessions.filter((session) => isLeftBehind(deps, session))
-      yield* Effect.forEach(left, (session) => recoverOne(deps, session), { discard: true })
-      return left.map((session) => session.id)
+      const reads = yield* listOwned(deps.sql, RECOVERABLE)
+      const left = reads
+        .flatMap((read) => readable(read))
+        .filter((owned) => isLeftBehind(deps, owned))
+      const stopped = yield* Effect.all(left.map(({ session }) => attemptOne(deps, session.id)))
+      return stopped.flat()
     })
 ```
 `session-shape.ts` gains `readonly recover: () => Effect.Effect<readonly string[], SessionError | StoreError>`; `session-manager.ts` adds `recover: makeRecover(deps)` to the service.
@@ -911,11 +1209,13 @@ export const makeRecover =
 ```ts
 import { definePlugin } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
-import { KernelTest } from '../kernel-test.js'
+import { Effect, Layer } from 'effect'
+import { SqlClient, SqlError } from 'effect/sql'
+import { hostOver } from '../plugins/plugin-fixtures.js'
 import { PluginHost } from '../plugins/plugin-host.js'
-import { tempDir } from '../testing/temp-repo.js'
-import { Health } from './health.js'
+import { sessionLayer, withPlugins } from '../sessions/session-layer-fixtures.js'
+import { StoreTest } from '../store/store-test.js'
+import { Health, HealthLive } from './health.js'
 
 const broken = definePlugin({
   manifest: { name: 'broken', version: '0.0.0', hostApi: '^0.0.0', kind: 'in-process' },
@@ -924,7 +1224,29 @@ const broken = definePlugin({
   },
 })
 
-it.layer(KernelTest({ home: tempDir('bb-health-') }))('Health over a sound kernel', (suite) => {
+const damaged = new SqlError.SqlError({
+  reason: new SqlError.UnknownError({
+    cause: 'damaged',
+    message: 'database disk image is malformed',
+    operation: 'quick_check',
+  }),
+})
+
+// The in-memory store, except that its integrity check fails as a damaged database would
+const damagedStore = Layer.effect(
+  SqlClient.SqlClient,
+  Effect.gen(function* damagesStore() {
+    const sql = yield* SqlClient.SqlClient
+    return new Proxy(sql, {
+      apply: (target, self: unknown, args: unknown[]): unknown =>
+        String(args[0]).includes('quick_check')
+          ? Effect.fail(damaged)
+          : Reflect.apply(target, self, args),
+    })
+  }),
+).pipe(Layer.provide(StoreTest))
+
+it.layer(sessionLayer())('Health over a sound kernel', (suite) => {
   suite.effect('is ok and counts the bundled plugins', () =>
     Effect.gen(function* checks() {
       yield* PluginHost.use((host) => host.load())
@@ -937,21 +1259,37 @@ it.layer(KernelTest({ home: tempDir('bb-health-') }))('Health over a sound kerne
   )
 })
 
-it.layer(KernelTest({ home: tempDir('bb-health-'), extraPlugins: [broken] }))(
-  'Health over a kernel with a failed plugin',
-  (suite) => {
-    suite.effect('is degraded and counts the failure', () =>
-      Effect.gen(function* checks() {
-        yield* PluginHost.use((host) => host.load())
-        const report = yield* Health.use((health) => health.check())
-        assert.deepStrictEqual(report, {
-          status: 'degraded',
-          checks: { store: 'ok', plugins: { loaded: 2, failed: 1 } },
-        })
-      }),
-    )
-  },
+it.layer(withPlugins([broken]))('Health over a kernel with a failed plugin', (suite) => {
+  suite.effect('is degraded and counts the failure', () =>
+    Effect.gen(function* checks() {
+      yield* PluginHost.use((host) => host.load())
+      const report = yield* Health.use((health) => health.check())
+      assert.deepStrictEqual(report, {
+        status: 'degraded',
+        checks: { store: 'ok', plugins: { loaded: 2, failed: 1 } },
+      })
+    }),
+  )
+})
+
+// The health of that store beside the plugin host of a sound one
+const overDamagedStore = HealthLive.pipe(
+  Layer.provide(damagedStore),
+  Layer.provideMerge(hostOver()),
 )
+
+it.layer(overDamagedStore)('Health over a store that fails its check', (suite) => {
+  suite.effect('is degraded and names the store', () =>
+    Effect.gen(function* checks() {
+      yield* PluginHost.use((host) => host.load())
+      const report = yield* Health.use((health) => health.check())
+      assert.deepStrictEqual(report, {
+        status: 'degraded',
+        checks: { store: 'failed', plugins: { loaded: 2, failed: 0 } },
+      })
+    }),
+  )
+})
 ```
 `definePlugin`'s manifest shape is the one of `packages/plugin-api/src/plugin.ts` (Phase A); copy the fields the type requires from `fake-agent-plugin.ts` if the manifest above misses one.
 
@@ -961,10 +1299,12 @@ import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { PluginHost } from '../plugins/plugin-host.js'
 
+type Check = 'ok' | 'failed'
+
 export interface HealthReport {
   readonly status: 'ok' | 'degraded'
   readonly checks: {
-    readonly store: 'ok' | 'failed'
+    readonly store: Check
     readonly plugins: { readonly loaded: number; readonly failed: number }
   }
 }
@@ -976,12 +1316,15 @@ export interface HealthShape {
 export class Health extends Context.Service<Health, HealthShape>()('bb/Health') {}
 
 // A sound database answers quick_check with one row that says ok; anything else, or a failure to ask, is a failed store
-const storeCheck = (sql: SqlClient.SqlClient): Effect.Effect<'ok' | 'failed'> =>
+const storeCheck = (sql: SqlClient.SqlClient): Effect.Effect<Check> =>
   sql<{ readonly quick_check: string }>`PRAGMA quick_check`.pipe(
-    Effect.map((rows): 'ok' | 'failed' =>
-      rows.length === 1 && rows[0] !== undefined && rows[0].quick_check === 'ok' ? 'ok' : 'failed',
-    ),
-    Effect.catch(() => Effect.succeed('failed' as const)),
+    Effect.match({
+      onFailure: (): Check => 'failed',
+      onSuccess: (rows): Check =>
+        rows.length === 1 && rows[0] !== undefined && rows[0].quick_check === 'ok'
+          ? 'ok'
+          : 'failed',
+    }),
   )
 
 const make = Effect.gen(function* makeHealth() {
@@ -989,7 +1332,7 @@ const make = Effect.gen(function* makeHealth() {
   const host = yield* PluginHost
   return Health.of({
     check: () =>
-      Effect.map(storeCheck(sql), (store) => {
+      Effect.map(storeCheck(sql), (store): HealthReport => {
         const statuses = host.plugins()
         const failed = statuses.filter((plugin) => plugin.state === 'failed').length
         const plugins = { loaded: statuses.length - failed, failed }
@@ -999,10 +1342,8 @@ const make = Effect.gen(function* makeHealth() {
   })
 })
 
-export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | PluginHost> = Layer.effect(
-  Health,
-  make,
-)
+export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | PluginHost> =
+  Layer.effect(Health, make)
 ```
 `'failed' as const` is the one `as const` the lint allows; if `Effect.catch` is exported as `catch_`, Phase A imports it as `catch` (`import { catch as catch_ }`) — follow the kernel's existing usage. `kernel-live.ts`: add `HealthLive` to the `Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive)` call (it needs the plugin host, which that merge is provided with) and `Health` to `KernelServices`.
 
@@ -1013,6 +1354,41 @@ export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | Plugin
 import { describe, expect, it } from 'vitest'
 import { redactValue } from './redact-value.js'
 
+const DEEP_SECRET = 'sk-ant-deep-secret-1234'
+// Eleven levels of nesting with the secret at the bottom
+const PATH = [
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+  'nine',
+  'ten',
+  'eleven',
+]
+
+// One record per key around the value, the last key innermost
+function nested(keys: readonly string[], value: unknown): unknown {
+  let inner = value
+  for (const key of keys.toReversed()) {
+    inner = { [key]: inner }
+  }
+  return inner
+}
+
+// The value at the end of the path, read without trusting the shape of what holds it
+function valueAt(value: unknown, keys: readonly string[]): unknown {
+  let current = value
+  for (const key of keys) {
+    current =
+      typeof current === 'object' && current !== null ? Reflect.get(current, key) : undefined
+  }
+  return current
+}
+
 describe(redactValue, () => {
   it('replaces the value of a secret-named field and a secret inside a string', () => {
     expect(
@@ -1022,21 +1398,28 @@ describe(redactValue, () => {
         env: { ANTHROPIC_API_KEY: 'sk-ant-zzzzzzzzzz' },
       }),
     ).toStrictEqual({
-      input: { command: 'curl -H "Authorization: Bearer [REDACTED]" https://x', api_key: '[REDACTED]' },
+      input: {
+        command: 'curl -H "Authorization: Bearer [REDACTED]" https://x',
+        api_key: '[REDACTED]',
+      },
       text: 'use [REDACTED] and [REDACTED]',
       env: { ANTHROPIC_API_KEY: '[REDACTED]' },
     })
   })
 
   it('leaves a payload without secrets as it was, arrays and nulls included', () => {
-    const payload = { status: 'ready', model: null, tools: ['Read', 'Write'], usage: { inputTokens: 3 } }
+    const payload = {
+      status: 'ready',
+      model: null,
+      tools: ['Read', 'Write'],
+      usage: { inputTokens: 3 },
+    }
     expect(redactValue(payload)).toStrictEqual(payload)
   })
 
   it('stops ten levels deep and keeps what lies deeper', () => {
-    const deep = { a: { b: { c: { d: { e: { f: { g: { h: { i: { j: { k: 'sk-ant-deepsecret1234' } } } } } } } } } } }
-    const redacted = redactValue(deep) as typeof deep
-    expect(redacted.a.b.c.d.e.f.g.h.i.j.k).toBe('sk-ant-deepsecret1234')
+    const redacted = redactValue(nested(PATH, DEEP_SECRET))
+    expect(valueAt(redacted, PATH)).toBe(DEEP_SECRET)
   })
 })
 ```
@@ -1052,18 +1435,21 @@ const MAX_DEPTH = 10
 
 const isSecretName = (key: string): boolean => REDACTED_FIELDS.some((pattern) => pattern.test(key))
 
-const redactText = (text: string): string =>
-  SECRET_PATTERNS.reduce(
-    (current, { pattern, replacement }) => current.replace(pattern, replacement),
-    text,
-  )
+// The patterns are global, and replace starts each of them at the beginning of the text
+function redactString(text: string): string {
+  let redacted = text
+  for (const { pattern, replacement } of SECRET_PATTERNS) {
+    redacted = redacted.replace(pattern, replacement)
+  }
+  return redacted
+}
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 function walk(value: unknown, depth: number): unknown {
   if (typeof value === 'string') {
-    return redactText(value)
+    return redactString(value)
   }
   if (depth >= MAX_DEPTH) {
     return value
@@ -1073,7 +1459,10 @@ function walk(value: unknown, depth: number): unknown {
   }
   if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, isSecretName(key) ? MARK : walk(item, depth + 1)]),
+      Object.entries(value).map(([key, item]) => [
+        key,
+        isSecretName(key) ? MARK : walk(item, depth + 1),
+      ]),
     )
   }
   return value
@@ -1089,7 +1478,7 @@ The `SECRET_PATTERNS` replacement of the URL userinfo pattern uses the `$<scheme
 `packages/kernel/src/events/event-log-redaction.test.ts`:
 ```ts
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Layer } from 'effect'
 import { StoreTest } from '../store/store-test.js'
 import { EventLog, EventLogLive } from './event-log.js'
 
@@ -1099,9 +1488,19 @@ it.layer(EventLogLive.pipe(Layer.provideMerge(StoreTest)))('EventLog redaction',
       const log = yield* EventLog
       const published = yield* log.publish({
         type: 'tool.started',
-        payload: { id: 't1', name: 'Bash', kind: 'bash', input: { command: 'export GITHUB_TOKEN=ghp_abcdefghijklmnop', token: 'x' } },
+        payload: {
+          id: 't1',
+          name: 'Bash',
+          kind: 'bash',
+          input: { command: 'export GITHUB_TOKEN=ghp_abcdefghijklmnop', token: 'x' },
+        },
       })
-      const expected = { id: 't1', name: 'Bash', kind: 'bash', input: { command: 'export GITHUB_TOKEN=[REDACTED]', token: '[REDACTED]' } }
+      const expected = {
+        id: 't1',
+        name: 'Bash',
+        kind: 'bash',
+        input: { command: 'export GITHUB_TOKEN=[REDACTED]', token: '[REDACTED]' },
+      }
       assert.deepStrictEqual(published.payload, expected)
       const [stored] = yield* log.read({}, { from: 0 })
       assert.deepStrictEqual(stored === undefined ? undefined : stored.payload, expected)
@@ -1119,16 +1518,109 @@ Add `import { Layer } from 'effect'` to it; `event-log.test.ts` is near the 300-
 
 `packages/kernel/src/facade/types.ts`: add to `Kernel`
 ```ts
-  readonly sessions: { /* existing members */ readonly recover: () => Promise<readonly string[]> }
+import type { AnsweredVia, Ask, AskAnswer, EventEnvelope, PromptInput } from '@bytebureau/protocol'
+import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
+import type { EventFilter } from '../events/event-log.js'
+import type { HealthReport } from '../health/health.js'
+import type { KernelLayerOptions } from '../kernel-live.js'
+import type { PluginStatus } from '../plugins/plugin-host.js'
+import type { Project } from '../projects/project-registry.js'
+import type { CreateSessionInput, Session, Turn } from '../sessions/types.js'
+import type { SessionUsage } from '../usage/usage-service.js'
+import type { PruneReport, WorkspaceInfo } from '../workspace/workspace-manager.js'
+
+// The log level of the layer comes from logging.level, a string as the command line gives it
+export interface KernelOptions extends Omit<KernelLayerOptions, 'logLevel'> {
+  readonly env: Readonly<Record<string, string | undefined>>
+  readonly logging?:
+    | {
+        readonly debug?: string | undefined
+        readonly level?: string | undefined
+        readonly json?: boolean | undefined
+      }
+    | undefined
+}
+
+export interface Kernel {
+  readonly projects: {
+    readonly register: (path: string) => Promise<Project>
+    readonly list: () => Promise<readonly Project[]>
+    readonly get: (id: string) => Promise<Project | undefined>
+    readonly remove: (id: string) => Promise<void>
+  }
+  readonly config: {
+    readonly load: (projectPath?: string) => Promise<ResolvedConfig>
+    readonly validate: (projectPath: string) => Promise<readonly ConfigIssue[]>
+    readonly schema: () => Record<string, unknown>
+  }
+  readonly sessions: {
+    readonly create: (input: CreateSessionInput) => Promise<Session>
+    readonly prompt: (sessionId: string, input: PromptInput) => Promise<Turn>
+    readonly interrupt: (sessionId: string) => Promise<void>
+    readonly stop: (sessionId: string) => Promise<void>
+    readonly complete: (sessionId: string) => Promise<void>
+    readonly resume: (sessionId: string) => Promise<Session>
+    readonly list: () => Promise<readonly Session[]>
+    readonly get: (id: string) => Promise<Session | undefined>
+    /**
+     * Stops the sessions left at work by kernels that are gone and resolves with their ids.
+     * Meant for the start of a process: the kernel runs it once as it starts, and a session that a running kernel owns is left alone.
+     */
+    readonly recover: () => Promise<readonly string[]>
+  }
+  readonly asks: {
+    readonly pending: (sessionId?: string) => Promise<readonly Ask[]>
+    readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
+  }
+  readonly events: {
+    /**
+     * Replays the durable events after filter.since, all of them when since is left out, and then follows them live.
+     * Pass the last seq a consumer has seen as since to resume without a gap or a duplicate.
+     */
+    readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope>
+    readonly read: (
+      filter: EventFilter,
+      range: { readonly from: number; readonly to?: number },
+    ) => Promise<readonly EventEnvelope[]>
+  }
+  readonly workspaces: {
+    readonly list: (projectId?: string) => Promise<readonly WorkspaceInfo[]>
+    readonly prune: (projectId?: string) => Promise<PruneReport>
+  }
+  readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsage> }
+  readonly providers: {
+    readonly list: () => readonly { readonly id: string; readonly displayName: string }[]
+  }
   readonly plugins: { readonly list: () => readonly PluginStatus[] }
   readonly health: { readonly check: () => Promise<HealthReport> }
+  /** Stops the agents and ends the open event subscriptions; a call made after it may reject. */
+  readonly close: () => Promise<void>
+}
 ```
 (`import type { HealthReport } from '../health/health.js'`, `import type { PluginStatus } from '../plugins/plugin-host.js'`; keep `providers` as it is).
 
 `packages/kernel/src/facade/sessions.ts`: `recover: promised(SessionManager, (sessions) => sessions.recover())`. `packages/kernel/src/facade/plugins.ts`:
 ```ts
+import { Context } from 'effect'
+import { PluginHost } from '../plugins/plugin-host.js'
+import type { Promised, Services } from './promised.js'
+import type { Kernel } from './types.js'
+
+// A plugin that fails to load is reported by the host and does not stop the kernel
+export async function loadPlugins(promised: Promised): Promise<void> {
+  await promised(PluginHost, (host) => host.load())()
+}
+
+// What the host made of each plugin, read without a promise like the providers
 export const pluginsApi = (services: Context.Context<Services>): Kernel['plugins'] => ({
   list: () => Context.get(services, PluginHost).plugins(),
+})
+
+export const providersApi = (services: Context.Context<Services>): Kernel['providers'] => ({
+  list: () =>
+    Context.get(services, PluginHost)
+      .agentProviders()
+      .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
 })
 ```
 `packages/kernel/src/facade/health.ts`:
@@ -1152,24 +1644,64 @@ and the returned object gains `plugins: pluginsApi(services)`, `health: healthAp
 
 `packages/kernel/src/bun.ts`:
 ```ts
-// The layer of the binary: the services over the database under the home of the user, with LogTape configured and the home made private
-// What could not be made private is logged once logging is configured
-export async function kernelBunLayer(options: KernelOptions): Promise<Layer.Layer<Services>> {
-  const home = prepareHome(options.home)
-  const database = path.join(home.data, 'bytebureau.db')
-  const level = await bootLevel(options)
-  await configureKernelLogging({ ...options, logging: { ...options.logging, level } })
+import path from 'node:path'
+import { Effect, Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import { bootLevel, configureKernelLogging } from './facade/boot-logging.js'
+import type { Services } from './facade/promised.js'
+import { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
+import { KernelLayer } from './kernel-live.js'
+import { effectLevelOf, kernelLogger, type KernelLogLevel } from './logging/logging.js'
+import { prepareHome, restrictDatabase } from './store/home.js'
+import { StoreLive } from './store/store-live.js'
+
+export { StoreLive } from './store/store-live.js'
+export type { Kernel, KernelOptions } from './facade.js'
+
+// What could not be made private is a warning: the start goes on
+const warnAll = (warnings: readonly string[]): void => {
   const logger = kernelLogger(['bb', 'store'])
-  for (const warning of [...home.warnings, ...restrictDatabase(database)]) {
+  for (const warning of warnings) {
     logger.warn(warning)
   }
-  return layerOf(options, level, database)
 }
 
+// The database, its WAL and its shared memory exist once the store has opened and migrated it; they are narrowed to the user then
+const privateStore = (database: string): Layer.Layer<SqlClient.SqlClient> =>
+  StoreLive(database).pipe(
+    Layer.tap(() =>
+      Effect.sync(() => {
+        warnAll(restrictDatabase(database))
+      }),
+    ),
+  )
+
+// The services over the store in the database; Effect drops its records below the level LogTape logs at, or below debug with --debug
+function layerOf(
+  options: KernelOptions,
+  level: KernelLogLevel,
+  database: string,
+): Layer.Layer<Services> {
+  const debug = options.logging === undefined ? undefined : options.logging.debug
+  const layer = KernelLayer({ ...options, logLevel: effectLevelOf(level, debug) })
+  return layer.pipe(Layer.provideMerge(privateStore(database)))
+}
+
+// The layer of the binary and of the daemon: the services over the database under the home of the user, with LogTape configured and the home made private
+// The log level is resolved once, so LogTape and Effect's own minimum agree; what could not be made private is logged once logging is configured
+export async function kernelBunLayer(options: KernelOptions): Promise<Layer.Layer<Services>> {
+  const home = prepareHome(options.home)
+  const level = await bootLevel(options)
+  await configureKernelLogging({ ...options, logging: { ...options.logging, level } })
+  warnAll(home.warnings)
+  return layerOf(options, level, path.join(home.data, 'bytebureau.db'))
+}
+
+// The kernel of the binary; the level is resolved before the layer, so the configuration is read once
 export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const level = await bootLevel(options)
-  const layer = await kernelBunLayer(options)
-  return createKernelFrom(layer, { ...options, logging: { ...options.logging, level } })
+  const resolved = { ...options, logging: { ...options.logging, level } }
+  return createKernelFrom(await kernelBunLayer(resolved), resolved)
 }
 ```
 `createKernelFrom` configures logging again through `boot`; `configureLogging` is idempotent in Phase A (it resets the sinks), so the double call is harmless — if it is not, give `createKernelFrom` an option `{ logging: 'configured' }` to skip it. `restrictDatabase` runs before the store opens the file: it chmods an existing database and says nothing of a missing one (Phase A behaviour), so the order is unchanged.
@@ -1199,6 +1731,7 @@ Phase A stored event payloads as the kernel's services and plugins handed them i
 ## Consequences
 
 - One place to audit; a reader cannot forget.
+- Each payload is redacted on its own: a secret split across two `message.assistant.delta` events reaches live subscribers whole, while the completed message that follows is redacted.
 - Redaction is lossy for legitimate text that looks like a secret (a document quoting `sk-ant-…`); the UI shows `[REDACTED]` there. Acceptable: no feature of ByteBureau needs the raw secret, and the agent's own context is unaffected (events are a projection).
 - A payload field named like a secret but holding none (`token` counting tokens, say) is replaced too; event schemas use `inputTokens`/`outputTokens`, which do not match `token$`. New schemas must avoid the reserved names, which `redact-value.test.ts` documents.
 ```
