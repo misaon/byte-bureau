@@ -55,8 +55,8 @@ it.layer(sessionLayer())('SessionManager claims a status', (suite) => {
     Effect.gen(function* claimsStatus() {
       const sql = yield* SqlClient.SqlClient
       const session = yield* startSession()
-      const moved = yield* claimStatus(sql, session, 'running')
-      const stale = yield* claimStatus(sql, session, 'stopped')
+      const moved = yield* claimStatus(sql, session, { next: 'running' })
+      const stale = yield* claimStatus(sql, session, { next: 'stopped' })
       assert.deepStrictEqual(
         [moved === undefined ? null : moved.status, stale],
         ['running', undefined],
@@ -71,9 +71,15 @@ it.layer(sessionLayer())('SessionManager claims a status', (suite) => {
       Effect.gen(function* datesSession() {
         const sql = yield* SqlClient.SqlClient
         const session = yield* startSession()
-        const running = yield* Effect.fromNullishOr(yield* claimStatus(sql, session, 'running'))
-        const stopped = yield* Effect.fromNullishOr(yield* claimStatus(sql, running, 'stopped'))
-        const resumed = yield* Effect.fromNullishOr(yield* claimStatus(sql, stopped, 'ready'))
+        const running = yield* Effect.fromNullishOr(
+          yield* claimStatus(sql, session, { next: 'running' }),
+        )
+        const stopped = yield* Effect.fromNullishOr(
+          yield* claimStatus(sql, running, { next: 'stopped' }),
+        )
+        const resumed = yield* Effect.fromNullishOr(
+          yield* claimStatus(sql, stopped, { next: 'ready' }),
+        )
         assert.deepStrictEqual(
           [session.startedAt, running.startedAt === null, running.endedAt],
           [null, false, null],

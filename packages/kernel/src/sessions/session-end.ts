@@ -12,9 +12,9 @@ import {
   rememberRef,
   settle,
 } from './session-live.js'
-import { claimOwner, requireSession } from './session-records.js'
+import { requireSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
-import { ensureAllowed, move } from './session-status.js'
+import { ensureAllowed, move, moveAndClaim } from './session-status.js'
 import type { Outcome } from './session-turns.js'
 
 // The commands that end or pause what an agent does, in one place for the manager
@@ -86,8 +86,7 @@ export const makeResume =
         const stopped = yield* requireSession(deps.sql, sessionId)
         yield* ensureAllowed(stopped, 'resume')
         const environment = yield* storedEnvironment(deps, stopped)
-        yield* claimOwner(deps.sql, sessionId, deps.instance)
-        const session = yield* move(deps, sessionId, 'resume')
+        const session = yield* moveAndClaim(deps, sessionId, 'resume')
         deps.live.setEnvironment(session.id, environment)
         return session
       }),

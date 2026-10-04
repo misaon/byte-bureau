@@ -10,6 +10,7 @@ import {
   type Failure,
   type PlainEvent,
 } from './session-events.js'
+import type { KernelInstance } from './live-sessions.js'
 import { claimStatus, requireSession } from './session-records.js'
 import { transition, type SessionEvent } from './state-machine.js'
 import type { Session } from './types.js'
@@ -22,10 +23,11 @@ export interface StatusDeps {
   readonly log: EventLogShape
 }
 
-// A transition and the event of the catalogue that tells of it once the status has changed
+// A transition and the event of the catalogue that tells of it once the status has changed, and the kernel that takes the session over with it
 interface Change {
   readonly event: SessionEvent
   readonly announce: (status: SessionStatus) => KernelEvent
+  readonly owner?: KernelInstance | undefined
 }
 
 const invalid = (session: Session, event: SessionEvent): SessionError =>
@@ -46,12 +48,12 @@ export const ensureAllowed = (
 const change = (
   deps: StatusDeps,
   sessionId: string,
-  { event, announce }: Change,
+  { event, announce, owner }: Change,
 ): Effect.Effect<Session, SessionError | StoreError> =>
   Effect.gen(function* changesStatus() {
     const session = yield* requireSession(deps.sql, sessionId)
     const next = transition(session.status, event)
-    const moved = next === null ? undefined : yield* claimStatus(deps.sql, session, next)
+    const moved = next === null ? undefined : yield* claimStatus(deps.sql, session, { next, owner })
     if (next === null || moved === undefined) {
       return yield* invalid(session, event)
     }
@@ -65,6 +67,18 @@ export const move = (
   event: PlainEvent,
 ): Effect.Effect<Session, SessionError | StoreError> =>
   change(deps, sessionId, { event, announce: (status) => plainEvent(event, status) })
+
+// The move of a kernel that takes the session over, which a resume or a prompt is: the row names it with the new status
+export const moveAndClaim = (
+  deps: StatusDeps & { readonly instance: KernelInstance },
+  sessionId: string,
+  event: PlainEvent,
+): Effect.Effect<Session, SessionError | StoreError> =>
+  change(deps, sessionId, {
+    event,
+    announce: (status) => plainEvent(event, status),
+    owner: deps.instance,
+  })
 
 export const moveToWaiting = (
   deps: StatusDeps,

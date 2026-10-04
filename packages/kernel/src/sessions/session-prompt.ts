@@ -6,7 +6,7 @@ import type { SessionDeps } from './session-deps.js'
 import { requireSession } from './session-records.js'
 import { sendPrompt } from './session-send.js'
 import type { SessionManagerShape } from './session-shape.js'
-import { ensureAllowed, move } from './session-status.js'
+import { ensureAllowed, moveAndClaim } from './session-status.js'
 import { startTurn } from './session-turns.js'
 
 // The turn is recorded and announced, and its worktree is locked until it is over
@@ -30,7 +30,7 @@ export const makePrompt =
         const session = yield* requireSession(deps.sql, sessionId)
         yield* ensureAllowed(session, 'prompt')
         const live = yield* attach(deps, session)
-        yield* move(deps, sessionId, 'prompt')
+        yield* moveAndClaim(deps, sessionId, 'prompt')
         const turn = yield* begin(deps, live, input)
         const hook = { sessionId, input }
         const sent = yield* deps.host.hooks.run('prompt.beforeSend', hook, Effect.succeed)

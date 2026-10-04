@@ -144,17 +144,6 @@ export const insertSession = (
     Effect.mapError(toStoreError),
   )
 
-// The kernel that resumes a session, or attaches its agent, owns it from then on
-export const claimOwner = (
-  sql: SqlClient.SqlClient,
-  sessionId: string,
-  owner: KernelInstance,
-): Effect.Effect<void, StoreError> =>
-  sql`UPDATE sessions SET owner_pid = ${owner.pid}, owner_instance = ${owner.id} WHERE id = ${sessionId}`.pipe(
-    Effect.asVoid,
-    Effect.mapError(toStoreError),
-  )
-
 // A row read on its own: one that does not fit keeps its failure, so it does not hide the others
 export interface OwnedRead {
   readonly id: string
@@ -203,16 +192,25 @@ const ENDED = new Set<string>(['completed', 'stopped', 'errored'])
 
 // The session moves only when it is still in the status the caller saw, so a stale decision claims nothing
 // A session starts when it first runs and ends when it completes, stops or fails; resuming clears the end
+// The kernel that resumes a session, or sets its agent to work, owns it from then on: named in the same statement, so a refused move names nobody
+export interface StatusClaim {
+  readonly next: SessionStatus
+  readonly owner?: KernelInstance | undefined
+}
+
 export const claimStatus = (
   sql: SqlClient.SqlClient,
   session: Session,
-  next: SessionStatus,
+  { next, owner }: StatusClaim,
 ): Effect.Effect<Session | undefined, StoreError> => {
   const now = nowIso()
   const startedAt = next === 'running' ? now : null
   const endedAt = ENDED.has(next) ? now : null
+  const ownerPid = owner === undefined ? null : owner.pid
+  const ownerInstance = owner === undefined ? null : owner.id
   return sql`
-    UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${startedAt}), ended_at = ${endedAt}
+    UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${startedAt}), ended_at = ${endedAt},
+      owner_pid = COALESCE(${ownerPid}, owner_pid), owner_instance = COALESCE(${ownerInstance}, owner_instance)
     WHERE id = ${session.id} AND status = ${session.status} RETURNING *`.pipe(
     Effect.mapError(toStoreError),
     Effect.flatMap((rows) => firstSession(rows)),
