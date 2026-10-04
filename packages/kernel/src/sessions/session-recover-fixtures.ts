@@ -96,6 +96,16 @@ export const seedBrokenAsk = (
     yield* sql`INSERT INTO asks (id, session_id, turn_id, kind, payload_json, status, recommendation_source, created_at) VALUES (${`ask-of-${left.sessionId}`}, ${left.sessionId}, ${left.turnId}, 'question', 'not json', 'pending', 'agent', ${NOW})`
   })
 
+// The row names another owner, as if that kernel had claimed the session last
+export const nameOwner = (
+  sessionId: string,
+  owner: SeededOwner,
+): Effect.Effect<void, SqlError.SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* namesOwner() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE sessions SET owner_pid = ${owner.pid}, owner_instance = ${owner.instance} WHERE id = ${sessionId}`
+  })
+
 // The owner a session row names
 export const ownerOf = (
   sessionId: string,

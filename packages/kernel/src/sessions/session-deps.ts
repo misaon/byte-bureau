@@ -24,7 +24,7 @@ export interface SessionDeps {
   readonly config: ConfigShape
   readonly env: KernelEnv
   readonly live: LiveSessions
-  // A session this kernel registers or resumes is recorded as its own, so the recovery of another kernel leaves it alone
+  // A session this kernel registers, resumes or prompts is recorded as its own, so the recovery of another kernel leaves it alone
   readonly instance: KernelInstance
   // The fibers of the sessions (the pumps of provider events, the prompts on their way) live in a scope of their own: as long as the layer, not as long as the call that started them
   // The layer closes it once the provider sessions are closed, so a pump that waits for its provider cannot hold the closing of the agents

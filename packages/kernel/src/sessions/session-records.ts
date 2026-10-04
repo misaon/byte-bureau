@@ -64,7 +64,7 @@ const sessionFrom = (stored: typeof Stored.Type): Effect.Effect<Session, Schema.
 const toSession = (row: unknown): Effect.Effect<Session, StoreError> =>
   decodeStored(row).pipe(Effect.flatMap(sessionFrom), Effect.mapError(unreadable))
 
-// Who works on a session: the process and the kernel that registered or resumed it last; nobody for a row from before owners were recorded
+// Who works on a session: the process and the kernel that registered, resumed or prompted it last; nobody for a row from before owners were recorded
 export interface SessionOwner {
   readonly pid: number | null
   readonly instance: string | null
@@ -144,7 +144,7 @@ export const insertSession = (
     Effect.mapError(toStoreError),
   )
 
-// The kernel that resumes a session owns it from then on
+// The kernel that resumes a session, or attaches its agent, owns it from then on
 export const claimOwner = (
   sql: SqlClient.SqlClient,
   sessionId: string,

@@ -8,8 +8,10 @@ import { SessionManager } from './session-manager.js'
 import {
   GONE,
   leftBehind,
+  nameOwner,
   ownerOf,
   provisionedLeft,
+  type Left,
   type SeededOwner,
 } from './session-recover-fixtures.js'
 
@@ -72,20 +74,41 @@ it.layer(sessionLayer())('SessionManager.recover and the owner of a session', (s
   )
 })
 
-it.layer(sessionLayer())('SessionManager.recover and the sessions of this process', (suite) => {
-  suite.effect('leaves alone a session attached here, whichever kernel owned it before', () =>
-    Effect.gen(function* leavesAttached() {
-      const project = yield* registerRepo()
-      const { left } = yield* provisionedLeft(project, 'ready', GONE)
-      const sessions = yield* SessionManager
-      yield* sessions.prompt(left.sessionId, { text: 'go' })
-      const recovered = yield* sessions.recover()
-      const { status } = yield* sessionOf(left.sessionId)
-      yield* sessions.stop(left.sessionId)
-      assert.deepStrictEqual([recovered, status === 'stopped'], [[], false])
+// A ready session that a kernel which is gone left behind with its worktree, prompted here
+const promptedLeft: Effect.Effect<Left, unknown, SessionServices> = Effect.gen(
+  function* promptsLeft() {
+    const project = yield* registerRepo()
+    const { left } = yield* provisionedLeft(project, 'ready', GONE)
+    yield* SessionManager.use((sessions) => sessions.prompt(left.sessionId, { text: 'go' }))
+    return left
+  },
+)
+
+it.layer(sessionLayer())('SessionManager and the sessions it prompts', (suite) => {
+  suite.effect('claims a session it prompts: the row names this process and this kernel', () =>
+    Effect.gen(function* claimsPrompted() {
+      const own = yield* thisKernel
+      const { sessionId } = yield* promptedLeft
+      const owner = yield* ownerOf(sessionId)
+      yield* SessionManager.use((sessions) => sessions.stop(sessionId))
+      assert.deepStrictEqual([own.pid, owner], [process.pid, own])
     }),
   )
 
+  suite.effect('leaves alone a session attached here, even when its row names a kernel gone', () =>
+    Effect.gen(function* leavesAttached() {
+      const { sessionId } = yield* promptedLeft
+      yield* nameOwner(sessionId, GONE)
+      const sessions = yield* SessionManager
+      const recovered = yield* sessions.recover()
+      const { status } = yield* sessionOf(sessionId)
+      yield* sessions.stop(sessionId)
+      assert.deepStrictEqual([recovered, status === 'stopped'], [[], false])
+    }),
+  )
+})
+
+it.layer(sessionLayer())('SessionManager and the sessions it creates or resumes', (suite) => {
   suite.effect(
     'records this kernel as the owner of a session it creates and of one it resumes',
     () =>
