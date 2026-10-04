@@ -58,51 +58,6 @@ const recordOf = async (
   return recordOf(home, child, deadline)
 }
 
-// A foreground daemon of the home, run from source; killed when the test ends if it is still there
-// The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
-export async function startDaemonProcess(
-  home: string,
-  flags: readonly string[] = ['--port', '0'],
-): Promise<DaemonProcess> {
-  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', ...flags], {
-    cwd: CLI_DIRECTORY,
-    env: childEnv({ BYTEBUREAU_HOME: home }),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  onTestFinished(() => {
-    child.kill('SIGKILL')
-  })
-  const output = captured(child)
-  const { promise: exited, resolve } = Promise.withResolvers<number | null>()
-  child.once('close', (code) => {
-    resolve(code)
-  })
-  const info = await recordOf(home, child, Date.now() + 15_000)
-  if (info === undefined) {
-    throw new Error(`the daemon did not write server.json in time: ${output.stderr}`)
-  }
-  const stop = async (): Promise<number | null> => {
-    child.kill('SIGTERM')
-    const code = await exited
-    return code
-  }
-  return {
-    info,
-    url: serverUrl(info),
-    child,
-    stdout: () => output.stdout,
-    stderr: () => output.stderr,
-    stop,
-  }
-}
-
-// A loopback port nothing listens on now, for daemons that must come and go on the same one
-export async function freePort(): Promise<number> {
-  const { port, close } = await listening(createServer())
-  await close()
-  return port
-}
-
 const ended = async (pid: number, deadline: number): Promise<boolean> => {
   const alive = isAlive(pid)
   if (!alive || Date.now() >= deadline) {
@@ -140,4 +95,56 @@ export function stoppedWithTheTest(home: string): void {
   onTestFinished(async () => {
     await stopDaemonOf(home)
   })
+}
+
+// The child is killed when the test ends, and a daemon that a command started on demand once the child was gone is stopped
+function endedWithTheTest(child: ChildProcess, home: string): void {
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  stoppedWithTheTest(home)
+}
+
+// A foreground daemon of the home, run from source; killed when the test ends if it is still there
+// A command that finds it gone starts another on demand, which ends with the test as well
+// The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
+export async function startDaemonProcess(
+  home: string,
+  flags: readonly string[] = ['--port', '0'],
+): Promise<DaemonProcess> {
+  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', ...flags], {
+    cwd: CLI_DIRECTORY,
+    env: childEnv({ BYTEBUREAU_HOME: home }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  endedWithTheTest(child, home)
+  const output = captured(child)
+  const { promise: exited, resolve } = Promise.withResolvers<number | null>()
+  child.once('close', (code) => {
+    resolve(code)
+  })
+  const info = await recordOf(home, child, Date.now() + 15_000)
+  if (info === undefined) {
+    throw new Error(`the daemon did not write server.json in time: ${output.stderr}`)
+  }
+  const stop = async (): Promise<number | null> => {
+    child.kill('SIGTERM')
+    const code = await exited
+    return code
+  }
+  return {
+    info,
+    url: serverUrl(info),
+    child,
+    stdout: () => output.stdout,
+    stderr: () => output.stderr,
+    stop,
+  }
+}
+
+// A loopback port nothing listens on now, for daemons that must come and go on the same one
+export async function freePort(): Promise<number> {
+  const { port, close } = await listening(createServer())
+  await close()
+  return port
 }

@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises'
-import { startDaemonProcess, stoppedWithTheTest, type DaemonProcess } from './daemon.js'
+import { startDaemonProcess, type DaemonProcess } from './daemon.js'
 import { firstField, firstId, jsonLines, listedUnder } from './json-lines.js'
 import { runCli, type CliResult } from './run-cli.js'
 import { NO_DAEMON, ON_FAKE, PROMPT, SCRIPTED, sessionIdIn, workbench } from './workbench.js'
@@ -41,8 +41,6 @@ export type Session = Bench & { readonly id: string }
 export async function benchWithDaemon(variables: Env = {}): Promise<Bench> {
   const { repo, home } = workbench()
   const daemon = await startDaemonProcess(home)
-  // A command that finds the daemon gone starts another on demand: it ends with the test as well
-  stoppedWithTheTest(home)
   return { repo, home, env: { BYTEBUREAU_HOME: home, ...variables }, daemon }
 }
 
