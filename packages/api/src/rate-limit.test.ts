@@ -2,7 +2,7 @@ import { createTempRepo } from '@bytebureau/kernel/testing'
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { TestClock } from 'effect/testing'
-import { ApiTestLayer, baseUrl, fetched, get, post } from './testing.js'
+import { ApiTestLayer, baseUrl, fetched, get, json, post } from './testing.js'
 
 // The budget runs on the TestClock of the suite: no token flows back unless a test moves the clock
 const TWO_TOKENS = ApiTestLayer({ mutationLimit: { capacity: 2, perMinute: 60 } })
@@ -27,6 +27,15 @@ it.layer(TWO_TOKENS)('the mutation rate limit with two tokens', (suite) => {
         })
         assert.strictEqual((yield* get('/projects')).status, 200)
       }),
+  )
+
+  suite.effect('says when to retry in the Retry-After header as well', () =>
+    Effect.gen(function* retryAfter() {
+      const base = yield* baseUrl
+      const refused = yield* fetched(`${base}/api/v1/projects`, json({ path: createTempRepo() }))
+      assert.strictEqual(refused.status, 429)
+      assert.strictEqual(refused.headers.get('retry-after'), '1')
+    }),
   )
 
   suite.effect('serves a mutation again once the clock has let a token flow back', () =>

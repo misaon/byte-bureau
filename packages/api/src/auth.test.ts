@@ -8,6 +8,9 @@ import { ApiTestLayer, authorized, baseUrl, bodyOf, fetched, json } from './test
 
 const EVENTS_SCHEMA = '/api/v1/schemas/events.json'
 
+// RFC 7235: every 401 names the scheme the API asks for
+const CHALLENGE = 'Bearer realm="bytebureau"'
+
 // What a refused request carries in its Authorization header: nothing, an empty bearer token, a wrong one
 const REFUSED: [string, Record<string, string>][] = [
   ['no Authorization header', {}],
@@ -59,6 +62,7 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
       const response = yield* fetched(`${base}${EVENTS_SCHEMA}`, { headers })
       assert.strictEqual(response.status, 401)
       assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.strictEqual(response.headers.get('www-authenticate'), CHALLENGE)
       assert.deepStrictEqual(yield* bodyOf(response), {
         type: 'https://bytebureau.dev/problems/unauthorized',
         title: 'Unauthorized',
@@ -98,6 +102,7 @@ it.layer(ApiTestLayer())('the bearer token on every operation of the API', (suit
       const base = yield* baseUrl
       const response = yield* fetched(`${base}${path}`, { method })
       assert.strictEqual(response.status, 401)
+      assert.strictEqual(response.headers.get('www-authenticate'), CHALLENGE)
       assert.containSubset(yield* bodyOf(response), { code: 'unauthorized' })
     }),
   )
