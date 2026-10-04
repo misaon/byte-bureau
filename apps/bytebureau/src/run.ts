@@ -1,4 +1,11 @@
-import { runCommand, showUsage, type ArgsDef, type CommandDef, type Resolvable } from 'citty'
+import {
+  runCommand,
+  showUsage,
+  type ArgsDef,
+  type CommandDef,
+  type Resolvable,
+  type SubCommandsDef,
+} from 'citty'
 import { DaemonRunningError } from './bureau/open-local.js'
 import { describeError } from './errors.js'
 
@@ -47,37 +54,68 @@ export function subCommandIndex(argv: readonly string[], args: ArgsDef, from = 0
   return subCommandIndex(argv, args, from + (takesValue(arg, args) ? 2 : 1))
 }
 
-// Citty hands a sub-command only the arguments after its name, and it parses its flags
-// The flags before it move behind it, to the end of the arguments, which a nested command parses too; a -- keeps what follows it
-async function flagsAfterSubCommand(
-  command: CommandDef,
-  argv: readonly string[],
-): Promise<string[]> {
-  const args = command.args === undefined ? {} : await resolved(command.args)
-  const index = subCommandIndex(argv, args)
-  if (index <= 0) {
-    return [...argv]
-  }
-  const rest = argv.slice(index)
-  const end = rest.includes('--') ? rest.indexOf('--') : rest.length
-  return [...rest.slice(0, end), ...argv.slice(0, index), ...rest.slice(end)]
+// Where a walk down the commands that argv names has come to
+interface Walked {
+  readonly command: CommandDef
+  readonly parent: CommandDef | undefined
+  // The commands it went through, as named
+  readonly names: readonly string[]
+  // The flags before those names, with their values
+  readonly flags: readonly string[]
+  // What follows the last name
+  readonly rest: readonly string[]
 }
 
-// Usage of the deepest subcommand named in argv, as citty's runMain prints it
-async function printUsage(
-  command: CommandDef,
-  argv: readonly string[],
-  parent?: CommandDef,
-): Promise<void> {
+interface Level {
+  readonly subCommands: SubCommandsDef
+  // The flags of this command and of those above it
+  readonly known: ArgsDef
+}
+
+async function levelOf(command: CommandDef, above: ArgsDef): Promise<Level> {
   const subCommands = command.subCommands === undefined ? {} : await resolved(command.subCommands)
-  const args = command.args === undefined ? {} : await resolved(command.args)
-  const index = subCommandIndex(argv, args)
-  const subCommand = index === -1 ? undefined : subCommands[argv[index] ?? '']
-  if (subCommand === undefined) {
-    await showUsage(command, parent)
-    return
+  const own = command.args === undefined ? {} : await resolved(command.args)
+  return { subCommands, known: { ...above, ...own } }
+}
+
+// Citty tells the sub-command of a command by the flags of that command alone, so a group would take the value of a global flag for a name
+// The walk knows the flags of every level above, and stops at the command that has no sub-commands, or at a name that is none
+async function descend(walked: Walked, above: ArgsDef): Promise<Walked> {
+  const { subCommands, known } = await levelOf(walked.command, above)
+  const index = Object.keys(subCommands).length === 0 ? -1 : subCommandIndex(walked.rest, known)
+  const name = index === -1 ? undefined : walked.rest[index]
+  if (name === undefined) {
+    return walked
   }
-  await printUsage(await resolved(subCommand), argv.slice(index + 1), command)
+  const named = {
+    ...walked,
+    names: [...walked.names, name],
+    flags: [...walked.flags, ...walked.rest.slice(0, index)],
+    rest: walked.rest.slice(index + 1),
+  }
+  const subCommand = Object.hasOwn(subCommands, name) ? subCommands[name] : undefined
+  if (subCommand === undefined) {
+    return named
+  }
+  return descend({ ...named, command: await resolved(subCommand), parent: walked.command }, known)
+}
+
+async function walk(command: CommandDef, argv: readonly string[]): Promise<Walked> {
+  const walked = await descend({ command, parent: undefined, names: [], flags: [], rest: argv }, {})
+  return walked
+}
+
+// Citty hands a command only the arguments after its name, and it parses its flags there
+// The flags before a name, at any level, move to right behind the last name, ahead of the arguments of the command itself, so those win; a -- keeps what follows it
+export async function flagsAtLeaf(command: CommandDef, argv: readonly string[]): Promise<string[]> {
+  const { names, flags, rest } = await walk(command, argv)
+  return [...names, ...flags, ...rest]
+}
+
+// Usage of the deepest command named in argv, as citty's runMain prints it
+async function printUsage(command: CommandDef, argv: readonly string[]): Promise<void> {
+  const { command: deepest, parent } = await walk(command, argv)
+  await showUsage(deepest, parent)
 }
 
 async function printVersion(command: CommandDef): Promise<void> {
@@ -103,7 +141,7 @@ async function execute(command: CommandDef, argv: readonly string[]): Promise<vo
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    const rawArgs = await flagsAfterSubCommand(command, argv)
+    const rawArgs = await flagsAtLeaf(command, argv)
     await runCommand(command, { rawArgs })
   }
 }

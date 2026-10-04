@@ -4,9 +4,16 @@ import { readServerInfo } from './daemon/server-info.js'
 import { freePort, stoppedWithTheTest } from './testing/daemon.js'
 import { runCli } from './testing/run-cli.js'
 import { testHome } from './testing/temp-repo.js'
-import { PROMPT, SCRIPTED, workbench } from './testing/workbench.js'
+import { NO_DAEMON, PROMPT, SCRIPTED, workbench } from './testing/workbench.js'
 
 const ESCAPE = '\u001B'
+const BEFORE = 'before the sub-command'
+const BETWEEN = 'between the sub-command and its own'
+
+// The arguments of a call to the ls of a group, with flags that stand before the group or between the group and the ls
+function lsWith(group: string, place: string, flags: readonly string[]): string[] {
+  return place === BEFORE ? [...flags, group, 'ls'] : [group, ...flags, 'ls']
+}
 
 describe('bytebureau CLI', () => {
   it('prints a semantic version', async () => {
@@ -123,40 +130,66 @@ describe('bytebureau global flags before the sub-command', () => {
     })
   })
 
-  it('keeps --host and --port a daemon that is never started: exit 2 and the url, and no daemon', async () => {
+  it('lets the flag given later win, as it does with no flag before the sub-command', async () => {
     expect.hasAssertions()
-    const home = testHome()
-    // Were the flags dropped, the command would start a daemon of its own on demand
-    stoppedWithTheTest(home)
-    const port = await freePort()
-    const flags = ['--host', '127.0.0.1', '--port', String(port)]
-    const result = await runCli([...flags, 'projects', 'ls'], { BYTEBUREAU_HOME: home })
-    expect([result.code, result.stderr.trim()]).toStrictEqual([
-      2,
-      `cannot reach the daemon at http://127.0.0.1:${port}/api/v1/projects`,
-    ])
-    expect(readServerInfo(home).state).toBe('absent')
+    const { stdout, code } = await runCli(['--lang', 'cs', 'hello', '--lang', 'en'])
+    expect([code, stdout.trim()]).toStrictEqual([0, 'Hello! ByteBureau is ready.'])
   })
+
+  it.each([BEFORE, BETWEEN])(
+    'keeps --host and --port %s a daemon that is never started: exit 2 and the url, and no daemon',
+    async (place) => {
+      expect.hasAssertions()
+      const home = testHome()
+      // Were the flags dropped, the command would start a daemon of its own on demand
+      stoppedWithTheTest(home)
+      const port = await freePort()
+      const argv = lsWith('projects', place, ['--host', '127.0.0.1', '--port', String(port)])
+      const result = await runCli(argv, { BYTEBUREAU_HOME: home })
+      expect([result.code, result.stderr.trim()]).toStrictEqual([
+        2,
+        `cannot reach the daemon at http://127.0.0.1:${port}/api/v1/projects`,
+      ])
+      expect(readServerInfo(home).state).toBe('absent')
+    },
+  )
 })
 
 describe('bytebureau global flags before a sub-command that has sub-commands', () => {
-  it('hands them on to the sub-command of the sub-command, which parses its flags', async () => {
+  it.each([BEFORE, BETWEEN])(
+    'hands the flags %s on to its own, which parses them',
+    async (place) => {
+      expect.hasAssertions()
+      const home = testHome()
+      // Were the flags dropped, the command would start a daemon of its own on demand
+      stoppedWithTheTest(home)
+      const env = { BYTEBUREAU_HOME: home }
+      const empty = await runCli(lsWith('sessions', place, ['--json', NO_DAEMON]), env)
+      const czech = await runCli(lsWith('sessions', place, ['--lang', 'cs', NO_DAEMON]), env)
+      expect(JSON.parse(empty.stdout)).toStrictEqual({ command: 'sessions.ls', sessions: [] })
+      expect(czech.stdout.trim()).toBe('Žádné relace')
+      expect(readServerInfo(home).state).toBe('absent')
+    },
+  )
+
+  it('hands on the flags of both levels at once', async () => {
     expect.hasAssertions()
     const home = testHome()
-    // Were the flags dropped, the command would start a daemon of its own on demand
     stoppedWithTheTest(home)
-    const env = { BYTEBUREAU_HOME: home }
-    const empty = await runCli(['--json', '--no-daemon', 'sessions', 'ls'], env)
-    const czech = await runCli(['--lang', 'cs', '--no-daemon', 'sessions', 'ls'], env)
-    expect(JSON.parse(empty.stdout)).toStrictEqual({ command: 'sessions.ls', sessions: [] })
-    expect(czech.stdout.trim()).toBe('Žádné relace')
+    const argv = ['--lang', 'cs', 'sessions', NO_DAEMON, 'ls']
+    const { stdout, code } = await runCli(argv, { BYTEBUREAU_HOME: home })
+    expect([code, stdout.trim(), readServerInfo(home).state]).toStrictEqual([
+      0,
+      'Žádné relace',
+      'absent',
+    ])
   })
 
   it('runs the kernel in the process of the command with --no-daemon before the sub-command', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     stoppedWithTheTest(home)
-    const run = ['--no-daemon', 'run', PROMPT, '--project', repo, ...SCRIPTED]
+    const run = [NO_DAEMON, 'run', PROMPT, '--project', repo, ...SCRIPTED]
     const result = await runCli(run, { BYTEBUREAU_HOME: home })
     expect([result.code, readServerInfo(home).state]).toStrictEqual([0, 'absent'])
   })

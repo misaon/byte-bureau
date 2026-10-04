@@ -142,6 +142,21 @@ describe('bytebureau ask answer through the daemon', () => {
   })
 })
 
+describe('bytebureau ask answer with a global flag before the group', () => {
+  it('keeps --other with no text from taking the flag that moved behind the group for its text', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const { id, env } = waiting
+    const refused = await runCli(['--json', 'ask', 'answer', id, '--other'], env)
+    expect([refused.code, refused.stdout]).toStrictEqual([1, ''])
+    expect(jsonLines(refused.stderr)).toStrictEqual([
+      { level: 'warn', message: `Ask ${id} needs --option or --other outside a terminal` },
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+})
+
 describe('bytebureau ask answer with options and words', () => {
   it('answers with an option for each question, spelled apart from its id or with an equals sign', async () => {
     expect.hasAssertions()
