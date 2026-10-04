@@ -10372,8 +10372,8 @@ git commit -m "feat(cli): add the daemon: startDaemon on bun, server.json and by
 ### Task 9: The CLI as a thin client — `Bureau` over the daemon or in-process, daemon on demand, `run` through the API
 
 **Files:**
-- Create: `apps/bytebureau/src/bureau/bureau.ts`, `apps/bytebureau/src/bureau/local.ts`, `apps/bytebureau/src/bureau/remote.ts`, `apps/bytebureau/src/bureau/remote.test.ts`, `apps/bytebureau/src/bureau/resolve.ts`, `apps/bytebureau/src/bureau/resolve.test.ts`, `apps/bytebureau/src/bureau/ensure-daemon.ts`, `apps/bytebureau/src/bureau/with-bureau.ts`, `apps/bytebureau/src/bureau/with-bureau.test.ts`, `apps/bytebureau/src/commands/run-daemon.test.ts`
-- Modify: `apps/bytebureau/src/context.ts` (`globalArgs`: `daemon`, `host`, `port`, `token-file`), `apps/bytebureau/src/kernel.ts` (`openKernel` only; `withKernel` goes), `apps/bytebureau/src/commands/run.ts`, `run-session.ts` (`Bureau` instead of `RunKernel`, remote refusals, SIGTERM/SIGHUP), `projects.ts`, `workspaces.ts`, `config.ts` (through `withBureau` where a kernel is needed), `apps/bytebureau/src/errors.ts` (`ApiError`), `apps/bytebureau/src/main.ts` (drain stdout before exit), `apps/bytebureau/src/testing/scripted-kernel.ts` (`Bureau` shape), the Phase A CLI tests that spell `--no-daemon` or `RunKernel`, `apps/bytebureau/package.json` (`@bytebureau/client`), `packages/i18n/messages/{en,cs}.json`, `vitest.config.ts` (coverage include for `bureau/*.ts`)
+- Create: `apps/bytebureau/src/bureau/bureau.ts`, `apps/bytebureau/src/bureau/local.ts`, `apps/bytebureau/src/bureau/local.test.ts`, `apps/bytebureau/src/bureau/remote.ts`, `apps/bytebureau/src/bureau/remote.test.ts`, `apps/bytebureau/src/bureau/resolve.ts`, `apps/bytebureau/src/bureau/resolve.test.ts`, `apps/bytebureau/src/bureau/ensure-daemon.ts`, `apps/bytebureau/src/bureau/open-local.ts`, `apps/bytebureau/src/bureau/session-env.ts`, `apps/bytebureau/src/bureau/session-env.test.ts`, `apps/bytebureau/src/bureau/with-bureau.ts`, `apps/bytebureau/src/bureau/with-bureau.test.ts`, `apps/bytebureau/src/commands/run-daemon.test.ts`, `apps/bytebureau/src/commands/run-daemon-restart.test.ts`, `apps/bytebureau/src/testing/records.ts`, `apps/bytebureau/src/testing/recording-client.ts`, `apps/bytebureau/src/testing/listening.ts`, `apps/bytebureau/src/drain.ts`, `apps/bytebureau/src/drain.test.ts`
+- Modify: `apps/bytebureau/src/context.ts` (`globalArgs`: `daemon`, `host`, `port`, `token-file`; `bureauFlags`; `Context.env`; `portOf` moved here), `apps/bytebureau/src/kernel.ts` (`openKernel` only; `withKernel` goes), `apps/bytebureau/src/commands/run.ts`, `run-session.ts` (`Bureau` instead of `RunKernel`, remote refusals, SIGTERM/SIGHUP), `projects.ts`, `workspaces.ts` (through `withBureau`), `config.ts` (the in-process kernel through `withLocalKernel`; never a daemon), `serve.ts` (`portOf` taken from `context.ts`), `apps/bytebureau/src/run.ts` (`DaemonRunningError` → exit 1), `apps/bytebureau/src/main.ts` (drain stdout and stderr before exit), `apps/bytebureau/src/testing/{scripted-kernel,workbench,run-cli,daemon,health-stub}.ts`, the Phase A CLI tests (`--no-daemon`), `apps/bytebureau/package.json` (`@bytebureau/client`), `apps/bytebureau/vitest.config.ts` (`execArgv`), `packages/i18n/messages/{en,cs}.json` (`bureau_daemon_running`), `packages/kernel/src/facade/{sessions,types}.ts` (`asks.get`), `vitest.config.ts` (coverage include for the bureau modules), `.github/workflows/ci.yml` (`--no-daemon` on the in-process smoke runs). `apps/bytebureau/src/errors.ts` is unchanged: the client's `ApiError` message already reads as the CLI tells it.
 
 **Interfaces:**
 - Consumes: `createBureauClient`, `BureauClient`, `ApiError` (Task 7); `Kernel` (`createKernel`, Task 2); `readServerInfo`, `spawnDaemon`, `waitForDaemon`, `daemonLogPath` (Task 8); `serverUrl`, the DTOs (protocol).
@@ -10441,7 +10441,9 @@ export interface Bureau {
   }
   readonly health: { readonly check: () => Promise<HealthDto> }
   // Where the commands talk to: the daemon's URL, or in-process
-  readonly where: { readonly kind: 'daemon'; readonly url: string } | { readonly kind: 'in-process' }
+  readonly where:
+    | { readonly kind: 'daemon'; readonly url: string }
+    | { readonly kind: 'in-process' }
   readonly close: () => Promise<void>
 }
 ```
@@ -10449,43 +10451,97 @@ export interface Bureau {
 
 `apps/bytebureau/src/bureau/local.ts`:
 ```ts
-import type { Kernel } from '@bytebureau/kernel/bun'
+import type { Kernel } from '@bytebureau/kernel'
+import type { EventEnvelope } from '@bytebureau/protocol'
 import type { Bureau } from './bureau.js'
 
-// The kernel of this process as a Bureau; answers given here are the CLI's
-export const localBureau = (kernel: Kernel, version: string): Bureau => ({
-  projects: kernel.projects,
-  sessions: kernel.sessions,
-  asks: {
-    pending: kernel.asks.pending,
-    get: async (id) => {
-      const pending = await kernel.asks.pending()
-      return pending.find((ask) => ask.id === id)
-    },
-    answer: (askId, answer) => kernel.asks.answer(askId, answer, 'cli'),
+const ENDED: IteratorReturnResult<undefined> = { done: true, value: undefined }
+
+// Settles once the signal aborts, at once when it has
+const abortOf = async (signal: AbortSignal): Promise<IteratorReturnResult<undefined>> => {
+  const { promise, resolve } = Promise.withResolvers<IteratorReturnResult<undefined>>()
+  const end = (): void => {
+    resolve(ENDED)
+  }
+  if (signal.aborted) {
+    end()
+  } else {
+    signal.addEventListener('abort', end, { once: true })
+  }
+  const ended = await promise
+  return ended
+}
+
+// The events until the signal aborts, as a subscription of the daemon ends: a wait for the next event ends then too, and the kernel's subscription with it
+const untilAborted = (
+  events: AsyncIterable<EventEnvelope>,
+  signal: AbortSignal,
+): AsyncIterable<EventEnvelope> => ({
+  [Symbol.asyncIterator]: () => {
+    const iterator = events[Symbol.asyncIterator]()
+    const aborted = abortOf(signal)
+    const end = async (): Promise<IteratorReturnResult<undefined>> => {
+      if (iterator.return !== undefined) {
+        await iterator.return()
+      }
+      return ENDED
+    }
+    return {
+      next: async () => {
+        const next = await Promise.race([iterator.next(), aborted])
+        if (signal.aborted) {
+          const ended = await end()
+          return ended
+        }
+        return next
+      },
+      return: end,
+    }
   },
-  events: { subscribe: (filter) => kernel.events.subscribe(filter) },
-  workspaces: kernel.workspaces,
-  usage: kernel.usage,
-  plugins: {
-    list: async () => {
-      const listed = await Promise.resolve(kernel.plugins.list())
-      return listed
-    },
-    providers: async () => {
-      const providers = await Promise.resolve(kernel.providers.list())
-      return providers
-    },
-  },
-  health: {
-    check: async () => {
-      const report = await kernel.health.check()
-      return { ...report, version, startedAt: new Date().toISOString() }
-    },
-  },
-  where: { kind: 'in-process' },
-  close: kernel.close,
 })
+
+// The kernel of this process as a Bureau; the answers given through it are the CLI's
+// It started when the Bureau was made, which is the start its health tells of
+export const localBureau = (kernel: Kernel, version: string): Bureau => {
+  const startedAt = new Date().toISOString()
+  return {
+    projects: kernel.projects,
+    sessions: kernel.sessions,
+    asks: {
+      pending: kernel.asks.pending,
+      get: kernel.asks.get,
+      answer: async (askId, answer) => {
+        await kernel.asks.answer(askId, answer, 'cli')
+      },
+    },
+    events: {
+      subscribe: (filter, signal) => {
+        const events = kernel.events.subscribe(filter)
+        return signal === undefined ? events : untilAborted(events, signal)
+      },
+    },
+    workspaces: kernel.workspaces,
+    usage: kernel.usage,
+    plugins: {
+      list: async () => {
+        const listed = await Promise.resolve(kernel.plugins.list())
+        return listed
+      },
+      providers: async () => {
+        const providers = await Promise.resolve(kernel.providers.list())
+        return providers
+      },
+    },
+    health: {
+      check: async () => {
+        const report = await kernel.health.check()
+        return { ...report, version, startedAt }
+      },
+    },
+    where: { kind: 'in-process' },
+    close: kernel.close,
+  }
+}
 ```
 `kernel.asks.get` does not exist on the facade (Task 2 added `AskService.get` to the Effect service only); either add `get` to the facade's `asksApi` in this task (one line: `get: promised(AskService, (asks, id) => asks.get(id))`) and use it here, or keep the `pending` lookup — add it to the facade. The kernel's `Session`/`Project` records are assignable to the DTO types (Task 4 pinned that); if the compiler disagrees on a field, the DTO is wrong, not the kernel.
 
@@ -10497,24 +10553,228 @@ import { ApiError } from '@bytebureau/client'
 import { describe, expect, it } from 'vitest'
 import { isRefusal } from '../commands/run-session.js'
 import { describeError } from '../errors.js'
-
-const problem = (status: number, code: string, detail: string): ApiError =>
-  new ApiError(status, { type: `https://bytebureau.dev/problems/${code}`, title: 'T', status, detail, code })
+import { recordingClient, type Calls } from '../testing/recording-client.js'
+import { problemError } from '../testing/records.js'
+import type { Bureau } from './bureau.js'
+import { remoteBureau } from './remote.js'
 
 describe('problems of the daemon in the CLI', () => {
   it('counts a workspace, provider or missing-provider problem as a refusal and nothing else', () => {
-    expect(isRefusal(problem(422, 'workspace_not_a_repository', 'x'))).toBe(true)
-    expect(isRefusal(problem(502, 'provider_crash', 'x'))).toBe(true)
-    expect(isRefusal(problem(422, 'session_provider_missing', 'x'))).toBe(true)
-    expect(isRefusal(problem(409, 'session_invalid_transition', 'x'))).toBe(false)
-    expect(isRefusal(problem(503, 'store_unavailable', 'x'))).toBe(false)
+    expect(isRefusal(problemError(422, 'workspace_not_a_repository', 'x'))).toBe(true)
+    expect(isRefusal(problemError(502, 'provider_crash', 'x'))).toBe(true)
+    expect(isRefusal(problemError(422, 'session_provider_missing', 'x'))).toBe(true)
+    expect(isRefusal(problemError(409, 'session_invalid_transition', 'x'))).toBe(false)
+    expect(isRefusal(problemError(503, 'store_unavailable', 'x'))).toBe(false)
+  })
+
+  it('counts no answer, or an answer without a problem, as no refusal', () => {
+    expect(isRefusal(new ApiError(0, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(false)
+    expect(isRefusal(new ApiError(502, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(
+      false,
+    )
   })
 
   it('describes a problem with its detail and code, and a connection failure with its url', () => {
-    expect(describeError(problem(404, 'session_not_found', 'no session 42'))).toBe('no session 42 (session_not_found)')
+    expect(describeError(problemError(404, 'session_not_found', 'no session 42'))).toBe(
+      'no session 42 (session_not_found)',
+    )
     expect(describeError(new ApiError(0, undefined, 'http://127.0.0.1:1/api/v1/health'))).toBe(
       'cannot reach the daemon at http://127.0.0.1:1/api/v1/health',
     )
+  })
+})
+
+const DAEMON_URL = 'http://127.0.0.1:4747'
+
+// What a command asks of the Bureau, and the call of the client it comes to: its name and its arguments
+interface Passed {
+  readonly name: string
+  readonly args: readonly unknown[]
+  readonly ask: (bureau: Bureau) => Promise<void>
+}
+
+const ANSWER = { selected: ['yes'] }
+const BODY = { projectId: 'p1', title: 'Fix the build' }
+
+// The path of a project goes in the body the API registers it by; everything else goes on as it is
+const PASSED: readonly Passed[] = [
+  {
+    name: 'projects.register',
+    args: [{ path: '/repo' }],
+    ask: async (bureau) => {
+      await bureau.projects.register('/repo')
+    },
+  },
+  {
+    name: 'projects.list',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.projects.list()
+    },
+  },
+  {
+    name: 'projects.get',
+    args: ['p1'],
+    ask: async (bureau) => {
+      await bureau.projects.get('p1')
+    },
+  },
+  {
+    name: 'projects.remove',
+    args: ['p1'],
+    ask: async (bureau) => {
+      await bureau.projects.remove('p1')
+    },
+  },
+  {
+    name: 'sessions.create',
+    args: [BODY],
+    ask: async (bureau) => {
+      await bureau.sessions.create(BODY)
+    },
+  },
+  {
+    name: 'sessions.prompt',
+    args: ['s1', { text: 'go' }],
+    ask: async (bureau) => {
+      await bureau.sessions.prompt('s1', { text: 'go' })
+    },
+  },
+  {
+    name: 'sessions.interrupt',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.sessions.interrupt('s1')
+    },
+  },
+  {
+    name: 'sessions.stop',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.sessions.stop('s1')
+    },
+  },
+  {
+    name: 'sessions.complete',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.sessions.complete('s1')
+    },
+  },
+  {
+    name: 'sessions.resume',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.sessions.resume('s1')
+    },
+  },
+  {
+    name: 'sessions.list',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.sessions.list()
+    },
+  },
+  {
+    name: 'sessions.get',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.sessions.get('s1')
+    },
+  },
+  {
+    name: 'asks.pending',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.asks.pending('s1')
+    },
+  },
+  {
+    name: 'asks.get',
+    args: ['a1'],
+    ask: async (bureau) => {
+      await bureau.asks.get('a1')
+    },
+  },
+  {
+    name: 'asks.answer',
+    args: ['a1', ANSWER],
+    ask: async (bureau) => {
+      await bureau.asks.answer('a1', ANSWER)
+    },
+  },
+  {
+    name: 'workspaces.list',
+    args: ['p1'],
+    ask: async (bureau) => {
+      await bureau.workspaces.list('p1')
+    },
+  },
+  {
+    name: 'workspaces.prune',
+    args: ['p1'],
+    ask: async (bureau) => {
+      await bureau.workspaces.prune('p1')
+    },
+  },
+  {
+    name: 'usage.session',
+    args: ['s1'],
+    ask: async (bureau) => {
+      await bureau.usage.session('s1')
+    },
+  },
+  {
+    name: 'plugins.list',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.plugins.list()
+    },
+  },
+  {
+    name: 'plugins.providers',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.plugins.providers()
+    },
+  },
+  {
+    name: 'health.check',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.health.check()
+    },
+  },
+  {
+    name: 'close',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.close()
+    },
+  },
+]
+
+describe(remoteBureau, () => {
+  it.each(PASSED)('passes $name on to the client of the daemon', async ({ name, args, ask }) => {
+    expect.hasAssertions()
+    const calls: Calls = []
+    await ask(remoteBureau(recordingClient(calls), DAEMON_URL))
+    expect(calls).toStrictEqual([[name, ...args]])
+  })
+
+  it('subscribes with the signal of the run, and gives up on a daemon gone for fifteen seconds', () => {
+    const calls: Calls = []
+    const { signal } = new AbortController()
+    const filter = { sessionId: 's1', since: 0, ephemeral: false }
+    remoteBureau(recordingClient(calls), DAEMON_URL).events.subscribe(filter, signal)
+    expect(calls).toStrictEqual([['events.subscribe', filter, { signal, retryFor: 15_000 }]])
+  })
+
+  it('says which daemon it talks to', () => {
+    expect(remoteBureau(recordingClient([]), DAEMON_URL).where).toStrictEqual({
+      kind: 'daemon',
+      url: DAEMON_URL,
+    })
   })
 })
 ```
@@ -10526,19 +10786,30 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { writeServerInfo } from '../daemon/server-info.js'
+import { tokenPath } from '../daemon/token.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { resolveServer } from './resolve.js'
 
-const info = { version: '0', host: '127.0.0.1', port: 4747, pid: process.pid, token: 't'.repeat(64), startedAt: 's' }
+const info = {
+  version: '0',
+  host: '127.0.0.1',
+  port: 4747,
+  pid: process.pid,
+  token: 't'.repeat(64),
+  startedAt: 's',
+}
+
+// No process has this pid: the highest a system hands out is far below it
+const DEAD_PID = 2_147_483_000
 
 describe(resolveServer, () => {
-  it('names the live daemon of the home', () => {
-    const home = tempDir('bb-home-')
-    writeServerInfo(home, info)
-    expect(resolveServer({}, home)).toStrictEqual({ kind: 'known', url: 'http://127.0.0.1:4747', token: info.token })
-  })
-
-  it('names nothing when no daemon is alive, so one can be started', () => {
+  it('names no daemon without --host and --port, not even one server.json calls alive: only its answer will tell', () => {
+    const alive = tempDir('bb-home-')
+    const stale = tempDir('bb-home-')
+    writeServerInfo(alive, info)
+    writeServerInfo(stale, { ...info, pid: DEAD_PID })
+    expect(resolveServer({}, alive)).toStrictEqual({ kind: 'none' })
+    expect(resolveServer({}, stale)).toStrictEqual({ kind: 'none' })
     expect(resolveServer({}, tempDir('bb-home-'))).toStrictEqual({ kind: 'none' })
   })
 
@@ -10556,7 +10827,37 @@ describe(resolveServer, () => {
   it('takes the token of the home for --host and --port without a token file', () => {
     const home = tempDir('bb-home-')
     writeServerInfo(home, info)
-    expect(resolveServer({ host: '127.0.0.1', port: 5000 }, home)).toStrictEqual({ kind: 'explicit', url: 'http://127.0.0.1:5000', token: info.token })
+    expect(resolveServer({ host: '127.0.0.1', port: 5000 }, home)).toStrictEqual({
+      kind: 'explicit',
+      url: 'http://127.0.0.1:5000',
+      token: info.token,
+    })
+  })
+})
+
+describe('resolveServer for a daemon named on the command line', () => {
+  it('takes the token the home keeps when its daemon is not running, and none when it keeps none', () => {
+    const home = tempDir('bb-home-')
+    writeFileSync(tokenPath(home), `${'k'.repeat(64)}\n`)
+    expect(resolveServer({ port: 5000 }, home)).toStrictEqual({
+      kind: 'explicit',
+      url: 'http://127.0.0.1:5000',
+      token: 'k'.repeat(64),
+    })
+    expect(resolveServer({ port: 5000 }, tempDir('bb-home-'))).toMatchObject({ token: '' })
+  })
+
+  it('names a token file it cannot read, rather than what the system says of it', () => {
+    const file = path.join(tempDir('bb-home-'), 'no-such-token')
+    expect(() => resolveServer({ port: 5000, tokenFile: file }, tempDir('bb-home-'))).toThrow(
+      new Error(`Cannot read the token file ${file}`),
+    )
+  })
+
+  it('fills in the loopback for --port alone and the default port for --host alone', () => {
+    const home = tempDir('bb-home-')
+    expect(resolveServer({ port: 5000 }, home)).toMatchObject({ url: 'http://127.0.0.1:5000' })
+    expect(resolveServer({ host: '::1' }, home)).toMatchObject({ url: 'http://[::1]:4747' })
   })
 })
 ```
@@ -10566,24 +10867,30 @@ describe(resolveServer, () => {
 `apps/bytebureau/src/bureau/resolve.ts`:
 ```ts
 import { readFileSync } from 'node:fs'
+import { m } from '@bytebureau/i18n'
 import { serverUrl } from '@bytebureau/protocol'
 import { readServerInfo } from '../daemon/server-info.js'
 import { tokenPath } from '../daemon/token.js'
 
+// A daemon named on the command line, and the file of its token
 export interface ServerFlags {
   readonly host?: string | undefined
   readonly port?: number | undefined
   readonly tokenFile?: string | undefined
 }
 
-export type ResolvedServer =
+// The Bureau a command talks to: the daemon unless --no-daemon
+export interface BureauFlags extends ServerFlags {
+  readonly daemon: boolean
+}
+
+type ResolvedServer =
   // A daemon named on the command line: used as it is, never started
   | { readonly kind: 'explicit'; readonly url: string; readonly token: string }
-  // The live daemon of the home
-  | { readonly kind: 'known'; readonly url: string; readonly token: string }
+  // None named: the daemon of the home is the one that answers, or one started on demand
   | { readonly kind: 'none' }
 
-// The token of the home is the one its daemon.token keeps (Task 8); reading it here never generates one — tokenFor would
+// The token the home keeps in daemon.token, read as it is: tokenFor would make one for a home that has none
 const keptToken = (home: string): string => {
   try {
     return readFileSync(tokenPath(home), 'utf8').trim()
@@ -10592,39 +10899,49 @@ const keptToken = (home: string): string => {
   }
 }
 
+// The token a --token-file holds; a file that cannot be read is named, which the error of the system does in its own words
+const tokenIn = (file: string): string => {
+  try {
+    return readFileSync(file, 'utf8').trim()
+  } catch (error) {
+    throw new Error(m.bureau_token_file_unreadable({ file }), { cause: error })
+  }
+}
+
 const tokenOf = (flags: ServerFlags, home: string): string => {
   if (flags.tokenFile !== undefined) {
-    return readFileSync(flags.tokenFile, 'utf8').trim()
+    return tokenIn(flags.tokenFile)
   }
   const record = readServerInfo(home)
   return record.state === 'alive' ? record.info.token : keptToken(home)
 }
 
+// The daemon --host and --port name; server.json names none, as only an answer of its daemon tells that a record holds
 export const resolveServer = (flags: ServerFlags, home: string): ResolvedServer => {
-  if (flags.host !== undefined || flags.port !== undefined) {
-    const host = flags.host ?? '127.0.0.1'
-    const port = flags.port ?? 4747
-    return { kind: 'explicit', url: serverUrl({ host, port }), token: tokenOf(flags, home) }
+  if (flags.host === undefined && flags.port === undefined) {
+    return { kind: 'none' }
   }
-  const record = readServerInfo(home)
-  return record.state === 'alive'
-    ? { kind: 'known', url: serverUrl(record.info), token: record.info.token }
-    : { kind: 'none' }
+  const host = flags.host ?? '127.0.0.1'
+  const port = flags.port ?? 4747
+  return { kind: 'explicit', url: serverUrl({ host, port }), token: tokenOf(flags, home) }
 }
 ```
 
 `apps/bytebureau/src/bureau/ensure-daemon.ts`:
 ```ts
-import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
+import { m } from '@bytebureau/i18n'
+import type { ServerInfo } from '@bytebureau/protocol'
 import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
 import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
+import { daemonEnv } from './session-env.js'
 
-export class DaemonUnavailable extends Error {
-  public override readonly name = 'DaemonUnavailable'
+class DaemonUnavailableError extends Error {
+  public override readonly name = 'DaemonUnavailableError'
 }
 
-// The daemon of the home, started detached when none answers; a start that does not come up in time is a failure that names the log
-// runningDaemon (Task 8) accepts only a daemon whose health answers with the start time of server.json, never a process that took over its pid
+// The daemon of the home, started detached as serve starts it when none answers; a start that does not come up in time names the log that says why
+// Only a daemon whose health answers with the start time of server.json counts, never a process that took over its pid
+// It gets the environment of the command without the choices of that run, which would be its defaults for every later one
 export const ensureDaemon = async (
   home: string,
   env: Readonly<Record<string, string | undefined>>,
@@ -10633,15 +10950,13 @@ export const ensureDaemon = async (
   if (running !== undefined) {
     return running
   }
-  spawnDaemon(home, env, [])
-  const info = await waitForDaemon(home)
-  if (info === undefined) {
-    throw new DaemonUnavailable(`the daemon did not start; see ${daemonLogPath(home)}`)
+  spawnDaemon(home, daemonEnv(env), [])
+  const started = await waitForDaemon(home)
+  if (started === undefined) {
+    throw new DaemonUnavailableError(m.serve_timeout({ log: daemonLogPath(home) }))
   }
-  return info
+  return started
 }
-
-export const urlOf = (info: ServerInfo): string => serverUrl(info)
 ```
 
 `apps/bytebureau/src/bureau/remote.ts`:
@@ -10649,42 +10964,27 @@ export const urlOf = (info: ServerInfo): string => serverUrl(info)
 import type { BureauClient } from '@bytebureau/client'
 import type { Bureau } from './bureau.js'
 
-// The daemon as a Bureau: every call is one request; a lookup that the API answers 404 to is undefined here
+// The daemon as a Bureau: every call is one request; a lookup the API answers 404 to is undefined here
 export const remoteBureau = (client: BureauClient, url: string): Bureau => ({
   projects: {
-    register: (path) => client.projects.register({ path }),
-    list: client.projects.list,
-    get: (id) => client.projects.get(id),
-    remove: (id) => client.projects.remove(id),
+    ...client.projects,
+    register: async (path) => {
+      const project = await client.projects.register({ path })
+      return project
+    },
   },
-  sessions: {
-    create: (body) => client.sessions.create(body),
-    prompt: (sessionId, input) => client.sessions.prompt(sessionId, input),
-    interrupt: (sessionId) => client.sessions.interrupt(sessionId),
-    stop: (sessionId) => client.sessions.stop(sessionId),
-    complete: (sessionId) => client.sessions.complete(sessionId),
-    resume: (sessionId) => client.sessions.resume(sessionId),
-    list: client.sessions.list,
-    get: (id) => client.sessions.get(id),
+  sessions: client.sessions,
+  asks: client.asks,
+  // A run gives up on a daemon that stays unreachable for fifteen seconds; the next start of the daemon stops the session
+  events: {
+    subscribe: (filter, signal) => client.events.subscribe(filter, { signal, retryFor: 15_000 }),
   },
-  asks: {
-    pending: (sessionId) => client.asks.pending(sessionId),
-    get: (id) => client.asks.get(id),
-    answer: (askId, answer) => client.asks.answer(askId, answer),
-  },
-  // A run gives up on a daemon that stays unreachable for fifteen seconds; the next daemon start recovers the session
-  events: { subscribe: (filter, signal) => client.events.subscribe(filter, { signal, retryFor: 15_000 }) },
-  workspaces: {
-    list: (projectId) => client.workspaces.list(projectId),
-    prune: (projectId) => client.workspaces.prune(projectId),
-  },
-  usage: { session: (sessionId) => client.usage.session(sessionId) },
-  plugins: { list: client.plugins.list, providers: client.plugins.providers },
-  health: { check: client.health.check },
+  workspaces: client.workspaces,
+  usage: client.usage,
+  plugins: client.plugins,
+  health: client.health,
   where: { kind: 'daemon', url },
-  close: async () => {
-    await client.close()
-  },
+  close: client.close,
 })
 ```
 Task 7's `client.projects.get(id)` resolves `undefined` on a 404 and throws `ApiError` on any other problem; `client.events.subscribe(filter, { signal })` applies `ephemeral: false` by dropping `seq === 0` events client-side (the SSE endpoint has no such query).
@@ -10692,74 +10992,422 @@ Task 7's `client.projects.get(id)` resolves `undefined` on a 404 and throws `Api
 `apps/bytebureau/src/bureau/with-bureau.ts`:
 ```ts
 import { createBureauClient } from '@bytebureau/client'
-import { m } from '@bytebureau/i18n'
+import { serverUrl } from '@bytebureau/protocol'
 import type { Context } from '../context.js'
-import { runningDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
-import { openKernel } from '../kernel.js'
 import { withResource } from '../resource.js'
-import { version } from '../version.js'
 import type { Bureau } from './bureau.js'
-import { ensureDaemon, urlOf } from './ensure-daemon.js'
-import { localBureau } from './local.js'
+import { ensureDaemon } from './ensure-daemon.js'
+import { openLocal } from './open-local.js'
 import { remoteBureau } from './remote.js'
-import { resolveServer, type ServerFlags } from './resolve.js'
+import { resolveServer, type BureauFlags, type ServerFlags } from './resolve.js'
 
-export interface BureauFlags extends ServerFlags {
-  readonly daemon: boolean
-}
+type Env = Readonly<Record<string, string | undefined>>
 
-export class DaemonRunning extends Error {
-  public override readonly name = 'DaemonRunning'
-}
-
-// The store has one writer: an in-process kernel is refused while the daemon of the same home is alive
-const openLocal = async (context: Context, env: Readonly<Record<string, string | undefined>>): Promise<Bureau> => {
+// The daemon the flags name, else the daemon of the home that answers, else one started on demand
+// A record whose daemon does not answer (its pid taken over after a crash, a daemon on its way out) leads to a start, never to a failure
+const openRemote = async (flags: ServerFlags, env: Env): Promise<Bureau> => {
   const home = kernelHome(env)
-  const running = await runningDaemon(home)
-  if (running !== undefined) {
-    throw new DaemonRunning(m.bureau_daemon_running({ pid: running.pid, url: urlOf(running) }))
-  }
-  return localBureau(await openKernel(context, env), version)
-}
-
-const openRemote = async (flags: ServerFlags, env: Readonly<Record<string, string | undefined>>): Promise<Bureau> => {
-  const home = kernelHome(env)
-  const resolved = resolveServer(flags, home)
-  if (resolved.kind !== 'none') {
-    return remoteBureau(createBureauClient({ baseUrl: resolved.url, token: resolved.token }), resolved.url)
+  const named = resolveServer(flags, home)
+  if (named.kind === 'explicit') {
+    return remoteBureau(createBureauClient({ baseUrl: named.url, token: named.token }), named.url)
   }
   const info = await ensureDaemon(home, env)
-  return remoteBureau(createBureauClient({ baseUrl: urlOf(info), token: info.token }), urlOf(info))
+  const url = serverUrl(info)
+  return remoteBureau(createBureauClient({ baseUrl: url, token: info.token }), url)
 }
 
-// A Bureau for the length of the work: the daemon's unless --no-daemon
-export const withBureau = <Result>(
+// A Bureau for the length of the work, closed after it: the daemon's unless --no-daemon
+export const withBureau = async <Result>(
   context: Context,
   flags: BureauFlags,
-  env: Readonly<Record<string, string | undefined>>,
   work: (bureau: Bureau) => Promise<Result>,
-): Promise<Result> =>
-  withResource(() => (flags.daemon ? openRemote(flags, env) : openLocal(context, env)), work)
+): Promise<Result> => {
+  const open = async (): Promise<Bureau> => {
+    const bureau = flags.daemon ? await openRemote(flags, context.env) : await openLocal(context)
+    return bureau
+  }
+  const result = await withResource(open, work)
+  return result
+}
 ```
 `apps/bytebureau/src/kernel.ts` keeps only `openKernel(context, env): Promise<Kernel>` (the body of the former `open`). `DaemonRunning` and `DaemonUnavailable` end a command with exit 1 (a refusal with a reason) — `run.ts` (the citty runner) maps them: add to its `catch`: `if (error instanceof DaemonRunning) { console.error(error.message); return 1 }` and `DaemonUnavailable` → exit 2 with the message (the generic path already does that; only `DaemonRunning` needs the branch). `errors.ts`: `describeError` gains `ApiError`: a problem is told as `${detail} (${code})`, a connection failure as `cannot reach the daemon at ${url}`.
 
 `apps/bytebureau/src/context.ts`, `globalArgs` gain:
 ```ts
-  daemon: { type: 'boolean', description: 'Talk to the daemon (started on demand); pass --no-daemon to run the kernel in-process', default: true },
+import { isatty } from 'node:tty'
+import { m, setLocale } from '@bytebureau/i18n'
+import type { BureauFlags } from './bureau/resolve.js'
+import { resolveLocale } from './locale.js'
+import { colorEnabled, createOutput, type Output } from './output.js'
+
+export const globalArgs = {
+  lang: { type: 'string', description: 'UI language: en or cs' },
+  json: { type: 'boolean', description: 'Machine-readable JSON output', default: false },
+  color: {
+    type: 'boolean',
+    description: 'Colour output; pass --no-color to disable',
+    default: true,
+  },
+  yes: {
+    type: 'boolean',
+    description: 'Answer every ask that has a recommended option with it',
+    default: false,
+  },
+  debug: {
+    type: 'string',
+    description:
+      'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
+  },
+  'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
+  daemon: {
+    type: 'boolean',
+    description:
+      'Talk to the daemon (started on demand); pass --no-daemon to run the kernel in-process',
+    default: true,
+  },
   host: { type: 'string', description: 'Host of a daemon to talk to (never started on demand)' },
   port: { type: 'string', description: 'Port of that daemon' },
   'token-file': { type: 'string', description: 'File holding the bearer token of that daemon' },
+} as const
+
+export interface GlobalArgs {
+  readonly lang?: string | undefined
+  readonly json: boolean
+  readonly color: boolean
+  readonly yes: boolean
+  readonly debug?: string | undefined
+  readonly 'log-level'?: string | undefined
+  // Citty gives false for --no-daemon alone; arguments made without the flag talk to the daemon too
+  readonly daemon?: boolean | undefined
+  readonly host?: string | undefined
+  readonly port?: string | undefined
+  readonly 'token-file'?: string | undefined
+}
+
+export interface Context {
+  readonly output: Output
+  readonly interactive: boolean
+  readonly logging: {
+    readonly debug: string | undefined
+    readonly level: string | undefined
+  }
+  // The home of the command, the configuration it reads and the environment of a daemon it starts
+  readonly env: Readonly<Record<string, string | undefined>>
+}
+
+export function createContext(
+  args: GlobalArgs,
+  env: Readonly<Record<string, string | undefined>>,
+  stdoutIsTTY: boolean,
+): Context {
+  const { locale, unsupported } = resolveLocale({ flag: args.lang, env })
+  setLocale(locale)
+  const output = createOutput({
+    json: args.json,
+    color: colorEnabled(env, !args.color, stdoutIsTTY),
+  })
+  if (unsupported !== undefined) {
+    output.warn(m.cli_unknown_locale({ locale: unsupported }))
+  }
+  return {
+    output,
+    interactive: stdoutIsTTY && !args.json,
+    logging: { debug: args.debug, level: args['log-level'] },
+    env,
+  }
+}
+
+// The context of the running process: its environment, and whether its stdout is a terminal
+export function processContext(args: GlobalArgs): Context {
+  return createContext(args, process.env, isatty(process.stdout.fd))
+}
+
+const usageError = (message: string): Error =>
+  Object.assign(new Error(message), { name: 'CLIError' })
+
+// A port is a whole number up to 65535; 0 asks for a free one
+export const portOf = (text: string | undefined): number | undefined => {
+  if (text === undefined) {
+    return undefined
+  }
+  const port = Number(text)
+  if (!/^\d+$/u.test(text) || port > 65_535) {
+    throw usageError(`--port takes a whole number from 0 to 65535, not ${text}`)
+  }
+  return port
+}
+
+// The Bureau the global flags ask for: the daemon of the home, the one --host and --port name, or the kernel in-process
+export function bureauFlags(args: GlobalArgs): BureauFlags {
+  if (args['token-file'] !== undefined && args.host === undefined && args.port === undefined) {
+    throw usageError(
+      '--token-file goes with --host or --port: it holds the token of the daemon they name',
+    )
+  }
+  return {
+    daemon: args.daemon !== false,
+    host: args.host,
+    port: portOf(args.port),
+    tokenFile: args['token-file'],
+  }
+}
 ```
 and `GlobalArgs` the matching fields; `bureauFlags(args): BureauFlags` (a helper in `context.ts`) turns them into `{ daemon, host, port: Number | undefined, tokenFile }`. The `run` command drops its own `no-daemon` argument (the global one replaces it; `--no-daemon` keeps working because citty's boolean `daemon` accepts `--no-daemon`).
 
 - [ ] **Step 4: Commands and the run through a Bureau**
 
-`run-session.ts`: `RunKernel` is replaced by `Bureau` (import the type); the project path is made absolute with `path.resolve` before `bureau.projects.register` (the daemon resolves a relative path in its own working directory — the `run` command and `projects add` resolve `args.project`/`args.path` against the CLI's cwd, and the Phase A tests pass absolute temp paths already); `unknownProvider` awaits `bureau.plugins.providers()`, `answerAsk` calls `bureau.asks.answer(ask.id, answer)`, `followSession` subscribes with `bureau.events.subscribe({ sessionId, since: 0, ephemeral: false }, controller.signal)` and aborts the controller in its `finally`, and the signal handling covers `SIGINT`, `SIGTERM` and `SIGHUP` (one `stop` for the three, `process.once` each, `process.off` each in `finally`). `isRefusal` is exported and gains:
+`apps/bytebureau/src/commands/run-session.ts` (as shipped below): `RunKernel` is replaced by `Bureau` (import the type); the project path is made absolute with `path.resolve` before `bureau.projects.register` (the daemon resolves a relative path in its own working directory — the `run` command and `projects add` resolve `args.project`/`args.path` against the CLI's cwd, and the Phase A tests pass absolute temp paths already); `unknownProvider` awaits `bureau.plugins.providers()`, `answerAsk` calls `bureau.asks.answer(ask.id, answer)`, `followSession` subscribes with `bureau.events.subscribe({ sessionId, since: 0, ephemeral: false }, controller.signal)` and aborts the controller in its `finally`, and the signal handling covers `SIGINT`, `SIGTERM` and `SIGHUP` (one `stop` for the three, `process.once` each, `process.off` each in `finally`). `isRefusal` is exported and gains:
 ```ts
+import { ApiError } from '@bytebureau/client'
+import { m } from '@bytebureau/i18n'
+import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
+import {
+  decodeEventPayload,
+  type Ask,
+  type CreateSessionBody,
+  type EventEnvelope,
+} from '@bytebureau/protocol'
+import type { Bureau } from '../bureau/bureau.js'
+import type { Context } from '../context.js'
+import { promptAsk } from '../render/ask-prompt.js'
+import { completionLine, readOrSkip, summarizeRun, titleOf } from '../render/transcript.js'
+import { describeError } from '../errors.js'
+import { closeFrame, EXIT_REFUSED, open, refuse, report, show, type Outcome } from './run-output.js'
+
+const EXIT_COMPLETED = 0
+const EXIT_STOPPED = 3
+
+const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
+
+// The first of them stops the session, and one of another kind after it does nothing; the second of a kind ends the process as it would without the run
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+// Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
 const REMOTE_REFUSALS = /^(?:workspace_|provider_|session_provider_missing$)/u
-if (error instanceof ApiError) {
-  return error.problem !== undefined && REMOTE_REFUSALS.test(error.problem.code)
+
+type Output = Context['output']
+
+export interface RunOptions {
+  readonly prompt: string
+  // An absolute path: the daemon would resolve a relative one in its own working directory
+  readonly project: string
+  readonly branch?: string | undefined
+  readonly employee?: string | undefined
+  readonly provider?: string | undefined
+  // The BYTEBUREAU_* variables of the command, for the agent: a daemon does not read the environment of the command
+  readonly env: Readonly<Record<string, string>>
+  readonly yes: boolean
+}
+
+interface Run {
+  readonly bureau: Bureau
+  readonly session: { readonly id: string }
+  readonly options: RunOptions
+  readonly context: Context
+}
+
+// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
+export function isRefusal(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.problem !== undefined && REMOTE_REFUSALS.test(error.problem.code)
+  }
+  if (error instanceof WorkspaceError) {
+    return true
+  }
+  if (error instanceof SessionError) {
+    return error.code === 'provider_missing'
+  }
+  return error instanceof ProviderError
+}
+
+// A named provider is checked before anything is registered or created
+async function unknownProvider(
+  bureau: Bureau,
+  provider: string | undefined,
+): Promise<string | undefined> {
+  if (provider === undefined) {
+    return undefined
+  }
+  const providers = await bureau.plugins.providers()
+  const available = providers.map((candidate) => candidate.id)
+  return available.includes(provider)
+    ? undefined
+    : m.run_provider_missing({ provider, available: available.join(', ') })
+}
+
+// An ask nobody can answer is left to the kernel policy; the person is told the session waits
+async function answerAsk({ bureau, options, context }: Run, ask: Ask): Promise<void> {
+  const answer = await promptAsk(ask, { yes: options.yes, interactive: context.interactive })
+  if (answer === undefined) {
+    context.output.warn(m.run_ask_waiting({ title: ask.title }))
+    return
+  }
+  await bureau.asks.answer(ask.id, answer)
+}
+
+// The ask of an ask.requested event, if its payload fits
+function askOf(event: EventEnvelope, output: Output): Ask | undefined {
+  return readOrSkip(event, output, () => decodeEventPayload('ask.requested', event.payload).ask)
+}
+
+// Besides showing an event the CLI answers an ask, and completes the session once its turn is over
+async function react(run: Run, event: EventEnvelope): Promise<void> {
+  const ask = event.type === 'ask.requested' ? askOf(event, run.context.output) : undefined
+  if (ask !== undefined) {
+    await answerAsk(run, ask)
+  }
+  if (event.type === 'turn.completed') {
+    await run.bureau.sessions.complete(run.session.id)
+  }
+}
+
+// The events up to the end of the session, which is the last one returned
+async function follow(run: Run, events: AsyncIterable<EventEnvelope>): Promise<EventEnvelope[]> {
+  const seen: EventEnvelope[] = []
+  for await (const event of events) {
+    seen.push(event)
+    show(event, run.context)
+    await react(run, event)
+    if (TERMINAL.has(event.type)) {
+      break
+    }
+  }
+  return seen
+}
+
+// A stop that fails is only reported; the same signal again ends the process
+async function stopSession({ bureau, session, context }: Run): Promise<void> {
+  try {
+    await bureau.sessions.stop(session.id)
+  } catch (error) {
+    context.output.warn(describeError(error))
+  }
+}
+
+// Ctrl-C, SIGTERM and SIGHUP stop the session alike, once; the result is a release that removes the listeners and waits for the stop
+function stopOnSignals(run: Run): () => Promise<void> {
+  let stopping = Promise.resolve()
+  let stopped = false
+  const stop = (): void => {
+    if (!stopped) {
+      stopped = true
+      stopping = stopSession(run)
+    }
+  }
+  for (const signal of STOP_SIGNALS) {
+    process.once(signal, stop)
+  }
+  return async () => {
+    for (const signal of STOP_SIGNALS) {
+      process.off(signal, stop)
+    }
+    await stopping
+  }
+}
+
+// A signal stops the session; the events then say so and the run ends with the exit code of a stopped one
+// The children of the kernel run detached, so the terminal does not reach them: only the stop does
+async function followSession(run: Run): Promise<EventEnvelope[]> {
+  const { bureau, session, options } = run
+  const subscription = new AbortController()
+  const release = stopOnSignals(run)
+  try {
+    // The ephemeral events (text deltas) carry no seq of their own and no transcript line
+    const filter = { sessionId: session.id, since: 0, ephemeral: false }
+    const events = bureau.events.subscribe(filter, subscription.signal)
+    await bureau.sessions.prompt(session.id, { text: options.prompt })
+    return await follow(run, events)
+  } finally {
+    subscription.abort()
+    await release()
+  }
+}
+
+// The reason of an errored session; the type of the event stands in for a payload that cannot be read
+function reasonOf(last: EventEnvelope, output: Output): string {
+  const reason = readOrSkip(last, output, () => decodeEventPayload('session.errored', last.payload))
+  return reason === undefined ? last.type : reason.message
+}
+
+// The summary is built only for the words that are printed: JSON output has none
+function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: Output): Outcome {
+  switch (last.type) {
+    case 'session.stopped': {
+      return { code: EXIT_STOPPED, text: m.run_stopped() }
+    }
+    case 'session.errored': {
+      return { code: EXIT_REFUSED, text: m.run_errored({ message: reasonOf(last, output) }) }
+    }
+    default: {
+      return {
+        code: EXIT_COMPLETED,
+        text: output.json ? '' : completionLine(summarizeRun(seen, output)),
+      }
+    }
+  }
+}
+
+function conclude(seen: readonly EventEnvelope[], context: Context): number {
+  const last = seen.at(-1)
+  if (last === undefined || !TERMINAL.has(last.type)) {
+    throw new Error('the events ended before the session did')
+  }
+  const outcome = outcomeOf(last, seen, context.output)
+  report(outcome, context)
+  return outcome.code
+}
+
+// The session as the person asked for it: what is not named is left to the kernel
+function sessionBody(projectId: string, options: RunOptions): CreateSessionBody {
+  return {
+    projectId,
+    title: titleOf(options.prompt),
+    ...(options.employee === undefined ? {} : { employeeId: options.employee }),
+    ...(options.provider === undefined ? {} : { providerId: options.provider }),
+    ...(options.branch === undefined ? {} : { branch: options.branch }),
+    env: options.env,
+  }
+}
+
+async function startAndFollow(
+  bureau: Bureau,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  const project = await bureau.projects.register(options.project)
+  const session = await bureau.sessions.create(sessionBody(project.id, options))
+  const seen = await followSession({ bureau, session, options, context })
+  return conclude(seen, context)
+}
+
+// A named provider is refused before anything is registered or created
+async function runOrRefuse(bureau: Bureau, options: RunOptions, context: Context): Promise<number> {
+  const refusal = await unknownProvider(bureau, options.provider)
+  if (refusal !== undefined) {
+    return refuse(context, refusal)
+  }
+  const code = await startAndFollow(bureau, options, context)
+  return code
+}
+
+// Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project, worktree or provider refused
+// A failure that has no exit code of its own closes the frame and goes on to the runner
+export async function runSession(
+  bureau: Bureau,
+  options: RunOptions,
+  context: Context,
+): Promise<number> {
+  open(context, options.prompt)
+  try {
+    return await runOrRefuse(bureau, options, context)
+  } catch (error) {
+    if (!isRefusal(error)) {
+      closeFrame(context)
+      throw error
+    }
+    return refuse(context, describeError(error))
+  }
 }
 ```
 `run.ts` (the command), `projects.ts`, `workspaces.ts` call `withBureau(context, bureauFlags(args), process.env, …)` instead of `withKernel`; `config.ts` keeps the in-process kernel for `validate`/`schema` (they read files, no daemon needed) through `openKernel` — `config` is the one command that never talks to a daemon. `projects rm`'s `has_sessions` refusal is now either the kernel's `WorkspaceError` or an `ApiError` with code `workspace_has_sessions`: match both. `main.ts`: before `process.exit(...)`, `await drained()` where `drained = () => new Promise<void>((resolve) => { process.stdout.write('', () => resolve()) })`.
@@ -10772,78 +11420,175 @@ New messages: `bureau_daemon_running` = "A daemon is running on {url} (pid {pid}
 
 `apps/bytebureau/src/commands/run-daemon.test.ts`:
 ```ts
-import { existsSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
-import { readServerInfo } from '../daemon/server-info.js'
+import { existsSync, readdirSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { readServerInfo, writeServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { startDaemonProcess } from '../testing/daemon.js'
-import { jsonLines } from '../testing/json-lines.js'
-import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
-import { FAKE, PROMPT, workbench, worktreesOf } from '../testing/workbench.js'
+import { freePort, startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
+import { eventLines, jsonLines } from '../testing/json-lines.js'
+import { runCli, type CliResult } from '../testing/run-cli.js'
+import { createTempRepo, testHome } from '../testing/temp-repo.js'
+import { PROMPT, projectIdIn, workbench, worktreesOf } from '../testing/workbench.js'
+
+// The fake provider read like a script: events as JSON, every ask answered; no --no-daemon here
+const SCRIPTED = ['--provider', 'fake', '--json', '--yes']
+
+// Without --yes and off a terminal the run waits on the question of the fake provider
+const WAITING = ['--provider', 'fake', '--json']
+
+// A run of the prompt on the repository, through the daemon of the home unless the flags say otherwise
+async function runOn(repo: string, home: string, flags = SCRIPTED): Promise<CliResult> {
+  const result = await runCli(['run', PROMPT, '--project', repo, ...flags], {
+    BYTEBUREAU_HOME: home,
+  })
+  return result
+}
+
+// A daemon the CLI starts on demand ends with the test, should an assertion fail before the test stops it
+function stoppedWithTheTest(home: string): void {
+  onTestFinished(async () => {
+    await stopDaemonOf(home)
+  })
+}
 
 describe('bytebureau run through the daemon', () => {
   it('runs the fake provider end to end over the API and streams NDJSON events', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const daemon = await startDaemonProcess(home)
-    const result = await runCli(['run', PROMPT, '--project', repo, ...FAKE], { BYTEBUREAU_HOME: home })
-    expect(result.stderr).toBe('')
-    expect(result.code).toBe(0)
+    const result = await runOn(repo, home)
     const types = jsonLines(result.stdout).map((record) => record['type'])
-    expect(types).toContain('session.created')
-    expect(types).toContain('ask.requested')
+    expect([result.code, result.stderr]).toStrictEqual([0, ''])
+    expect(types).toStrictEqual(expect.arrayContaining(['session.created', 'ask.requested']))
     expect(types.at(-1)).toBe('session.completed')
     expect(existsSync(worktreesOf(repo))).toBe(true)
-    const listed = await runCli(['projects', 'ls', '--json'], { BYTEBUREAU_HOME: home })
-    expect(jsonLines(listed.stdout)).toMatchObject([{ projects: [{ path: repo }] }])
     await daemon.stop()
   })
 
+  it('lists the project of the run, and refuses to remove it while it has a session', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const daemon = await startDaemonProcess(home)
+    await runOn(repo, home)
+    const listed = await runCli(['projects', 'ls', '--json'], { BYTEBUREAU_HOME: home })
+    const id = await projectIdIn(home, [])
+    const removed = await runCli(['projects', 'rm', id], { BYTEBUREAU_HOME: home })
+    expect(jsonLines(listed.stdout)).toMatchObject([{ projects: [{ id, path: repo }] }])
+    // The kernel's refusal comes as a problem; it is told as the in-process one is, with exit code 1
+    expect([removed.code, removed.stderr.trim()]).toStrictEqual([
+      1,
+      `project ${path.basename(repo)} still has 1 session`,
+    ])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau run and the daemon of its home', () => {
   it('starts the daemon on demand when none runs, and leaves it running', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
+    stoppedWithTheTest(home)
     expect(readServerInfo(home).state).toBe('absent')
-    const result = await runCli(['run', PROMPT, '--project', repo, ...FAKE], { BYTEBUREAU_HOME: home })
+    const result = await runOn(repo, home)
     expect(result.code).toBe(0)
     expect(readServerInfo(home).state).toBe('alive')
-    expect(await stopDaemon(home)).toMatchObject({ outcome: 'stopped' })
+    await expect(stopDaemon(home)).resolves.toMatchObject({ outcome: 'stopped' })
   })
 
   it('refuses --no-daemon while the daemon is alive, with exit 1 and the way out', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const daemon = await startDaemonProcess(home)
-    const result = await runCli(['run', PROMPT, '--project', repo, '--no-daemon', ...FAKE], { BYTEBUREAU_HOME: home })
+    const result = await runOn(repo, home, ['--no-daemon', ...SCRIPTED])
     expect(result.code).toBe(1)
-    expect(result.stderr.trim()).toMatch(/^A daemon is running on http:\/\/127\.0\.0\.1:\d+ \(pid \d+\); drop --no-daemon/u)
+    expect(result.stderr.trim()).toBe(
+      `A daemon is running on ${daemon.url} (pid ${daemon.info.pid}); drop --no-daemon or stop it with bytebureau serve --stop`,
+    )
     await daemon.stop()
   })
 
-  it('fails with exit 2 and the url when --host and --port name a daemon that is not there', async () => {
+  it('still runs in-process with --no-daemon when no daemon is alive', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
-    const result = await runCli(['projects', 'ls', '--host', '127.0.0.1', '--port', '9'], { BYTEBUREAU_HOME: home })
-    expect(result.code).toBe(2)
-    expect(result.stderr.trim()).toBe('cannot reach the daemon at http://127.0.0.1:9/api/v1/projects')
+    const { repo, home } = workbench()
+    const result = await runOn(repo, home, ['--no-daemon', ...SCRIPTED])
+    expect(result.code).toBe(0)
     expect(readServerInfo(home).state).toBe('absent')
   })
+})
 
-  it('runs two sessions through one daemon at the same time and lists both', async () => {
+// The record of a daemon that crashed, its pid taken over: this test's pid is alive, and nothing listens on the port
+async function writeUnansweredRecord(home: string): Promise<void> {
+  const port = await freePort()
+  const token = 'a'.repeat(64)
+  writeServerInfo(home, {
+    version: '0',
+    host: '127.0.0.1',
+    port,
+    pid: process.pid,
+    token,
+    startedAt: 's',
+  })
+}
+
+describe('bytebureau commands and a record whose daemon does not answer', () => {
+  it('trust no record but an answer: they start a daemon on demand', async () => {
     expect.hasAssertions()
-    const first = workbench()
-    const second = { repo: workbench().repo, home: first.home }
-    const daemon = await startDaemonProcess(first.home)
-    const env = { BYTEBUREAU_HOME: first.home }
-    const [left, right] = await Promise.all([
-      runCli(['run', PROMPT, '--project', first.repo, ...FAKE], env),
-      runCli(['run', PROMPT, '--project', second.repo, ...FAKE], env),
+    const home = testHome()
+    stoppedWithTheTest(home)
+    await writeUnansweredRecord(home)
+    const listed = await runCli(['projects', 'ls', '--json'], { BYTEBUREAU_HOME: home })
+    const record = readServerInfo(home)
+    expect([listed.code, record.state]).toStrictEqual([0, 'alive'])
+    expect(record).not.toMatchObject({ info: { pid: process.pid } })
+    await expect(stopDaemon(home)).resolves.toMatchObject({ outcome: 'stopped' })
+  })
+})
+
+describe('bytebureau commands and a daemon named on the command line', () => {
+  it('fail with exit 2 and the url when --host and --port name a daemon that is not there', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const result = await runCli(['projects', 'ls', '--host', '127.0.0.1', '--port', '9'], {
+      BYTEBUREAU_HOME: home,
+    })
+    expect(result.code).toBe(2)
+    expect(result.stderr.trim()).toBe(
+      'cannot reach the daemon at http://127.0.0.1:9/api/v1/projects',
+    )
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+})
+
+describe('bytebureau run beside another run', () => {
+  it('runs two sessions through one daemon at the same time, and the daemon knows both', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const other = createTempRepo()
+    const daemon = await startDaemonProcess(home)
+    const results = await Promise.all([runOn(repo, home), runOn(other, home)])
+    expect(results.map((result) => result.code)).toStrictEqual([0, 0])
+    expect([repo, other].map((each) => readdirSync(worktreesOf(each)).length)).toStrictEqual([1, 1])
+    const listed = await runCli(['workspaces', 'ls', '--json'], { BYTEBUREAU_HOME: home })
+    expect(jsonLines(listed.stdout)).toMatchObject([
+      { workspaces: [{ sessionStatus: 'completed' }, { sessionStatus: 'completed' }] },
     ])
-    expect([left.code, right.code]).toStrictEqual([0, 0])
-    const listed = await runCli(['sessions', 'ls', '--json'], env)
-    const [record] = jsonLines(listed.stdout)
-    const sessions: unknown = record === undefined ? [] : record['sessions']
-    expect(Array.isArray(sessions) ? sessions.length : 0).toBe(2)
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau run through the daemon when it is stopped or the daemon is gone', () => {
+  it('stops the session on SIGTERM while it waits on an ask, and exits 3', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const daemon = await startDaemonProcess(home)
+    const result = await runCli(
+      ['run', PROMPT, '--project', repo, ...WAITING],
+      { BYTEBUREAU_HOME: home },
+      { signal: 'SIGTERM', afterStdout: '"type":"session.waiting"' },
+    )
+    expect(result.code).toBe(3)
+    expect(eventLines(result.stdout).at(-1)).toMatchObject({ type: 'session.stopped' })
     await daemon.stop()
   })
 
@@ -10851,25 +11596,16 @@ describe('bytebureau run through the daemon', () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const daemon = await startDaemonProcess(home)
-    const env = { BYTEBUREAU_HOME: home }
-    // Without --yes and off a terminal the run waits on the fake provider's question; the daemon is killed meanwhile
-    const running = runCli(['run', PROMPT, '--project', repo, '--provider', 'fake', '--json'], env, {
-      signal: 'SIGKILL',
-      afterStdout: '"type":"ask.requested"',
-      target: daemon.child,
-    })
-    const result = await running
+    const result = await runCli(
+      ['run', PROMPT, '--project', repo, ...WAITING],
+      { BYTEBUREAU_HOME: home },
+      { signal: 'SIGKILL', afterStdout: '"type":"ask.requested"', target: daemon.child },
+    )
     expect(result.code).toBe(2)
-    expect(result.stderr).toMatch(/^cannot reach the daemon at http:\/\/127\.0\.0\.1:\d+\/api\/v1\/events/mu)
+    expect(result.stderr).toMatch(
+      /^cannot reach the daemon at http:\/\/127\.0\.0\.1:\d+\/api\/v1\/events/mu,
+    )
   }, 30_000)
-
-  it('still runs in-process with --no-daemon when no daemon is alive', async () => {
-    expect.hasAssertions()
-    const { repo, home } = workbench()
-    const result = await runCli(['run', PROMPT, '--project', repo, '--no-daemon', ...FAKE], { BYTEBUREAU_HOME: home })
-    expect(result.code).toBe(0)
-    expect(readServerInfo(home).state).toBe('absent')
-  })
 })
 ```
 `runCli`'s `Interruption` (Phase A's `testing/run-cli.ts`) signals the CLI child once its stdout contains a text; this test needs the signal sent to another process — extend `Interruption` with an optional `target: ChildProcess` that receives the signal instead of the CLI child. The `sessions ls` listing comes from Task 10; until then the parallel-run test asserts on the two exit codes and on two worktrees under each repository. The remote adapter passes `retryFor: 15_000` to `subscribeEvents`, so a run gives up fifteen seconds after the daemon stops answering, and the next `serve` recovers the session as `stopped` (Task 2).
@@ -10877,6 +11613,654 @@ describe('bytebureau run through the daemon', () => {
 Test homes (ruling after Task 8): a daemon a test starts on demand must not bind the default port 4747 — `testHome()` in `apps/bytebureau/src/testing/temp-repo.ts` (landed in Task 8's fix round: a `tempDir('bb-home-')` into which it writes `config.json` with `{ "server": { "port": 0 } }`; the daemon reads `server.port` from the user configuration) is what `workbench()` and `childEnv`'s default home must use from this task on, and every test of this task and of Task 10 that may start a daemon takes its home from it; `startDaemonProcess` passes `--port 0` itself.
 
 The Phase A `run.test.ts`, `projects.test.ts`, `workspaces.test.ts` and `config.test.ts` run the CLI without a daemon alive and without `--no-daemon`: under the new default they would start a daemon on demand in every test — pass `--no-daemon` in their `runCli` calls (one edit in `workbench.ts`'s `FAKE`/`fakeRun` and in the tests that spell their own arguments), so the Phase A tests keep testing the in-process path and the daemon path has the tests above. If a `workbench` run starts a daemon anyway, `run-daemon.test.ts`'s second test is the one that wants it.
+
+**Added files (as shipped):**
+
+`apps/bytebureau/src/bureau/open-local.ts` (as shipped):
+
+```ts
+import { m } from '@bytebureau/i18n'
+import { serverUrl } from '@bytebureau/protocol'
+import type { Context } from '../context.js'
+import { runningDaemon } from '../daemon/wait.js'
+import { kernelHome } from '../kernel-home.js'
+import { version } from '../version.js'
+import type { Bureau } from './bureau.js'
+import { localBureau } from './local.js'
+
+export class DaemonRunningError extends Error {
+  public override readonly name = 'DaemonRunningError'
+}
+
+// The store has one writer: the kernel of this process is refused while the daemon of the same home answers
+// The module of the kernel needs Bun; it is imported only to open the kernel, so this one loads under Node, where its tests run
+export const openLocal = async (context: Context): Promise<Bureau> => {
+  const running = await runningDaemon(kernelHome(context.env))
+  if (running !== undefined) {
+    throw new DaemonRunningError(
+      m.bureau_daemon_running({ pid: running.pid, url: serverUrl(running) }),
+    )
+  }
+  const { openKernel } = await import('../kernel.js')
+  return localBureau(await openKernel(context), version)
+}
+```
+
+`apps/bytebureau/src/bureau/session-env.ts` (as shipped):
+
+```ts
+type Env = Readonly<Record<string, string | undefined>>
+
+const OURS = 'BYTEBUREAU_'
+
+// The BYTEBUREAU_* names that are a daemon's own: where it keeps its data, how much it logs, the runtime of its worktrees
+const DAEMON_OWN: ReadonlySet<string> = new Set([
+  'BYTEBUREAU_HOME',
+  'BYTEBUREAU_LOG_LEVEL',
+  'BYTEBUREAU_WORKSPACE_RUNTIME',
+])
+
+// What the environment of the command chooses for a session where the flags choose nothing
+export interface SessionChoices {
+  readonly employee: string | undefined
+  readonly branch: string | undefined
+  // The BYTEBUREAU_* variables, which the agent gets; nothing else of the environment leaves the command
+  readonly env: Readonly<Record<string, string>>
+}
+
+// A variable that is set and not empty, as the kernel reads one
+const setIn = (env: Env, name: string): string | undefined => {
+  const value = env[name]
+  return value === '' ? undefined : value
+}
+
+const kept = (env: Env, keep: (name: string) => boolean): Record<string, string> => {
+  const result: Record<string, string> = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (value !== undefined && keep(name)) {
+      result[name] = value
+    }
+  }
+  return result
+}
+
+// A daemon reads its own environment, not the command's: what the command's names choose travels with the session, the flags first
+// The home is left out: the agent gets the home of its daemon from the daemon, which for --host and --port is another one
+export const sessionChoices = (
+  flags: { readonly employee?: string | undefined; readonly branch?: string | undefined },
+  env: Env,
+): SessionChoices => ({
+  employee: flags.employee ?? setIn(env, 'BYTEBUREAU_EMPLOYEE'),
+  branch: flags.branch ?? setIn(env, 'BYTEBUREAU_BRANCH'),
+  env: kept(env, (name) => name.startsWith(OURS) && name !== 'BYTEBUREAU_HOME'),
+})
+
+// The environment of a daemon a command starts on demand: the command's, without the BYTEBUREAU_* names that choose for one run
+// Kept, they would be the daemon's defaults, and every later run of any command would get them
+export const daemonEnv = (env: Env): Record<string, string> =>
+  kept(env, (name) => !name.startsWith(OURS) || DAEMON_OWN.has(name))
+```
+
+`apps/bytebureau/src/bureau/session-env.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { daemonEnv, sessionChoices } from './session-env.js'
+
+describe(sessionChoices, () => {
+  it('takes the employee and the base branch from the environment when the flags name none', () => {
+    const env = { BYTEBUREAU_EMPLOYEE: 'reviewer', BYTEBUREAU_BRANCH: 'develop' }
+    expect(sessionChoices({}, env)).toStrictEqual({ employee: 'reviewer', branch: 'develop', env })
+  })
+
+  it('lets the flags win over the environment, and takes an empty variable for none, as the kernel does', () => {
+    const env = { BYTEBUREAU_EMPLOYEE: 'reviewer', BYTEBUREAU_BRANCH: '' }
+    expect(sessionChoices({ employee: 'developer', branch: 'main' }, env)).toMatchObject({
+      employee: 'developer',
+      branch: 'main',
+    })
+    expect(sessionChoices({}, env)).toMatchObject({ employee: 'reviewer', branch: undefined })
+  })
+
+  it('hands on the BYTEBUREAU_* variables alone but the home, and reads none but the employee and the branch', () => {
+    const env = {
+      PATH: '/usr/bin',
+      HOME: '/home/someone',
+      ANTHROPIC_API_KEY: 'not for the daemon',
+      // The agent gets the home of its daemon from the daemon, whatever home the command has
+      BYTEBUREAU_HOME: '/home/someone/.bytebureau',
+      BYTEBUREAU_FAKE_SCRIPT: 'slow',
+      BYTEBUREAU_LOG_LEVEL: 'debug',
+      BYTEBUREAU_WORKSPACE_RUNTIME: 'local',
+      BYTEBUREAU_UNSET: undefined,
+    }
+    expect(sessionChoices({}, env)).toStrictEqual({
+      employee: undefined,
+      branch: undefined,
+      env: {
+        BYTEBUREAU_FAKE_SCRIPT: 'slow',
+        BYTEBUREAU_LOG_LEVEL: 'debug',
+        BYTEBUREAU_WORKSPACE_RUNTIME: 'local',
+      },
+    })
+  })
+})
+
+describe(daemonEnv, () => {
+  it('keeps the BYTEBUREAU_* names of the daemon itself, and drops those that choose for a run', () => {
+    const env = {
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'the agent may need it',
+      BYTEBUREAU_HOME: '/data/bytebureau',
+      BYTEBUREAU_LOG_LEVEL: 'debug',
+      BYTEBUREAU_WORKSPACE_RUNTIME: 'local',
+      BYTEBUREAU_EMPLOYEE: 'reviewer',
+      BYTEBUREAU_BRANCH: 'develop',
+      BYTEBUREAU_FAKE_SCRIPT: 'slow',
+    }
+    expect(daemonEnv(env)).toStrictEqual({
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'the agent may need it',
+      BYTEBUREAU_HOME: '/data/bytebureau',
+      BYTEBUREAU_LOG_LEVEL: 'debug',
+      BYTEBUREAU_WORKSPACE_RUNTIME: 'local',
+    })
+  })
+})
+```
+
+`apps/bytebureau/src/bureau/local.test.ts` (as shipped):
+
+```ts
+import { setTimeout as sleep } from 'node:timers/promises'
+import { createKernelFrom, type Kernel } from '@bytebureau/kernel'
+import { KernelTest } from '@bytebureau/kernel/testing'
+import { decodeEventPayload, type AskRecord, type EventEnvelope } from '@bytebureau/protocol'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { createTempRepo, tempDir } from '../testing/temp-repo.js'
+import type { Bureau } from './bureau.js'
+import { localBureau } from './local.js'
+
+// A kernel over an in-memory store, closed when the test is over; closing it earlier does no harm
+async function testKernel(): Promise<Kernel> {
+  const home = tempDir('bb-home-')
+  const kernel = await createKernelFrom(KernelTest({ home }), {
+    home,
+    env: {},
+    logging: { level: 'error' },
+  })
+  onTestFinished(async () => {
+    await kernel.close()
+  })
+  return kernel
+}
+
+interface Answered {
+  // The asks as they were read back by their ids, before they were answered
+  readonly read: readonly (AskRecord | undefined)[]
+  // What the events tell of the answer
+  readonly answered: unknown
+}
+
+// The ask the agent puts is read back by its id and answered with its recommended option
+async function answerTheAsk(
+  bureau: Bureau,
+  events: AsyncIterable<EventEnvelope>,
+): Promise<Answered> {
+  const read: (AskRecord | undefined)[] = []
+  for await (const event of events) {
+    if (event.type === 'ask.requested') {
+      const { ask } = decodeEventPayload('ask.requested', event.payload)
+      read.push(await bureau.asks.get(ask.id))
+      await bureau.asks.answer(ask.id, { selected: ['yes'] })
+    }
+    if (event.type === 'ask.answered') {
+      return { read, answered: event.payload }
+    }
+  }
+  return { read, answered: undefined }
+}
+
+describe(localBureau, () => {
+  it('reads the ask of a session by its id and answers it as the CLI', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const project = await bureau.projects.register(createTempRepo())
+    const input = { projectId: project.id, title: 'local', providerId: 'fake' }
+    const session = await bureau.sessions.create(input)
+    const events = bureau.events.subscribe({ sessionId: session.id, since: 0 })
+    await bureau.sessions.prompt(session.id, { text: 'go' })
+    await expect(answerTheAsk(bureau, events)).resolves.toMatchObject({
+      read: [{ sessionId: session.id, title: 'Export style', status: 'pending' }],
+      answered: { answer: { selected: ['yes'] }, answeredVia: 'cli' },
+    })
+  })
+
+  it('tells its health with the version of the CLI, and the plugins and providers of the kernel', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const health = await bureau.health.check()
+    const plugins = await bureau.plugins.list()
+    const providers = await bureau.plugins.providers()
+    expect(health).toMatchObject({ status: 'ok', version: '1.2.3', checks: { store: 'ok' } })
+    expect(Number.isNaN(Date.parse(health.startedAt))).toBe(false)
+    expect(plugins.map((plugin) => plugin.name)).toContain('agent-fake')
+    expect(providers.map((provider) => provider.id)).toContain('fake')
+  })
+
+  it('says it is in-process, and closes the kernel', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    expect(bureau.where).toStrictEqual({ kind: 'in-process' })
+    await bureau.close()
+    await expect(bureau.projects.list()).rejects.toBeInstanceOf(Error)
+  })
+})
+
+// What the promise settles with, unless it takes longer than the time given
+async function within<Value>(
+  promise: Promise<Value>,
+  ms: number,
+): Promise<Value | 'still waiting'> {
+  const settled = await Promise.race([promise, sleep(ms, 'still waiting' as const)])
+  return settled
+}
+
+// The events of a project the Bureau registers, until the signal aborts
+async function projectEvents(
+  bureau: Bureau,
+  signal: AbortSignal,
+): Promise<AsyncIterator<EventEnvelope>> {
+  const project = await bureau.projects.register(createTempRepo())
+  const events = bureau.events.subscribe({ projectId: project.id, since: 0 }, signal)
+  return events[Symbol.asyncIterator]()
+}
+
+describe('the events of the local Bureau', () => {
+  it('end when the signal aborts, a wait for the next event as well', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const subscription = new AbortController()
+    const iterator = await projectEvents(bureau, subscription.signal)
+    const replayed = await iterator.next()
+    const waiting = iterator.next()
+    subscription.abort()
+    expect(replayed).toMatchObject({ done: false, value: { type: 'project.registered' } })
+    await expect(within(waiting, 2000)).resolves.toStrictEqual({ done: true, value: undefined })
+    await expect(iterator.next()).resolves.toStrictEqual({ done: true, value: undefined })
+  })
+
+  it('have ended before the first one for a signal that has aborted already', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const iterator = await projectEvents(bureau, AbortSignal.abort())
+    await expect(within(iterator.next(), 2000)).resolves.toStrictEqual({
+      done: true,
+      value: undefined,
+    })
+  })
+})
+```
+
+`apps/bytebureau/src/commands/run-daemon-restart.test.ts` (as shipped):
+
+```ts
+import { once } from 'node:events'
+import { createBureauClient } from '@bytebureau/client'
+import { describe, expect, it } from 'vitest'
+import { freePort, startDaemonProcess, type DaemonProcess } from '../testing/daemon.js'
+import { eventLines, jsonLines } from '../testing/json-lines.js'
+import { runCli, type CliResult } from '../testing/run-cli.js'
+import { PROMPT, workbench } from '../testing/workbench.js'
+
+interface Restarted {
+  readonly result: CliResult
+  // The daemon that came up in place of the first
+  readonly second: DaemonProcess
+}
+
+// The first daemon ends while the run waits on the ask; the next one comes up on the same port and stops the session it finds left at work
+async function runAcrossRestart(repo: string, home: string): Promise<Restarted> {
+  const port = ['--port', String(await freePort())]
+  const first = await startDaemonProcess(home, port)
+  const ended = once(first.child, 'close')
+  const running = runCli(
+    ['run', PROMPT, '--project', repo, '--provider', 'fake', '--json'],
+    { BYTEBUREAU_HOME: home },
+    { signal: 'SIGTERM', afterStdout: '"type":"ask.requested"', target: first.child },
+  )
+  await ended
+  const second = await startDaemonProcess(home, port)
+  const result = await running
+  return { result, second }
+}
+
+// The session the events of a run belong to
+function sessionOf(stdout: string): string {
+  const [first] = jsonLines(stdout)
+  const id: unknown = first === undefined ? undefined : first['sessionId']
+  return typeof id === 'string' ? id : ''
+}
+
+// The seq of every durable event of the session as the daemon keeps them, up to its stop
+async function loggedSequence(daemon: DaemonProcess, sessionId: string): Promise<number[]> {
+  const client = createBureauClient({ baseUrl: daemon.url, token: daemon.info.token })
+  const sequence: number[] = []
+  for await (const event of client.events.subscribe({ sessionId, since: 0, ephemeral: false })) {
+    sequence.push(event.seq)
+    if (event.type === 'session.stopped') {
+      break
+    }
+  }
+  return sequence
+}
+
+describe('bytebureau run across a restart of the daemon', () => {
+  it('resumes the events where they stopped and ends as the recovered session says', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const { result, second } = await runAcrossRestart(repo, home)
+    const events = eventLines(result.stdout)
+    const sequence = events.map((event) => event.seq)
+    expect([result.code, events.at(-1)]).toMatchObject([3, { type: 'session.stopped' }])
+    // Only the recovery of the next daemon cancels the ask: the events after the restart reached the run
+    expect(events.map((event) => event.type)).toContain('ask.cancelled')
+    // Every durable event of the session, before the restart and after it, once and in order
+    expect(sequence).toStrictEqual([...new Set(sequence)].toSorted((left, right) => left - right))
+    expect(sequence).toStrictEqual(await loggedSequence(second, sessionOf(result.stdout)))
+    await second.stop()
+  }, 30_000)
+})
+```
+
+`apps/bytebureau/src/testing/records.ts` (as shipped):
+
+```ts
+import { ApiError } from '@bytebureau/client'
+import {
+  defaultProjectConfig,
+  type AskRecord,
+  type EmployeeSpec,
+  type HealthDto,
+  type ProjectDto,
+  type SessionDto,
+  type TurnDto,
+} from '@bytebureau/protocol'
+
+// Records as the daemon answers them; every field that may be null has a value, as the CLI sources spell no null
+const AT = '2026-10-02T12:00:00.000Z'
+
+export const PROJECT: ProjectDto = {
+  id: 'p1',
+  name: 'repo',
+  path: '/repo',
+  defaultBranch: 'main',
+  config: defaultProjectConfig,
+  createdAt: AT,
+  updatedAt: AT,
+}
+
+const EMPLOYEE: EmployeeSpec = {
+  id: 'developer',
+  name: 'Developer',
+  provider: 'fake',
+  model: 'any',
+  effort: 'medium',
+  systemPrompt: '',
+  tools: { allow: [], deny: [] },
+  permissionMode: 'supervised',
+  skills: [],
+  appearance: {},
+}
+
+export const SESSION: SessionDto = {
+  id: 's1',
+  projectId: 'p1',
+  title: 'Fix the build',
+  employee: EMPLOYEE,
+  providerId: 'fake',
+  profileId: 'default',
+  workspace: {
+    id: 's1',
+    runtimeId: 'local',
+    path: '/repo/.bytebureau/worktrees/s1',
+    branch: 'bb/s1',
+    baseRef: 'main',
+  },
+  externalRef: { providerId: 'fake', ref: 'r1' },
+  status: 'ready',
+  createdAt: AT,
+  startedAt: AT,
+  endedAt: AT,
+}
+
+export const TURN: TurnDto = {
+  id: 'u1',
+  sessionId: 's1',
+  index: 0,
+  prompt: { text: 'Fix the build' },
+  status: 'completed',
+  stopReason: 'end_turn',
+  usage: { inputTokens: 10, outputTokens: 5 },
+  startedAt: AT,
+  endedAt: AT,
+}
+
+export const HEALTH: HealthDto = {
+  status: 'ok',
+  version: '1.2.3',
+  startedAt: AT,
+  checks: { store: 'ok', plugins: { loaded: 2, failed: 0 } },
+}
+
+export const ASK: AskRecord = {
+  id: 'a1',
+  sessionId: 's1',
+  turnId: 'u1',
+  kind: 'question',
+  title: 'Export style',
+  questions: [
+    {
+      id: 'q',
+      header: 'Export',
+      prompt: 'Should hello() be a named export?',
+      options: [{ id: 'yes', label: 'Named export', recommended: true, evidence: [] }],
+      multiSelect: false,
+      allowOther: false,
+    },
+  ],
+  policy: { onTimeout: 'wait', timeout: '30m' },
+  recommendationSource: 'agent',
+  status: 'answered',
+  createdAt: AT,
+  deadlineAt: AT,
+  answer: { selected: ['yes'] },
+  answeredAt: AT,
+  answeredVia: 'cli',
+}
+
+// The failure a call of the client rejects with when the daemon answers with a problem
+export const problemError = (status: number, code: string, detail: string): ApiError =>
+  new ApiError(status, {
+    type: `https://bytebureau.dev/problems/${code}`,
+    title: 'T',
+    status,
+    detail,
+    code,
+  })
+```
+
+`apps/bytebureau/src/testing/recording-client.ts` (as shipped):
+
+```ts
+import type { BureauClient } from '@bytebureau/client'
+import type { EventEnvelope } from '@bytebureau/protocol'
+import { ASK, HEALTH, PROJECT, SESSION, TURN } from './records.js'
+
+// The calls a client was asked, each its name and its arguments
+export type Calls = unknown[][]
+
+const USAGE = { turns: 1, inputTokens: 10, outputTokens: 5, costUsd: 0.002, contextPct: 3 }
+
+// A function of the client that remembers how it was called and answers with the value
+const answering =
+  <Value>(calls: Calls, name: string, value: Value) =>
+  async (...args: readonly unknown[]): Promise<Value> => {
+    calls.push([name, ...args])
+    await Promise.resolve()
+    return value
+  }
+
+// The same for a command the daemon answers with no content
+const doing =
+  (calls: Calls, name: string) =>
+  async (...args: readonly unknown[]): Promise<void> => {
+    calls.push([name, ...args])
+    await Promise.resolve()
+  }
+
+async function* noEvents(): AsyncGenerator<EventEnvelope> {
+  await Promise.resolve()
+  yield* []
+}
+
+// The calls of the client that come back with a record of the daemon
+const recordsOf = (calls: Calls): Pick<BureauClient, 'projects' | 'sessions'> => ({
+  projects: {
+    list: answering(calls, 'projects.list', [PROJECT]),
+    register: answering(calls, 'projects.register', PROJECT),
+    get: answering(calls, 'projects.get', PROJECT),
+    remove: doing(calls, 'projects.remove'),
+  },
+  sessions: {
+    list: answering(calls, 'sessions.list', [SESSION]),
+    create: answering(calls, 'sessions.create', SESSION),
+    get: answering(calls, 'sessions.get', SESSION),
+    prompt: answering(calls, 'sessions.prompt', TURN),
+    interrupt: doing(calls, 'sessions.interrupt'),
+    stop: doing(calls, 'sessions.stop'),
+    resume: answering(calls, 'sessions.resume', SESSION),
+    complete: doing(calls, 'sessions.complete'),
+  },
+})
+
+// A client of no daemon at all: it remembers what it was asked
+export const recordingClient = (calls: Calls): BureauClient => ({
+  ...recordsOf(calls),
+  asks: {
+    pending: answering(calls, 'asks.pending', [ASK]),
+    get: answering(calls, 'asks.get', ASK),
+    answer: doing(calls, 'asks.answer'),
+  },
+  usage: { session: answering(calls, 'usage.session', USAGE) },
+  workspaces: {
+    list: answering(calls, 'workspaces.list', []),
+    prune: answering(calls, 'workspaces.prune', { removed: [], retained: [] }),
+  },
+  plugins: {
+    list: answering(calls, 'plugins.list', []),
+    providers: answering(calls, 'plugins.providers', []),
+  },
+  health: { check: answering(calls, 'health.check', HEALTH) },
+  events: {
+    subscribe: (filter, options) => {
+      calls.push(['events.subscribe', filter, options])
+      return noEvents()
+    },
+  },
+  rpc: {
+    connect: async () => {
+      await Promise.resolve()
+      throw new Error('no RPC in this test')
+    },
+  },
+  close: doing(calls, 'close'),
+})
+```
+
+`apps/bytebureau/src/testing/listening.ts` (as shipped):
+
+```ts
+import { once } from 'node:events'
+import type { Server } from 'node:net'
+
+export interface Listening {
+  readonly port: number
+  // Stops listening, and settles once the server has closed
+  readonly close: () => Promise<void>
+}
+
+// The server listening on a free loopback port
+export async function listening(server: Server): Promise<Listening> {
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+  const close = async (): Promise<void> => {
+    const closed = once(server, 'close')
+    server.close()
+    await closed
+  }
+  return { port, close }
+}
+```
+
+`apps/bytebureau/src/drain.ts` (as shipped):
+
+```ts
+// What a stream offers to tell that it has taken in what was written to it
+interface Sink {
+  readonly write: (chunk: string, taken: () => void) => boolean
+}
+
+// Bun writes to a pipe asynchronously: an exit that does not wait for the writes would lose the last lines of NDJSON
+// Without a limit the wait lasts as long as the reader takes, a pager too; with one it ends then, so an exit that must happen does
+export async function drained(stream: Sink, limitMs?: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<boolean>()
+  const timer = limitMs === undefined ? undefined : setTimeout(resolve, limitMs, false)
+  stream.write('', () => {
+    resolve(true)
+  })
+  await promise
+  clearTimeout(timer)
+}
+```
+
+`apps/bytebureau/src/drain.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { drained } from './drain.js'
+
+describe(drained, () => {
+  it('waits until the stream has taken in what was written to it before', async () => {
+    expect.hasAssertions()
+    const order: string[] = []
+    const stream = {
+      write: (chunk: string, taken: () => void): boolean => {
+        setTimeout(() => {
+          order.push(`taken ${JSON.stringify(chunk)}`)
+          taken()
+        }, 20)
+        return false
+      },
+    }
+    await drained(stream)
+    order.push('drained')
+    expect(order).toStrictEqual(['taken ""', 'drained'])
+  })
+
+  it('waits no longer than the limit for a stream that never takes anything in', async () => {
+    expect.hasAssertions()
+    const stream = { write: (): boolean => false }
+    const started = performance.now()
+    await drained(stream, 50)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(45)
+  })
+})
+```
+
+**Semantics (as shipped, commits 156485c, e3bf8d7, 5b00710, f2fc8d3, cf56d35, 35f6443, b028de9, 542b6e1, c2361a1, 8ccd0a6, 12b814d, e56e5d7, c84ede5):** `bureau/bureau.ts` is the `Bureau` interface; `localBureau(kernel, version)` answers asks `via: 'cli'` and adds the CLI version and a `startedAt` taken when the Bureau is made to the health check; `remoteBureau(client, url)` passes the client's areas through, sends `projects.register(path)` as `{ path }` and subscribes to events with `{ signal, retryFor: 15_000 }`, so a run gives up fifteen seconds after the daemon stops answering (exit 2, `cannot reach the daemon at <url>` — the client's own `ApiError` message, which `describeError` tells as it is; `errors.ts` is unchanged). `resolveServer(flags, home)` returns `explicit` for `--host`/`--port` (the token from `--token-file`, else the alive record's, else `daemon.token` read as it is — `tokenFor` is never called, as it would generate one) and `none` otherwise: `server.json` is never trusted by itself, `openRemote` goes through `ensureDaemon(home, env)`, whose `runningDaemon` probe is the only test of a record (a record whose daemon does not answer — a pid taken over after a crash, a daemon on its way out — leads to `spawnDaemon(home, env, [])` + `waitForDaemon(home)`, never to exit 2; a start that does not come up fails with `m.serve_timeout` naming the log, exit 2 through the generic path). `openLocal(context)` (`bureau/open-local.ts`) refuses with `DaemonRunningError` (`m.bureau_daemon_running({ url, pid })`, exit 1 in `run.ts`) while `runningDaemon(home)` answers, and imports `../kernel.js` lazily (the module needs Bun; the unit tests run under Node). `withBureau(context, flags, work)` has three parameters (`max-params`): the environment travels in `Context.env`, and the Bureau is closed through `withResource`. The global flags are `daemon` (only `false` means in-process), `host`, `port` (validated by `portOf`: `--port abc` is a usage error) and `token-file` (a usage error without `--host`/`--port`, exit 1; an unreadable token file is told by `m.bureau_token_file_unreadable` naming the file, exit 2); `bureauFlags(args)` turns them into `BureauFlags` (declared in `resolve.ts`, as `context.ts` needs the type without a cycle). `run` resolves `--project` with `path.resolve` in the command and takes its session choices from `sessionChoices(flags, env)` (`bureau/session-env.ts`): the command's `BYTEBUREAU_*` variables travel as `CreateSessionBody.env` (the kernel stores them for the agent at start and resume; nothing else of the environment leaves the command, and `BYTEBUREAU_HOME` stays out — the kernel's own allowlist gives the agent the daemon's home), and `BYTEBUREAU_EMPLOYEE` → `employeeId`, `BYTEBUREAU_BRANCH` → `branch` when the flags choose nothing — the daemon's `envOverrides` sees only the daemon's environment; the log level and the workspace runtime stay the daemon's own. For the same reason a daemon started on demand gets `daemonEnv(env)` (`session-env.ts`): the command's environment stripped of every `BYTEBUREAU_*` name but `BYTEBUREAU_HOME`, `BYTEBUREAU_LOG_LEVEL` and `BYTEBUREAU_WORKSPACE_RUNTIME`, so the command that happened to start it leaves no defaults behind for later sessions (an explicit `serve` keeps its full environment); pinned by a run with `BYTEBUREAU_EMPLOYEE=reviewer` that starts the daemon followed by a run without it. In `run-session.ts`, `isRefusal` is exported and covers an `ApiError` whose code matches `/^(?:workspace_|provider_|session_provider_missing$)/u`; `unknownProvider` asks `plugins.providers()` only when a provider is named; `followSession` subscribes with an `AbortController` and aborts in `finally`; SIGINT, SIGTERM and SIGHUP share one stop (`process.once` each, removed after; a later signal of another kind is ignored, the second of the same kind ends the process; exit 3). `localBureau`'s `events.subscribe` honours the abort signal as the remote one does. `projects add` resolves the path; `projects rm` maps the kernel's `WorkspaceError has_sessions` and the problem `workspace_has_sessions` to the same message and exit 1; `workspaces` goes through `withBureau`; `config validate`/`config schema` keep the in-process kernel and never talk to a daemon. `main.ts` drains stdout and stderr (`drain.ts`: `drained(stream, limitMs?)`) before `process.exit`: a normal exit waits for the reader as long as it takes, so a pager never sees truncated output; the uncaught-exception and unhandled-rejection handlers only print and resolve a race, and the exit after such a failure drains within 1 s. The kernel facade gains `asks.get(id)` and types `asks.pending` as `AskRecord[]`. Tests: `testHome()` is every CLI test home (`workbench()`, `childEnv`'s default — the daemon of such a home listens on port 0); `FAKE` carries `--no-daemon` (`NO_DAEMON`), `projectIdIn(home, flags = [NO_DAEMON])`; `Interruption.target?: ChildProcess` receives the signal instead of the CLI child; the scripted fake implements `Bureau` and rejects anything not scripted; `testing/records.ts` holds DTO fixtures and `problemError`, `testing/recording-client.ts` a fake `BureauClient` that records its calls; `health-stub.ts` gains `projectsStub`, `testing/daemon.ts` gains `freePort`, both on the shared `testing/listening.ts`; the CLI Vitest project passes `execArgv` to silence node:sqlite's ExperimentalWarning as the kernel and api projects do. `run-daemon.test.ts` covers the brief's seven cases plus `projects ls`/`rm` through the daemon, SIGTERM (exit 3), a stale record leading to a start; `run-config.test.ts` pins the environment handed to a daemon that lacks it and that a daemon started on demand by a run with `BYTEBUREAU_EMPLOYEE=reviewer` gives the next run the default employee; `local.test.ts` pins the abort, `drain.test.ts` the limit; `run-daemon-restart.test.ts` ends the daemon while a run waits on its ask and shows the next daemon's recovery ending the run `stopped` with `ask.cancelled` (exit 3). The three in-process smoke runs of `ci.yml` carry `--no-daemon`. Accepted as shipped: answers through the daemon are recorded `answeredVia: 'api'` (the channel the kernel received them through); a `4xx` problem ends `projects`/`workspaces` with exit 2 until Task 10's `refusable`; the mid-run test spends the full `retryFor` wait.
 
 - [ ] **Step 6: Run everything**
 
