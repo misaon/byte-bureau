@@ -117,7 +117,7 @@ const unscripted: Pick<Bureau, 'health' | 'plugins' | 'usage' | 'workspaces' | '
       list: notScripted(),
       providers: async () => {
         await Promise.resolve()
-        return [{ id: 'fake', displayName: 'Fake agent' }]
+        return [{ id: 'fake', displayName: 'Fake agent', supportsApiKey: true }]
       },
     },
     health: { check: notScripted() },

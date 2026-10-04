@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { Usage } from '../agent-event.js'
+import { RateLimit, Usage } from '../agent-event.js'
 import { Id, SessionStatus, Timestamp, TurnStatus } from '../common.js'
 import { ProjectConfig } from '../config.js'
 import { EmployeeSpec, PromptInput } from '../employee.js'
@@ -86,9 +86,38 @@ export const PluginStatusDto = Schema.Struct({
   ports: Schema.Array(Schema.String),
 }).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
 
+export const ProfileKind = Schema.Literals(['login', 'api_key'])
+export const AuthState = Schema.Literals(['loggedIn', 'loggedOut', 'expired', 'unknown'])
+
+export const ProfileDto = Schema.Struct({
+  id: Schema.String,
+  providerId: Schema.String,
+  name: Schema.String,
+  kind: ProfileKind,
+  configDir: Schema.NullOr(Schema.String),
+  isDefault: Schema.Boolean,
+  createdAt: Timestamp,
+}).annotate({ title: 'Profile', identifier: 'Profile' })
+
+export const ProfileStatusDto = Schema.Struct({
+  profileId: Schema.String,
+  state: AuthState,
+  hint: Schema.optionalKey(Schema.String),
+  account: Schema.optionalKey(Schema.String),
+  checkedAt: Timestamp,
+}).annotate({ title: 'ProfileStatus', identifier: 'ProfileStatus' })
+
+export const UsageSnapshotDto = Schema.Struct({
+  profileId: Schema.String,
+  rateLimit: RateLimit,
+  observedAt: Schema.NullOr(Timestamp),
+}).annotate({ title: 'UsageSnapshot', identifier: 'UsageSnapshot' })
+
 export const ProviderDto = Schema.Struct({
   id: Schema.String,
   displayName: Schema.String,
+  // Whether the provider takes an API-key profile: it declares the variable the key travels in
+  supportsApiKey: Schema.Boolean,
 }).annotate({ title: 'Provider', identifier: 'Provider' })
 
 export const HealthDto = Schema.Struct({
@@ -110,5 +139,10 @@ export type WorkspaceInfoDto = typeof WorkspaceInfoDto.Type
 export type PruneReportDto = typeof PruneReportDto.Type
 export type SessionUsageDto = typeof SessionUsageDto.Type
 export type PluginStatusDto = typeof PluginStatusDto.Type
+export type ProfileKind = typeof ProfileKind.Type
+export type AuthState = typeof AuthState.Type
+export type ProfileDto = typeof ProfileDto.Type
+export type ProfileStatusDto = typeof ProfileStatusDto.Type
+export type UsageSnapshotDto = typeof UsageSnapshotDto.Type
 export type ProviderDto = typeof ProviderDto.Type
 export type HealthDto = typeof HealthDto.Type

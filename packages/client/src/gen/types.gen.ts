@@ -53,6 +53,7 @@ export type Problem401 = {
 export type Provider = {
     id: string;
     displayName: string;
+    supportsApiKey: boolean;
 };
 
 /**

@@ -2,6 +2,7 @@ import { Schema, SchemaTransformation } from 'effect'
 import { AskAnswer } from '../ask.js'
 import { Id } from '../common.js'
 import { PromptInput } from '../employee.js'
+import { ProfileKind } from './dto.js'
 
 export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annotate({
   title: 'RegisterProject',
@@ -54,6 +55,28 @@ export const EventsFilter = Schema.Struct({
   ephemeral: Schema.optionalKey(Schema.Boolean),
 }).annotate({ title: 'EventsFilter', identifier: 'EventsFilter' })
 
+// A profile name is a path segment of the profiles directory: lower-case letters, digits and dashes, 1 to 32 of them
+const ProfileName = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,31}$/u)).annotate({
+  title: 'ProfileName',
+  description: 'Lower-case letters, digits and dashes, 1 to 32 characters',
+})
+
+export const AddProfileBody = Schema.Struct({
+  providerId: Schema.String,
+  name: ProfileName,
+  kind: ProfileKind,
+  // Only for kind api_key; stored in the secret store, never echoed
+  apiKey: Schema.optionalKey(Schema.String),
+  makeDefault: Schema.optionalKey(Schema.Boolean),
+}).annotate({ title: 'AddProfile', identifier: 'AddProfile' })
+
+export const ProfileIdParam = Schema.Struct({ id: Schema.String })
+
+// A query string carries purge as text, which the handler reads as a boolean
+export const RemoveProfileQuery = Schema.Struct({
+  purge: Schema.optionalKey(Schema.Literals(['true', 'false'])),
+})
+
 export type RegisterProjectBody = typeof RegisterProjectBody.Type
 export type CreateSessionBody = typeof CreateSessionBody.Type
 export type PromptBody = typeof PromptBody.Type
@@ -61,3 +84,4 @@ export type AnswerAskBody = typeof AnswerAskBody.Type
 export type SessionRef = typeof SessionRef.Type
 export type EventsQuery = typeof EventsQuery.Type
 export type EventsFilter = typeof EventsFilter.Type
+export type AddProfileBody = typeof AddProfileBody.Type

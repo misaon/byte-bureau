@@ -82,6 +82,10 @@ const TelemetrySection = Schema.Struct({
 })
 const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 
+// Where the daemon keeps secrets: the OS keychain through Bun.secrets, a 0600 file under the home, or whichever of the two works (auto)
+export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
+const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
+
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
   profiles: Schema.optionalKey(ProfilesSection),
@@ -89,6 +93,7 @@ export const UserConfig = Schema.Struct({
   locale: Schema.optionalKey(Schema.String),
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
+  secrets: Schema.optionalKey(SecretsSection),
   ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
@@ -96,6 +101,7 @@ export type LogLevel = typeof LogLevel.Type
 export type EmployeeConfig = typeof EmployeeConfig.Type
 export type PluginRef = typeof PluginRef.Type
 export type ProjectConfig = typeof ProjectConfig.Type
+export type SecretsBackend = typeof SecretsBackend.Type
 export type UserConfig = typeof UserConfig.Type
 
 const STRICT = { onExcessProperty: 'error', errors: 'all' } as const

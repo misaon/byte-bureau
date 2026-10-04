@@ -38,6 +38,10 @@ export const PROBLEM_CODES = [
   'workspace_fs_failed',
   'workspace_runtime_missing',
   'workspace_not_found',
+  'profile_not_found',
+  'profile_exists',
+  'profile_invalid',
+  'profile_in_use',
 ] as const
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number]

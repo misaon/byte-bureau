@@ -63,7 +63,7 @@ it.layer(ApiTestLayer())('GET /api/v1/plugins and GET /api/v1/providers', (suite
       const listed = yield* get('/providers')
       assert.strictEqual(listed.status, 200)
       assert.deepStrictEqual(listed.body, [
-        { id: 'fake', displayName: 'Fake agent (tests and CI)' },
+        { id: 'fake', displayName: 'Fake agent (tests and CI)', supportsApiKey: true },
       ])
     }),
   )

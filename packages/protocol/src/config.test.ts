@@ -68,4 +68,11 @@ describe(decodeUserConfig, () => {
     expect(() => decodeUserConfig({ ...userConfig, extra: true })).toThrow(/extra/u)
     expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
   })
+
+  it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
+    expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({
+      backend: 'file',
+    })
+    expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
+  })
 })

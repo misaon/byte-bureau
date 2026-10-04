@@ -3959,11 +3959,15 @@
           },
           "displayName": {
             "type": "string"
+          },
+          "supportsApiKey": {
+            "type": "boolean"
           }
         },
         "required": [
           "id",
-          "displayName"
+          "displayName",
+          "supportsApiKey"
         ],
         "additionalProperties": false,
         "title": "Provider"
