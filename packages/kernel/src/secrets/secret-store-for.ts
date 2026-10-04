@@ -1,6 +1,7 @@
 import path from 'node:path'
 import type { SecretsBackend } from '@bytebureau/protocol'
 import { kernelLogger } from '../logging/logging.js'
+import { recordBackend, recordedBackend, type ChosenBackend } from './backend-record.js'
 import { FileSecretStore } from './file-secret-store.js'
 import { probeKeychain } from './keychain-probe.js'
 import type { SecretsShape } from './secrets.js'
@@ -31,21 +32,44 @@ async function demanded(): Promise<Choice> {
   )
 }
 
-// Auto takes the keychain where it answers the probe, else the file, and says why
+// Auto at the first start of a home takes the keychain where it answers the probe, else the file, and keeps to it from then on
 async function chosen(home: string): Promise<Choice> {
   const probed = await probeKeychain()
   if (typeof probed !== 'string') {
+    recordBackend(home, 'keychain')
     return { store: probed, reason: 'auto: the keychain answered' }
   }
-  logger.warn(`${probed}: the secrets are kept in ${fileOf(home)}`)
+  recordBackend(home, 'file')
+  logger.warn(`${probed}: the secrets are kept in ${fileOf(home)} from now on`)
   return fileChoice(home, `auto: ${probed}`)
 }
 
+// Auto after that keeps what it chose: the file even where the keychain answers now, the keychain while it answers
+async function kept(home: string, recorded: ChosenBackend): Promise<Choice> {
+  if (recorded === 'file') {
+    return fileChoice(home, 'auto, as recorded in secrets.backend')
+  }
+  const probed = await probeKeychain()
+  if (typeof probed !== 'string') {
+    return { store: probed, reason: 'auto, as recorded in secrets.backend' }
+  }
+  logger.warn(
+    `the secrets kept in the keychain are not available (${probed}); new ones go to ${fileOf(home)} until it answers`,
+  )
+  return fileChoice(home, 'auto: the keychain it chose before is not available')
+}
+
+// File and keychain go by the configuration alone; auto goes by the record of what it chose, once there is one
 const choiceFor = async (home: string, backend: SecretsBackend): Promise<Choice> => {
   if (backend === 'file') {
     return fileChoice(home, 'secrets.backend is file')
   }
-  const choice = backend === 'keychain' ? await demanded() : await chosen(home)
+  if (backend === 'keychain') {
+    const demand = await demanded()
+    return demand
+  }
+  const recorded = recordedBackend(home)
+  const choice = recorded === undefined ? await chosen(home) : await kept(home, recorded)
   return choice
 }
 
