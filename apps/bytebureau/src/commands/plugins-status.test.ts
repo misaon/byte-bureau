@@ -134,7 +134,7 @@ describe('bytebureau with no sub-command, in the process of the command', () => 
     expect(text.stdout.trim().split('\n')).toStrictEqual([
       'Démon: neběží (v procesu)',
       'Projekty: 0',
-      'Relace: 0 běží, 0 čeká na Vás, 0 celkem',
+      'Relace: celkem 0, běžící 0, čekající na Vás 0',
       'Čekající otázky: 0',
     ])
   })

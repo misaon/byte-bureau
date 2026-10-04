@@ -80,7 +80,7 @@ describe('bytebureau sessions show and the status, for a run that waits on its a
     const status = await runCli(['--lang', 'cs'], waiting.env)
     expect(shown.stdout).toContain(`Čeká na Vaši odpověď: Export style (${waiting.id})`)
     expect(status.stdout.trim().split('\n').slice(2)).toStrictEqual([
-      'Relace: 0 běží, 1 čeká na Vás, 1 celkem',
+      'Relace: celkem 1, běžící 0, čekající na Vás 1',
       'Čekající otázky: 1',
     ])
     await finished(waiting)

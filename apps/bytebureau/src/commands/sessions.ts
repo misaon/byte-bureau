@@ -91,6 +91,13 @@ const prompt = defineCommand({
   },
 })
 
+// What each of them tells once it is done, in a line of its own
+const DONE = {
+  interrupt: m.sessions_interrupted,
+  stop: m.sessions_stopped,
+  resume: m.sessions_resumed,
+} as const
+
 // Interrupt, stop and resume: one request, one line
 const steer = (
   name: 'interrupt' | 'stop' | 'resume',
@@ -107,7 +114,7 @@ const steer = (
       })
       if (done !== undefined) {
         context.output.emit({ command: `sessions.${name}`, id: args.id })
-        context.output.print(m.sessions_done({ action: name, id: args.id }))
+        context.output.print(DONE[name]({ id: args.id }))
       }
     },
   })

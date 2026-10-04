@@ -23,7 +23,7 @@ describe('bytebureau sessions resume and prompt through the daemon', () => {
     const resumed = await runCli(['sessions', 'resume', session.id], session.env)
     const shown = await ready(session)
     expect(stopped.stdout).toMatch(/^status\s+stopped$/mu)
-    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `resume: ${session.id}`])
+    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `Resumed ${session.id}`])
     expect(shown.stdout).toMatch(/^status\s+ready$/mu)
     await session.daemon.stop()
   })
@@ -87,7 +87,7 @@ describe('bytebureau sessions prompt and a signal', () => {
     const shown = await ready(slow)
     expect([interrupted.code, interrupted.stdout.trim()]).toStrictEqual([
       0,
-      `interrupt: ${slow.id}`,
+      `Interrupted ${slow.id}`,
     ])
     const types = jsonLines(prompted.stdout).map((record) => record['type'])
     expect([prompted.code, types.slice(-2)]).toStrictEqual([
@@ -104,7 +104,7 @@ describe('bytebureau sessions prompt and a signal', () => {
     await ready(session)
     const stopped = await runCli(['sessions', 'stop', session.id], session.env)
     const shown = await runCli(['sessions', 'show', session.id], session.env)
-    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `stop: ${session.id}`])
+    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `Stopped ${session.id}`])
     expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
     await session.daemon.stop()
   })
@@ -116,7 +116,7 @@ describe('bytebureau sessions resume and prompt in the process of the command', 
     const { env, id } = await stoppedInProcess()
     const resumed = await runCli(['sessions', 'resume', id, NO_DAEMON], env)
     const shown = await runCli(['sessions', 'show', id, NO_DAEMON], env)
-    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `resume: ${id}`])
+    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `Resumed ${id}`])
     expect(shown.stdout).toMatch(/^status\s+ready$/mu)
   })
 

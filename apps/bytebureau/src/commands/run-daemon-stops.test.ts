@@ -18,7 +18,7 @@ describe('bytebureau run when another command interrupts its turn', () => {
     const shown = await untilStatus({ env, id: sessionId }, 'ready')
     expect([interrupted.code, interrupted.stdout.trim()]).toStrictEqual([
       0,
-      `interrupt: ${sessionId}`,
+      `Interrupted ${sessionId}`,
     ])
     expect([run.code, lastLine(run.stdout)]).toStrictEqual([3, 'Turn interrupted'])
     expect(shown.stdout).toMatch(/^status\s+ready$/mu)
@@ -38,6 +38,30 @@ describe('bytebureau run when another command interrupts its turn', () => {
   })
 })
 
+describe('bytebureau sessions interrupt, stop and resume in Czech', () => {
+  it('tells that the turn is interrupted with the verb of the action', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const interrupted = await runCli(['sessions', 'interrupt', sessionId, '--lang', 'cs'], env)
+    await waiting.run
+    expect(interrupted.stdout.trim()).toBe(`Přerušeno: ${sessionId}`)
+    await waiting.daemon.stop()
+  })
+
+  it('tells that the session is stopped, and that it is resumed', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const stopped = await runCli(['sessions', 'stop', sessionId, '--lang', 'cs'], env)
+    await waiting.run
+    const resumed = await runCli(['sessions', 'resume', sessionId, '--lang', 'cs'], env)
+    expect(stopped.stdout.trim()).toBe(`Zastaveno: ${sessionId}`)
+    expect(resumed.stdout.trim()).toBe(`Obnoveno: ${sessionId}`)
+    await waiting.daemon.stop()
+  })
+})
+
 describe('bytebureau run when another command stops its session', () => {
   it('ends with exit code 3 and the line that the session was stopped', async () => {
     expect.hasAssertions()
@@ -45,7 +69,7 @@ describe('bytebureau run when another command stops its session', () => {
     const { env, sessionId } = waiting
     const stopped = await runCli(['sessions', 'stop', sessionId], env)
     const run = await waiting.run
-    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `stop: ${sessionId}`])
+    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `Stopped ${sessionId}`])
     expect([run.code, lastLine(run.stdout)]).toStrictEqual([3, 'Session stopped'])
     await waiting.daemon.stop()
   })
