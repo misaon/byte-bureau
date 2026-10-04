@@ -13,7 +13,7 @@ export interface Outcome {
 }
 
 // A refusal is told in one line, whatever the text behind it, such as the stderr of git, spans
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text
     .split(/\r?\n/u)
     .map((line) => line.trim())

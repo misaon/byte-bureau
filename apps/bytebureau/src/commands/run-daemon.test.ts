@@ -62,6 +62,18 @@ describe('bytebureau run through the daemon', () => {
   })
 })
 
+describe('bytebureau projects rm through the daemon', () => {
+  it('refuses a project that is not there as a refusal, with exit code 1 and the detail of the problem', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
+    const missing = '0192f0a0-0000-7000-8000-000000000009'
+    const removed = await runCli(['projects', 'rm', missing], { BYTEBUREAU_HOME: home })
+    expect([removed.code, removed.stderr.trim()]).toStrictEqual([1, `no project ${missing}`])
+    await daemon.stop()
+  })
+})
+
 describe('bytebureau run and the daemon of its home', () => {
   it('starts the daemon on demand when none runs, and leaves it running', async () => {
     expect.hasAssertions()

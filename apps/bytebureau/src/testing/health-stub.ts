@@ -41,6 +41,18 @@ export async function projectsStub(): Promise<ProjectsStub> {
   return { port, authorizations: () => seen }
 }
 
+// A daemon of this test on a free loopback port that refuses every request with a problem of the status, the code and the detail
+export async function refusingStub(status: number, code: string, detail: string): Promise<number> {
+  const server = createServer((_request, response) => {
+    const type = `https://bytebureau.dev/problems/${code}`
+    response.writeHead(status, { 'content-type': 'application/problem+json' })
+    response.end(JSON.stringify({ type, title: 'Refused', status, detail, code }))
+  })
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return port
+}
+
 // The record of a daemon of this test on the port, as server.json holds it
 export const recordOn = (port: number, pid: number = process.pid): ServerInfo => ({
   version: '0.0.0-test',
