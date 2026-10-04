@@ -17,7 +17,7 @@ export interface SessionManagerShape {
     sessionId: string,
     input: PromptInput,
   ) => Effect.Effect<Turn, SessionError | ProviderError | StoreError>
-  readonly interrupt: (sessionId: string) => Effect.Effect<void, SessionError>
+  readonly interrupt: (sessionId: string) => Effect.Effect<void, SessionError | StoreError>
   readonly stop: (sessionId: string) => Effect.Effect<void, SessionError | StoreError>
   readonly complete: (sessionId: string) => Effect.Effect<void, SessionError | StoreError>
   readonly resume: (

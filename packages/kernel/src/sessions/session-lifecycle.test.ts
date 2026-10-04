@@ -52,12 +52,19 @@ it.layer(sessionLayer())('SessionManager interrupt', (suite) => {
       }),
   )
 
-  suite.effect('cannot interrupt a session that is not running', () =>
+  suite.effect('cannot interrupt a session that is not at work, nor one that is not there', () =>
     Effect.gen(function* cannotInterrupt() {
       const sessions = yield* SessionManager
       const session = yield* startSession()
-      const refused = yield* refusalOf(sessions.interrupt(session.id))
-      assert.strictEqual(refused, `not_found: session ${session.id} is not running`)
+      const idle = yield* refusalOf(sessions.interrupt(session.id))
+      const missing = yield* refusalOf(sessions.interrupt('no-such-session'))
+      assert.deepStrictEqual(
+        [idle, missing.split(':')[0]],
+        [
+          'invalid_transition: cannot interrupt a ready session: no turn of it is at work',
+          'not_found',
+        ],
+      )
     }),
   )
 })

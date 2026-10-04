@@ -6,6 +6,7 @@ import type { Live } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
 import { cancelAsks, interruptAgent, reported, withinLimit } from './session-live.js'
 import { logger } from './session-logger.js'
+import { requireSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
 
 // The turn is marked before anything else is done, so a question it asks from then on is known to be moot
@@ -35,6 +36,21 @@ const interruptOrUnmark = (live: Live): Effect.Effect<void> => {
   })
 }
 
+// A session that is there but has no agent at work in this kernel has nothing to interrupt: a refused transition, as for any other command
+// One that is not there is not found
+const nothingToInterrupt = (
+  deps: SessionDeps,
+  sessionId: string,
+): ReturnType<SessionManagerShape['interrupt']> =>
+  Effect.flatMap(requireSession(deps.sql, sessionId), (session) =>
+    Effect.fail(
+      new SessionError({
+        code: 'invalid_transition',
+        reason: `cannot interrupt a ${session.status} session: no turn of it is at work`,
+      }),
+    ),
+  )
+
 // The provider acknowledges an interruption by ending the turn, which is when the session is ready again
 // A question that waits for an answer is not answered by an interrupted agent, so it is cancelled, and so is one it asks meanwhile
 export const makeInterrupt =
@@ -43,9 +59,7 @@ export const makeInterrupt =
     Effect.suspend(() => {
       const live = deps.live.get(sessionId)
       if (live === undefined) {
-        return Effect.fail(
-          new SessionError({ code: 'not_found', reason: `session ${sessionId} is not running` }),
-        )
+        return nothingToInterrupt(deps, sessionId)
       }
       const cancelling = reported({ sessionId, event: 'interrupt' })(cancelAsks(deps, sessionId))
       return markInterrupted(live).pipe(
