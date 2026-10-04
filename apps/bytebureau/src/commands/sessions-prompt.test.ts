@@ -1,4 +1,4 @@
-import { SessionError } from '@bytebureau/kernel'
+import { SessionError, WorkspaceError } from '@bytebureau/kernel'
 import { describe, expect, it } from 'vitest'
 import { askOf, event, inTurn, option, question } from '../testing/events.js'
 import { frames } from '../testing/frames.js'
@@ -218,51 +218,50 @@ describe('promptSession with an ask', () => {
   })
 })
 
-describe('promptSession when the session is refused', () => {
+describe('promptSession when the request is refused', () => {
   const provider = new SessionError({
     code: 'provider_missing',
     reason: 'provider "claude" is not available; available: fake',
   })
-
-  it('exits 4 with the reason when the kernel refuses the provider, as a run does', async () => {
-    expect.hasAssertions()
-    const printed = captureConsole()
-    const { bureau } = scripted([DONE], { prompt: rejecting(provider) })
-    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(4)
-    expect(printed.err()).toStrictEqual([
-      'SessionError: provider "claude" is not available; available: fake (provider_missing)',
-    ])
-  })
-
-  it('exits 4 with the detail and the code when the daemon refuses the worktree', async () => {
-    expect.hasAssertions()
-    const printed = captureConsole()
-    const refusal = problemError(422, 'workspace_git_failed', 'git worktree add failed')
-    const { bureau } = scripted([DONE], { prompt: rejecting(refusal) })
-    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(4)
-    expect(printed.err()).toStrictEqual(['git worktree add failed (workspace_git_failed)'])
+  const worktree = new WorkspaceError({ code: 'git_failed', reason: 'git worktree add failed' })
+  const unprompted = new SessionError({
+    code: 'invalid_transition',
+    reason: 'cannot prompt a completed session',
   })
 
   it.each([
-    ['a session that is not there', problemError(404, 'session_not_found', 'no session s1')],
+    ['the kernel refuses the provider', provider],
+    ['the kernel refuses the worktree', worktree],
+    ['the kernel refuses a prompt that the session cannot take', unprompted],
     [
-      'a session that cannot take a prompt',
-      new SessionError({ code: 'invalid_transition', reason: 'cannot prompt a completed session' }),
+      'the daemon refuses the worktree',
+      problemError(422, 'workspace_git_failed', 'git worktree add failed'),
     ],
-  ])('passes the refusal of %s on, for the command to tell', async (_what, refusal) => {
+    [
+      'the daemon refuses the provider',
+      problemError(422, 'session_provider_missing', 'provider "claude" is not available'),
+    ],
+    [
+      'the daemon does not know the session',
+      problemError(404, 'session_not_found', 'no session s1'),
+    ],
+  ])('passes the refusal on, to be told by the command, when %s', async (_what, refusal) => {
     expect.hasAssertions()
-    captureConsole()
+    const printed = captureConsole()
     const { bureau } = scripted([DONE], { prompt: rejecting(refusal) })
     await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toBe(refusal)
+    expect(printed.err()).toStrictEqual([])
   })
 })
 
 describe('promptSession at a terminal', () => {
-  it('closes the frame it opened, and lets a failure that is no refusal go on', async () => {
+  it.each([
+    ['a failure that is no refusal', new Error('the store is gone')],
+    ['a refusal', new SessionError({ code: 'not_found', reason: 'session s1 does not exist' })],
+  ])('closes the frame it opened, and lets %s go on', async (_what, failure) => {
     expect.hasAssertions()
     captureConsole()
     const written = captureTerminal()
-    const failure = new Error('the store is gone')
     const { bureau } = scripted([DONE], { prompt: rejecting(failure) })
     await expect(promptSession(bureau, PROMPT, contextOf(false, true))).rejects.toBe(failure)
     expect(frames(written())).toStrictEqual({ starts: 1, ends: 1 })

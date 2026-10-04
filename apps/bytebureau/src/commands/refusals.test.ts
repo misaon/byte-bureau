@@ -34,3 +34,52 @@ describe('a request that the daemon refuses with a 4xx problem', () => {
     },
   )
 })
+
+// The problems that a run ends with exit code 4: the exit code of a prompt of an existing session is 1 for them, as for any other command
+const RUN_REFUSALS = [
+  ['workspace_git_failed', 'git worktree add failed'],
+  ['session_provider_missing', 'provider "claude" is not available'],
+  ['provider_missing', 'provider "claude" is not available'],
+] as const
+
+describe('a request that the daemon refuses with a problem that a run ends with exit code 4', () => {
+  it.each(RUN_REFUSALS)(
+    'ends sessions prompt with exit code 1 and the detail for %s',
+    async (code, detail) => {
+      expect.hasAssertions()
+      const port = await refusingStub(422, code, detail)
+      const command = [
+        'sessions',
+        'prompt',
+        's1',
+        'go',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(port),
+      ]
+      const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
+      expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, detail])
+    },
+  )
+
+  it.each(RUN_REFUSALS)(
+    'still ends run with exit code 4, which is its own contract, for %s',
+    async (code, detail) => {
+      expect.hasAssertions()
+      const port = await refusingStub(422, code, detail)
+      const command = [
+        'run',
+        'go',
+        '--project',
+        '/somewhere',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(port),
+      ]
+      const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
+      expect([refused.code, refused.stderr.trim()]).toStrictEqual([4, `${detail} (${code})`])
+    },
+  )
+})

@@ -1,11 +1,9 @@
 import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
-import { describeError } from '../errors.js'
 import { withBureauRefusable } from './refusable.js'
 import { conclude, promptAndFollow, type Ends } from './run-follow.js'
-import { closeFrame, open, refuse } from './run-output.js'
-import { isRefusal } from './run-session.js'
+import { closeFrame, open } from './run-output.js'
 
 // A prompt ends with its turn, or with the session if that ends first; the session stays ready for the next prompt
 // An interrupted turn ends where the session says what became of it: ready again, stopped or errored
@@ -31,8 +29,8 @@ async function followPrompt(
   return conclude(followed, context)
 }
 
-// Prompts a session and follows the new turn to its end; the exit code is 0 completed, 3 interrupted or stopped, 4 errored, or refused as a run is (worktree, provider)
-// Any other failure closes the frame and goes on; the command tells it if it is a refusal
+// Prompts a session and follows the new turn to its end; the exit code is 0 completed, 3 interrupted or stopped, 4 errored
+// A request that is refused, as any other failure, closes the frame and goes on: the command tells a refusal with exit code 1, as every command but run does
 export async function promptSession(
   bureau: Bureau,
   options: PromptOptions,
@@ -42,11 +40,8 @@ export async function promptSession(
   try {
     return await followPrompt(bureau, options, context)
   } catch (error) {
-    if (!isRefusal(error)) {
-      closeFrame(context)
-      throw error
-    }
-    return refuse(context, describeError(error))
+    closeFrame(context)
+    throw error
   }
 }
 
