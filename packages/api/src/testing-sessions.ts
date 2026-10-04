@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { EventLog, type StoreError } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
 import {
@@ -59,8 +60,19 @@ export const createdSession = Effect.gen(function* creates() {
   return { project, session: Schema.decodeUnknownSync(SessionDto)(body), status }
 })
 
+// How long a test waits for an event, on the wall clock: the clock of a suite is the test clock, which moves only when told
+const EVENT_WAIT_MS = 10_000
+
+// A wait that has run out ends the test with what it waited for, well before the timeout of the test would
+const waitedTooLong = (sessionId: string, type: string): Effect.Effect<never> => {
+  const missing = new Error(`no ${type} event of session ${sessionId} in ${EVENT_WAIT_MS} ms`)
+  const waited = Effect.promise(async (signal) => {
+    await sleep(EVENT_WAIT_MS, undefined, { signal })
+  })
+  return Effect.andThen(waited, Effect.die(missing))
+}
+
 // The first event of the type the session has had or will have, from the kernel behind the API
-// Only the timeout of the test bounds the wait: the clock of a suite is the test clock
 export const firstEvent = (
   sessionId: string,
   type: string,
@@ -68,6 +80,7 @@ export const firstEvent = (
   EventLog.use((log) =>
     Stream.runHead(log.subscribe({ sessionId, types: [type], since: 0 })).pipe(
       Effect.flatMap(Effect.fromOption),
+      Effect.raceFirst(waitedTooLong(sessionId, type)),
     ),
   )
 

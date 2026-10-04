@@ -110,8 +110,27 @@ it.layer(ApiTestLayer())('the commands on a session over the fake provider', (su
       yield* firstEvent(id, 'turn.started')
       assert.strictEqual((yield* post(`/sessions/${id}/interrupt`)).status, 204)
       yield* firstEvent(id, 'turn.interrupted')
+      assert.containSubset((yield* get(`/sessions/${id}`)).body, { status: 'ready' })
       assert.strictEqual((yield* post(`/sessions/${id}/complete`)).status, 204)
     }),
+  )
+})
+
+it.layer(ApiTestLayer())('POST /api/v1/sessions/:id/interrupt without a turn at work', (suite) => {
+  suite.effect(
+    'refuses to interrupt a session with no turn at work with 409, an unknown one with 404',
+    () =>
+      Effect.gen(function* refusesInterrupt() {
+        const { session } = yield* createdSession
+        const idle = yield* post(`/sessions/${session.id}/interrupt`)
+        const missing = yield* post(`/sessions/${UNKNOWN_ID}/interrupt`)
+        assert.deepStrictEqual([idle.status, missing.status], [409, 404])
+        assert.containSubset(idle.body, {
+          code: 'session_invalid_transition',
+          detail: 'cannot interrupt a ready session: no turn of it is at work',
+        })
+        assert.containSubset(missing.body, { code: 'session_not_found' })
+      }),
   )
 })
 
