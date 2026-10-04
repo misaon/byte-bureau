@@ -76,16 +76,19 @@ const signal = (pid: number, name: NodeJS.Signals): void => {
   }
 }
 
+// Processes a lock that a test wrote names, standing in for one that got the pid of a daemon: never signalled
+const UNTOUCHABLE: ReadonlySet<number> = new Set([1, process.pid, process.ppid])
+
 // The daemon of the home ends with the test: as --stop ends it, else through the pid of its lock, which a daemon holds from its start on
-// One that does not end within the wait is killed; both waits together stay within the 10 s a test hook is given
+// One that does not end within the wait is killed; the waits together stay within the 10 s a test hook is given
 export async function stopDaemonOf(home: string): Promise<void> {
-  await stopDaemon(home, 4000)
+  await stopDaemon(home, 3000, { graceMs: 500, bootMs: 30_000 })
   const holder = lockHolder(home)
-  if (holder === undefined || !isAlive(holder)) {
+  if (holder === undefined || UNTOUCHABLE.has(holder) || !isAlive(holder)) {
     return
   }
   signal(holder, 'SIGTERM')
-  if (!(await ended(holder, Date.now() + 4000))) {
+  if (!(await ended(holder, Date.now() + 3000))) {
     signal(holder, 'SIGKILL')
   }
 }

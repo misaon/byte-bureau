@@ -1,8 +1,10 @@
 import { PortInUseError, startDaemon, type RunningDaemon } from '@bytebureau/api/bun'
+import { m } from '@bytebureau/i18n'
 import type { Context } from '../context.js'
 import { version } from '../version.js'
+import { acquireLock, releaseLock, type LockOutcome } from './lock.js'
 import { publish } from './publish.js'
-import { acquireLock, releaseLock, removeServerInfo } from './server-info.js'
+import { lockPath, removeServerInfoIf } from './server-info.js'
 import { tokenFor } from './token.js'
 
 export interface ForegroundOptions {
@@ -47,11 +49,16 @@ async function started(
   }
 }
 
+// Only the record of this daemon goes: one a daemon that took the lock over has written since is that daemon's
 async function closed(daemon: RunningDaemon, home: string): Promise<void> {
   try {
     await daemon.close()
   } finally {
-    removeServerInfo(home)
+    removeServerInfoIf(
+      home,
+      (record) =>
+        record.state !== 'absent' && record.info !== undefined && record.info.pid === process.pid,
+    )
   }
 }
 
@@ -73,14 +80,20 @@ async function serveLocked(options: ForegroundOptions, context: Context): Promis
   return 0
 }
 
+// Why the lock went to another: a daemon of the home has it, or a process that is no daemon of the home and not this user's to take it from
+const refusal = (lock: Extract<LockOutcome, { acquired: false }>, home: string): string =>
+  lock.stuck
+    ? m.serve_lock_stuck({ lock: lockPath(home), pid: lock.pid })
+    : `a daemon is already running (pid ${lock.pid})`
+
 // Runs until SIGINT, SIGTERM or SIGHUP; one daemon per home, which the lock decides atomically, naming the pid of the one that holds it
 export async function serveForeground(
   options: ForegroundOptions,
   context: Context,
 ): Promise<number> {
-  const lock = acquireLock(options.home)
+  const lock = await acquireLock(options.home)
   if (!lock.acquired) {
-    context.output.warn(`a daemon is already running (pid ${lock.pid})`)
+    context.output.warn(refusal(lock, options.home))
     return 1
   }
   try {

@@ -1,19 +1,14 @@
-import {
-  chmodSync,
-  linkSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
 import path from 'node:path'
 import { decodeServerInfo, type ServerInfo } from '@bytebureau/protocol'
+import { codeOf, pidIn, readIfThere, removeIfSame, removeIfThere, stampOf } from './files.js'
 import { writePrivateFile } from './private-file.js'
 
 export const serverInfoPath = (home: string): string => path.join(home, 'server.json')
 
 export const lockPath = (home: string): string => path.join(home, 'daemon.lock')
+
+// The pid the lock of the home names, if it names one
+export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
 
 export type ServerRecord =
   | { readonly state: 'absent' }
@@ -21,47 +16,23 @@ export type ServerRecord =
   // The daemon the file names is gone, or the file is no record at all
   | { readonly state: 'stale'; readonly info?: ServerInfo }
 
-export type LockOutcome =
-  | { readonly acquired: true }
-  | { readonly acquired: false; readonly pid: number }
+// What signal 0 tells of a pid: a dead one throws ESRCH, a live one of another user EPERM, which this user cannot look into
+export type PidState = 'dead' | 'alive' | 'foreign'
 
-const codeOf = (error: unknown): unknown =>
-  error instanceof Error && 'code' in error ? error.code : undefined
-
-// Signal 0 tests the pid: a dead one throws ESRCH, a live one of another user EPERM; 0 and below would name a group of processes
-export const isAlive = (pid: number): boolean => {
+// Pid 0 and below would name a group of processes
+export const pidState = (pid: number): PidState => {
   if (!Number.isInteger(pid) || pid <= 0) {
-    return false
+    return 'dead'
   }
   try {
     process.kill(pid, 0)
-    return true
+    return 'alive'
   } catch (error) {
-    return codeOf(error) === 'EPERM'
+    return codeOf(error) === 'EPERM' ? 'foreign' : 'dead'
   }
 }
 
-// The text of the file, or nothing when there is no file
-const readIfThere = (file: string): string | undefined => {
-  try {
-    return readFileSync(file, 'utf8')
-  } catch (error) {
-    if (codeOf(error) === 'ENOENT') {
-      return undefined
-    }
-    throw error
-  }
-}
-
-const removeIfThere = (file: string): void => {
-  try {
-    unlinkSync(file)
-  } catch (error) {
-    if (codeOf(error) !== 'ENOENT') {
-      throw error
-    }
-  }
-}
+export const isAlive = (pid: number): boolean => pidState(pid) !== 'dead'
 
 const decoded = (text: string): ServerInfo | undefined => {
   try {
@@ -72,8 +43,7 @@ const decoded = (text: string): ServerInfo | undefined => {
   }
 }
 
-export const readServerInfo = (home: string): ServerRecord => {
-  const text = readIfThere(serverInfoPath(home))
+const recordIn = (text: string | undefined): ServerRecord => {
   if (text === undefined) {
     return { state: 'absent' }
   }
@@ -84,6 +54,9 @@ export const readServerInfo = (home: string): ServerRecord => {
   return isAlive(info.pid) ? { state: 'alive', info } : { state: 'stale', info }
 }
 
+export const readServerInfo = (home: string): ServerRecord =>
+  recordIn(readIfThere(serverInfoPath(home)))
+
 export const writeServerInfo = (home: string, info: ServerInfo): void => {
   writePrivateFile(serverInfoPath(home), `${JSON.stringify(info, undefined, 2)}\n`)
 }
@@ -92,107 +65,18 @@ export const removeServerInfo = (home: string): void => {
   removeIfThere(serverInfoPath(home))
 }
 
-// The pid a lock file names, if it names one
-const pidIn = (file: string): number | undefined => {
-  const text = readIfThere(file)
-  const pid = Number(text === undefined ? undefined : text.trim())
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined
-}
-
-// The lock appears with the pid already in it: written aside, then linked into place, which fails when a lock is there
-const tryLock = (home: string): boolean => {
-  const draft = `${lockPath(home)}.${process.pid}`
-  writeFileSync(draft, String(process.pid), { mode: 0o600 })
-  chmodSync(draft, 0o600)
-  try {
-    linkSync(draft, lockPath(home))
-    return true
-  } catch (error) {
-    if (codeOf(error) === 'EEXIST') {
-      return false
-    }
-    throw error
-  } finally {
-    unlinkSync(draft)
-  }
-}
-
-// False when another taker moved the lock first
-const movedAside = (lock: string, aside: string): boolean => {
-  try {
-    renameSync(lock, aside)
-    return true
-  } catch (error) {
-    if (codeOf(error) === 'ENOENT') {
-      return false
-    }
-    throw error
-  }
-}
-
-// Back where its holder expects it, never over a lock made since
-const putBack = (aside: string, lock: string): void => {
-  try {
-    linkSync(aside, lock)
-  } catch (error) {
-    if (codeOf(error) !== 'EEXIST') {
-      throw error
-    }
-  } finally {
-    unlinkSync(aside)
-  }
-}
-
 /**
- * Takes a lock whose holder was seen gone out of the way, as one round of acquireLock.
- * A rename moves it, which only one taker can win, and only what was moved is judged: the lock of a holder that is gone is removed (undefined, the caller tries again); a lock a live process made since it was read is put back and names that process.
+ * Removes server.json if the record it holds now passes the check, and only that record: one a daemon has written since
+ * the file was read stays. Read, judged and removed as one file, by its inode.
  */
-export const takeOverLock = (home: string): LockOutcome | undefined => {
-  const aside = `${lockPath(home)}.${process.pid}.stale`
-  if (!movedAside(lockPath(home), aside)) {
-    return undefined
+export const removeServerInfoIf = (
+  home: string,
+  check: (record: ServerRecord) => boolean,
+): boolean => {
+  const file = serverInfoPath(home)
+  const stamp = stampOf(file)
+  if (stamp === undefined || !check(recordIn(readIfThere(file)))) {
+    return false
   }
-  const holder = pidIn(aside)
-  if (holder === undefined || !isAlive(holder)) {
-    unlinkSync(aside)
-    return undefined
-  }
-  putBack(aside, lockPath(home))
-  return { acquired: false, pid: holder }
-}
-
-// Rounds before a lock that keeps changing hands is given up on; racing takers settle within a round or two
-const ROUNDS = 5
-
-// Each round takes the lock, names its live holder, or moves the lock of a holder that is gone out of the way and goes again
-const lockOf = (home: string, rounds: number): LockOutcome => {
-  if (tryLock(home)) {
-    return { acquired: true }
-  }
-  const holder = pidIn(lockPath(home))
-  const refused: LockOutcome | undefined =
-    holder !== undefined && isAlive(holder) ? { acquired: false, pid: holder } : takeOverLock(home)
-  if (refused !== undefined) {
-    return refused
-  }
-  if (rounds <= 1) {
-    throw new Error(`the lock ${lockPath(home)} keeps changing hands; try again`)
-  }
-  return lockOf(home, rounds - 1)
-}
-
-// One daemon per home, decided atomically: a live holder is named, and a lock whose holder is gone, or that names none, is taken over
-export const acquireLock = (home: string): LockOutcome => {
-  mkdirSync(home, { recursive: true, mode: 0o700 })
-  return lockOf(home, ROUNDS)
-}
-
-// The pid the lock of the home names, if it names one
-export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
-
-// Only the lock of this process is released: a lock another daemon has taken over is that daemon's
-export const releaseLock = (home: string): void => {
-  if (lockHolder(home) === process.pid) {
-    removeIfThere(lockPath(home))
-  }
+  return removeIfSame(file, stamp)
 }

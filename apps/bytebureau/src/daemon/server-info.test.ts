@@ -4,8 +4,12 @@ import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
 import {
   isAlive,
+  lockHolder,
+  lockPath,
+  pidState,
   readServerInfo,
   removeServerInfo,
+  removeServerInfoIf,
   serverInfoPath,
   writeServerInfo,
 } from './server-info.js'
@@ -23,6 +27,9 @@ const info = {
 const DEAD_PID = 2_147_483_000
 
 const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+// Pid 1 is another user's to everyone but root, who may signal it
+const ROOT = typeof process.getuid === 'function' && process.getuid() === 0
 
 describe('server.json', () => {
   it('is written for the user alone and read back', () => {
@@ -52,12 +59,44 @@ describe('server.json', () => {
     writeFileSync(serverInfoPath(home), 'not json')
     expect(readServerInfo(home)).toStrictEqual({ state: 'stale' })
   })
+})
 
+describe('the pids and the lock of a home', () => {
   it('knows a live pid from a dead one', () => {
     expect(isAlive(process.pid)).toBe(true)
     expect(isAlive(DEAD_PID)).toBe(false)
     // Signal 0 to pid 0 or -1 would reach a whole group of processes: neither is a daemon
     expect(isAlive(0)).toBe(false)
     expect(isAlive(-1)).toBe(false)
+  })
+
+  it.skipIf(ROOT)('tells a live pid of another user, which counts as alive', () => {
+    expect([pidState(1), pidState(process.pid), pidState(DEAD_PID)]).toStrictEqual([
+      'foreign',
+      'alive',
+      'dead',
+    ])
+    expect(isAlive(1)).toBe(true)
+  })
+
+  it('removes a record only when the check passes on the record that is there', () => {
+    const home = tempDir('bb-home-')
+    writeServerInfo(home, info)
+    expect(removeServerInfoIf(home, (record) => record.state === 'stale')).toBe(false)
+    writeServerInfo(home, { ...info, pid: DEAD_PID })
+    expect(removeServerInfoIf(home, (record) => record.state === 'stale')).toBe(true)
+    expect([readServerInfo(home), removeServerInfoIf(home, () => true)]).toStrictEqual([
+      { state: 'absent' },
+      false,
+    ])
+  })
+
+  it('reads the pid the lock names, and none from a lock that names none', () => {
+    const home = tempDir('bb-home-')
+    expect(lockHolder(home)).toBeUndefined()
+    writeFileSync(lockPath(home), '4242\n')
+    expect(lockHolder(home)).toBe(4242)
+    writeFileSync(lockPath(home), 'not a pid')
+    expect(lockHolder(home)).toBeUndefined()
   })
 })

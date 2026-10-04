@@ -2,9 +2,9 @@ import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
 import { globalArgs, portOf, processContext, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
-import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
-import { stopDaemon } from '../daemon/stop.js'
-import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
+import { startDetached as started } from '../daemon/start.js'
+import { stopDaemon, type StopOutcome } from '../daemon/stop.js'
+import { runningDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
 
 interface ServeFlags {
@@ -23,7 +23,16 @@ const flagsOf = (flags: ServeFlags): string[] => [
   ...(flags.debug === undefined ? [] : [`--debug=${flags.debug}`]),
 ]
 
-// A daemon that is not running is what was asked for; one that outlives the wait is a failure
+const stopped = (result: Exclude<StopOutcome, { outcome: 'still_running' }>): string => {
+  if (result.outcome === 'stopped') {
+    return m.serve_stopped({ pid: result.pid })
+  }
+  return result.outcome === 'cleared'
+    ? m.serve_lock_cleared({ pid: result.pid })
+    : m.serve_not_running()
+}
+
+// A daemon that is not running is what was asked for, and so is a lock cleared that no daemon of the home held; one that outlives the wait is a failure
 async function stop(home: string, context: Context): Promise<number> {
   const result = await stopDaemon(home)
   context.output.emit({ command: 'serve.stop', ...result })
@@ -31,21 +40,19 @@ async function stop(home: string, context: Context): Promise<number> {
     context.output.warn(m.serve_still_running({ pid: result.pid }))
     return 1
   }
-  context.output.print(
-    result.outcome === 'stopped' ? m.serve_stopped({ pid: result.pid }) : m.serve_not_running(),
-  )
+  context.output.print(stopped(result))
   return 0
 }
 
+// A start that fails says why at once, naming the log or the lock
 async function startDetached(home: string, flags: ServeFlags, context: Context): Promise<number> {
-  spawnDaemon(home, process.env, flagsOf(flags))
-  const info = await waitForDaemon(home)
-  if (info === undefined) {
-    context.output.warn(m.serve_timeout({ log: daemonLogPath(home) }))
+  const start = await started(home, process.env, flagsOf(flags))
+  if (!start.up) {
+    context.output.warn(start.reason)
     return 1
   }
   // The record names the host clients use; a wildcard bind is known here by the flag alone
-  announce(info, context, flags.host ?? info.host)
+  announce(start.info, context, flags.host ?? start.info.host)
   return 0
 }
 

@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { serverUrl } from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
+import { lockPath, readServerInfo, serverInfoPath } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/spawn.js'
 import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
@@ -153,17 +153,77 @@ describe('bytebureau serve (detached) and serve --stop', () => {
 })
 
 describe('bytebureau serve (detached) that cannot start', () => {
-  it('gives up on a daemon that does not come up, naming the log that says why', async () => {
+  it('tells at once that the daemon failed to start, naming the log that says why', async () => {
     expect.hasAssertions()
     const daemon = await startDaemonProcess(tempDir('bb-home-'))
     const home = tempDir('bb-home-')
     const port = String(daemon.info.port)
+    const since = Date.now()
     const started = await runCli(['serve', '--port', port], stoppedWithTheTest(home))
-    const gaveUp = `The daemon did not come up in time; see ${daemonLogPath(home)}`
-    expect([started.code, started.stderr.trim()]).toStrictEqual([1, gaveUp])
+    // Well within the 30 s a start that does not come up is given
+    expect([started.code, started.stderr.trim(), Date.now() - since < 15_000]).toStrictEqual([
+      1,
+      `The daemon failed to start; see ${daemonLogPath(home)}`,
+      true,
+    ])
     expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(cannotListen(port))
     await expect(daemon.stop()).resolves.toBe(0)
   })
+})
+
+// A lock left from before a crash or a reboot, naming a process that got the pid since: written an hour ago
+const oldLock = (home: string, pid: number): void => {
+  writeFileSync(lockPath(home), String(pid))
+  const anHourAgo = new Date(Date.now() - 3_600_000)
+  utimesSync(lockPath(home), anHourAgo, anHourAgo)
+}
+
+// What a start says of the lock of pid 1, which it cannot judge, and the way out
+const stuckLock = (home: string): string =>
+  `The lock ${lockPath(home)} names pid 1, which does not answer as a daemon of this home; if none is running, clear the lock with bytebureau serve --stop`
+
+// Pid 1 is another user's to everyone but root, who may signal it
+const ROOT = typeof process.getuid === 'function' && process.getuid() === 0
+
+describe('bytebureau serve and a lock whose pid lives on after a crash or a reboot', () => {
+  it('starts on the lock of a live process of this user that is no daemon of the home, which it takes over', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    // This test's own pid stands for the process that got the pid of the daemon
+    oldLock(home, process.pid)
+    const started = await runCli(['serve', '--port', '0', '--json'], stoppedWithTheTest(home))
+    expect(started.code).toBe(0)
+    expect(jsonLines(started.stdout)).toStrictEqual([describedDaemon(home)])
+    expect(readFileSync(lockPath(home), 'utf8')).not.toBe(String(process.pid))
+  })
+
+  it('clears with --stop the lock of a live process that is no daemon of the home, and says so', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    oldLock(home, process.pid)
+    const stopped = await runCli(['serve', '--stop'], stoppedWithTheTest(home))
+    const said = `Cleared the stale lock of pid ${process.pid}, which is not a daemon of this home\n`
+    expect([stopped.code, stopped.stdout, existsSync(lockPath(home))]).toStrictEqual([
+      0,
+      said,
+      false,
+    ])
+  })
+
+  it.skipIf(ROOT)(
+    'names the lock of a process of another user and the way out, which --stop takes',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      oldLock(home, 1)
+      const env = stoppedWithTheTest(home)
+      const started = await runCli(['serve', '--port', '0'], env)
+      expect([started.code, started.stderr.trim()]).toStrictEqual([1, stuckLock(home)])
+      const stopped = await runCli(['serve', '--stop'], env)
+      expect([stopped.code, existsSync(lockPath(home))]).toStrictEqual([0, false])
+      await expect(runCli(['serve', '--port', '0'], env)).resolves.toMatchObject({ code: 0 })
+    },
+  )
 })
 
 describe('bytebureau serve and the user configuration', () => {
