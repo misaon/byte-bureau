@@ -71,6 +71,15 @@ Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `doc
 - Tests use `@effect/vitest` (`it.effect`, `it.layer`), `KernelTest` from `@bytebureau/kernel/testing` (the whole kernel over `StoreTest`), `TestClock` for time and the fake provider for the agent; no test spawns a real agent.
 - `StoreLive` cannot load under Node, so Vitest never imports it: the CLI tests run it in a Bun subprocess, and the compiled-binary smoke in CI (`bytebureau run … --provider fake`) runs it in the shipped binary. To try that by hand, build with `bun run build:binaries --host` and point `BYTEBUREAU_HOME` at a throwaway directory so that `~/.bytebureau` stays untouched.
 
+## Working in the API and the client
+
+- `packages/api` may import `effect` and the kernel. A handler calls a kernel service and maps its failure with `orProblem`, which turns the errors of the kernel into the problem of a status the endpoint declares (`error: PROBLEM_SCHEMAS`). The [daemon and API page](apps/docs/src/content/docs/daemon-and-api.md) of the docs describes what the API answers.
+- The OpenAPI document and the client are generated and committed: `bun run --cwd packages/api build` regenerates `packages/api/openapi.json`, and `bun run generate:client` regenerates `packages/client/src/gen` from it with hey-api, which runs in `tools/client-codegen` on TypeScript 6. Commit both with the change that caused them; CI regenerates them and fails on any difference. Commits to `tools/client-codegen` use the `repo` scope.
+- `packages/client` has no Effect at runtime: it runs on `fetch`, `eventsource-parser` and the global `WebSocket`, and imports only types from the protocol. Its generated code under `src/gen` is not linted, formatted or spell-checked.
+- API tests run the real server on `@effect/platform-node` over `KernelTest` (`ApiTestLayer` of `packages/api/src/testing.ts`), on a free loopback port, and talk to it over HTTP, SSE and the WebSocket.
+- CLI tests that need the daemon start one with `startDaemonProcess` (`apps/bytebureau/src/testing/daemon.ts`) on a `testHome()`, whose `config.json` puts the daemon on a free port, and every test that may start a daemon registers `stoppedWithTheTest(home)`, so no daemon outlives its test.
+- Never run the daemon tests, or a daemon you start by hand, against `~/.bytebureau`: every helper uses a temporary home, and `BYTEBUREAU_HOME` gives a hand-started daemon a throwaway one; end it with `bytebureau serve --stop`.
+
 ## Editors
 
 VS Code: accept the recommended extensions (`.vscode/extensions.json`). WebStorm: the lefthook hooks keep formatting and linting consistent; run `bun run format` before committing if your IDE formatter differs.
