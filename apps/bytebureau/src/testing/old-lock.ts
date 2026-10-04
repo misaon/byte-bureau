@@ -26,6 +26,6 @@ export const unknownStart = async (): Promise<number | undefined> => {
   return undefined
 }
 
-// What a start or a stop says of a daemon of the home that holds the lock without answering
+// What a start or a stop says of a daemon of the home that holds the lock without answering, and the way out
 export const silentLine = (home: string, pid: number): string =>
-  `A daemon of this home (pid ${pid}) holds the lock ${lockPath(home)} but does not answer; it may be stopped or busy`
+  `A daemon of this home (pid ${pid}) holds the lock but does not answer; it may be stopped or busy, and if it is not a daemon of this home, delete ${lockPath(home)}`
