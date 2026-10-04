@@ -5196,17 +5196,22 @@ Verified facts this task relies on (fact sheet §4): in `effect@4.0.0`, `effect/
 
 Semantics (ADR-0013): the spec's "effect/rpc over WebSocket" is served as the spec says it (ruling of the plan: the fact sheet §4 recommends a hand-written JSON protocol instead, because every `effect/rpc` export is marked unstable and a stream waits for the client's acknowledgement of each chunk — the first holds for all of `effect/http-api` as well, and the second is the flow control the client implements in Task 7; if `rpc.test.ts` cannot be made green against the envelopes below within this task's fix rounds, the fallback is that hand-written protocol with the message schemas in the protocol package, ledgered as a ruling), with the JSON serialization so that a client without Effect can speak it — the envelopes above are small and typed, and Task 7's client implements them in one module. Authentication is per request: every `Request` envelope carries `["authorization", "Bearer <token>"]` in its `headers`, and `RpcAuthorization` refuses a request without a valid token with the `unauthorized` problem as the request's failure; the upgrade itself is unauthenticated (the server listens on loopback and the token never travels in the URL), but a browser's `Origin` header is checked at the upgrade: an origin outside `corsOrigins` is refused with `403` before the socket opens, a request without `Origin` (the CLI, Node, Bun) passes. Streams (`events.subscribe`) are delivered as `Chunk` messages; the server waits for the client's `Ack` of a chunk before it sends the next, which is the per-client backpressure of spec §11.1 together with the `buffered` delivery (oldest ephemeral deltas go first). `Interrupt` ends a subscription; closing the socket ends them all. A client's `Ping` gets a `Pong`.
 
+Semantics (as shipped, commits a44eb43, 82e2ae8, d230d18): the Effect RPC server behaves as the fact sheet says (frames of a call, a refusal, a subscription with ack and interrupt, and a ping are in the task report) — the `effect/rpc` ruling holds. **Mutations over the socket are rate limited** (`rpc/limit.ts`, an `RpcMiddleware` on every procedure but `events.subscribe`) from the same `TokenBuckets` as REST through the `MutationBuckets` service (`mutation-buckets.ts`), keyed by the client's remote address — captured *before* the upgrade by `rpc/upgrade.ts` (`request.modify({ remoteAddress })` provided to the upgrade effect), because Bun forgets a request's address once the socket is open (a Bun probe of the shipped code showed one budget for both doors; Node keeps the address anyway); authentication runs before the limit, so a tokenless flood drains nothing. **The origin guard** (`rpc/origin.ts`) admits an absent `Origin`, a configured origin, or a loopback-named origin (`localhost`, `127.0.0.1`, `[::1]`) whose port equals the `Host` header's port — never the request's own `Host` name (DNS rebinding); an unparsable `Origin` gets 403; a guarded request without `Upgrade` answers Effect's empty 400. `disableFatalDefects: true`, so a handler defect answers that request's `Exit` with a `Die` cause (`{ name, message }`, no stack) and the socket stays open; a `Request` without `headers` closes the socket with 1011 (ADR-0013 says both). `projects.remove` over RPC checks existence first (as REST does; `projectOf` lives in `handlers/found.ts`); `Routes`/`OPENAPI_PATH` moved to `routes.ts`, the requirement aliases to `requirements.ts`; the test client opens its socket in the test's scope; tests: `rpc.test.ts`, `rpc-limit.test.ts`, `rpc-origin.test.ts`, `rpc-defect.test.ts`, `rpc/auth.test.ts`, `rpc/origin.test.ts`, `rpc/upgrade.test.ts`. For the whole-branch review: no CI test runs the Bun upgrade path (the unit stub and the probe carry it); neither door logs a handler defect until Task 8's error reporter; a token sent only on the upgrade is accepted by Effect too (a token in the request overrides it); a schema failure or unknown tag answers a `Die` before authentication.
+
 - [ ] **Step 1: The group with middleware, the middleware, the handlers**
 
 `packages/api/src/rpc/group.ts`:
 ```ts
 import { BureauRpcs } from '@bytebureau/protocol'
 import { RpcAuthorization } from './auth.js'
+import { RpcMutationLimit } from './limit.js'
 
 export const WS_PATH = '/api/v1/ws'
 
 // Every procedure, the subscription included, carries the bearer token in the headers of its request
-export const BureauRpcsWithAuth = BureauRpcs.middleware(RpcAuthorization)
+// The middleware added last wraps the others: a request without a valid token is refused before it costs a token of the limit
+export const BureauRpcsWithAuth =
+  BureauRpcs.middleware(RpcMutationLimit).middleware(RpcAuthorization)
 ```
 
 `packages/api/src/rpc/auth.ts`:
@@ -5216,7 +5221,6 @@ import { Effect, Layer, Option, Redacted } from 'effect'
 import { Headers } from 'effect/http'
 import { RpcMiddleware } from 'effect/rpc'
 import { sameToken, UNAUTHORIZED } from '../auth.js'
-// Task 3 stopped exporting UNAUTHORIZED while nothing used it: export it from auth.ts again here
 
 export class RpcAuthorization extends RpcMiddleware.Service<RpcAuthorization>()(
   'bb/api/RpcAuthorization',
@@ -5226,18 +5230,17 @@ export class RpcAuthorization extends RpcMiddleware.Service<RpcAuthorization>()(
 const BEARER = 'bearer '
 
 // The token of a request: the authorization header of its envelope, whatever the case of the scheme
+// The headers come from the wire as the client wrote them, so a value that is no text carries no token
 export const bearerOf = (headers: Headers.Headers): string | undefined => {
   const value = Option.getOrUndefined(Headers.get(headers, 'authorization'))
-  if (value === undefined || !value.toLowerCase().startsWith(BEARER)) {
+  if (typeof value !== 'string' || !value.toLowerCase().startsWith(BEARER)) {
     return undefined
   }
   return value.slice(BEARER.length).trim()
 }
 
 // Built the way AuthorizationLive is: an empty token is a programming error and dies at construction
-export const RpcAuthorizationLive = (
-  token: Redacted.Redacted<string>,
-): Layer.Layer<RpcAuthorization> =>
+export const RpcAuthorizationLive = (token: Redacted.Redacted): Layer.Layer<RpcAuthorization> =>
   Layer.effect(
     RpcAuthorization,
     Redacted.value(token) === ''
@@ -5263,6 +5266,7 @@ import {
 } from '@bytebureau/kernel'
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
+import { projectOf } from '../handlers/found.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
@@ -5272,7 +5276,10 @@ export const RpcHandlers = BureauRpcsWithAuth.toLayer({
     Stream.unwrap(EventLog.use((log) => Effect.succeed(buffered(log.subscribe(filter))))),
   'projects.register': ({ path }) =>
     orProblem(ProjectRegistry.use((registry) => registry.register(path))),
-  'projects.remove': ({ id }) => orProblem(ProjectRegistry.use((registry) => registry.remove(id))),
+  'projects.remove': ({ id }) =>
+    projectOf(id).pipe(
+      Effect.flatMap(() => orProblem(ProjectRegistry.use((registry) => registry.remove(id)))),
+    ),
   'sessions.create': (body) => orProblem(SessionManager.use((sessions) => sessions.create(body))),
   'sessions.prompt': ({ sessionId, input }) =>
     orProblem(SessionManager.use((sessions) => sessions.prompt(sessionId, input))),
@@ -5296,42 +5303,39 @@ The subscription's stream must fail with nothing (`events.subscribe` declares no
 
 `packages/api/src/rpc/route.ts`:
 ```ts
-import { Effect, Layer, Option, type Redacted } from 'effect'
-import { Headers, HttpRouter, HttpServerRequest, HttpServerResponse } from 'effect/http'
+import type { KernelServices } from '@bytebureau/kernel'
+import { Effect, Layer, type Redacted } from 'effect'
+import { HttpRouter } from 'effect/http'
 import { RpcSerialization, RpcServer } from 'effect/rpc'
+import type { MutationBuckets } from '../mutation-buckets.js'
 import { RpcAuthorizationLive } from './auth.js'
 import { BureauRpcsWithAuth, WS_PATH } from './group.js'
 import { RpcHandlers } from './handlers.js'
+import { RpcMutationLimitLive } from './limit.js'
+import { guardedUpgrade } from './upgrade.js'
 
 export interface RpcRouteOptions {
-  readonly token: Redacted.Redacted<string>
+  readonly token: Redacted.Redacted
   readonly corsOrigins: readonly string[]
 }
 
-// A browser says where it comes from; an origin the daemon does not serve is turned away before the socket opens
-const originAllowed = (headers: Headers.Headers, origins: readonly string[]): boolean => {
-  const origin = Option.getOrUndefined(Headers.get(headers, 'origin'))
-  return origin === undefined || origins.includes(origin)
-}
-
-export const RpcRoute = (options: RpcRouteOptions) =>
+// GET /api/v1/ws: the RPC server of the group behind the origin check, with its handlers, its middlewares and JSON frames
+// Before the upgrade, an origin that may not open the socket is turned away and the address of the client is captured
+// A defect of a handler ends that request with a Die instead of a Defect for the whole connection
+export const RpcRoute = (
+  options: RpcRouteOptions,
+): Layer.Layer<never, never, HttpRouter.HttpRouter | KernelServices | MutationBuckets> =>
   HttpRouter.use((router) =>
     Effect.gen(function* registersRpc() {
-      const upgrade = yield* RpcServer.toHttpEffectWebsocket(BureauRpcsWithAuth)
-      yield* router.add(
-        'GET',
-        WS_PATH,
-        Effect.gen(function* guardsUpgrade() {
-          const request = yield* HttpServerRequest.HttpServerRequest
-          return originAllowed(request.headers, options.corsOrigins)
-            ? yield* upgrade
-            : HttpServerResponse.empty({ status: 403 })
-        }),
-      )
+      const upgrade = yield* RpcServer.toHttpEffectWebsocket(BureauRpcsWithAuth, {
+        disableFatalDefects: true,
+      })
+      yield* router.add('GET', WS_PATH, guardedUpgrade(upgrade, options.corsOrigins))
     }),
   ).pipe(
     Layer.provide(RpcHandlers),
     Layer.provide(RpcAuthorizationLive(options.token)),
+    Layer.provide(RpcMutationLimitLive),
     Layer.provide(RpcSerialization.layerJson),
   )
 ```
@@ -5341,147 +5345,947 @@ export const RpcRoute = (options: RpcRouteOptions) =>
 
 `packages/api/src/testing-ws.ts`:
 ```ts
+import { EventEnvelope } from '@bytebureau/protocol'
+import { Effect, Queue, Schema, type Cause, type Scope } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { WS_PATH } from './rpc/group.js'
+import { baseUrl } from './testing.js'
+
+// One envelope of effect/rpc as it travels: Request, Ack, Interrupt, Ping from the client; Chunk, Exit, Defect, Pong from the server
 export interface WsMessage {
   readonly _tag: string
   readonly [key: string]: unknown
 }
 
+const isMessage = (item: unknown): item is WsMessage =>
+  typeof item === 'object' && item !== null && typeof Reflect.get(item, '_tag') === 'string'
+
 // A frame holds one message or a batch of them
 const messagesOf = (text: string): WsMessage[] => {
   const parsed: unknown = JSON.parse(text)
-  return (Array.isArray(parsed) ? parsed : [parsed]).filter(
-    (item): item is WsMessage => typeof item === 'object' && item !== null && '_tag' in item,
-  )
+  const items: readonly unknown[] = Array.isArray(parsed) ? parsed : [parsed]
+  return items.filter((item) => isMessage(item))
 }
+
+export const tagOf = ({ _tag: tag }: WsMessage): string => tag
 
 export interface WsClient {
+  // One message, one frame
   readonly send: (message: object) => void
-  readonly next: () => Promise<WsMessage>
-  readonly close: () => void
+  // The next message the server sent, in order; fails with Done once the socket has closed and nothing is left
+  readonly next: Effect.Effect<WsMessage, Cause.Done>
 }
 
-// The global WebSocket of Node and Bun; messages are queued so a test reads them in order
-export async function wsClient(url: string, headers: Record<string, string> = {}): Promise<WsClient> {
-  const socket = new WebSocket(url, Object.keys(headers).length === 0 ? undefined : { headers })
-  const queue: WsMessage[] = []
-  const waiting: ((message: WsMessage) => void)[] = []
+type Inbox = Queue.Queue<WsMessage, Cause.Done>
+
+const listen = (socket: WebSocket, inbox: Inbox): void => {
   socket.addEventListener('message', (event) => {
     for (const message of messagesOf(String(event.data))) {
-      const waiter = waiting.shift()
-      if (waiter === undefined) {
-        queue.push(message)
-      } else {
-        waiter(message)
-      }
+      Queue.offerUnsafe(inbox, message)
     }
   })
-  await new Promise<void>((resolve, reject) => {
-    socket.addEventListener('open', () => resolve(), { once: true })
-    socket.addEventListener('error', () => reject(new Error(`cannot open ${url}`)), { once: true })
+  socket.addEventListener('close', () => {
+    Queue.endUnsafe(inbox)
   })
-  return {
-    send: (message) => socket.send(JSON.stringify(message)),
-    next: () => {
-      const queued = queue.shift()
-      return queued === undefined ? new Promise((resolve) => waiting.push(resolve)) : Promise.resolve(queued)
-    },
-    close: () => socket.close(),
-  }
 }
 
-export const request = (id: string, tag: string, payload: unknown, token?: string): object => ({
+// The global WebSocket of Node and Bun, which take headers (a browser sends none but its Origin)
+// The inbox listens from the start, so nothing the server sends right after the upgrade is lost
+const opened = (
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  inbox: Inbox,
+): Effect.Effect<WebSocket, Error> =>
+  Effect.callback<WebSocket, Error>((resume) => {
+    const socket = new WebSocket(url, { headers: { ...headers } })
+    listen(socket, inbox)
+    const failed = (): void => {
+      resume(Effect.fail(new Error(`cannot open ${url}`)))
+    }
+    socket.addEventListener(
+      'open',
+      () => {
+        resume(Effect.succeed(socket))
+      },
+      { once: true },
+    )
+    socket.addEventListener('error', failed, { once: true })
+    return Effect.sync(() => {
+      socket.close()
+    })
+  })
+
+// A client of the wire protocol; the socket closes with the scope of the test, whatever its outcome
+const wsClient = (
+  url: string,
+  headers: Readonly<Record<string, string>> = {},
+): Effect.Effect<WsClient, Error, Scope.Scope> =>
+  Effect.gen(function* opensClient() {
+    const inbox = yield* Queue.unbounded<WsMessage, Cause.Done>()
+    const socket = yield* Effect.acquireRelease(opened(url, headers, inbox), (open) =>
+      Effect.sync(() => {
+        open.close()
+      }),
+    )
+    return {
+      send: (message) => {
+        socket.send(JSON.stringify(message))
+      },
+      next: Queue.take(inbox),
+    }
+  })
+
+// A client of the RPC socket of the server under test; a browser would send its Origin among the headers
+export const connected = (
+  headers: Readonly<Record<string, string>> = {},
+): Effect.Effect<WsClient, Error, HttpServer.HttpServer | Scope.Scope> =>
+  baseUrl.pipe(
+    Effect.flatMap((base) => wsClient(`${base.replace(/^http/u, 'ws')}${WS_PATH}`, headers)),
+  )
+
+// Reads until a message satisfies the predicate and gives every message read, that one last
+// An ack follows each chunk when the stream is named, so the stream keeps coming
+export const readUntil = (
+  client: WsClient,
+  done: (message: WsMessage) => boolean,
+  ackOf?: string,
+): Effect.Effect<WsMessage[], Cause.Done> =>
+  Effect.gen(function* reads() {
+    const read: WsMessage[] = []
+    let finished = false
+    while (!finished) {
+      const message = yield* client.next
+      read.push(message)
+      if (ackOf !== undefined && tagOf(message) === 'Chunk') {
+        client.send({ _tag: 'Ack', requestId: ackOf })
+      }
+      finished = done(message)
+    }
+    return read
+  })
+
+// The events a chunk carries, read through the protocol's schema as a client reads them
+export const envelopesOf = (message: WsMessage | undefined): readonly EventEnvelope[] =>
+  message === undefined || tagOf(message) !== 'Chunk'
+    ? []
+    : Schema.decodeUnknownSync(Schema.Array(EventEnvelope))(message['values'])
+
+export interface RequestEnvelope {
+  readonly id: string
+  readonly tag: string
+  readonly payload: unknown
+  // Sent as the authorization header of the request; without one the request carries no header
+  readonly token?: string | undefined
+}
+
+export const request = ({ id, tag, payload, token }: RequestEnvelope): object => ({
   _tag: 'Request',
   id,
   tag,
   payload,
   headers: token === undefined ? [] : [['authorization', `Bearer ${token}`]],
 })
+
+// Sends the request and gives the next message, which for a procedure alone on its socket is its exit
+export const called = (
+  client: WsClient,
+  envelope: RequestEnvelope,
+): Effect.Effect<WsMessage, Cause.Done> =>
+  Effect.suspend(() => {
+    client.send(request(envelope))
+    return client.next
+  })
 ```
 Both Bun's and Node's (undici) global `WebSocket` accept a non-standard `{ headers }` second argument (fact sheet §4.4, verified on Node 24, Node 26 and Bun 1.4.2); browsers do not, which is why the token travels in the RPC request headers and not in the upgrade. The `as` cast is avoided by the type guard; `Object(event.data)` is not needed since `event.data` is a string for text frames.
 
 `packages/api/src/rpc.test.ts`:
 ```ts
+import { EventLog, type StoreError } from '@bytebureau/kernel'
 import { createTempRepo } from '@bytebureau/kernel/testing'
-import { it } from '@effect/vitest'
-import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, baseUrl, TEST_TOKEN } from './testing.js'
-import { createdSession } from './testing-sessions.js'
-import { request, wsClient } from './testing-ws.js'
+import { ProjectDto, PruneReportDto, SessionDto, type EventEnvelope } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect, Schema, type Cause, type Scope } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { UNAUTHORIZED } from './auth.js'
+import { ApiTestLayer, get, TEST_TOKEN } from './testing.js'
+import { createdSession, registeredProject, UNKNOWN_ID } from './testing-sessions.js'
+import {
+  called,
+  connected,
+  envelopesOf,
+  readUntil,
+  request,
+  tagOf,
+  type WsClient,
+  type WsMessage,
+} from './testing-ws.js'
 
-const wsUrl = (base: string): string => `${base.replace(/^http/u, 'ws')}/api/v1/ws`
+// Far longer than an event takes to reach a subscriber that is free to receive it
+const QUIET = '300 millis'
 
-describe('GET /api/v1/ws (effect/rpc over WebSocket)', () => {
-  it.layer(ApiTestLayer())('over the test kernel', (it) => {
-    it.effect('runs a procedure with the token in the request headers and answers with its exit', () =>
-      Effect.gen(function* calls() {
-        const base = yield* baseUrl
-        const client = yield* Effect.promise(() => wsClient(wsUrl(base)))
-        const repo = createTempRepo()
-        client.send(request('1', 'projects.register', { path: repo }, TEST_TOKEN))
-        const exit = yield* Effect.promise(() => client.next())
-        expect(exit).toMatchObject({ _tag: 'Exit', requestId: '1', exit: { _tag: 'Success', value: { path: repo } } })
-        client.close()
-      }),
+interface Subscribed {
+  readonly client: WsClient
+  readonly first: WsMessage
+}
+
+// A client subscribed to the events of a session since the start, and the first message of the stream
+const subscribed = (
+  sessionId: string,
+  id: string,
+): Effect.Effect<Subscribed, Error | Cause.Done, HttpServer.HttpServer | Scope.Scope> =>
+  Effect.gen(function* subscribes() {
+    const client = yield* connected()
+    const payload = { sessionId, since: 0 }
+    client.send(request({ id, tag: 'events.subscribe', payload, token: TEST_TOKEN }))
+    return { client, first: yield* client.next }
+  })
+
+// A durable event of the session, published while its subscription waits for an ack
+const warned = (sessionId: string): Effect.Effect<EventEnvelope, StoreError, EventLog> =>
+  EventLog.use((log) =>
+    log.publish({
+      type: 'session.warning',
+      sessionId,
+      payload: { kind: 'probe', message: 'published while a chunk waits for its ack' },
+    }),
+  )
+
+const isExit = (message: WsMessage): boolean => tagOf(message) === 'Exit'
+
+const isWarning = (message: WsMessage): boolean =>
+  envelopesOf(message).some((event) => event.type === 'session.warning')
+
+// The exits of a register, a create and a prune as a client reads them, through the protocol's schemas
+const Registered = Schema.Struct({ exit: Schema.Struct({ value: ProjectDto }) })
+const Created = Schema.Struct({ exit: Schema.Struct({ value: SessionDto }) })
+const Pruned = Schema.Struct({ exit: Schema.Struct({ value: PruneReportDto }) })
+
+interface CreatedOver {
+  readonly session: SessionDto
+  readonly worktree: string
+}
+
+// A session of the project created over the socket, and the path of its worktree
+const createdOver = (
+  client: WsClient,
+  projectId: string,
+): Effect.Effect<CreatedOver, Cause.Done | Cause.NoSuchElementError> =>
+  Effect.gen(function* creates() {
+    const payload = { projectId, title: 'Over the socket' }
+    const answer = yield* called(client, {
+      id: 'create',
+      tag: 'sessions.create',
+      payload,
+      token: TEST_TOKEN,
+    })
+    const session = Schema.decodeUnknownSync(Created)(answer).exit.value
+    const workspace = yield* Effect.fromNullishOr(session.workspace)
+    return { session, worktree: workspace.path }
+  })
+
+// What the prune of a project over the socket reports
+const prunedOver = (
+  client: WsClient,
+  projectId: string,
+): Effect.Effect<PruneReportDto, Cause.Done> =>
+  called(client, {
+    id: 'prune',
+    tag: 'workspaces.prune',
+    payload: { projectId },
+    token: TEST_TOKEN,
+  }).pipe(Effect.map((answer) => Schema.decodeUnknownSync(Pruned)(answer).exit.value))
+
+const SUCCEEDED = { exit: { _tag: 'Success' } }
+
+// The failure of a procedure the kernel refused, told by the code of its problem
+const refusedWith = (code: string): object => ({
+  exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: { code } }] },
+})
+
+// The other procedures on a ready session, in an order the kernel accepts, and what each answers
+const lifecycle = (sessionId: string): [string, object, object][] => [
+  ['sessions.interrupt', { sessionId }, refusedWith('session_not_found')],
+  ['sessions.stop', { sessionId }, SUCCEEDED],
+  ['sessions.resume', { sessionId }, { exit: { value: { id: sessionId, status: 'ready' } } }],
+  ['sessions.complete', { sessionId }, SUCCEEDED],
+  [
+    'sessions.prompt',
+    { sessionId, input: { text: 'more' } },
+    refusedWith('session_invalid_transition'),
+  ],
+  ['asks.answer', { askId: UNKNOWN_ID, answer: { selected: ['x'] } }, refusedWith('ask_not_found')],
+]
+
+// What a refused request carries: no authorization header, or a token that is not the daemon's
+const REFUSED: [string, string | undefined][] = [
+  ['no token', undefined],
+  ['a wrong token', 'not-the-token'],
+]
+
+it.layer(ApiTestLayer())('procedures over the WebSocket of /api/v1/ws', (suite) => {
+  suite.effect('runs a procedure with the token in its headers and answers with its exit', () =>
+    Effect.gen(function* calls() {
+      const client = yield* connected()
+      const repo = createTempRepo()
+      const register = { id: '1', tag: 'projects.register', payload: { path: repo } }
+      assert.containSubset(yield* called(client, { ...register, token: TEST_TOKEN }), {
+        _tag: 'Exit',
+        requestId: '1',
+        exit: { _tag: 'Success', value: { path: repo } },
+      })
+    }),
+  )
+
+  suite.effect('fails a procedure with its problem: a project removed twice is not found', () =>
+    Effect.gen(function* refusesRemoval() {
+      const client = yield* connected()
+      const payload = { path: createTempRepo() }
+      const register = { id: '5', tag: 'projects.register', payload, token: TEST_TOKEN }
+      const { exit } = Schema.decodeUnknownSync(Registered)(yield* called(client, register))
+      const removal = { tag: 'projects.remove', payload: { id: exit.value.id }, token: TEST_TOKEN }
+      const removed = yield* called(client, { ...removal, id: '6' })
+      assert.containSubset(removed, { requestId: '6', exit: { _tag: 'Success' } })
+      const notFound = { _tag: 'Fail', error: { status: 404, code: 'not_found' } }
+      const again = yield* called(client, { ...removal, id: '7' })
+      assert.containSubset(again, { requestId: '7', exit: { _tag: 'Failure', cause: [notFound] } })
+    }),
+  )
+
+  suite.effect('answers a ping with a pong', () =>
+    Effect.gen(function* pings() {
+      const client = yield* connected()
+      client.send({ _tag: 'Ping' })
+      assert.deepStrictEqual(yield* client.next, { _tag: 'Pong' })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())(
+  'the bearer token in the headers of each request on /api/v1/ws',
+  (suite) => {
+    suite.effect.each(REFUSED)(
+      'refuses a request with %s: its failure is the unauthorized problem',
+      ([, token]) =>
+        Effect.gen(function* refuses() {
+          const client = yield* connected()
+          const repo = createTempRepo()
+          const register = { id: '2', tag: 'projects.register', payload: { path: repo }, token }
+          assert.containSubset(yield* called(client, register), {
+            _tag: 'Exit',
+            requestId: '2',
+            exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: UNAUTHORIZED }] },
+          })
+          const { body } = yield* get('/projects')
+          assert.notInclude(JSON.stringify(body), repo)
+        }),
     )
+  },
+)
 
-    it.effect('refuses a request without a valid token with the unauthorized problem as its failure', () =>
-      Effect.gen(function* refuses() {
-        const base = yield* baseUrl
-        const client = yield* Effect.promise(() => wsClient(wsUrl(base)))
-        client.send(request('2', 'projects.register', { path: createTempRepo() }))
-        const exit = yield* Effect.promise(() => client.next())
-        expect(exit).toMatchObject({
-          _tag: 'Exit',
-          requestId: '2',
-          exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: { code: 'unauthorized', status: 401 } }] },
-        })
-        client.close()
-      }),
-    )
+it.layer(ApiTestLayer())('the session procedures over the WebSocket of /api/v1/ws', (suite) => {
+  suite.effect('creates a session over the socket and reaches every procedure on it', () =>
+    Effect.gen(function* drivesSession() {
+      const { project } = yield* registeredProject
+      const client = yield* connected()
+      const { session, worktree } = yield* createdOver(client, project.id)
+      assert.strictEqual(session.status, 'ready')
+      for (const [tag, input, answer] of lifecycle(session.id)) {
+        const done = yield* called(client, { id: tag, tag, payload: input, token: TEST_TOKEN })
+        assert.containSubset(done, { requestId: tag, ...answer })
+      }
+      const retained = [{ path: worktree, reason: 'younger than 7 days' }]
+      assert.deepStrictEqual(yield* prunedOver(client, project.id), { removed: [], retained })
+      assert.containSubset((yield* get(`/sessions/${session.id}`)).body, { status: 'completed' })
+    }),
+  )
+})
 
-    it.effect('streams the events of a session in chunks, waits for acks and ends on interrupt', () =>
+// On the live clock: the test waits a while to see that nothing comes before the ack
+it.layer(ApiTestLayer(), { excludeTestServices: true })(
+  'the event subscription over the WebSocket of /api/v1/ws',
+  (suite) => {
+    suite.effect('streams the events of a session in chunks and ends the stream on interrupt', () =>
       Effect.gen(function* streams() {
-        const base = yield* baseUrl
         const { session } = yield* createdSession
-        const client = yield* Effect.promise(() => wsClient(wsUrl(base)))
-        client.send(request('3', 'events.subscribe', { sessionId: session.id, since: 0 }, TEST_TOKEN))
-        const first = yield* Effect.promise(() => client.next())
-        expect(first).toMatchObject({ _tag: 'Chunk', requestId: '3' })
-        const values = Reflect.get(first, 'values')
-        expect(Array.isArray(values) && values.length > 0).toBe(true)
-        expect(values).toMatchObject([{ type: 'session.created', sessionId: session.id }])
+        const { client, first } = yield* subscribed(session.id, '3')
+        assert.containSubset(first, { _tag: 'Chunk', requestId: '3' })
+        assert.containSubset(envelopesOf(first).at(0), {
+          type: 'session.created',
+          sessionId: session.id,
+        })
         client.send({ _tag: 'Ack', requestId: '3' })
         client.send({ _tag: 'Interrupt', requestId: '3' })
-        const ended = yield* Effect.promise(() => client.next())
-        expect(ended).toMatchObject({ _tag: 'Exit', requestId: '3' })
-        client.close()
+        const read = yield* readUntil(client, isExit)
+        assert.containSubset(read.at(-1), { _tag: 'Exit', requestId: '3' })
       }),
     )
 
-    it.effect('answers a ping with a pong', () =>
-      Effect.gen(function* pings() {
-        const base = yield* baseUrl
-        const client = yield* Effect.promise(() => wsClient(wsUrl(base)))
+    suite.effect('sends the next chunk only once the client has acknowledged the last one', () =>
+      Effect.gen(function* holdsChunks() {
+        const { session } = yield* createdSession
+        const { client, first } = yield* subscribed(session.id, '4')
+        assert.containSubset(first, { _tag: 'Chunk', requestId: '4' })
+        yield* warned(session.id)
+        yield* Effect.sleep(QUIET)
         client.send({ _tag: 'Ping' })
-        expect(yield* Effect.promise(() => client.next())).toMatchObject({ _tag: 'Pong' })
-        client.close()
-      }),
-    )
-
-    it.effect('turns a browser away whose origin the daemon does not serve', () =>
-      Effect.gen(function* refusesOrigin() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/ws`, { headers: { origin: 'http://evil.example', upgrade: 'websocket' } }),
+        assert.deepStrictEqual(yield* client.next, { _tag: 'Pong' })
+        client.send({ _tag: 'Ack', requestId: '4' })
+        const read = yield* readUntil(
+          client,
+          (message) => isExit(message) || isWarning(message),
+          '4',
         )
-        expect(response.status).toBe(403)
+        assert.containSubset(read.at(-1), { _tag: 'Chunk', requestId: '4' })
       }),
     )
+  },
+)
+```
+If a `Chunk` arrives in several frames or the first chunk holds more events than `session.created`, assert that the first value is `session.created` and keep reading until `Exit`; the interrupt may also surface as an `Exit` with an `Interrupt` cause — assert on `_tag: 'Exit'` and the request id only.
+
+`packages/api/src/rpc/limit.ts` (added during execution):
+```ts
+import { Problem } from '@bytebureau/protocol'
+import { Effect, Layer, Option } from 'effect'
+import { HttpServerRequest } from 'effect/http'
+import { RpcMiddleware } from 'effect/rpc'
+import { clientKey, drawToken, MutationBuckets } from '../mutation-buckets.js'
+
+export class RpcMutationLimit extends RpcMiddleware.Service<RpcMutationLimit>()(
+  'bb/api/RpcMutationLimit',
+  { error: Problem },
+) {}
+
+// The one procedure that changes nothing: it reads the event log
+const SUBSCRIPTION = 'events.subscribe'
+
+// A request on the socket runs in the context of its upgrade, which carries the address captured before the upgrade (Bun forgets it after)
+// So the client is known by the address the REST limit knows it by, and both doors draw from one budget; without it the socket clients share one key
+const socketKey: Effect.Effect<string> = Effect.serviceOption(
+  HttpServerRequest.HttpServerRequest,
+).pipe(Effect.map((upgrade) => Option.match(upgrade, { onNone: () => 'rpc', onSome: clientKey })))
+
+export const RpcMutationLimitLive: Layer.Layer<RpcMutationLimit, never, MutationBuckets> =
+  Layer.effect(
+    RpcMutationLimit,
+    Effect.gen(function* makeRpcMutationLimit() {
+      const buckets = yield* MutationBuckets
+      return (effect, { rpc }) => {
+        const { _tag: tag } = rpc
+        if (tag === SUBSCRIPTION) {
+          return effect
+        }
+        return socketKey.pipe(
+          Effect.flatMap((key) => drawToken(buckets, key)),
+          Effect.andThen(effect),
+        )
+      }
+    }),
+  )
+```
+`packages/api/src/mutation-buckets.ts` (added during execution):
+```ts
+import { Context, Effect, Layer, Option } from 'effect'
+import type { HttpServerRequest } from 'effect/http'
+import { ApiConfig } from './config.js'
+import { problem, type ApiProblem } from './problems.js'
+import { TokenBuckets } from './token-bucket.js'
+
+// The mutation budgets of the clients: one per client, whichever door it comes through (the REST API or the RPC socket)
+export class MutationBuckets extends Context.Service<MutationBuckets, TokenBuckets>()(
+  'bb/api/MutationBuckets',
+) {}
+
+export const MutationBucketsLive: Layer.Layer<MutationBuckets, never, ApiConfig> = Layer.effect(
+  MutationBuckets,
+  Effect.gen(function* makeMutationBuckets() {
+    const { mutationLimit } = yield* ApiConfig
+    return new TokenBuckets({ ...mutationLimit, now: Date.now })
+  }),
+)
+
+// A client is known by the address it calls from
+export const clientKey = (request: HttpServerRequest.HttpServerRequest): string =>
+  Option.getOrElse(request.remoteAddress, () => 'local')
+
+// A token from the budget of the client, or the 429 problem that says when to retry
+export const drawToken = (
+  buckets: TokenBuckets,
+  key: string,
+): Effect.Effect<void, ApiProblem<429>> =>
+  Effect.suspend(() => {
+    const verdict = buckets.take(key)
+    return verdict.allowed
+      ? Effect.void
+      : Effect.fail(problem(429, 'rate_limited', `retry after ${verdict.retryAfterSec} s`))
+  })
+```
+`packages/api/src/rpc/origin.ts` (added during execution):
+```ts
+import { Option } from 'effect'
+import { Headers } from 'effect/http'
+
+// The names a page of the daemon itself is served under on this machine; the parser keeps the brackets of an IPv6 address
+const LOOPBACK: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+const DEFAULT_PORT: Readonly<Record<string, string>> = { 'http:': '80', 'https:': '443' }
+
+// The port a URL names, or the one its scheme implies
+const portOf = (url: URL): string =>
+  url.port === '' ? (DEFAULT_PORT[url.protocol] ?? '') : url.port
+
+// A page on a loopback name and on the port the request came to is the daemon's own (the embedded UI of SP2)
+// The name in the Host header is never trusted: a page that rebinds its own name to the loopback sends that name as well
+const isOwnPage = (page: URL, host: string | undefined): boolean => {
+  const served = host === undefined ? null : URL.parse(`http://${host}`)
+  return served !== null && LOOPBACK.has(page.hostname) && portOf(page) === portOf(served)
+}
+
+// A browser says where it comes from: a listed origin or the daemon's own page may open the socket
+// A client without an Origin (the CLI, Node, Bun) is no browser; an Origin that is no URL is turned away
+export const originAllowed = (headers: Headers.Headers, origins: readonly string[]): boolean => {
+  const origin = Option.getOrUndefined(Headers.get(headers, 'origin'))
+  if (origin === undefined || origins.includes(origin)) {
+    return true
+  }
+  const page = URL.parse(origin)
+  return page !== null && isOwnPage(page, Option.getOrUndefined(Headers.get(headers, 'host')))
+}
+```
+`packages/api/src/rpc/upgrade.ts` (added during execution):
+```ts
+import { Effect, type Scope } from 'effect'
+import { HttpServerRequest, HttpServerResponse } from 'effect/http'
+import { originAllowed } from './origin.js'
+
+type Upgrade = Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  HttpServerRequest.HttpServerRequest | Scope.Scope
+>
+
+// Bun forgets the address of a request once it has upgraded it, so the address is captured before the upgrade
+// The requests on the socket run in the context of this request, and the mutation limit counts them for that address
+const frozenRequest = (
+  request: HttpServerRequest.HttpServerRequest,
+): HttpServerRequest.HttpServerRequest => request.modify({ remoteAddress: request.remoteAddress })
+
+// The upgrade behind the origin check: a browser from an origin the daemon does not serve gets 403 before the socket opens
+export const guardedUpgrade = (upgrade: Upgrade, origins: readonly string[]): Upgrade =>
+  Effect.gen(function* guardsUpgrade() {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    if (!originAllowed(request.headers, origins)) {
+      return HttpServerResponse.empty({ status: 403 })
+    }
+    return yield* upgrade.pipe(
+      Effect.provideService(HttpServerRequest.HttpServerRequest, frozenRequest(request)),
+    )
+  })
+```
+`packages/api/src/routes.ts` (added during execution):
+```ts
+import { Layer } from 'effect'
+import { HttpRouter } from 'effect/http'
+import { HttpApiBuilder } from 'effect/http-api'
+import { API_PREFIX, BureauApi } from './api.js'
+import type { ApiConfig, ApiOptions } from './config.js'
+import { Handlers } from './handlers/all.js'
+import { Middlewares } from './middlewares.js'
+import type { MutationBuckets } from './mutation-buckets.js'
+import type { ApiRequirements } from './requirements.js'
+
+export const OPENAPI_PATH = `${API_PREFIX}/openapi.json` as const
+
+// The endpoints of the API with their handlers and middlewares; the handlers read the configuration with each request
+export const Routes = (
+  options: ApiOptions,
+  config: Layer.Layer<ApiConfig>,
+): Layer.Layer<never, never, ApiRequirements | MutationBuckets> =>
+  HttpApiBuilder.layer(BureauApi, { openapiPath: OPENAPI_PATH }).pipe(
+    Layer.provide(Handlers),
+    Layer.provide(Middlewares(options.token)),
+    HttpRouter.provideRequest(config),
+  )
+```
+`packages/api/src/requirements.ts` (added during execution):
+```ts
+import type { KernelServices } from '@bytebureau/kernel'
+import type { FileSystem, Path } from 'effect'
+import type { Etag, HttpPlatform, HttpRouter, HttpServer } from 'effect/http'
+import type { SqlClient } from 'effect/sql'
+
+// What the platform layer of the server provides (BunHttpServer.layer in the binary, NodeHttpServer.layer under Vitest)
+export type ServerPlatform =
+  | HttpPlatform.HttpPlatform
+  | FileSystem.FileSystem
+  | Path.Path
+  | Etag.Generator
+
+// A handler reads the kernel when a request comes (a requirement of the request) or when the routes are built
+export type ApiRequirements =
+  | HttpRouter.HttpRouter
+  | ServerPlatform
+  | KernelServices
+  | SqlClient.SqlClient
+  | HttpRouter.Request.From<'Requires', KernelServices>
+
+// What the served API needs from its environment: the server, its platform and the kernel
+export type ServeRequirements =
+  | HttpServer.HttpServer
+  | ServerPlatform
+  | KernelServices
+  | SqlClient.SqlClient
+```
+`packages/api/src/rpc/auth.test.ts` (added during execution):
+```ts
+import { Cause, Effect, Exit, Layer, Redacted } from 'effect'
+import { Headers } from 'effect/http'
+import { describe, expect, it } from 'vitest'
+import { bearerOf, RpcAuthorizationLive } from './auth.js'
+
+// The authorization header of a request envelope and the token read from it
+const READ: [string, string | undefined][] = [
+  ['Bearer abc', 'abc'],
+  ['bearer abc', 'abc'],
+  ['BEARER  abc ', 'abc'],
+  ['Bearer ', ''],
+  ['Basic abc', undefined],
+  ['Bearer-abc', undefined],
+]
+
+// What building the layer dies with, or nothing when it builds
+const buildFailure = <Out>(layer: Layer.Layer<Out>): string => {
+  const built = Effect.runSyncExit(Effect.scoped(Layer.build(layer)))
+  return Exit.match(built, { onFailure: (cause) => Cause.pretty(cause), onSuccess: () => '' })
+}
+
+describe(bearerOf, () => {
+  it.each(READ)('reads %j as %j', (header, token) => {
+    const headers = Headers.fromInput([['authorization', header]])
+    expect(bearerOf(headers)).toBe(token)
+  })
+
+  it('reads no token from a request without the header', () => {
+    expect(bearerOf(Headers.empty)).toBeUndefined()
+  })
+})
+
+describe(RpcAuthorizationLive, () => {
+  it('refuses to build without a token, which would let every request in', () => {
+    const withoutToken = RpcAuthorizationLive(Redacted.make(''))
+    expect(buildFailure(withoutToken)).toContain('the API token must not be empty')
+    const withToken = RpcAuthorizationLive(Redacted.make('token'))
+    expect(buildFailure(withToken)).toBe('')
   })
 })
 ```
-If a `Chunk` arrives in several frames or the first chunk holds more events than `session.created`, assert that the first value is `session.created` and keep reading until `Exit`; the interrupt may also surface as an `Exit` with an `Interrupt` cause — assert on `_tag: 'Exit'` and the request id only.
+`packages/api/src/rpc/origin.test.ts` (added during execution):
+```ts
+import { Headers } from 'effect/http'
+import { describe, expect, it } from 'vitest'
+import { originAllowed } from './origin.js'
+
+const LISTED = ['http://ui.test']
+
+// The daemon on its usual port, reached at the IPv4 loopback
+const HOST = '127.0.0.1:4747'
+
+// The headers of an upgrade from a page to that daemon
+const from = (origin: string): Record<string, string> => ({ origin, host: HOST })
+
+// The headers of an upgrade and whether a browser that sent them may open the socket
+const DECIDED: [string, Record<string, string>, boolean][] = [
+  ['no Origin', { host: HOST }, true],
+  ['a listed origin', from('http://ui.test'), true],
+  ['the own page on localhost', from('http://localhost:4747'), true],
+  ['the own page on 127.0.0.1', { origin: 'http://127.0.0.1:4747', host: 'localhost:4747' }, true],
+  ['the own page on [::1]', { origin: 'http://[::1]:4747', host: '[::1]:4747' }, true],
+  ['a loopback page on another port', from('http://localhost:1'), false],
+  [
+    'a page that rebound its own name to the loopback',
+    { origin: 'http://attacker.example:4747', host: 'attacker.example:4747' },
+    false,
+  ],
+  [
+    'an https page against a daemon on port 80',
+    { origin: 'https://localhost', host: 'localhost' },
+    false,
+  ],
+  ['a page of another site', from('http://evil.example'), false],
+  ['an opaque origin', from('null'), false],
+  ['an empty Origin', from(''), false],
+  ['a loopback page without a Host', { origin: 'http://localhost:4747' }, false],
+  [
+    'a loopback page and a Host that is no host',
+    { origin: 'http://localhost:4747', host: 'no host' },
+    false,
+  ],
+  ['a loopback origin of another scheme', from('ftp://localhost'), false],
+]
+
+describe(originAllowed, () => {
+  it.each(DECIDED)('decides on %s', (name, headers, allowed) => {
+    expect(originAllowed(Headers.fromInput(headers), LISTED), name).toBe(allowed)
+  })
+})
+```
+`packages/api/src/rpc/upgrade.test.ts` (added during execution):
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect, Option } from 'effect'
+import { HttpServerRequest, HttpServerResponse } from 'effect/http'
+import { guardedUpgrade } from './upgrade.js'
+
+const ADDRESS = '203.0.113.9'
+
+interface Upgrading {
+  readonly request: HttpServerRequest.HttpServerRequest
+  readonly upgrade: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    never,
+    HttpServerRequest.HttpServerRequest
+  >
+  // The address a request on the socket saw, if the upgrade ran
+  readonly seen: () => string | undefined
+}
+
+// A request as Bun serves it, whose address is gone once it has been upgraded, and an upgrade that makes it so
+// The upgrade records the address that a request on the socket then reads from its context
+const bunUpgrade = (headers: Record<string, string> = {}): Upgrading => {
+  const state: { upgraded: boolean; seen: string | undefined } = {
+    upgraded: false,
+    seen: undefined,
+  }
+  const served = HttpServerRequest.fromWeb(
+    new Request('http://127.0.0.1:4747/api/v1/ws', { headers }),
+  )
+  const addressNow = (): Option.Option<string> =>
+    state.upgraded ? Option.none() : Option.some(ADDRESS)
+  const request = new Proxy(served, {
+    get: (target, key, receiver): unknown =>
+      key === 'remoteAddress' ? addressNow() : Reflect.get(target, key, receiver),
+  })
+  const upgrade = Effect.gen(function* upgrades() {
+    state.upgraded = true
+    const current = yield* HttpServerRequest.HttpServerRequest
+    state.seen = Option.getOrUndefined(current.remoteAddress)
+    return HttpServerResponse.empty()
+  })
+  return { request, upgrade, seen: () => state.seen }
+}
+
+it.effect(
+  'keeps for the socket the address the request came from, which Bun forgets at the upgrade',
+  () =>
+    Effect.gen(function* keepsAddress() {
+      const { request, upgrade, seen } = bunUpgrade()
+      const guarded = guardedUpgrade(upgrade, [])
+      yield* guarded.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, request))
+      assert.strictEqual(seen(), ADDRESS)
+    }),
+)
+
+it.effect('models Bun: without the guard a request on the socket sees no address', () =>
+  Effect.gen(function* losesAddress() {
+    const { request, upgrade, seen } = bunUpgrade()
+    yield* upgrade.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, request))
+    assert.isUndefined(seen())
+  }),
+)
+
+it.effect('turns away a browser from a foreign origin with 403 and does not upgrade', () =>
+  Effect.gen(function* refuses() {
+    const { request, upgrade, seen } = bunUpgrade({ origin: 'http://evil.example' })
+    const guarded = guardedUpgrade(upgrade, [])
+    const response = yield* guarded.pipe(
+      Effect.provideService(HttpServerRequest.HttpServerRequest, request),
+    )
+    assert.strictEqual(response.status, 403)
+    assert.isUndefined(seen())
+  }),
+)
+```
+`packages/api/src/rpc-limit.test.ts` (added during execution):
+```ts
+import { createTempRepo } from '@bytebureau/kernel/testing'
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { ApiTestLayer, post, TEST_TOKEN } from './testing.js'
+import { called, connected, type RequestEnvelope } from './testing-ws.js'
+
+// One token per client, and the next flows back after a minute: the second mutation of a test is always refused
+const ONE_TOKEN = ApiTestLayer({ mutationLimit: { capacity: 1, perMinute: 1 } })
+
+// The registration of a new repository over the socket
+const registration = (id: string, token?: string): RequestEnvelope => ({
+  id,
+  tag: 'projects.register',
+  payload: { path: createTempRepo() },
+  token,
+})
+
+const SUCCEEDED = { exit: { _tag: 'Success' } }
+
+const LIMITED = {
+  exit: {
+    _tag: 'Failure',
+    cause: [
+      { _tag: 'Fail', error: { status: 429, code: 'rate_limited', detail: 'retry after 60 s' } },
+    ],
+  },
+}
+
+it.layer(ONE_TOKEN)('the mutation limit over the WebSocket of /api/v1/ws', (suite) => {
+  suite.effect(
+    'refuses the second mutation in a row with rate_limited and still streams events',
+    () =>
+      Effect.gen(function* limits() {
+        const client = yield* connected()
+        assert.containSubset(yield* called(client, registration('1', TEST_TOKEN)), SUCCEEDED)
+        assert.containSubset(yield* called(client, registration('2', TEST_TOKEN)), {
+          requestId: '2',
+          ...LIMITED,
+        })
+        const subscription = { id: '3', tag: 'events.subscribe', payload: { since: 0 } }
+        const first = yield* called(client, { ...subscription, token: TEST_TOKEN })
+        assert.containSubset(first, { _tag: 'Chunk', requestId: '3' })
+      }),
+  )
+})
+
+it.layer(ONE_TOKEN)('one mutation budget for the REST API and the socket', (suite) => {
+  suite.effect('refuses a REST mutation once the socket has spent the budget of the client', () =>
+    Effect.gen(function* sharesBudget() {
+      const client = yield* connected()
+      assert.containSubset(yield* called(client, registration('1', TEST_TOKEN)), SUCCEEDED)
+      const refused = yield* post('/projects', { path: createTempRepo() })
+      assert.strictEqual(refused.status, 429)
+      assert.containSubset(refused.body, { code: 'rate_limited', detail: 'retry after 60 s' })
+    }),
+  )
+})
+
+it.layer(ONE_TOKEN)('the mutation limit and the bearer token over the socket', (suite) => {
+  suite.effect('does not count a request without the token against the limit', () =>
+    Effect.gen(function* keepsToken() {
+      const client = yield* connected()
+      const unauthorized = { _tag: 'Fail', error: { code: 'unauthorized' } }
+      const refused = yield* called(client, registration('1'))
+      assert.containSubset(refused, { exit: { cause: [unauthorized] } })
+      assert.containSubset(yield* called(client, registration('2', TEST_TOKEN)), SUCCEEDED)
+    }),
+  )
+})
+```
+`packages/api/src/rpc-origin.test.ts` (added during execution):
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { ApiTestLayer, baseUrl, fetched } from './testing.js'
+import { connected } from './testing-ws.js'
+
+const UI = 'http://ui.test'
+const ELSEWHERE = 'http://evil.example'
+
+// The body of an answer as text
+const textOf = (response: Response): Effect.Effect<string> =>
+  Effect.promise(async () => {
+    const whole = await response.text()
+    return whole
+  })
+
+// The Origin of a page and what the socket answers a plain GET from it: past the check it wants an Upgrade (400), else 403
+const pagesOf = (port: string): [string, number][] => [
+  [`http://localhost:${port}`, 400],
+  [`http://127.0.0.1:${port}`, 400],
+  ['http://localhost:1', 403],
+  [ELSEWHERE, 403],
+]
+
+it.layer(ApiTestLayer())('the own page of the daemon at the upgrade of /api/v1/ws', (suite) => {
+  suite.effect(
+    'lets a page on a loopback name and the port of the daemon through, and no other',
+    () =>
+      Effect.gen(function* checksPages() {
+        const base = yield* baseUrl
+        const pages = pagesOf(new URL(base).port)
+        const answers = yield* Effect.all(
+          pages.map(([origin]) => fetched(`${base}/api/v1/ws`, { headers: { origin } })),
+        )
+        assert.deepStrictEqual(
+          answers.map(({ status }) => status),
+          pages.map(([, status]) => status),
+        )
+      }),
+  )
+})
+
+it.layer(ApiTestLayer({ corsOrigins: [UI] }))(
+  'the Origin a browser sends to /api/v1/ws',
+  (suite) => {
+    suite.effect('turns away an origin the daemon does not serve before the socket opens', () =>
+      Effect.gen(function* refusesOrigin() {
+        const base = yield* baseUrl
+        const response = yield* fetched(`${base}/api/v1/ws`, { headers: { origin: ELSEWHERE } })
+        assert.strictEqual(response.status, 403)
+        assert.strictEqual(yield* textOf(response), '')
+        const refused = yield* Effect.flip(connected({ origin: ELSEWHERE }))
+        assert.include(refused.message, 'cannot open')
+      }),
+    )
+
+    suite.effect('lets a listed origin open the socket', () =>
+      Effect.gen(function* acceptsOrigin() {
+        const client = yield* connected({ origin: UI })
+        client.send({ _tag: 'Ping' })
+        assert.deepStrictEqual(yield* client.next, { _tag: 'Pong' })
+      }),
+    )
+  },
+)
+```
+`packages/api/src/rpc-defect.test.ts` (added during execution):
+```ts
+import { createServer } from 'node:http'
+import { WorkspaceManager } from '@bytebureau/kernel'
+import { NodeHttpServer } from '@effect/platform-node'
+import { assert, it } from '@effect/vitest'
+import { Effect, Layer } from 'effect'
+import { serveApi } from './layer.js'
+import { BootedKernel } from './testing-kernel.js'
+import { TEST_TOKEN, testOptions } from './testing.js'
+import { called, connected } from './testing-ws.js'
+
+// The kernel of the tests with a prune that dies, as a bug behind a handler would
+const DyingPrune = Layer.effect(
+  WorkspaceManager,
+  WorkspaceManager.use((workspaces) =>
+    Effect.succeed({ ...workspaces, prune: () => Effect.die(new Error('the prune broke')) }),
+  ),
+)
+
+const DyingLayer = serveApi(testOptions()).pipe(
+  Layer.provide(DyingPrune),
+  Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
+  Layer.provideMerge(BootedKernel),
+)
+
+it.layer(DyingLayer)('a defect behind a procedure over the WebSocket of /api/v1/ws', (suite) => {
+  suite.effect('ends that request with a Die and goes on serving the socket', () =>
+    Effect.gen(function* dies() {
+      const client = yield* connected()
+      const prune = { id: 'prune', tag: 'workspaces.prune', payload: {}, token: TEST_TOKEN }
+      assert.containSubset(yield* called(client, prune), {
+        _tag: 'Exit',
+        requestId: 'prune',
+        exit: { _tag: 'Failure', cause: [{ _tag: 'Die' }] },
+      })
+      client.send({ _tag: 'Ping' })
+      assert.deepStrictEqual(yield* client.next, { _tag: 'Pong' })
+    }),
+  )
+})
+```
 
 - [ ] **Step 4: Run, fix, record the decision**
 
@@ -5501,13 +6305,17 @@ Spec §11 asks for an OpenAPI 3.1 REST API, an SSE endpoint that resumes with `L
 
 ## Decision
 
-The daemon serves `effect/rpc` on `/api/v1/ws` with `RpcSerialization.json`: each WebSocket frame is one JSON envelope of the documented `RpcMessage` shapes (`Request`, `Ack`, `Interrupt`, `Ping` from the client; `Chunk`, `Exit`, `Defect`, `Pong` from the server). The client package implements those envelopes in one module and keeps Effect out of its runtime; the REST and SSE parts are generated from the OpenAPI document and read with `fetch`. The bearer token travels in the `headers` of every RPC request, never in the URL; the upgrade checks a browser's `Origin`.
+The daemon serves `effect/rpc` on `/api/v1/ws` with `RpcSerialization.json`: each WebSocket frame is one JSON envelope of the documented `RpcMessage` shapes (`Request`, `Ack`, `Interrupt`, `Ping` from the client; `Chunk`, `Exit`, `Defect`, `Pong` from the server). The client package implements those envelopes in one module and keeps Effect out of its runtime; the REST and SSE parts are generated from the OpenAPI document and read with `fetch`. The bearer token travels in the `headers` of every RPC request, never in the URL. The upgrade checks a browser's `Origin`: an origin listed in `corsOrigins` may open the socket, and so may the daemon's own page, served on a loopback name (`localhost`, `127.0.0.1`, `[::1]`) and the port the request came to; the name in the `Host` header is never trusted, since a page that rebinds its own name to the loopback sends that name as well. Every procedure but `events.subscribe` draws a token from the mutation budget of the address the socket was opened from, the budget the REST mutations of that address draw from, so the socket is no second door around the rate limit. The address is captured at the upgrade, because Bun forgets the address of a request once it has upgraded it.
 
 ## Consequences
 
 - One contract (`BureauRpcs` in the protocol) for the server and the client; the wire shapes are pinned by `rpc.test.ts` and by the client's codec tests, so a change in Effect's envelopes is caught at upgrade time.
 - A browser client (SP2) needs no header on the upgrade, so no token in the URL and no subprotocol trick.
 - Streams need the client to acknowledge chunks; a client that forgets to ack sees one chunk and then silence, which the client package hides.
+- Effect puts the headers of the upgrade request in front of the headers of every request on the socket, so a Node or Bun client that sends the bearer header with the upgrade is let in as well; the header of the request wins when both carry one.
+- A payload that does not fit its schema, or a tag the group does not know, ends as an `Exit` whose cause is a `Die` with the schema's message, not as a `request_invalid` problem; the client package reports it as an error.
+- Every `Request` envelope carries a `headers` array, empty when there is nothing to send; Effect closes the socket with 1011 on a request without one.
+- A defect in a handler ends that request with an `Exit` whose cause is a `Die` (the route sets `disableFatalDefects`), so the other requests on the socket go on.
 ```
 `apps/docs/src/content/docs/architecture.md` gets a pointer to ADR-0013 in Task 11 together with the rest of the Phase B text.
 
@@ -6192,7 +7000,8 @@ const serveOptions = (hostname: string, port: number) => ({
   idleTimeout: 60,
   maxRequestBodySize: MAX_BODY_BYTES,
   gracefulShutdownTimeout: '2 seconds',
-  websocket: { closeOnBackpressureLimit: true, backpressureLimit: 1024 * 1024 },
+  // WebSocket frames are outside the HTTP body limit: cap them at the same size
+  websocket: { closeOnBackpressureLimit: true, backpressureLimit: 1024 * 1024, maxPayloadLength: MAX_BODY_BYTES },
 })
 
 export interface DaemonOptions extends KernelOptions {
@@ -6253,7 +7062,7 @@ export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon
   }
 }
 ```
-A port that is taken surfaces from `Bun.serve` as a defect, not as `ServeError` (fact sheet §1.9): `portInUse(error, port)` reads the message of the cause for `EADDRINUSE` or "Is port" and returns `new Error(`port ${port} is already in use`)` for it, `undefined` otherwise, so `serve` can print one line. `configuredServer` runs over a second build of the kernel layer only if `Effect.provide(kernel)` builds it afresh — avoid that: run it inside the same runtime instead (`runtime.runPromise(configuredServer(options))`) and choose host and port before building the server layer by making the server layer depend on an effect: `Layer.unwrap(Effect.map(configuredServer(options), (configured) => BunHttpServer.layer({ hostname: options.host ?? configured.host ?? DEFAULT_HOST, port: options.port ?? configured.port ?? DEFAULT_PORT })))` provided with the kernel. Write it that way; the sketch above only names the pieces. `max-statements` (10) asks for the body of `startDaemon` to be split: `resolveServer`, `buildRuntime`, `announce`. `Effect.catch` is the kernel's import alias of Effect 4's `catch_` (see Task 2).
+Two more things the daemon composes (notes from Tasks 3–6): `serveApi` passes `disableListenLog: true` next to `disableLogger: true` in `HttpRouter.serve` (`packages/api/src/layer.ts`), so the daemon's stderr carries only LogTape records; and `startDaemon` provides an error reporter so that a defect behind either door (a REST handler → empty 500, an RPC handler → `Exit` with a `Die`) reaches `daemon.log` — `ErrorReporter.layer([ErrorReporter.make(({ cause, error }) => { if the cause holds a `Die`, `kernelLogger(['bb', 'api']).error('a handler failed with a defect', { error: error.message, cause: String(cause) })` })])` merged into the daemon's layer (`ErrorReporter` is exported from `effect`; read `dist/ErrorReporter.d.ts` and `dist/Cause.d.ts` for the `Die` predicate — expected problems are reported too, so the filter on defects keeps `daemon.log` quiet about ordinary refusals). A port that is taken surfaces from `Bun.serve` as a defect, not as `ServeError` (fact sheet §1.9): `portInUse(error, port)` reads the message of the cause for `EADDRINUSE` or "Is port" and returns `new Error(`port ${port} is already in use`)` for it, `undefined` otherwise, so `serve` can print one line. `configuredServer` runs over a second build of the kernel layer only if `Effect.provide(kernel)` builds it afresh — avoid that: run it inside the same runtime instead (`runtime.runPromise(configuredServer(options))`) and choose host and port before building the server layer by making the server layer depend on an effect: `Layer.unwrap(Effect.map(configuredServer(options), (configured) => BunHttpServer.layer({ hostname: options.host ?? configured.host ?? DEFAULT_HOST, port: options.port ?? configured.port ?? DEFAULT_PORT })))` provided with the kernel. Write it that way; the sketch above only names the pieces. `max-statements` (10) asks for the body of `startDaemon` to be split: `resolveServer`, `buildRuntime`, `announce`. `Effect.catch` is the kernel's import alias of Effect 4's `catch_` (see Task 2).
 
 - [ ] **Step 2: `server.json`, the token, the exec arguments — tests first**
 
