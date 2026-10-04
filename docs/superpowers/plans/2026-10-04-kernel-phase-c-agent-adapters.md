@@ -87,57 +87,257 @@ apps/docs/src/content/docs/agents-and-profiles.md, architecture.md, CONTRIBUTING
 `packages/protocol/src/api/dto.test.ts` — add to the existing `describe` of the DTOs:
 
 ```ts
-it('decodes a profile, a profile status and a usage snapshot, and refuses a kind outside the two', () => {
-  const profile = Schema.decodeUnknownSync(ProfileDto)({
-    id: 'claude/work',
-    providerId: 'claude',
-    name: 'work',
-    kind: 'login',
-    configDir: '/home/me/.bytebureau/profiles/claude/work',
-    isDefault: true,
-    createdAt: '2026-10-04T12:00:00.000Z',
+import { Schema } from 'effect'
+import { describe, expect, it } from 'vitest'
+import {
+  HealthDto,
+  PluginStatusDto,
+  ProfileDto,
+  ProfileStatusDto,
+  ProviderDto,
+  SessionDto,
+  TurnDto,
+  UsageSnapshotDto,
+  WorkspaceInfoDto,
+} from './dto.js'
+import {
+  AddProfileBody,
+  CreateSessionBody,
+  EventsFilter,
+  EventsQuery,
+  ProfileIdParam,
+  RemoveProfileQuery,
+} from './requests.js'
+
+const PROFILE_ID = 'claude/work'
+
+const employee = {
+  id: 'developer',
+  name: 'Developer',
+  provider: 'fake',
+  model: 'any',
+  effort: null,
+  systemPrompt: '',
+  tools: { allow: [], deny: [] },
+  permissionMode: 'supervised',
+  skills: [],
+  appearance: {},
+}
+
+const session = {
+  id: '0192f0a0-0000-7000-8000-000000000001',
+  projectId: '0192f0a0-0000-7000-8000-000000000002',
+  title: 'Create hello',
+  employee,
+  providerId: 'fake',
+  profileId: null,
+  workspace: {
+    id: '0192f0a0-0000-7000-8000-000000000001',
+    runtimeId: 'local',
+    path: '/tmp/repo/.bytebureau/worktrees/x',
+    branch: 'bb/create-hello',
+    baseRef: 'main',
+  },
+  externalRef: null,
+  status: 'ready',
+  createdAt: '2026-10-04T10:00:00.000Z',
+  startedAt: null,
+  endedAt: null,
+}
+
+describe('the API DTO schemas', () => {
+  it('decodes a session with a workspace and no external ref', () => {
+    expect(Schema.decodeUnknownSync(SessionDto)(session)).toStrictEqual(session)
   })
-  expect(profile.kind).toBe('login')
-  expect(() =>
-    Schema.decodeUnknownSync(ProfileDto)({ ...profile, kind: 'oauth' }),
-  ).toThrow(/kind/u)
-  const status = Schema.decodeUnknownSync(ProfileStatusDto)({
-    profileId: 'claude/work',
-    state: 'loggedOut',
-    hint: 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/claude/work claude /login',
-    checkedAt: '2026-10-04T12:00:01.000Z',
+
+  it('refuses a session with an unknown field', () => {
+    expect(() =>
+      Schema.decodeUnknownSync(SessionDto)({ ...session, extra: 1 }, { onExcessProperty: 'error' }),
+    ).toThrow(/extra/u)
   })
-  expect(status.state).toBe('loggedOut')
-  const snapshot = Schema.decodeUnknownSync(UsageSnapshotDto)({
-    profileId: 'claude/work',
-    rateLimit: { fiveHourPct: 12.5 },
-    observedAt: null,
+
+  it('decodes a turn whose usage is null and a plugin status without a reason', () => {
+    const turn = {
+      id: '0192f0a0-0000-7000-8000-000000000003',
+      sessionId: session.id,
+      index: 0,
+      prompt: { text: 'hi' },
+      status: 'completed',
+      stopReason: 'end_turn',
+      usage: null,
+      startedAt: '2026-10-04T10:00:00.000Z',
+      endedAt: '2026-10-04T10:00:01.000Z',
+    }
+    expect(Schema.decodeUnknownSync(TurnDto)(turn)).toStrictEqual(turn)
+    const plugin = {
+      name: 'fake-agent',
+      version: '0.0.0',
+      state: 'loaded',
+      ports: ['agentProvider'],
+    }
+    expect(Schema.decodeUnknownSync(PluginStatusDto)(plugin)).toStrictEqual(plugin)
   })
-  expect(snapshot.observedAt).toBeNull()
+
+  it('decodes a degraded health report', () => {
+    const health = {
+      status: 'degraded',
+      version: '0.1.0',
+      startedAt: '2026-10-04T10:00:00.000Z',
+      checks: { store: 'failed', plugins: { loaded: 2, failed: 1 } },
+    }
+    expect(Schema.decodeUnknownSync(HealthDto)(health)).toStrictEqual(health)
+  })
 })
 
-it('decodes the body that adds a profile, with the key and the default optional', () => {
-  const body = Schema.decodeUnknownSync(AddProfileBody)({ providerId: 'claude', name: 'work', kind: 'login' })
-  expect(body).toStrictEqual({ providerId: 'claude', name: 'work', kind: 'login' })
-  expect(
-    Schema.decodeUnknownSync(AddProfileBody)({
-      providerId: 'acp:codex',
-      name: 'key',
-      kind: 'api_key',
-      apiKey: 'sk-test',
-      makeDefault: true,
-    }).makeDefault,
-  ).toBe(true)
-  expect(() =>
-    Schema.decodeUnknownSync(AddProfileBody)({ providerId: 'claude', name: 'Work Profile', kind: 'login' }),
-  ).toThrow(/name/u)
+describe('the profile DTOs', () => {
+  it('decodes a profile, a profile status and a usage snapshot, and refuses a kind outside the two', () => {
+    const profile = Schema.decodeUnknownSync(ProfileDto)({
+      id: PROFILE_ID,
+      providerId: 'claude',
+      name: 'work',
+      kind: 'login',
+      configDir: '/home/me/.bytebureau/profiles/claude/work',
+      isDefault: true,
+      createdAt: '2026-10-04T12:00:00.000Z',
+    })
+    expect(profile.kind).toBe('login')
+    expect(() => Schema.decodeUnknownSync(ProfileDto)({ ...profile, kind: 'oauth' })).toThrow(
+      /kind/u,
+    )
+    const status = Schema.decodeUnknownSync(ProfileStatusDto)({
+      profileId: PROFILE_ID,
+      state: 'loggedOut',
+      hint: 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/claude/work claude /login',
+      checkedAt: '2026-10-04T12:00:01.000Z',
+    })
+    expect(status.state).toBe('loggedOut')
+    const snapshot = Schema.decodeUnknownSync(UsageSnapshotDto)({
+      profileId: PROFILE_ID,
+      rateLimit: { fiveHourPct: 12.5 },
+      observedAt: null,
+    })
+    expect(snapshot.observedAt).toBeNull()
+  })
+
+  it('tells whether a provider takes API-key profiles', () => {
+    expect(
+      Schema.decodeUnknownSync(ProviderDto)({
+        id: 'claude',
+        displayName: 'Claude Code',
+        supportsApiKey: true,
+      }).supportsApiKey,
+    ).toBe(true)
+  })
 })
 
-it('tells whether a provider takes API-key profiles', () => {
-  expect(
-    Schema.decodeUnknownSync(ProviderDto)({ id: 'claude', displayName: 'Claude Code', supportsApiKey: true })
-      .supportsApiKey,
-  ).toBe(true)
+describe('the worktree DTO', () => {
+  const worktree = {
+    sessionId: session.id,
+    projectId: session.projectId,
+    path: '/tmp/repo/.bytebureau/worktrees/x',
+    branch: 'bb/create-hello',
+    baseRef: 'main',
+    sessionStatus: 'completed',
+    exists: true,
+  }
+
+  it('carries the status of its session as one of the session statuses', () => {
+    expect(Schema.decodeUnknownSync(WorkspaceInfoDto)(worktree)).toStrictEqual(worktree)
+    expect(() =>
+      Schema.decodeUnknownSync(WorkspaceInfoDto)({ ...worktree, sessionStatus: 'dancing' }),
+    ).toThrow(/sessionStatus/u)
+  })
+})
+
+describe('the API request schemas', () => {
+  it('accepts a session creation with only the required fields', () => {
+    const body = { projectId: session.projectId, title: 'x' }
+    expect(Schema.decodeUnknownSync(CreateSessionBody)(body)).toStrictEqual(body)
+  })
+
+  it('accepts an events query with every filter and with none, its since read from the text of the query', () => {
+    const filters = {
+      session: session.id,
+      project: session.projectId,
+      types: 'turn.started,turn.completed',
+    }
+    const query = Schema.decodeUnknownSync(EventsQuery)({ since: '12', ...filters })
+    expect(query).toStrictEqual({ since: 12, ...filters })
+    expect(Schema.decodeUnknownSync(EventsQuery)({})).toStrictEqual({})
+  })
+
+  it.each([-1, 1.5])(
+    'refuses a since of %d, in the query and in the filter of the socket',
+    (since) => {
+      expect(() => Schema.decodeUnknownSync(EventsQuery)({ since: String(since) })).toThrow(
+        /since/u,
+      )
+      expect(() => Schema.decodeUnknownSync(EventsFilter)({ since })).toThrow(/since/u)
+    },
+  )
+
+  it.each(['+5', '1e3', ' 5', ''])('refuses %j as the text of a since in the query', (since) => {
+    expect(() => Schema.decodeUnknownSync(EventsQuery)({ since })).toThrow(/since/u)
+  })
+
+  it('takes a since of 0, the start of the log', () => {
+    expect(Schema.decodeUnknownSync(EventsQuery)({ since: '0' })).toStrictEqual({ since: 0 })
+    expect(Schema.decodeUnknownSync(EventsFilter)({ since: 0 })).toStrictEqual({ since: 0 })
+  })
+})
+
+describe('the profile request schemas', () => {
+  it('decodes the body that adds a profile, with the key and the default optional', () => {
+    const body = Schema.decodeUnknownSync(AddProfileBody)({
+      providerId: 'claude',
+      name: 'work',
+      kind: 'login',
+    })
+    expect(body).toStrictEqual({ providerId: 'claude', name: 'work', kind: 'login' })
+    expect(
+      Schema.decodeUnknownSync(AddProfileBody)({
+        providerId: 'acp:codex',
+        name: 'key',
+        kind: 'api_key',
+        apiKey: 'sk-test',
+        makeDefault: true,
+      }).makeDefault,
+    ).toBe(true)
+    expect(() =>
+      Schema.decodeUnknownSync(AddProfileBody)({
+        providerId: 'claude',
+        name: 'Work Profile',
+        kind: 'login',
+      }),
+    ).toThrow(/name/u)
+  })
+
+  it('reads the profile of a path and the purge of a query as the text they are', () => {
+    expect(Schema.decodeUnknownSync(ProfileIdParam)({ id: PROFILE_ID })).toStrictEqual({
+      id: PROFILE_ID,
+    })
+    expect(Schema.decodeUnknownSync(RemoveProfileQuery)({})).toStrictEqual({})
+    expect(Schema.decodeUnknownSync(RemoveProfileQuery)({ purge: 'true' })).toStrictEqual({
+      purge: 'true',
+    })
+    expect(() => Schema.decodeUnknownSync(RemoveProfileQuery)({ purge: 'yes' })).toThrow(/purge/u)
+  })
+})
+
+describe('the name of a profile', () => {
+  it.each(['a', '0', 'work-2', 'a'.repeat(32)])('takes %j', (name) => {
+    const body = { providerId: 'claude', name, kind: 'login' }
+    expect(Schema.decodeUnknownSync(AddProfileBody)(body)).toStrictEqual(body)
+  })
+
+  it.each(['', '-work', 'a'.repeat(33), 'under_score'])(
+    'refuses %j, since it is a path segment',
+    (name) => {
+      expect(() =>
+        Schema.decodeUnknownSync(AddProfileBody)({ providerId: 'claude', name, kind: 'login' }),
+      ).toThrow(/name/u)
+    },
+  )
 })
 ```
 
@@ -146,9 +346,83 @@ it('tells whether a provider takes API-key profiles', () => {
 `packages/protocol/src/config.test.ts` — add:
 
 ```ts
-it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
-  expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({ backend: 'file' })
-  expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
+import { describe, expect, it } from 'vitest'
+import { decodeProjectConfig, decodeUserConfig, defaultProjectConfig } from './config.js'
+
+const withTimeout = (askTimeout: string): unknown => ({
+  ...defaultProjectConfig,
+  employees: { developer: { ...defaultProjectConfig.employees['developer'], askTimeout } },
+})
+
+describe(decodeProjectConfig, () => {
+  it('accepts the documented sample and fills nothing silently', () => {
+    const config = decodeProjectConfig(defaultProjectConfig)
+    expect(config.version).toBe(1)
+    expect(config.employees['developer']).toMatchObject({ permissionMode: 'supervised' })
+  })
+
+  it('takes an ask timeout of a whole number and a unit only', () => {
+    expect.hasAssertions()
+    for (const accepted of ['500ms', '30s', '30m', '1h', '2 h']) {
+      expect(() => decodeProjectConfig(withTimeout(accepted))).not.toThrow()
+    }
+    for (const refused of ['soon', '30', '1.5h', '30min', '-1m']) {
+      expect(() => decodeProjectConfig(withTimeout(refused))).toThrow(/askTimeout/u)
+    }
+  })
+
+  it('reads the passEnv list of a provider and leaves its other keys to the provider', () => {
+    const providers = {
+      claude: { executable: 'claude', passEnv: ['GH_TOKEN'], extra: { depth: 1 } },
+    }
+    const config = decodeProjectConfig({ ...defaultProjectConfig, providers })
+    expect(config.providers).toStrictEqual(providers)
+    const broken = { ...defaultProjectConfig, providers: { claude: { passEnv: 'GH_TOKEN' } } }
+    expect(() => decodeProjectConfig(broken)).toThrow(/passEnv/u)
+  })
+
+  it('reports every problem with its path and rejects unknown keys', () => {
+    const broken = { ...defaultProjectConfig, logging: { level: 'loud' }, extra: true }
+    expect(() => decodeProjectConfig(broken)).toThrow(/logging.*level/u)
+    expect(() => decodeProjectConfig(broken)).toThrow(/extra/u)
+  })
+})
+
+describe(decodeUserConfig, () => {
+  const userConfig = {
+    server: { host: '127.0.0.1', port: 4747 },
+    defaults: { provider: 'claude', profile: 'work' },
+    profiles: {
+      work: {
+        providerId: 'claude',
+        name: 'Work',
+        kind: 'login',
+        configDir: '/home/me/.claude-work',
+      },
+      ci: { providerId: 'claude', name: 'CI', kind: 'api_key' },
+    },
+    locale: 'cs',
+    logging: { level: 'debug' },
+    telemetry: { content: 'local', otlpEndpoint: 'http://localhost:4318' },
+    ui: { theme: 'dark', panes: { left: 3 } },
+  }
+
+  it('decodes profiles, ui and the telemetry endpoint unchanged', () => {
+    expect(decodeUserConfig(userConfig)).toStrictEqual(userConfig)
+  })
+
+  it('still rejects an unknown user key and a profile with an unknown kind', () => {
+    const oauth = { profiles: { work: { ...userConfig.profiles.work, kind: 'oauth' } } }
+    expect(() => decodeUserConfig({ ...userConfig, extra: true })).toThrow(/extra/u)
+    expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
+  })
+
+  it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
+    expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({
+      backend: 'file',
+    })
+    expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
+  })
 })
 ```
 
@@ -162,6 +436,94 @@ Expected: FAIL — `ProfileDto`, `ProfileStatusDto`, `UsageSnapshotDto`, `AddPro
 `packages/protocol/src/api/dto.ts` — add (next to `ProviderDto`, which gains the field):
 
 ```ts
+import { Schema } from 'effect'
+import { RateLimit, Usage } from '../agent-event.js'
+import { Id, SessionStatus, Timestamp, TurnStatus } from '../common.js'
+import { ProjectConfig } from '../config.js'
+import { EmployeeSpec, PromptInput } from '../employee.js'
+
+export const ProjectDto = Schema.Struct({
+  id: Id,
+  name: Schema.String,
+  path: Schema.String,
+  defaultBranch: Schema.String,
+  config: ProjectConfig,
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
+}).annotate({ title: 'Project', identifier: 'Project' })
+
+// The handle of a worktree as the kernel keeps it: the id is the session id
+export const WorkspaceHandleDto = Schema.Struct({
+  id: Schema.String,
+  runtimeId: Schema.String,
+  path: Schema.String,
+  branch: Schema.String,
+  baseRef: Schema.String,
+}).annotate({ title: 'WorkspaceHandle', identifier: 'WorkspaceHandle' })
+
+export const ExternalRefDto = Schema.Struct({
+  providerId: Schema.String,
+  ref: Schema.String,
+}).annotate({ title: 'ExternalSessionRef', identifier: 'ExternalSessionRef' })
+
+export const SessionDto = Schema.Struct({
+  id: Id,
+  projectId: Id,
+  title: Schema.String,
+  employee: EmployeeSpec,
+  providerId: Schema.String,
+  profileId: Schema.NullOr(Schema.String),
+  workspace: Schema.NullOr(WorkspaceHandleDto),
+  externalRef: Schema.NullOr(ExternalRefDto),
+  status: SessionStatus,
+  createdAt: Timestamp,
+  startedAt: Schema.NullOr(Timestamp),
+  endedAt: Schema.NullOr(Timestamp),
+}).annotate({ title: 'Session', identifier: 'Session' })
+
+export const TurnDto = Schema.Struct({
+  id: Id,
+  sessionId: Id,
+  index: Schema.Int,
+  prompt: PromptInput,
+  status: TurnStatus,
+  stopReason: Schema.NullOr(Schema.String),
+  usage: Schema.NullOr(Usage),
+  startedAt: Timestamp,
+  endedAt: Schema.NullOr(Timestamp),
+}).annotate({ title: 'Turn', identifier: 'Turn' })
+
+export const WorkspaceInfoDto = Schema.Struct({
+  sessionId: Id,
+  projectId: Id,
+  path: Schema.String,
+  branch: Schema.String,
+  baseRef: Schema.String,
+  sessionStatus: SessionStatus,
+  exists: Schema.Boolean,
+}).annotate({ title: 'WorkspaceInfo', identifier: 'WorkspaceInfo' })
+
+export const PruneReportDto = Schema.Struct({
+  removed: Schema.Array(Schema.String),
+  retained: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
+}).annotate({ title: 'PruneReport', identifier: 'PruneReport' })
+
+export const SessionUsageDto = Schema.Struct({
+  turns: Schema.Int,
+  inputTokens: Schema.Int,
+  outputTokens: Schema.Int,
+  costUsd: Schema.NullOr(Schema.Finite),
+  contextPct: Schema.NullOr(Schema.Finite),
+}).annotate({ title: 'SessionUsage', identifier: 'SessionUsage' })
+
+export const PluginStatusDto = Schema.Struct({
+  name: Schema.String,
+  version: Schema.String,
+  state: Schema.Literals(['loaded', 'failed']),
+  reason: Schema.optionalKey(Schema.String),
+  ports: Schema.Array(Schema.String),
+}).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
+
 export const ProfileKind = Schema.Literals(['login', 'api_key'])
 export const AuthState = Schema.Literals(['loggedIn', 'loggedOut', 'expired', 'unknown'])
 
@@ -196,11 +558,32 @@ export const ProviderDto = Schema.Struct({
   supportsApiKey: Schema.Boolean,
 }).annotate({ title: 'Provider', identifier: 'Provider' })
 
+export const HealthDto = Schema.Struct({
+  status: Schema.Literals(['ok', 'degraded']),
+  version: Schema.String,
+  startedAt: Timestamp,
+  checks: Schema.Struct({
+    store: Schema.Literals(['ok', 'failed']),
+    plugins: Schema.Struct({ loaded: Schema.Int, failed: Schema.Int }),
+  }),
+}).annotate({ title: 'Health', identifier: 'Health' })
+
+export type ProjectDto = typeof ProjectDto.Type
+export type WorkspaceHandleDto = typeof WorkspaceHandleDto.Type
+export type ExternalRefDto = typeof ExternalRefDto.Type
+export type SessionDto = typeof SessionDto.Type
+export type TurnDto = typeof TurnDto.Type
+export type WorkspaceInfoDto = typeof WorkspaceInfoDto.Type
+export type PruneReportDto = typeof PruneReportDto.Type
+export type SessionUsageDto = typeof SessionUsageDto.Type
+export type PluginStatusDto = typeof PluginStatusDto.Type
 export type ProfileKind = typeof ProfileKind.Type
 export type AuthState = typeof AuthState.Type
 export type ProfileDto = typeof ProfileDto.Type
 export type ProfileStatusDto = typeof ProfileStatusDto.Type
 export type UsageSnapshotDto = typeof UsageSnapshotDto.Type
+export type ProviderDto = typeof ProviderDto.Type
+export type HealthDto = typeof HealthDto.Type
 ```
 
 (`RateLimit` is imported from `../agent-event.js`; keep the file under 300 lines — move the health and plugin DTOs to `dto-daemon.ts` re-exported from `dto.ts` if the cap is reached.)
@@ -208,8 +591,65 @@ export type UsageSnapshotDto = typeof UsageSnapshotDto.Type
 `packages/protocol/src/api/requests.ts` — add:
 
 ```ts
+import { Schema, SchemaTransformation } from 'effect'
+import { AskAnswer } from '../ask.js'
+import { Id } from '../common.js'
+import { PromptInput } from '../employee.js'
+import { ProfileKind } from './dto.js'
+
+export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annotate({
+  title: 'RegisterProject',
+  identifier: 'RegisterProject',
+})
+
+// The same fields as the kernel's CreateSessionInput; env carries BYTEBUREAU_* names only, the kernel drops the rest and its own (home, log level, workspace runtime)
+export const CreateSessionBody = Schema.Struct({
+  projectId: Id,
+  title: Schema.String,
+  employeeId: Schema.optionalKey(Schema.String),
+  providerId: Schema.optionalKey(Schema.String),
+  profileId: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+  env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+}).annotate({ title: 'CreateSession', identifier: 'CreateSession' })
+
+export const PromptBody = PromptInput
+export const AnswerAskBody = AskAnswer
+
+export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({
+  title: 'SessionRef',
+  identifier: 'SessionRef',
+})
+
+// The text of a seq in a query string: digits only, which the OpenAPI document tells in the pattern
+// No sign, fraction or exponent goes through, so a client knows the bound from the document itself
+const SeqText = Schema.String.check(Schema.isPattern(/^\d+$/u)).annotate({
+  description: 'The last seq the client has seen: a whole number of 0 or more',
+})
+
+const SeqFromText = SeqText.pipe(
+  Schema.decodeTo(Schema.Natural, SchemaTransformation.numberFromString),
+)
+
+// The query string of GET /events: types is comma-separated, since is the last seq the client has seen (0 or more)
+export const EventsQuery = Schema.Struct({
+  since: Schema.optionalKey(SeqFromText),
+  session: Schema.optionalKey(Id),
+  project: Schema.optionalKey(Id),
+  types: Schema.optionalKey(Schema.String),
+}).annotate({ title: 'EventsQuery', identifier: 'EventsQuery' })
+
+// The filter of the RPC subscription, the shape of the kernel's EventFilter
+export const EventsFilter = Schema.Struct({
+  since: Schema.optionalKey(Schema.Natural),
+  sessionId: Schema.optionalKey(Id),
+  projectId: Schema.optionalKey(Id),
+  types: Schema.optionalKey(Schema.Array(Schema.String)),
+  ephemeral: Schema.optionalKey(Schema.Boolean),
+}).annotate({ title: 'EventsFilter', identifier: 'EventsFilter' })
+
 // A profile name is a path segment of the profiles directory: lower-case letters, digits and dashes, 1 to 32 of them
-const ProfileName = Schema.String.pipe(Schema.pattern(/^[a-z0-9][a-z0-9-]{0,31}$/u)).annotate({
+const ProfileName = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,31}$/u)).annotate({
   title: 'ProfileName',
   description: 'Lower-case letters, digits and dashes, 1 to 32 characters',
 })
@@ -224,8 +664,19 @@ export const AddProfileBody = Schema.Struct({
 }).annotate({ title: 'AddProfile', identifier: 'AddProfile' })
 
 export const ProfileIdParam = Schema.Struct({ id: Schema.String })
-export const RemoveProfileQuery = Schema.Struct({ purge: Schema.optionalKey(Schema.BooleanFromString) })
 
+// A query string carries purge as text, which the handler reads as a boolean
+export const RemoveProfileQuery = Schema.Struct({
+  purge: Schema.optionalKey(Schema.Literals(['true', 'false'])),
+})
+
+export type RegisterProjectBody = typeof RegisterProjectBody.Type
+export type CreateSessionBody = typeof CreateSessionBody.Type
+export type PromptBody = typeof PromptBody.Type
+export type AnswerAskBody = typeof AnswerAskBody.Type
+export type SessionRef = typeof SessionRef.Type
+export type EventsQuery = typeof EventsQuery.Type
+export type EventsFilter = typeof EventsFilter.Type
 export type AddProfileBody = typeof AddProfileBody.Type
 ```
 
@@ -236,9 +687,143 @@ export type AddProfileBody = typeof AddProfileBody.Type
 `packages/protocol/src/config.ts` — add before `UserConfig`:
 
 ```ts
+import { Schema } from 'effect'
+import { Effort, PermissionMode } from './common.js'
+import { Appearance, ToolPolicy } from './employee.js'
+
+export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
+
+// A whole number and a unit, as the kernel parses it: 500ms, 30s, 30m, 1h
+const DurationText = Schema.String.check(Schema.isPattern(/^\d+\s*(?:ms|s|m|h)$/u))
+
+export const EmployeeConfig = Schema.Struct({
+  name: Schema.String,
+  provider: Schema.String,
+  model: Schema.String,
+  effort: Schema.optionalKey(Schema.NullOr(Effort)),
+  prompt: Schema.optionalKey(Schema.String),
+  systemPrompt: Schema.optionalKey(Schema.String),
+  permissionMode: PermissionMode,
+  tools: Schema.optionalKey(ToolPolicy),
+  skills: Schema.optionalKey(Schema.Array(Schema.String)),
+  maxTurns: Schema.optionalKey(Schema.Int),
+  askTimeout: Schema.optionalKey(DurationText),
+  appearance: Schema.optionalKey(Appearance),
+})
+
+export const PluginRef = Schema.Union([
+  Schema.String,
+  Schema.Struct({ npm: Schema.String, version: Schema.optionalKey(Schema.String) }),
+])
+
+const LoggingSection = Schema.Struct({ level: Schema.optionalKey(LogLevel) })
+
+const WorkspaceSection = Schema.Struct({
+  runtime: Schema.optionalKey(Schema.String),
+  copyIgnored: Schema.optionalKey(Schema.Array(Schema.String)),
+  retainDays: Schema.optionalKey(Schema.Int),
+})
+// The kernel reads passEnv: the names of further variables of its environment an agent of the provider is given
+// Every other key belongs to the provider plugin
+const PassEnv = Schema.optionalKey(Schema.Array(Schema.String))
+const ProviderSection = Schema.StructWithRest(Schema.Struct({ passEnv: PassEnv }), [
+  Schema.Record(Schema.String, Schema.Unknown),
+])
+const ProvidersSection = Schema.Record(Schema.String, ProviderSection)
+const ProjectDefaults = Schema.Struct({
+  employee: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+})
+
+export const ProjectConfig = Schema.Struct({
+  $schema: Schema.optionalKey(Schema.String),
+  version: Schema.Literal(1),
+  project: Schema.Struct({
+    name: Schema.NonEmptyString,
+    defaultBranch: Schema.optionalKey(Schema.String),
+  }),
+  workspace: Schema.optionalKey(WorkspaceSection),
+  providers: Schema.optionalKey(ProvidersSection),
+  employees: Schema.Record(Schema.String, EmployeeConfig),
+  defaults: Schema.optionalKey(ProjectDefaults),
+  plugins: Schema.optionalKey(Schema.Array(PluginRef)),
+  logging: Schema.optionalKey(LoggingSection),
+}).annotate({ title: 'ByteBureau project configuration (v1)' })
+
+const ServerSection = Schema.Struct({
+  host: Schema.optionalKey(Schema.String),
+  port: Schema.optionalKey(Schema.Int),
+})
+const UserDefaults = Schema.Struct({
+  provider: Schema.optionalKey(Schema.String),
+  profile: Schema.optionalKey(Schema.String),
+})
+const UserProfile = Schema.Struct({
+  providerId: Schema.String,
+  name: Schema.String,
+  kind: Schema.Literals(['login', 'api_key']),
+  configDir: Schema.optionalKey(Schema.String),
+})
+const ProfilesSection = Schema.Record(Schema.String, UserProfile)
+const TelemetrySection = Schema.Struct({
+  content: Schema.optionalKey(Schema.Literals(['local', 'off'])),
+  otlpEndpoint: Schema.optionalKey(Schema.String),
+})
+const UiSection = Schema.Record(Schema.String, Schema.Unknown)
+
 // Where the daemon keeps secrets: the OS keychain through Bun.secrets, a 0600 file under the home, or whichever of the two works (auto)
 export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
 const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
+
+export const UserConfig = Schema.Struct({
+  server: Schema.optionalKey(ServerSection),
+  profiles: Schema.optionalKey(ProfilesSection),
+  defaults: Schema.optionalKey(UserDefaults),
+  locale: Schema.optionalKey(Schema.String),
+  logging: Schema.optionalKey(LoggingSection),
+  telemetry: Schema.optionalKey(TelemetrySection),
+  secrets: Schema.optionalKey(SecretsSection),
+  ui: Schema.optionalKey(UiSection),
+}).annotate({ title: 'ByteBureau user configuration' })
+
+export type LogLevel = typeof LogLevel.Type
+export type EmployeeConfig = typeof EmployeeConfig.Type
+export type PluginRef = typeof PluginRef.Type
+export type ProjectConfig = typeof ProjectConfig.Type
+export type SecretsBackend = typeof SecretsBackend.Type
+export type UserConfig = typeof UserConfig.Type
+
+const STRICT = { onExcessProperty: 'error', errors: 'all' } as const
+
+export const decodeProjectConfig = (input: unknown): ProjectConfig =>
+  Schema.decodeUnknownSync(ProjectConfig)(input, STRICT)
+export const decodeUserConfig = (input: unknown): UserConfig =>
+  Schema.decodeUnknownSync(UserConfig)(input, STRICT)
+
+// The branch keys are left out on purpose: a default here would hide the one detected from each repository
+export const defaultProjectConfig: ProjectConfig = {
+  version: 1,
+  project: { name: 'my-app' },
+  workspace: { runtime: 'local', copyIgnored: ['.env', '.env.local'], retainDays: 7 },
+  providers: { claude: { executable: 'claude', settingSources: ['user', 'project', 'local'] } },
+  employees: {
+    developer: {
+      name: 'Developer',
+      provider: 'claude',
+      model: 'claude-opus-5-5',
+      effort: 'medium',
+      prompt: './.bytebureau/employees/developer.md',
+      permissionMode: 'supervised',
+      tools: { allow: [], deny: [] },
+      skills: [],
+      askTimeout: '30m',
+      appearance: {},
+    },
+  },
+  defaults: { employee: 'developer' },
+  plugins: [],
+  logging: { level: 'info' },
+}
 ```
 
 and `secrets: Schema.optionalKey(SecretsSection),` in `UserConfig`; export `type SecretsBackend = typeof SecretsBackend.Type`. Regenerate the schemas: `bun run --cwd packages/protocol build` (commits `packages/protocol/schemas/config.json`).
@@ -248,6 +833,50 @@ and `secrets: Schema.optionalKey(SecretsSection),` in `UserConfig`; export `type
 `packages/plugin-api/src/ports.ts`:
 
 ```ts
+import type { AgentEvent, AskAnswer, Effort, EmployeeSpec, PromptInput } from '@bytebureau/protocol'
+import type { Logger } from './logger.js'
+
+export interface ProfileRef {
+  readonly id: string
+  readonly providerId: string
+  readonly kind: 'login' | 'api_key'
+  readonly configDir?: string | undefined
+}
+
+export type AuthState = 'loggedIn' | 'loggedOut' | 'expired' | 'unknown'
+
+export interface AuthStatus {
+  readonly state: AuthState
+  readonly hint?: string | undefined
+  readonly account?: string | undefined
+}
+
+export interface ModelInfo {
+  readonly id: string
+  readonly displayName: string
+  readonly contextWindow?: number | undefined
+}
+
+export interface AgentCapabilities {
+  readonly resume: boolean
+  readonly interrupt: boolean
+  readonly askUser: boolean
+  readonly permissions: boolean
+  readonly structuredOutput: boolean
+  readonly usage: boolean
+  readonly rateLimits: boolean
+  readonly contextUsage: boolean
+  readonly thinking: boolean
+  readonly setModel: boolean
+  readonly setEffort: boolean
+  readonly attachments: boolean
+}
+
+export interface ExternalSessionRef {
+  readonly providerId: string
+  readonly ref: string
+}
+
 export interface CreateSessionRequest {
   readonly sessionId: string
   readonly workspace: { readonly path: string }
@@ -261,6 +890,17 @@ export interface CreateSessionRequest {
   readonly logger: Logger
 }
 
+export interface AgentSession {
+  readonly externalRef: ExternalSessionRef | null
+  prompt(input: PromptInput): Promise<void>
+  interrupt(): Promise<void>
+  answer(askId: string, answer: AskAnswer): Promise<void>
+  setModel?(model: string): Promise<void>
+  setEffort?(effort: Effort): Promise<void>
+  events(): AsyncIterable<AgentEvent>
+  close(): Promise<void>
+}
+
 export interface AgentProvider {
   readonly id: string
   readonly displayName: string
@@ -271,9 +911,72 @@ export interface AgentProvider {
   listModels?(profile: ProfileRef): Promise<ModelInfo[]>
   createSession(request: CreateSessionRequest): Promise<AgentSession>
 }
+
+export type WorkspaceIsolation = 'none' | 'process' | 'container' | 'vm'
+
+export interface WorkspaceSpec {
+  readonly sessionId: string
+  readonly projectPath: string
+  readonly baseBranch: string
+  readonly branch: string
+  readonly copyIgnored: readonly string[]
+  readonly logger: Logger
+}
+
+export interface WorkspaceHandle {
+  /** The session id the kernel passed as WorkspaceSpec.sessionId; the kernel expects it back unchanged. */
+  readonly id: string
+  readonly runtimeId: string
+  readonly path: string
+  readonly branch: string
+  readonly baseRef: string
+}
+
+export interface WorkspaceStatus {
+  readonly dirty: boolean
+  readonly ahead: number
+  readonly behind: number
+  /** True when a remote-tracking ref contains the head of the branch: it was pushed, or merged on the remote. */
+  readonly pushed: boolean
+  readonly locked: boolean
+  readonly branch: string
+}
+
+export interface ExecSpec {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly env?: Readonly<Record<string, string>> | undefined
+  readonly signal?: AbortSignal | undefined
+  readonly timeoutMs?: number | undefined
+}
+
+export interface ExecHandle {
+  readonly pid: number
+  readonly stdout: AsyncIterable<string>
+  readonly stderr: AsyncIterable<string>
+  readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
+  kill(signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL'): void
+}
+
+export interface WorkspaceRuntime {
+  readonly id: string
+  readonly isolation: WorkspaceIsolation
+  provision(spec: WorkspaceSpec): Promise<WorkspaceHandle>
+  exec(handle: WorkspaceHandle, spec: ExecSpec): Promise<ExecHandle>
+  status(handle: WorkspaceHandle): Promise<WorkspaceStatus>
+  destroy(handle: WorkspaceHandle, options?: { readonly force?: boolean }): Promise<void>
+}
+
+export interface SecretStore {
+  get(key: string): Promise<string | undefined>
+  set(key: string, value: string): Promise<void>
+  delete(key: string): Promise<void>
+}
 ```
 
 `packages/kernel/src/testing/fake-agent-provider.ts`: add `public readonly apiKeyEnv = 'BYTEBUREAU_FAKE_API_KEY'` to `FakeAgentProvider`. `packages/kernel/src/sessions/session-start.ts` `requestOf`: add `providerConfig: {},` (Task 3 replaces it). Every other `CreateSessionRequest` literal in tests gains `providerConfig: {}` (grep `sessionId:` in `packages/kernel/src/**/*fixtures*.ts`, `packages/plugin-api/src/plugin.test.ts`).
+
+**Semantics (as shipped, commits 9a15b15, 81295d0):** `AgentProvider.apiKeyEnv?` and `CreateSessionRequest.providerConfig` are in the plugin-api; the fake provider declares `apiKeyEnv: 'BYTEBUREAU_FAKE_API_KEY'` and every `CreateSessionRequest` literal carries `providerConfig` (`{}` in `session-start.ts` until Task 3). The protocol has `ProfileKind`, `AuthState`, `ProfileDto`, `ProfileStatusDto`, `UsageSnapshotDto`, `ProviderDto.supportsApiKey`, `AddProfileBody` (the name checked with `.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,31}$/u))`, as `requests.ts` checks its other strings — Effect 4.0.0 has no `Schema.pattern`), `ProfileIdParam`, `RemoveProfileQuery` (`purge` is `Schema.optionalKey(Schema.Literals(['true', 'false']))` — there is no `Schema.BooleanFromString`; Task 4's handler reads `query.purge === 'true'`), the four `profile_*` problem codes and `UserConfig.secrets.backend` (`SecretsBackend`). `packages/protocol/schemas/config.json` is the project configuration's schema and did not change (the user configuration has no schema file); `packages/api/openapi.json` and the client were regenerated for `supportsApiKey`, which the API's provider handler and the kernel facade's `providers.list()` now carry (pulled forward from Task 3), and the CLI's scripted fake follows. The profile tests sit in `describe` blocks of their own (the 50-line cap). Heads-up for Tasks 4–5: a profile id holds `/` (and `:` for ACP providers), so a client must percent-encode it in a path (`/profiles/claude%2Fwork` reaches the handler decoded; an unencoded slash matches no route).
 
 - [ ] **Step 5: Run the protocol, plugin-api and kernel tests**
 
@@ -982,7 +1685,7 @@ const checkedInput = (deps: Deps, input: AddProfileInput): Effect.Effect<string,
     if (!isProfileName(input.name)) {
       return yield* invalid(`"${input.name}" is not a profile name (lower-case letters, digits and dashes, 1 to 32)`)
     }
-    if (input.kind === 'api_key' && input.apiKey === undefined) {
+    if (input.kind === 'api_key' && (input.apiKey === undefined || input.apiKey === '')) {
       return yield* invalid('an api_key profile needs its key')
     }
     if (input.kind === 'api_key' && provider.apiKeyEnv === undefined) {
@@ -1185,7 +1888,7 @@ git commit -m "feat(kernel): keep named auth profiles per provider, and run a se
 
 **Files:**
 - Create: `packages/api/src/groups/profiles.ts`, `packages/api/src/handlers/profiles.ts`, `packages/api/src/profiles.test.ts`
-- Modify: `packages/api/src/api.ts` (the group), `packages/api/src/handlers/all.ts`, `packages/api/src/groups/usage.ts` and `handlers/usage.ts` (`GET /usage/profiles/:id`), `packages/api/src/handlers/plugins.ts` (`supportsApiKey`), `packages/api/src/problems.ts` (`ProfileError` → statuses and `profile_*` codes), `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` (regenerated), `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`), `packages/client/src/http.test.ts`, `packages/api/src/rpc.test.ts` (every procedure reached), `packages/api/src/plugins.test.ts` (`supportsApiKey`)
+- Modify: `packages/api/src/api.ts` (the group), `packages/api/src/handlers/all.ts`, `packages/api/src/groups/usage.ts` and `handlers/usage.ts` (`GET /usage/profiles/:id`), `packages/api/src/handlers/plugins.ts` (`supportsApiKey`), `packages/api/src/problems.ts` (`ProfileError` → statuses and `profile_*` codes), `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` (regenerated), `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`), `packages/client/src/http.test.ts`, `packages/api/src/rpc.test.ts` (every procedure reached), `packages/api/src/workspaces-plugins.test.ts` (`supportsApiKey` is pinned there already by Task 1)
 - Test: the new `profiles.test.ts` over `ApiTestLayer`
 
 **Interfaces:**
@@ -1254,9 +1957,9 @@ describe('the profiles of the API', () => {
 })
 ```
 
-(Profile ids hold a slash, so they travel percent-encoded in the path: `fake%2Fwork`. The `found`/path decoding of `effect/http-api` gives the handler the decoded `id`; assert so in the first test by reading the status of `fake%2Fwork`. If the platform rejects an encoded slash in a path segment, switch the routes to `/profiles/by/:providerId/:name` and say so in the report — the client hides the shape either way.)
+(Ruled after Task 1: a profile id stays one path segment and travels percent-encoded: `fake%2Fwork`; verify that the generated client encodes path params (hey-api's `buildUrl`) and, if it does not, encode the id in the client's `profiles` area. In this task `AddProfileBody.apiKey` also gains a minimum length of 1 (`Schema.String.check(Schema.isMinLength(1))` or the form `requests.ts` uses), regenerated with the group. The `found`/path decoding of `effect/http-api` gives the handler the decoded `id`; assert so in the first test by reading the status of `fake%2Fwork`. If the platform rejects an encoded slash in a path segment, switch the routes to `/profiles/by/:providerId/:name` and say so in the report — the client hides the shape either way.)
 
-Also: `plugins.test.ts` asserts `supportsApiKey: true` for `fake`; `rpc.test.ts`'s "every procedure" test reaches `profiles.list`, `profiles.add`, `profiles.setDefault`, `profiles.status`, `profiles.remove`, `usage.profile`; `openapi.test.ts`'s drift test will fail until the document is regenerated.
+Also: `workspaces-plugins.test.ts` already asserts `supportsApiKey: true` for `fake` (Task 1); `rpc.test.ts`'s "every procedure" test reaches `profiles.list`, `profiles.add`, `profiles.setDefault`, `profiles.status`, `profiles.remove`, `usage.profile`; `openapi.test.ts`'s drift test will fail until the document is regenerated.
 
 - [ ] **Step 2: Run the tests to see them fail**
 
@@ -1319,7 +2022,7 @@ export const ProfilesHandlers = HttpApiBuilder.group(BureauApi, 'profiles', (han
     .handle('list', () => orProblem(ProfileService.use((profiles) => profiles.list())))
     .handle('add', ({ payload }) => orProblem(ProfileService.use((profiles) => profiles.add(payload))))
     .handle('remove', ({ params, query }) =>
-      orProblem(ProfileService.use((profiles) => profiles.remove(params.id, { purge: query.purge === true }))),
+      orProblem(ProfileService.use((profiles) => profiles.remove(params.id, { purge: query.purge === 'true' }))),
     )
     .handle('setDefault', ({ params }) => orProblem(ProfileService.use((profiles) => profiles.setDefault(params.id))))
     .handle('status', ({ params }) => orProblem(ProfileService.use((profiles) => profiles.status(params.id)))),
