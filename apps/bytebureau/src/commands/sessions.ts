@@ -5,7 +5,7 @@ import { bureauFlags, globalArgs, processContext, type Context } from '../contex
 import { sessionFields, sessionRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
 import { withBureauRefusable } from './refusable.js'
-import { promptCommand } from './sessions-prompt.js'
+import { promptSession } from './sessions-prompt.js'
 
 const sessionArgs = {
   ...globalArgs,
@@ -71,6 +71,26 @@ const show = defineCommand({
   },
 })
 
+const prompt = defineCommand({
+  meta: { name: 'prompt', description: 'Prompt a session and follow its turn to the end' },
+  args: {
+    ...globalArgs,
+    id: { type: 'positional', description: 'Session id', required: true },
+    text: { type: 'positional', description: 'The prompt', required: true },
+  },
+  async run({ args }) {
+    const context = processContext(args)
+    const options = { id: args.id, text: args.text, yes: args.yes }
+    const code = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const ended = await promptSession(bureau, options, context)
+      return ended
+    })
+    if (code !== undefined) {
+      process.exitCode = code
+    }
+  },
+})
+
 // Interrupt, stop and resume: one request, one line
 const steer = (
   name: 'interrupt' | 'stop' | 'resume',
@@ -97,7 +117,7 @@ export const sessionsCommand = defineCommand({
   subCommands: {
     ls,
     show,
-    prompt: promptCommand,
+    prompt,
     interrupt: steer('interrupt', 'Interrupt the running turn of a session'),
     stop: steer('stop', 'Stop a session (resumable later)'),
     resume: steer('resume', 'Resume a stopped or errored session'),

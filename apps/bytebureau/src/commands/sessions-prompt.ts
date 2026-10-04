@@ -1,7 +1,5 @@
-import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
-import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
-import { withBureauRefusable } from './refusable.js'
+import type { Context } from '../context.js'
 import { conclude, promptAndFollow, type Ends } from './run-follow.js'
 import { closeFrame, open } from './run-output.js'
 
@@ -44,23 +42,3 @@ export async function promptSession(
     throw error
   }
 }
-
-export const promptCommand = defineCommand({
-  meta: { name: 'prompt', description: 'Prompt a session and follow its turn to the end' },
-  args: {
-    ...globalArgs,
-    id: { type: 'positional', description: 'Session id', required: true },
-    text: { type: 'positional', description: 'The prompt', required: true },
-  },
-  async run({ args }) {
-    const context = processContext(args)
-    const options = { id: args.id, text: args.text, yes: args.yes }
-    const code = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
-      const ended = await promptSession(bureau, options, context)
-      return ended
-    })
-    if (code !== undefined) {
-      process.exitCode = code
-    }
-  },
-})
