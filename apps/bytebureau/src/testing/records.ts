@@ -4,9 +4,12 @@ import {
   type AskRecord,
   type EmployeeSpec,
   type HealthDto,
+  type ProfileDto,
+  type ProfileStatusDto,
   type ProjectDto,
   type SessionDto,
   type TurnDto,
+  type UsageSnapshotDto,
 } from '@bytebureau/protocol'
 
 // Records as the daemon answers them; every field that may be null has a value, as the CLI sources spell no null
@@ -99,6 +102,28 @@ export const ASK: AskRecord = {
   answer: { selected: ['yes'] },
   answeredAt: AT,
   answeredVia: 'cli',
+}
+
+export const PROFILE: ProfileDto = {
+  id: 'fake/work',
+  providerId: 'fake',
+  name: 'work',
+  kind: 'login',
+  configDir: '/home/me/.bytebureau/profiles/fake/work',
+  isDefault: true,
+  createdAt: AT,
+}
+
+export const PROFILE_STATUS: ProfileStatusDto = {
+  profileId: 'fake/work',
+  state: 'loggedIn',
+  checkedAt: AT,
+}
+
+export const SNAPSHOT: UsageSnapshotDto = {
+  profileId: 'fake/work',
+  rateLimit: { fiveHourPct: 40 },
+  observedAt: AT,
 }
 
 // The failure a call of the client rejects with when the daemon answers with a problem

@@ -1,6 +1,15 @@
 import type { BureauClient } from '@bytebureau/client'
 import type { EventEnvelope } from '@bytebureau/protocol'
-import { ASK, HEALTH, PROJECT, SESSION, TURN } from './records.js'
+import {
+  ASK,
+  HEALTH,
+  PROFILE,
+  PROFILE_STATUS,
+  PROJECT,
+  SESSION,
+  SNAPSHOT,
+  TURN,
+} from './records.js'
 
 // The calls a client was asked, each its name and its arguments
 export type Calls = unknown[][]
@@ -30,12 +39,19 @@ async function* noEvents(): AsyncGenerator<EventEnvelope> {
 }
 
 // The calls of the client that come back with a record of the daemon
-const recordsOf = (calls: Calls): Pick<BureauClient, 'projects' | 'sessions'> => ({
+const recordsOf = (calls: Calls): Pick<BureauClient, 'profiles' | 'projects' | 'sessions'> => ({
   projects: {
     list: answering(calls, 'projects.list', [PROJECT]),
     register: answering(calls, 'projects.register', PROJECT),
     get: answering(calls, 'projects.get', PROJECT),
     remove: doing(calls, 'projects.remove'),
+  },
+  profiles: {
+    list: answering(calls, 'profiles.list', [PROFILE]),
+    add: answering(calls, 'profiles.add', PROFILE),
+    remove: doing(calls, 'profiles.remove'),
+    setDefault: doing(calls, 'profiles.setDefault'),
+    status: answering(calls, 'profiles.status', PROFILE_STATUS),
   },
   sessions: {
     list: answering(calls, 'sessions.list', [SESSION]),
@@ -57,7 +73,10 @@ export const recordingClient = (calls: Calls): BureauClient => ({
     get: answering(calls, 'asks.get', ASK),
     answer: doing(calls, 'asks.answer'),
   },
-  usage: { session: answering(calls, 'usage.session', USAGE) },
+  usage: {
+    session: answering(calls, 'usage.session', USAGE),
+    profile: answering(calls, 'usage.profile', SNAPSHOT),
+  },
   workspaces: {
     list: answering(calls, 'workspaces.list', []),
     prune: answering(calls, 'workspaces.prune', { removed: [], retained: [] }),

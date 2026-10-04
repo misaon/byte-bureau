@@ -1,7 +1,7 @@
 import { ApiError, createBureauClient, type BureauClient } from '@bytebureau/client'
 import type { EventLog } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
-import type { AskRecord, ProjectDto, SessionDto } from '@bytebureau/protocol'
+import type { AskRecord, ProfileDto, ProjectDto, SessionDto } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, type Cause } from 'effect'
 import { ApiTestLayer, baseUrl, TEST_TOKEN } from './testing.js'
@@ -180,6 +180,54 @@ it.layer(ApiTestLayer())('the worktrees of the API through @bytebureau/client', 
         [here.path, there.path],
       )
     }),
+  )
+})
+
+const KEYED = {
+  providerId: 'fake',
+  name: 'key',
+  kind: 'api_key',
+  apiKey: 'sk-canary-client',
+} as const
+
+// The id of each profile the daemon lists, with whether it is the default of its provider
+const defaultsOf = (profiles: readonly ProfileDto[]): [string, boolean][] =>
+  profiles.map((profile) => [profile.id, profile.isDefault])
+
+it.layer(ApiTestLayer())('the profiles of the API through @bytebureau/client', (suite) => {
+  suite.effect('adds profiles, lists them and moves the default among them by their ids', () =>
+    Effect.gen(function* manages() {
+      const api = yield* client
+      yield* awaited(api.profiles.add({ providerId: 'fake', name: 'work', kind: 'login' }))
+      yield* awaited(api.profiles.add(KEYED))
+      const before = defaultsOf(yield* awaited(api.profiles.list()))
+      assert.deepStrictEqual(before, [
+        ['fake/work', true],
+        ['fake/key', false],
+      ])
+      yield* awaited(api.profiles.setDefault('fake/key'))
+      const after = defaultsOf(yield* awaited(api.profiles.list()))
+      assert.deepStrictEqual(after, [
+        ['fake/work', false],
+        ['fake/key', true],
+      ])
+    }),
+  )
+
+  suite.effect(
+    'tells the status and the usage of a profile, and removes it with its directory',
+    () =>
+      Effect.gen(function* checks() {
+        const api = yield* client
+        const body = { providerId: 'fake', name: 'checked', kind: 'login' } as const
+        const { id } = yield* awaited(api.profiles.add(body))
+        assert.containSubset(yield* awaited(api.profiles.status(id)), { state: 'loggedIn' })
+        const empty = { profileId: 'fake/checked', rateLimit: {}, observedAt: null }
+        assert.deepStrictEqual(yield* awaited(api.usage.profile(id)), empty)
+        yield* awaited(api.profiles.remove(id, { purge: true }))
+        const gone = yield* refused(api.profiles.status(id))
+        assert.containSubset(gone, { status: 404, problem: { code: 'profile_not_found' } })
+      }),
   )
 })
 
