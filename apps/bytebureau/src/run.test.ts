@@ -1,6 +1,7 @@
 import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand, type CommandDef } from 'citty'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
+import { DaemonRunningError } from './bureau/open-local.js'
 import { globalArgs } from './context.js'
 import { run } from './run.js'
 
@@ -86,6 +87,19 @@ describe('run with a typed error of the kernel', () => {
     expect(output.error).toHaveBeenCalledWith(
       'WorkspaceError: /tmp/x is not inside a git repository (not_a_repository)',
     )
+  })
+})
+
+describe('run with --no-daemon beside a live daemon', () => {
+  it('prints the way out without the usage, and returns 1', async () => {
+    expect.hasAssertions()
+    const output = silenceConsole()
+    const refusal = new DaemonRunningError('A daemon is running on http://127.0.0.1:4747 (pid 42)')
+    await expect(run(failingWith(refusal), [])).resolves.toBe(1)
+    expect(output.error).toHaveBeenCalledWith(
+      'A daemon is running on http://127.0.0.1:4747 (pid 42)',
+    )
+    expect(output.log).not.toHaveBeenCalled()
   })
 })
 

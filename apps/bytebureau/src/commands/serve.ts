@@ -1,6 +1,6 @@
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext, type Context } from '../context.js'
+import { globalArgs, portOf, processContext, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
 import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
 import { stopDaemon } from '../daemon/stop.js'
@@ -12,21 +12,6 @@ interface ServeFlags {
   readonly port?: string | undefined
   readonly 'log-level'?: string | undefined
   readonly debug?: string | undefined
-}
-
-const usageError = (message: string): Error =>
-  Object.assign(new Error(message), { name: 'CLIError' })
-
-// A port is a whole number up to 65535; 0 asks for a free one
-const portOf = (text: string | undefined): number | undefined => {
-  if (text === undefined) {
-    return undefined
-  }
-  const port = Number(text)
-  if (!/^\d+$/u.test(text) || port > 65_535) {
-    throw usageError(`--port takes a whole number from 0 to 65535, not ${text}`)
-  }
-  return port
 }
 
 // What the detached daemon is started with: the address and the logging of this command

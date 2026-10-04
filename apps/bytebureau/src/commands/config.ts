@@ -1,10 +1,11 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { m } from '@bytebureau/i18n'
-import { defaultProjectConfigText } from '@bytebureau/kernel'
+import { defaultProjectConfigText, type Kernel } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { withKernel } from '../kernel.js'
+import { globalArgs, processContext, type Context } from '../context.js'
+import { openKernel } from '../kernel.js'
+import { withResource } from '../resource.js'
 
 const PROJECT_ARG = {
   type: 'string',
@@ -30,6 +31,19 @@ function createConfig(file: string): boolean {
     }
     throw error
   }
+}
+
+// The configuration is files the kernel of this process reads: config never talks to a daemon
+async function withLocalKernel<Result>(
+  context: Context,
+  work: (kernel: Kernel) => Promise<Result>,
+): Promise<Result> {
+  const open = async (): Promise<Kernel> => {
+    const kernel = await openKernel(context)
+    return kernel
+  }
+  const result = await withResource(open, work)
+  return result
 }
 
 const init = defineCommand({
@@ -58,7 +72,7 @@ const validate = defineCommand({
   args: { ...globalArgs, project: PROJECT_ARG },
   async run({ args }) {
     const context = processContext(args)
-    const issues = await withKernel(context, process.env, async (kernel) => {
+    const issues = await withLocalKernel(context, async (kernel) => {
       const found = await kernel.config.validate(args.project ?? process.cwd())
       return found
     })
@@ -80,7 +94,7 @@ const schema = defineCommand({
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const document = await withKernel(context, process.env, async (kernel) => {
+    const document = await withLocalKernel(context, async (kernel) => {
       await Promise.resolve()
       return kernel.config.schema()
     })

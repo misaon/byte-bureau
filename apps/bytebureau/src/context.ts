@@ -1,5 +1,6 @@
 import { isatty } from 'node:tty'
 import { m, setLocale } from '@bytebureau/i18n'
+import type { BureauFlags } from './bureau/resolve.js'
 import { resolveLocale } from './locale.js'
 import { colorEnabled, createOutput, type Output } from './output.js'
 
@@ -22,6 +23,15 @@ export const globalArgs = {
       'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
   },
   'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
+  daemon: {
+    type: 'boolean',
+    description:
+      'Talk to the daemon (started on demand); pass --no-daemon to run the kernel in-process',
+    default: true,
+  },
+  host: { type: 'string', description: 'Host of a daemon to talk to (never started on demand)' },
+  port: { type: 'string', description: 'Port of that daemon' },
+  'token-file': { type: 'string', description: 'File holding the bearer token of that daemon' },
 } as const
 
 export interface GlobalArgs {
@@ -31,6 +41,11 @@ export interface GlobalArgs {
   readonly yes: boolean
   readonly debug?: string | undefined
   readonly 'log-level'?: string | undefined
+  // Citty gives false for --no-daemon alone; arguments made without the flag talk to the daemon too
+  readonly daemon?: boolean | undefined
+  readonly host?: string | undefined
+  readonly port?: string | undefined
+  readonly 'token-file'?: string | undefined
 }
 
 export interface Context {
@@ -40,6 +55,8 @@ export interface Context {
     readonly debug: string | undefined
     readonly level: string | undefined
   }
+  // The home of the command, the configuration it reads and the environment of a daemon it starts
+  readonly env: Readonly<Record<string, string | undefined>>
 }
 
 export function createContext(
@@ -60,10 +77,36 @@ export function createContext(
     output,
     interactive: stdoutIsTTY && !args.json,
     logging: { debug: args.debug, level: args['log-level'] },
+    env,
   }
 }
 
 // The context of the running process: its environment, and whether its stdout is a terminal
 export function processContext(args: GlobalArgs): Context {
   return createContext(args, process.env, isatty(process.stdout.fd))
+}
+
+const usageError = (message: string): Error =>
+  Object.assign(new Error(message), { name: 'CLIError' })
+
+// A port is a whole number up to 65535; 0 asks for a free one
+export const portOf = (text: string | undefined): number | undefined => {
+  if (text === undefined) {
+    return undefined
+  }
+  const port = Number(text)
+  if (!/^\d+$/u.test(text) || port > 65_535) {
+    throw usageError(`--port takes a whole number from 0 to 65535, not ${text}`)
+  }
+  return port
+}
+
+// The Bureau the global flags ask for: the daemon of the home, the one --host and --port name, or the kernel in-process
+export function bureauFlags(args: GlobalArgs): BureauFlags {
+  return {
+    daemon: args.daemon !== false,
+    host: args.host,
+    port: portOf(args.port),
+    tokenFile: args['token-file'],
+  }
 }

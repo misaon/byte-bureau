@@ -21,6 +21,31 @@ export async function healthStub(startedAt: string = STARTED_AT): Promise<number
   return typeof address === 'object' && address !== null ? address.port : 0
 }
 
+export interface ProjectsStub {
+  readonly port: number
+  // The authorization header of every request, in order
+  readonly authorizations: () => readonly (string | undefined)[]
+}
+
+// A daemon of this test on a free loopback port that knows no projects; it keeps the token of every request
+export async function projectsStub(): Promise<ProjectsStub> {
+  const seen: (string | undefined)[] = []
+  const server = createServer((request, response) => {
+    seen.push(request.headers.authorization)
+    const found = request.url === '/api/v1/projects'
+    response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
+    response.end('[]')
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  onTestFinished(() => {
+    server.close()
+  })
+  const address = server.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+  return { port, authorizations: () => seen }
+}
+
 // The record of a daemon of this test on the port, as server.json holds it
 export const recordOn = (port: number, pid: number = process.pid): ServerInfo => ({
   version: '0.0.0-test',

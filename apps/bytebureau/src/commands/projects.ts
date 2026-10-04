@@ -1,16 +1,48 @@
+import path from 'node:path'
+import { ApiError } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
 import { WorkspaceError } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { withKernel } from '../kernel.js'
+import type { BureauFlags } from '../bureau/resolve.js'
+import { withBureau } from '../bureau/with-bureau.js'
+import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
+
+// Why a project that sessions still belong to is not removed, as the kernel or the daemon says it; nothing for any other failure
+function hasSessions(error: unknown): string | undefined {
+  if (error instanceof WorkspaceError && error.code === 'has_sessions') {
+    return error.reason
+  }
+  const problem = error instanceof ApiError ? error.problem : undefined
+  return problem !== undefined && problem.code === 'workspace_has_sessions'
+    ? problem.detail
+    : undefined
+}
+
+// The project goes; one that sessions still belong to stays, a refusal with its reason and exit code 1 rather than a failure
+async function removeProject(context: Context, flags: BureauFlags, id: string): Promise<boolean> {
+  try {
+    await withBureau(context, flags, async (bureau) => {
+      await bureau.projects.remove(id)
+    })
+    return true
+  } catch (error) {
+    const refusal = hasSessions(error)
+    if (refusal === undefined) {
+      throw error
+    }
+    context.output.warn(refusal)
+    process.exitCode = 1
+    return false
+  }
+}
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List registered projects' },
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const projects = await withKernel(context, process.env, async (kernel) => {
-      const listed = await kernel.projects.list()
+    const projects = await withBureau(context, bureauFlags(args), async (bureau) => {
+      const listed = await bureau.projects.list()
       return listed
     })
     context.output.emit({ command: 'projects.ls', projects })
@@ -34,8 +66,10 @@ const add = defineCommand({
   },
   async run({ args }) {
     const context = processContext(args)
-    const project = await withKernel(context, process.env, async (kernel) => {
-      const registered = await kernel.projects.register(args.path ?? process.cwd())
+    // The daemon would resolve a relative path in its own working directory
+    const directory = path.resolve(args.path ?? process.cwd())
+    const project = await withBureau(context, bureauFlags(args), async (bureau) => {
+      const registered = await bureau.projects.register(directory)
       return registered
     })
     context.output.emit({ command: 'projects.add', project })
@@ -52,21 +86,10 @@ const rm = defineCommand({
   args: { ...globalArgs, id: { type: 'positional', description: 'Project id', required: true } },
   async run({ args }) {
     const context = processContext(args)
-    try {
-      await withKernel(context, process.env, async (kernel) => {
-        await kernel.projects.remove(args.id)
-      })
-    } catch (error) {
-      // A project that sessions still belong to is a refusal, not a failure: its reason and exit code 1
-      if (!(error instanceof WorkspaceError && error.code === 'has_sessions')) {
-        throw error
-      }
-      context.output.warn(error.reason)
-      process.exitCode = 1
-      return
+    if (await removeProject(context, bureauFlags(args), args.id)) {
+      context.output.emit({ command: 'projects.rm', id: args.id })
+      context.output.print(m.projects_removed({ id: args.id }))
     }
-    context.output.emit({ command: 'projects.rm', id: args.id })
-    context.output.print(m.projects_removed({ id: args.id }))
   },
 })
 

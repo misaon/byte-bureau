@@ -31,6 +31,12 @@ export default defineConfig({
         'apps/bytebureau/src/render/**/*.ts',
         'apps/bytebureau/src/commands/run-session.ts',
         'apps/bytebureau/src/commands/run-output.ts',
+        // The Bureau the tests run in-process; ensure-daemon.ts and the kernel of --no-daemon run only in CLI subprocesses
+        'apps/bytebureau/src/bureau/local.ts',
+        'apps/bytebureau/src/bureau/open-local.ts',
+        'apps/bytebureau/src/bureau/remote.ts',
+        'apps/bytebureau/src/bureau/resolve.ts',
+        'apps/bytebureau/src/bureau/with-bureau.ts',
         // The daemon modules the tests run in-process; foreground.ts and spawn.ts run only in the daemon and CLI subprocesses
         'apps/bytebureau/src/daemon/announce.ts',
         'apps/bytebureau/src/daemon/exec-args.ts',

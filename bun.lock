@@ -39,6 +39,7 @@
       },
       "dependencies": {
         "@bytebureau/api": "workspace:*",
+        "@bytebureau/client": "workspace:*",
         "@bytebureau/i18n": "workspace:*",
         "@bytebureau/kernel": "workspace:*",
         "@bytebureau/protocol": "workspace:*",

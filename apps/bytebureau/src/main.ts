@@ -34,6 +34,16 @@ const main = defineCommand({
   },
 })
 
+// Bun writes to a pipe asynchronously: an exit that does not wait for the writes would lose the last lines of NDJSON
+async function drained(stream: NodeJS.WriteStream): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<boolean>()
+  stream.write('', () => {
+    resolve(true)
+  })
+  await promise
+}
+
 // A command with an exit code of its own (run: 3, 4; config: 1) leaves it in process.exitCode
 const code = await run(main, process.argv.slice(2))
+await Promise.all([drained(process.stdout), drained(process.stderr)])
 process.exit(code === 0 ? (process.exitCode ?? 0) : code)

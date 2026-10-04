@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createContext, globalArgs, type GlobalArgs } from './context.js'
+import { bureauFlags, createContext, globalArgs, type GlobalArgs } from './context.js'
 
 const QUIET: GlobalArgs = { json: false, color: false, yes: false }
 
@@ -31,6 +31,38 @@ describe(createContext, () => {
     expect(createContext({ ...QUIET, json: true }, {}, true).interactive).toBe(false)
     expect(createContext(QUIET, {}, false).interactive).toBe(false)
   })
+
+  it('keeps the environment it was made with, the home of the command among it', () => {
+    const env = { BYTEBUREAU_HOME: '/data/bytebureau' }
+    expect(createContext(QUIET, env, false).env).toStrictEqual(env)
+  })
+})
+
+describe(bureauFlags, () => {
+  it('talks to the daemon unless --no-daemon says otherwise', () => {
+    const none = { daemon: true, host: undefined, port: undefined, tokenFile: undefined }
+    expect(bureauFlags(QUIET)).toStrictEqual(none)
+    expect(bureauFlags({ ...QUIET, daemon: false })).toStrictEqual({ ...none, daemon: false })
+  })
+
+  it('names a daemon by its host, its port as a number and the file of its token', () => {
+    const named = { ...QUIET, daemon: true, host: '10.0.0.5', port: '4800', 'token-file': 't' }
+    expect(bureauFlags(named)).toStrictEqual({
+      daemon: true,
+      host: '10.0.0.5',
+      port: 4800,
+      tokenFile: 't',
+    })
+  })
+
+  it.each(['80a', '-1', '65536', ''])('refuses %j as a port, as a usage error', (port) => {
+    expect(() => bureauFlags({ ...QUIET, port })).toThrow(
+      expect.objectContaining({
+        name: 'CLIError',
+        message: `--port takes a whole number from 0 to 65535, not ${port}`,
+      }),
+    )
+  })
 })
 
 describe('the global flags', () => {
@@ -42,6 +74,10 @@ describe('the global flags', () => {
       'yes',
       'debug',
       'log-level',
+      'daemon',
+      'host',
+      'port',
+      'token-file',
     ])
   })
 

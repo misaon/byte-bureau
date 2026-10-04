@@ -1,4 +1,5 @@
 import { runCommand, showUsage, type CommandDef, type Resolvable } from 'citty'
+import { DaemonRunningError } from './bureau/open-local.js'
 import { describeError } from './errors.js'
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(['--help', '-h'])
@@ -57,18 +58,32 @@ async function execute(command: CommandDef, argv: readonly string[]): Promise<vo
   }
 }
 
-// Exit codes: 0 success, 1 usage error (citty's CLIError), 2 anything else
+// The exit code of a failure, which is told on stderr: 1 for a usage error and for --no-daemon beside a live daemon, 2 for anything else
+async function failed(
+  command: CommandDef,
+  argv: readonly string[],
+  error: unknown,
+): Promise<number> {
+  if (isUsageError(error)) {
+    await printUsage(command, argv)
+    console.error(error.message)
+    return 1
+  }
+  if (error instanceof DaemonRunningError) {
+    console.error(error.message)
+    return 1
+  }
+  console.error(describeError(error))
+  return 2
+}
+
+// Exit codes: 0 success, 1 usage error (citty's CLIError) or a refused --no-daemon, 2 anything else
 export async function run(command: CommandDef, argv: readonly string[]): Promise<number> {
   try {
     await execute(command, argv)
     return 0
   } catch (error) {
-    if (isUsageError(error)) {
-      await printUsage(command, argv)
-      console.error(error.message)
-      return 1
-    }
-    console.error(describeError(error))
-    return 2
+    const code = await failed(command, argv, error)
+    return code
   }
 }

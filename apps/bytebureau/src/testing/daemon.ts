@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
+import { createServer } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
@@ -92,6 +94,17 @@ export async function startDaemonProcess(
     stderr: () => output.stderr,
     stop,
   }
+}
+
+// A loopback port nothing listens on now, for daemons that must come and go on the same one
+export async function freePort(): Promise<number> {
+  const server = createServer()
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  server.close()
+  await once(server, 'close')
+  return typeof address === 'object' && address !== null ? address.port : 0
 }
 
 const ended = async (pid: number, deadline: number): Promise<boolean> => {

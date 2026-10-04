@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
 import { tempDir } from '../testing/temp-repo.js'
-import { fakeRun, workbench, worktreesOf } from '../testing/workbench.js'
+import { fakeRun, NO_DAEMON, workbench, worktreesOf } from '../testing/workbench.js'
 
 describe('bytebureau workspaces', () => {
   it('lists nothing before any session ran', async () => {
     expect.hasAssertions()
-    const listed = await runCli(['workspaces', 'ls'], { BYTEBUREAU_HOME: tempDir('bb-home-') })
+    const listed = await runCli(['workspaces', 'ls', NO_DAEMON], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
     expect(listed.stdout.trim()).toBe('No workspaces')
   })
 
@@ -15,7 +17,9 @@ describe('bytebureau workspaces', () => {
     expect.hasAssertions()
     const bench = workbench()
     await fakeRun(bench)
-    const listed = await runCli(['workspaces', 'ls'], { BYTEBUREAU_HOME: bench.home })
+    const listed = await runCli(['workspaces', 'ls', NO_DAEMON], {
+      BYTEBUREAU_HOME: bench.home,
+    })
     expect(listed.code).toBe(0)
     const [line = ''] = listed.stdout.trim().split('\n')
     expect(line).toMatch(/^\S+ {2}bb\/\S+ {2}completed {2}/u)
@@ -26,7 +30,9 @@ describe('bytebureau workspaces', () => {
     expect.hasAssertions()
     const bench = workbench()
     await fakeRun(bench)
-    const listed = await runCli(['workspaces', 'ls', '--json'], { BYTEBUREAU_HOME: bench.home })
+    const listed = await runCli(['workspaces', 'ls', '--json', NO_DAEMON], {
+      BYTEBUREAU_HOME: bench.home,
+    })
     expect(jsonLines(listed.stdout)).toMatchObject([
       {
         command: 'workspaces.ls',
@@ -39,7 +45,7 @@ describe('bytebureau workspaces', () => {
     expect.hasAssertions()
     const bench = workbench()
     await fakeRun(bench)
-    const listed = await runCli(['workspaces', 'ls', '--project', 'nobody'], {
+    const listed = await runCli(['workspaces', 'ls', '--project', 'nobody', NO_DAEMON], {
       BYTEBUREAU_HOME: bench.home,
     })
     expect(listed.stdout.trim()).toBe('No workspaces')
@@ -49,7 +55,9 @@ describe('bytebureau workspaces', () => {
 describe('bytebureau workspaces prune', () => {
   it('has nothing to prune before any session ran', async () => {
     expect.hasAssertions()
-    const pruned = await runCli(['workspaces', 'prune'], { BYTEBUREAU_HOME: tempDir('bb-home-') })
+    const pruned = await runCli(['workspaces', 'prune', NO_DAEMON], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
     expect(pruned.code).toBe(0)
     expect(pruned.stdout.trim()).toBe('Removed 0 worktree(s), kept 0')
   })
@@ -58,7 +66,9 @@ describe('bytebureau workspaces prune', () => {
     expect.hasAssertions()
     const bench = workbench()
     await fakeRun(bench)
-    const pruned = await runCli(['workspaces', 'prune'], { BYTEBUREAU_HOME: bench.home })
+    const pruned = await runCli(['workspaces', 'prune', NO_DAEMON], {
+      BYTEBUREAU_HOME: bench.home,
+    })
     expect(pruned.code).toBe(0)
     const lines = pruned.stdout.trim().split('\n')
     expect(lines[0]).toMatch(/^.+: younger than 7 days$/u)

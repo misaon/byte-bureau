@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -23,6 +23,12 @@ describe(childEnv, () => {
     expect(first.startsWith(temp)).toBe(true)
     expect(first).not.toBe(second)
     expect(first).not.toBe(path.join(homedir(), '.bytebureau'))
+  })
+
+  it('gives that home a daemon on a free port, should the CLI start one on demand', () => {
+    const file = path.join(homeOf(childEnv({})), 'config.json')
+    const config: unknown = JSON.parse(readFileSync(file, 'utf8'))
+    expect(config).toStrictEqual({ server: { port: 0 } })
   })
 
   it('keeps the home that a test names, and the other variables it sets', () => {

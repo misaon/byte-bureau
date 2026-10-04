@@ -1,21 +1,14 @@
+import { ApiError } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
-import {
-  ProviderError,
-  SessionError,
-  WorkspaceError,
-  type CreateSessionInput,
-  type EventFilter,
-} from '@bytebureau/kernel'
+import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
 import {
   decodeEventPayload,
-  type AnsweredVia,
   type Ask,
-  type AskAnswer,
+  type CreateSessionBody,
   type EventEnvelope,
-  type PromptInput,
 } from '@bytebureau/protocol'
+import type { Bureau } from '../bureau/bureau.js'
 import type { Context } from '../context.js'
-import type { Output } from '../output.js'
 import { promptAsk } from '../render/ask-prompt.js'
 import { completionLine, readOrSkip, summarizeRun, titleOf } from '../render/transcript.js'
 import { describeError } from '../errors.js'
@@ -26,8 +19,17 @@ const EXIT_STOPPED = 3
 
 const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
 
+// Each stops the session once; the second of a kind ends the process as it would without the run
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+// Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
+const REMOTE_REFUSALS = /^(?:workspace_|provider_|session_provider_missing$)/u
+
+type Output = Context['output']
+
 export interface RunOptions {
   readonly prompt: string
+  // An absolute path: the daemon would resolve a relative one in its own working directory
   readonly project: string
   readonly branch?: string | undefined
   readonly employee?: string | undefined
@@ -35,31 +37,18 @@ export interface RunOptions {
   readonly yes: boolean
 }
 
-// What a run needs of the kernel facade, which has more
-export interface RunKernel {
-  readonly providers: { readonly list: () => readonly { readonly id: string }[] }
-  readonly projects: { readonly register: (path: string) => Promise<{ readonly id: string }> }
-  readonly sessions: {
-    readonly create: (input: CreateSessionInput) => Promise<{ readonly id: string }>
-    readonly prompt: (sessionId: string, input: PromptInput) => Promise<unknown>
-    readonly stop: (sessionId: string) => Promise<void>
-    readonly complete: (sessionId: string) => Promise<void>
-  }
-  readonly asks: {
-    readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
-  }
-  readonly events: { readonly subscribe: (filter: EventFilter) => AsyncIterable<EventEnvelope> }
-}
-
 interface Run {
-  readonly kernel: RunKernel
+  readonly bureau: Bureau
   readonly session: { readonly id: string }
   readonly options: RunOptions
   readonly context: Context
 }
 
 // Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
-function isRefusal(error: unknown): boolean {
+export function isRefusal(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.problem !== undefined && REMOTE_REFUSALS.test(error.problem.code)
+  }
   if (error instanceof WorkspaceError) {
     return true
   }
@@ -70,21 +59,28 @@ function isRefusal(error: unknown): boolean {
 }
 
 // A named provider is checked before anything is registered or created
-function unknownProvider(kernel: RunKernel, provider: string | undefined): string | undefined {
-  const available = kernel.providers.list().map((candidate) => candidate.id)
-  return provider === undefined || available.includes(provider)
+async function unknownProvider(
+  bureau: Bureau,
+  provider: string | undefined,
+): Promise<string | undefined> {
+  if (provider === undefined) {
+    return undefined
+  }
+  const providers = await bureau.plugins.providers()
+  const available = providers.map((candidate) => candidate.id)
+  return available.includes(provider)
     ? undefined
     : m.run_provider_missing({ provider, available: available.join(', ') })
 }
 
 // An ask nobody can answer is left to the kernel policy; the person is told the session waits
-async function answerAsk({ kernel, options, context }: Run, ask: Ask): Promise<void> {
+async function answerAsk({ bureau, options, context }: Run, ask: Ask): Promise<void> {
   const answer = await promptAsk(ask, { yes: options.yes, interactive: context.interactive })
   if (answer === undefined) {
     context.output.warn(m.run_ask_waiting({ title: ask.title }))
     return
   }
-  await kernel.asks.answer(ask.id, answer, 'cli')
+  await bureau.asks.answer(ask.id, answer)
 }
 
 // The ask of an ask.requested event, if its payload fits
@@ -99,7 +95,7 @@ async function react(run: Run, event: EventEnvelope): Promise<void> {
     await answerAsk(run, ask)
   }
   if (event.type === 'turn.completed') {
-    await run.kernel.sessions.complete(run.session.id)
+    await run.bureau.sessions.complete(run.session.id)
   }
 }
 
@@ -117,32 +113,47 @@ async function follow(run: Run, events: AsyncIterable<EventEnvelope>): Promise<E
   return seen
 }
 
-// A stop that fails is only reported; Ctrl-C again ends the process
-async function stopSession({ kernel, session, context }: Run): Promise<void> {
+// A stop that fails is only reported; the same signal again ends the process
+async function stopSession({ bureau, session, context }: Run): Promise<void> {
   try {
-    await kernel.sessions.stop(session.id)
+    await bureau.sessions.stop(session.id)
   } catch (error) {
     context.output.warn(describeError(error))
   }
 }
 
-// Ctrl-C stops the session; the events then say so and the run ends with the exit code of a stopped one
-// The children of the kernel run detached, so the terminal does not reach them: only the stop does
-async function followSession(run: Run): Promise<EventEnvelope[]> {
-  const { kernel, session, options } = run
+// Ctrl-C, SIGTERM and SIGHUP stop the session alike; the result is a release that removes the listeners and waits for the stop
+function stopOnSignals(run: Run): () => Promise<void> {
   let stopping = Promise.resolve()
   const stop = (): void => {
     stopping = stopSession(run)
   }
-  process.once('SIGINT', stop)
+  for (const signal of STOP_SIGNALS) {
+    process.once(signal, stop)
+  }
+  return async () => {
+    for (const signal of STOP_SIGNALS) {
+      process.off(signal, stop)
+    }
+    await stopping
+  }
+}
+
+// A signal stops the session; the events then say so and the run ends with the exit code of a stopped one
+// The children of the kernel run detached, so the terminal does not reach them: only the stop does
+async function followSession(run: Run): Promise<EventEnvelope[]> {
+  const { bureau, session, options } = run
+  const subscription = new AbortController()
+  const release = stopOnSignals(run)
   try {
     // The ephemeral events (text deltas) carry no seq of their own and no transcript line
-    const events = kernel.events.subscribe({ sessionId: session.id, since: 0, ephemeral: false })
-    await kernel.sessions.prompt(session.id, { text: options.prompt })
+    const filter = { sessionId: session.id, since: 0, ephemeral: false }
+    const events = bureau.events.subscribe(filter, subscription.signal)
+    await bureau.sessions.prompt(session.id, { text: options.prompt })
     return await follow(run, events)
   } finally {
-    process.off('SIGINT', stop)
-    await stopping
+    subscription.abort()
+    await release()
   }
 }
 
@@ -180,47 +191,48 @@ function conclude(seen: readonly EventEnvelope[], context: Context): number {
   return outcome.code
 }
 
+// The session as the person asked for it: what is not named is left to the kernel
+function sessionBody(projectId: string, options: RunOptions): CreateSessionBody {
+  return {
+    projectId,
+    title: titleOf(options.prompt),
+    ...(options.employee === undefined ? {} : { employeeId: options.employee }),
+    ...(options.provider === undefined ? {} : { providerId: options.provider }),
+    ...(options.branch === undefined ? {} : { branch: options.branch }),
+  }
+}
+
 async function startAndFollow(
-  kernel: RunKernel,
+  bureau: Bureau,
   options: RunOptions,
   context: Context,
 ): Promise<number> {
-  const project = await kernel.projects.register(options.project)
-  const session = await kernel.sessions.create({
-    projectId: project.id,
-    title: titleOf(options.prompt),
-    employeeId: options.employee,
-    providerId: options.provider,
-    branch: options.branch,
-  })
-  const seen = await followSession({ kernel, session, options, context })
+  const project = await bureau.projects.register(options.project)
+  const session = await bureau.sessions.create(sessionBody(project.id, options))
+  const seen = await followSession({ bureau, session, options, context })
   return conclude(seen, context)
 }
 
 // A named provider is refused before anything is registered or created
-async function runOrRefuse(
-  kernel: RunKernel,
-  options: RunOptions,
-  context: Context,
-): Promise<number> {
-  const refusal = unknownProvider(kernel, options.provider)
+async function runOrRefuse(bureau: Bureau, options: RunOptions, context: Context): Promise<number> {
+  const refusal = await unknownProvider(bureau, options.provider)
   if (refusal !== undefined) {
     return refuse(context, refusal)
   }
-  const code = await startAndFollow(kernel, options, context)
+  const code = await startAndFollow(bureau, options, context)
   return code
 }
 
 // Streams one session to its end; the exit code is 0 completed, 3 stopped, 4 project, worktree or provider refused
 // A failure that has no exit code of its own closes the frame and goes on to the runner
 export async function runSession(
-  kernel: RunKernel,
+  bureau: Bureau,
   options: RunOptions,
   context: Context,
 ): Promise<number> {
   open(context, options.prompt)
   try {
-    return await runOrRefuse(kernel, options, context)
+    return await runOrRefuse(bureau, options, context)
   } catch (error) {
     if (!isRefusal(error)) {
       closeFrame(context)

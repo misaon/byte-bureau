@@ -26,8 +26,8 @@ describe('runSession with an event whose payload does not fit its type', () => {
     expect.hasAssertions()
     const printed = captureConsole()
     const said = event('message.assistant.completed', { text: 'Fixed it', content: [] }, 3)
-    const { kernel } = scripted([malformed('tool.started', 2), said, TURN_DONE, COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(0)
+    const { bureau } = scripted([malformed('tool.started', 2), said, TURN_DONE, COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(0)
     expect(printed.out()).toStrictEqual([
       'Fixed it',
       'Done — turns: 1, input tokens: 10, output tokens: 5',
@@ -38,8 +38,8 @@ describe('runSession with an event whose payload does not fit its type', () => {
   it('counts the turns it can read, and warns about the one it cannot', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel, calls } = scripted([malformed('turn.completed', 2), COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(0)
+    const { bureau, calls } = scripted([malformed('turn.completed', 2), COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(0)
     expect(calls).toContain('complete s1')
     expect(printed.out()).toStrictEqual(['Done — turns: 0, input tokens: 0, output tokens: 0'])
     expect(printed.err()).toStrictEqual([skipped('turn.completed', 2)])
@@ -48,8 +48,8 @@ describe('runSession with an event whose payload does not fit its type', () => {
   it('leaves an ask it cannot read to the kernel policy, and says that it skipped it', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel, answered } = scripted([malformed('ask.requested', 2), STOPPED])
-    await expect(runSession(kernel, { ...OPTIONS, yes: true }, contextOf())).resolves.toBe(3)
+    const { bureau, answered } = scripted([malformed('ask.requested', 2), STOPPED])
+    await expect(runSession(bureau, { ...OPTIONS, yes: true }, contextOf())).resolves.toBe(3)
     expect(answered).toStrictEqual([])
     expect(printed.err()).toStrictEqual([skipped('ask.requested', 2)])
   })
@@ -57,8 +57,8 @@ describe('runSession with an event whose payload does not fit its type', () => {
   it('still ends with the code of an errored session whose reason it cannot read', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { kernel } = scripted([malformed('session.errored', 2)])
-    await expect(runSession(kernel, OPTIONS, contextOf())).resolves.toBe(4)
+    const { bureau } = scripted([malformed('session.errored', 2)])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(4)
     expect(printed.err()).toStrictEqual([
       skipped('session.errored', 2),
       'The provider failed: session.errored',
@@ -71,8 +71,8 @@ describe('runSession with machine-readable output and an event that does not fit
     expect.hasAssertions()
     const printed = captureConsole()
     const bad = malformed('turn.completed', 2)
-    const { kernel } = scripted([bad, COMPLETED])
-    await expect(runSession(kernel, OPTIONS, contextOf(true))).resolves.toBe(0)
+    const { bureau } = scripted([bad, COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf(true))).resolves.toBe(0)
     expect(printed.out()).toStrictEqual([JSON.stringify(bad), JSON.stringify(COMPLETED)])
     expect(printed.err()).toStrictEqual([])
   })

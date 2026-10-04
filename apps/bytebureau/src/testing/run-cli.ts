@@ -1,8 +1,8 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { onTestFinished } from 'vitest'
-import { tempDir } from './temp-repo.js'
+import { testHome } from './temp-repo.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
 const BASE_ENV = {
@@ -15,8 +15,9 @@ const BASE_ENV = {
 }
 
 // A test that names no home for the CLI gets a throwaway one, never that of the person who runs the tests
+// Its daemon, should the CLI start one on demand, listens on a free port
 export function childEnv(env: Readonly<Record<string, string>>): Record<string, string> {
-  return { ...BASE_ENV, BYTEBUREAU_HOME: env['BYTEBUREAU_HOME'] ?? tempDir('bb-home-'), ...env }
+  return { ...BASE_ENV, BYTEBUREAU_HOME: env['BYTEBUREAU_HOME'] ?? testHome(), ...env }
 }
 
 export interface CliResult {
@@ -27,8 +28,10 @@ export interface CliResult {
 
 // The signal goes out once the CLI has printed the text: no timing guess about how far the run has got
 export interface Interruption {
-  readonly signal: 'SIGINT' | 'SIGTERM'
+  readonly signal: NodeJS.Signals
   readonly afterStdout: string
+  // The process that gets the signal in place of the CLI, such as the daemon the CLI talks to
+  readonly target?: ChildProcess | undefined
 }
 
 type Child = ChildProcessByStdio<null, Readable, Readable>
@@ -49,7 +52,8 @@ function capture(child: Child, interruption: Interruption | undefined): Captured
       captured.stdout.includes(interruption.afterStdout)
     ) {
       signalled = true
-      child.kill(interruption.signal)
+      const target = interruption.target ?? child
+      target.kill(interruption.signal)
     }
   })
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => {

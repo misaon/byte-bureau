@@ -53,12 +53,12 @@ interface Ended {
 
 // A run at a terminal: the code it ends with, what was written to the terminal and what went to stderr
 async function endedAtTerminal(
-  scriptedKernel: ReturnType<typeof scripted>,
+  scriptedBureau: ReturnType<typeof scripted>,
   options: RunOptions = OPTIONS,
 ): Promise<Ended> {
   const printed = captureConsole()
   const written = captureTerminal()
-  const code = await runSession(scriptedKernel.kernel, options, AT_A_TERMINAL)
+  const code = await runSession(scriptedBureau.bureau, options, AT_A_TERMINAL)
   return { code, terminal: written(), stdout: printed.out(), stderr: printed.err() }
 }
 
@@ -104,8 +104,8 @@ describe('runSession at a terminal', () => {
     captureConsole()
     const written = captureTerminal()
     const failure = new Error('the store is gone')
-    const { kernel } = scripted([COMPLETED], { create: rejecting(failure) })
-    await expect(runSession(kernel, OPTIONS, AT_A_TERMINAL)).rejects.toBe(failure)
+    const { bureau } = scripted([COMPLETED], { create: rejecting(failure) })
+    await expect(runSession(bureau, OPTIONS, AT_A_TERMINAL)).rejects.toBe(failure)
     expect(frames(written())).toStrictEqual(ONE_FRAME)
     expect(written()).not.toContain('the store is gone')
   })
@@ -116,8 +116,8 @@ describe('runSession to a pipe', () => {
     expect.hasAssertions()
     const printed = captureConsole()
     const written = captureTerminal()
-    const { kernel } = scripted([COMPLETED])
-    await expect(runSession(kernel, { ...OPTIONS, provider: 'nope' }, contextOf())).resolves.toBe(4)
+    const { bureau } = scripted([COMPLETED])
+    await expect(runSession(bureau, { ...OPTIONS, provider: 'nope' }, contextOf())).resolves.toBe(4)
     expect(written()).toBe('')
     expect(printed.err()).toStrictEqual(['Provider "nope" is not available. Available: fake'])
   })
