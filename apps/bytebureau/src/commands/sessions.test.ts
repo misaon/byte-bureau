@@ -81,7 +81,10 @@ describe('bytebureau sessions steering through the daemon', () => {
     const { env, id, daemon } = await completedSession()
     const interrupt = refusal(['sessions', 'interrupt', id], env)
     const stop = refusal(['sessions', 'stop', MISSING], env)
-    await expect(interrupt).resolves.toStrictEqual([1, `session ${id} is not running`])
+    await expect(interrupt).resolves.toStrictEqual([
+      1,
+      'cannot interrupt a completed session: no turn of it is at work',
+    ])
     await expect(stop).resolves.toStrictEqual([1, `session ${MISSING} does not exist`])
     await daemon.stop()
   })
