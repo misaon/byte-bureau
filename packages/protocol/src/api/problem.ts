@@ -35,6 +35,7 @@ export const PROBLEM_CODES = [
   'workspace_git_too_old',
   'workspace_git_failed',
   'workspace_fs_failed',
+  'workspace_runtime_missing',
 ] as const
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number]
