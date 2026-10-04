@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { createKernelFrom, type Kernel } from '@bytebureau/kernel'
 import { KernelTest } from '@bytebureau/kernel/testing'
 import { decodeEventPayload, type AskRecord, type EventEnvelope } from '@bytebureau/protocol'
@@ -79,5 +80,49 @@ describe(localBureau, () => {
     expect(bureau.where).toStrictEqual({ kind: 'in-process' })
     await bureau.close()
     await expect(bureau.projects.list()).rejects.toBeInstanceOf(Error)
+  })
+})
+
+// What the promise settles with, unless it takes longer than the time given
+async function within<Value>(
+  promise: Promise<Value>,
+  ms: number,
+): Promise<Value | 'still waiting'> {
+  const settled = await Promise.race([promise, sleep(ms, 'still waiting' as const)])
+  return settled
+}
+
+// The events of a project the Bureau registers, until the signal aborts
+async function projectEvents(
+  bureau: Bureau,
+  signal: AbortSignal,
+): Promise<AsyncIterator<EventEnvelope>> {
+  const project = await bureau.projects.register(createTempRepo())
+  const events = bureau.events.subscribe({ projectId: project.id, since: 0 }, signal)
+  return events[Symbol.asyncIterator]()
+}
+
+describe('the events of the local Bureau', () => {
+  it('end when the signal aborts, a wait for the next event as well', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const subscription = new AbortController()
+    const iterator = await projectEvents(bureau, subscription.signal)
+    const replayed = await iterator.next()
+    const waiting = iterator.next()
+    subscription.abort()
+    expect(replayed).toMatchObject({ done: false, value: { type: 'project.registered' } })
+    await expect(within(waiting, 2000)).resolves.toStrictEqual({ done: true, value: undefined })
+    await expect(iterator.next()).resolves.toStrictEqual({ done: true, value: undefined })
+  })
+
+  it('have ended before the first one for a signal that has aborted already', async () => {
+    expect.hasAssertions()
+    const bureau = localBureau(await testKernel(), '1.2.3')
+    const iterator = await projectEvents(bureau, AbortSignal.abort())
+    await expect(within(iterator.next(), 2000)).resolves.toStrictEqual({
+      done: true,
+      value: undefined,
+    })
   })
 })
