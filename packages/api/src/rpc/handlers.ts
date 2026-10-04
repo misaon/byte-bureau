@@ -1,6 +1,7 @@
 import {
   AskService,
   EventLog,
+  ProfileService,
   ProjectRegistry,
   SessionManager,
   WorkspaceManager,
@@ -8,6 +9,7 @@ import {
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
 import { absolutePath, projectOf } from '../handlers/found.js'
+import { profileUsageOf } from '../handlers/usage.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
@@ -40,4 +42,12 @@ export const RpcHandlers = BureauRpcsWithAuth.toLayer({
     orProblem(AskService.use((asks) => asks.answer(askId, answer, 'api'))).pipe(Effect.asVoid),
   'workspaces.prune': ({ projectId }) =>
     orProblem(WorkspaceManager.use((workspaces) => workspaces.prune(projectId))),
+  'profiles.list': () => orProblem(ProfileService.use((profiles) => profiles.list())),
+  'profiles.add': (body) => orProblem(ProfileService.use((profiles) => profiles.add(body))),
+  'profiles.remove': ({ id, purge }) =>
+    orProblem(ProfileService.use((profiles) => profiles.remove(id, { purge: purge === true }))),
+  'profiles.setDefault': ({ id }) =>
+    orProblem(ProfileService.use((profiles) => profiles.setDefault(id))),
+  'profiles.status': ({ id }) => orProblem(ProfileService.use((profiles) => profiles.status(id))),
+  'usage.profile': ({ id }) => profileUsageOf(id),
 })

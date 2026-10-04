@@ -3,6 +3,7 @@ import {
   ConfigError,
   configErrorLine,
   PluginError,
+  ProfileError,
   ProviderError,
   redactValue,
   SessionError,
@@ -134,6 +135,12 @@ const ASK_STATUS: Readonly<Record<AskError['code'], KernelStatus>> = {
   not_pending: 409,
   invalid_answer: 422,
 }
+const PROFILE_STATUS: Readonly<Record<ProfileError['code'], KernelStatus>> = {
+  not_found: 404,
+  exists: 409,
+  in_use: 409,
+  invalid: 422,
+}
 const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], KernelStatus>> = {
   auth: 502,
   ratelimit: 502,
@@ -156,6 +163,9 @@ const workspaceStatus = (code: string): KernelStatus => WORKSPACE_STATUS.get(cod
 const toProblemOfRest = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof ConfigError) {
     return problem(422, 'config_invalid', configErrorLine(error))
+  }
+  if (error instanceof ProfileError) {
+    return problem(PROFILE_STATUS[error.code], `profile_${error.code}`, error.reason)
   }
   if (error instanceof PluginError) {
     return problem(500, 'plugin_failed', `${error.plugin}: ${error.reason}`)

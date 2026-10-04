@@ -3,7 +3,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, ServerSentEventsResult, TDataShape } from './client/index.js';
-import type { AsksAnswerData, AsksAnswerErrors, AsksAnswerResponses, AsksGetData, AsksGetErrors, AsksGetResponses, AsksPendingData, AsksPendingErrors, AsksPendingResponses, EventsStreamData, EventsStreamErrors, EventsStreamResponse, EventsStreamResponses, HealthCheckData, HealthCheckErrors, HealthCheckResponses, PluginsListData, PluginsListErrors, PluginsListResponses, PluginsProvidersData, PluginsProvidersErrors, PluginsProvidersResponses, ProjectsGetData, ProjectsGetErrors, ProjectsGetResponses, ProjectsListData, ProjectsListErrors, ProjectsListResponses, ProjectsRegisterData, ProjectsRegisterErrors, ProjectsRegisterResponses, ProjectsRemoveData, ProjectsRemoveErrors, ProjectsRemoveResponses, SchemasConfigData, SchemasConfigErrors, SchemasConfigResponses, SchemasEventsData, SchemasEventsErrors, SchemasEventsResponses, SessionsCompleteData, SessionsCompleteErrors, SessionsCompleteResponses, SessionsCreateData, SessionsCreateErrors, SessionsCreateResponses, SessionsGetData, SessionsGetErrors, SessionsGetResponses, SessionsInterruptData, SessionsInterruptErrors, SessionsInterruptResponses, SessionsListData, SessionsListErrors, SessionsListResponses, SessionsPromptData, SessionsPromptErrors, SessionsPromptResponses, SessionsResumeData, SessionsResumeErrors, SessionsResumeResponses, SessionsStopData, SessionsStopErrors, SessionsStopResponses, UsageSessionData, UsageSessionErrors, UsageSessionResponses, WorkspacesListData, WorkspacesListErrors, WorkspacesListResponses, WorkspacesPruneData, WorkspacesPruneErrors, WorkspacesPruneResponses } from './types.gen.js';
+import type { AsksAnswerData, AsksAnswerErrors, AsksAnswerResponses, AsksGetData, AsksGetErrors, AsksGetResponses, AsksPendingData, AsksPendingErrors, AsksPendingResponses, EventsStreamData, EventsStreamErrors, EventsStreamResponse, EventsStreamResponses, HealthCheckData, HealthCheckErrors, HealthCheckResponses, PluginsListData, PluginsListErrors, PluginsListResponses, PluginsProvidersData, PluginsProvidersErrors, PluginsProvidersResponses, ProfilesAddData, ProfilesAddErrors, ProfilesAddResponses, ProfilesListData, ProfilesListErrors, ProfilesListResponses, ProfilesRemoveData, ProfilesRemoveErrors, ProfilesRemoveResponses, ProfilesSetDefaultData, ProfilesSetDefaultErrors, ProfilesSetDefaultResponses, ProfilesStatusData, ProfilesStatusErrors, ProfilesStatusResponses, ProjectsGetData, ProjectsGetErrors, ProjectsGetResponses, ProjectsListData, ProjectsListErrors, ProjectsListResponses, ProjectsRegisterData, ProjectsRegisterErrors, ProjectsRegisterResponses, ProjectsRemoveData, ProjectsRemoveErrors, ProjectsRemoveResponses, SchemasConfigData, SchemasConfigErrors, SchemasConfigResponses, SchemasEventsData, SchemasEventsErrors, SchemasEventsResponses, SessionsCompleteData, SessionsCompleteErrors, SessionsCompleteResponses, SessionsCreateData, SessionsCreateErrors, SessionsCreateResponses, SessionsGetData, SessionsGetErrors, SessionsGetResponses, SessionsInterruptData, SessionsInterruptErrors, SessionsInterruptResponses, SessionsListData, SessionsListErrors, SessionsListResponses, SessionsPromptData, SessionsPromptErrors, SessionsPromptResponses, SessionsResumeData, SessionsResumeErrors, SessionsResumeResponses, SessionsStopData, SessionsStopErrors, SessionsStopResponses, UsageProfileData, UsageProfileErrors, UsageProfileResponses, UsageSessionData, UsageSessionErrors, UsageSessionResponses, WorkspacesListData, WorkspacesListErrors, WorkspacesListResponses, WorkspacesPruneData, WorkspacesPruneErrors, WorkspacesPruneResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -58,6 +58,40 @@ export const projectsRemove = <ThrowOnError extends boolean = false>(options: Op
 export const projectsGet = <ThrowOnError extends boolean = false>(options: Options<ProjectsGetData, ThrowOnError>): RequestResult<ProjectsGetResponses, ProjectsGetErrors, ThrowOnError> => (options.client ?? client).get<ProjectsGetResponses, ProjectsGetErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/api/v1/projects/{id}',
+    ...options
+});
+
+export const profilesList = <ThrowOnError extends boolean = false>(options?: Options<ProfilesListData, ThrowOnError>): RequestResult<ProfilesListResponses, ProfilesListErrors, ThrowOnError> => (options?.client ?? client).get<ProfilesListResponses, ProfilesListErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/profiles',
+    ...options
+});
+
+export const profilesAdd = <ThrowOnError extends boolean = false>(options: Options<ProfilesAddData, ThrowOnError>): RequestResult<ProfilesAddResponses, ProfilesAddErrors, ThrowOnError> => (options.client ?? client).post<ProfilesAddResponses, ProfilesAddErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/profiles',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const profilesRemove = <ThrowOnError extends boolean = false>(options: Options<ProfilesRemoveData, ThrowOnError>): RequestResult<ProfilesRemoveResponses, ProfilesRemoveErrors, ThrowOnError> => (options.client ?? client).delete<ProfilesRemoveResponses, ProfilesRemoveErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/profiles/{id}',
+    ...options
+});
+
+export const profilesSetDefault = <ThrowOnError extends boolean = false>(options: Options<ProfilesSetDefaultData, ThrowOnError>): RequestResult<ProfilesSetDefaultResponses, ProfilesSetDefaultErrors, ThrowOnError> => (options.client ?? client).post<ProfilesSetDefaultResponses, ProfilesSetDefaultErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/profiles/{id}/default',
+    ...options
+});
+
+export const profilesStatus = <ThrowOnError extends boolean = false>(options: Options<ProfilesStatusData, ThrowOnError>): RequestResult<ProfilesStatusResponses, ProfilesStatusErrors, ThrowOnError> => (options.client ?? client).get<ProfilesStatusResponses, ProfilesStatusErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/profiles/{id}/status',
     ...options
 });
 
@@ -142,6 +176,12 @@ export const asksAnswer = <ThrowOnError extends boolean = false>(options: Option
 export const usageSession = <ThrowOnError extends boolean = false>(options: Options<UsageSessionData, ThrowOnError>): RequestResult<UsageSessionResponses, UsageSessionErrors, ThrowOnError> => (options.client ?? client).get<UsageSessionResponses, UsageSessionErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/api/v1/usage/sessions/{id}',
+    ...options
+});
+
+export const usageProfile = <ThrowOnError extends boolean = false>(options: Options<UsageProfileData, ThrowOnError>): RequestResult<UsageProfileResponses, UsageProfileErrors, ThrowOnError> => (options.client ?? client).get<UsageProfileResponses, UsageProfileErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/v1/usage/profiles/{id}',
     ...options
 });
 

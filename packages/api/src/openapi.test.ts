@@ -14,6 +14,12 @@ const OPERATIONS: [string, string][] = [
   ['/api/v1/sessions/{id}/prompt', 'post'],
   ['/api/v1/asks/{id}/answer', 'post'],
   ['/api/v1/usage/sessions/{id}', 'get'],
+  ['/api/v1/usage/profiles/{id}', 'get'],
+  ['/api/v1/profiles', 'get'],
+  ['/api/v1/profiles', 'post'],
+  ['/api/v1/profiles/{id}', 'delete'],
+  ['/api/v1/profiles/{id}/default', 'post'],
+  ['/api/v1/profiles/{id}/status', 'get'],
   ['/api/v1/workspaces/prune', 'post'],
   ['/api/v1/plugins', 'get'],
   ['/api/v1/providers', 'get'],
@@ -86,11 +92,22 @@ describe('the OpenAPI document of the resource groups', () => {
 
   it('names the schemas of the DTOs and of the problems once each', () => {
     const { schemas } = openApiDocument().components
-    expect(schemas).toHaveProperty('Session')
-    expect(schemas).toHaveProperty('Project')
-    expect(schemas).toHaveProperty('Problem404')
+    const named = ['Session', 'Project', 'Profile', 'UsageSnapshot', 'Problem404']
+    expect(Object.keys(schemas)).toStrictEqual(expect.arrayContaining(named))
     // A suffix would mean two schemas of one name: the generated client would name its types after it
     expect(Object.keys(schemas).filter((name) => /_\d+$/u.test(name))).toStrictEqual([])
+  })
+})
+
+describe('the OpenAPI document of the profile endpoints', () => {
+  it('takes purge as the query of removing a profile, and answers 201 to adding one', () => {
+    const { paths } = openApiDocument()
+    const removal = ['/api/v1/profiles/{id}', 'delete', 'parameters']
+    expect(paths).toHaveProperty(
+      removal,
+      expect.arrayContaining([expect.objectContaining({ name: 'purge', in: 'query' })]),
+    )
+    expect(paths).toHaveProperty(['/api/v1/profiles', 'post', 'responses', '201'])
   })
 })
 

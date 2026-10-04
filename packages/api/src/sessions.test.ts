@@ -2,6 +2,7 @@ import { EventLog, SessionManager } from '@bytebureau/kernel'
 import { SessionDto, TurnDto } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, Schema } from 'effect'
+import { SqlClient } from 'effect/sql'
 import { ApiTestLayer, get, post } from './testing.js'
 import {
   askedSession,
@@ -166,6 +167,46 @@ it.layer(ApiTestLayer())('GET /api/v1/usage/sessions/:id over the fake provider'
       assert.strictEqual(usage.status, 200)
       const none = { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: null, contextPct: null }
       assert.deepStrictEqual(usage.body, none)
+    }),
+  )
+})
+
+// A profile of a provider no plugin offers any more, which the store keeps
+const foreignProfile = Effect.gen(function* keepsProfile() {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`INSERT INTO profiles (id, provider_id, name, kind, config_dir, is_default, created_at)
+    VALUES ('other/work', 'other', 'work', 'login', NULL, 0, ${new Date().toISOString()})`
+})
+
+it.layer(ApiTestLayer())('POST /api/v1/sessions under a profile', (suite) => {
+  suite.effect('refuses a profile nobody holds with 404, and creates nothing', () =>
+    Effect.gen(function* refusesUnknown() {
+      const { project } = yield* registeredProject
+      const body = { projectId: project.id, title: 'x', profileId: 'fake/nope' }
+      const refused = yield* post('/sessions', body)
+      assert.strictEqual(refused.status, 404)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, {
+        code: 'profile_not_found',
+        detail: 'no profile "fake/nope"',
+      })
+      assert.notInclude(JSON.stringify((yield* get('/sessions')).body), project.id)
+    }),
+  )
+
+  suite.effect('refuses the profile of another provider with 422, and creates nothing', () =>
+    Effect.gen(function* refusesForeign() {
+      yield* foreignProfile
+      const { project } = yield* registeredProject
+      const body = { projectId: project.id, title: 'x', profileId: 'other/work' }
+      const refused = yield* post('/sessions', body)
+      assert.strictEqual(refused.status, 422)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, {
+        code: 'profile_invalid',
+        detail: 'profile "other/work" belongs to provider "other", not "fake"',
+      })
+      assert.notInclude(JSON.stringify((yield* get('/sessions')).body), project.id)
     }),
   )
 })
