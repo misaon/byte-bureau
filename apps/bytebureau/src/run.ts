@@ -1,3 +1,5 @@
+import { ApiError } from '@bytebureau/client'
+import { m } from '@bytebureau/i18n'
 import {
   runCommand,
   showUsage,
@@ -174,6 +176,23 @@ async function execute(command: CommandDef, argv: readonly string[]): Promise<vo
   }
 }
 
+// Whether the arguments name the daemon to talk to with --host or --port; what follows -- is no flag
+const namesDaemon = (argv: readonly string[]): boolean => {
+  const end = argv.indexOf('--')
+  return (end === -1 ? argv : argv.slice(0, end)).some((arg) =>
+    /^--(?:host|port)(?:=|$)/u.test(arg),
+  )
+}
+
+// The line of a failure; a daemon named on the command line that refuses the token is told where its token goes, as in a refusal
+const failureLine = (error: unknown, argv: readonly string[]): string =>
+  error instanceof ApiError &&
+  error.status === 401 &&
+  error.problem !== undefined &&
+  namesDaemon(argv)
+    ? m.bureau_token_hint({ detail: error.problem.detail })
+    : describeError(error)
+
 // The exit code of a failure, which is told on stderr: 1 for a usage error and for --no-daemon beside a live daemon, 2 for anything else
 async function failed(
   command: CommandDef,
@@ -189,7 +208,7 @@ async function failed(
     console.error(error.message)
     return 1
   }
-  console.error(describeError(error))
+  console.error(failureLine(error, argv))
   return 2
 }
 
