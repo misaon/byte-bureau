@@ -52,6 +52,7 @@ export const Problem = Schema.Struct({
   instance: Schema.optionalKey(Schema.String),
 }).annotate({
   title: 'Problem',
+  identifier: 'Problem',
   description: 'RFC 9457 problem details with a ByteBureau error code',
 })
 

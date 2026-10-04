@@ -12,7 +12,7 @@ export const ProjectDto = Schema.Struct({
   config: ProjectConfig,
   createdAt: Timestamp,
   updatedAt: Timestamp,
-}).annotate({ title: 'Project' })
+}).annotate({ title: 'Project', identifier: 'Project' })
 
 // The handle of a worktree as the kernel keeps it: the id is the session id
 export const WorkspaceHandleDto = Schema.Struct({
@@ -21,12 +21,12 @@ export const WorkspaceHandleDto = Schema.Struct({
   path: Schema.String,
   branch: Schema.String,
   baseRef: Schema.String,
-}).annotate({ title: 'WorkspaceHandle' })
+}).annotate({ title: 'WorkspaceHandle', identifier: 'WorkspaceHandle' })
 
 export const ExternalRefDto = Schema.Struct({
   providerId: Schema.String,
   ref: Schema.String,
-}).annotate({ title: 'ExternalSessionRef' })
+}).annotate({ title: 'ExternalSessionRef', identifier: 'ExternalSessionRef' })
 
 export const SessionDto = Schema.Struct({
   id: Id,
@@ -41,7 +41,7 @@ export const SessionDto = Schema.Struct({
   createdAt: Timestamp,
   startedAt: Schema.NullOr(Timestamp),
   endedAt: Schema.NullOr(Timestamp),
-}).annotate({ title: 'Session' })
+}).annotate({ title: 'Session', identifier: 'Session' })
 
 export const TurnDto = Schema.Struct({
   id: Id,
@@ -53,7 +53,7 @@ export const TurnDto = Schema.Struct({
   usage: Schema.NullOr(Usage),
   startedAt: Timestamp,
   endedAt: Schema.NullOr(Timestamp),
-}).annotate({ title: 'Turn' })
+}).annotate({ title: 'Turn', identifier: 'Turn' })
 
 export const WorkspaceInfoDto = Schema.Struct({
   sessionId: Id,
@@ -63,12 +63,12 @@ export const WorkspaceInfoDto = Schema.Struct({
   baseRef: Schema.String,
   sessionStatus: Schema.String,
   exists: Schema.Boolean,
-}).annotate({ title: 'WorkspaceInfo' })
+}).annotate({ title: 'WorkspaceInfo', identifier: 'WorkspaceInfo' })
 
 export const PruneReportDto = Schema.Struct({
   removed: Schema.Array(Schema.String),
   retained: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
-}).annotate({ title: 'PruneReport' })
+}).annotate({ title: 'PruneReport', identifier: 'PruneReport' })
 
 export const SessionUsageDto = Schema.Struct({
   turns: Schema.Int,
@@ -76,7 +76,7 @@ export const SessionUsageDto = Schema.Struct({
   outputTokens: Schema.Int,
   costUsd: Schema.NullOr(Schema.Finite),
   contextPct: Schema.NullOr(Schema.Finite),
-}).annotate({ title: 'SessionUsage' })
+}).annotate({ title: 'SessionUsage', identifier: 'SessionUsage' })
 
 export const PluginStatusDto = Schema.Struct({
   name: Schema.String,
@@ -84,12 +84,12 @@ export const PluginStatusDto = Schema.Struct({
   state: Schema.Literals(['loaded', 'failed']),
   reason: Schema.optionalKey(Schema.String),
   ports: Schema.Array(Schema.String),
-}).annotate({ title: 'PluginStatus' })
+}).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
 
 export const ProviderDto = Schema.Struct({
   id: Schema.String,
   displayName: Schema.String,
-}).annotate({ title: 'Provider' })
+}).annotate({ title: 'Provider', identifier: 'Provider' })
 
 export const HealthDto = Schema.Struct({
   status: Schema.Literals(['ok', 'degraded']),
@@ -99,7 +99,7 @@ export const HealthDto = Schema.Struct({
     store: Schema.Literals(['ok', 'failed']),
     plugins: Schema.Struct({ loaded: Schema.Int, failed: Schema.Int }),
   }),
-}).annotate({ title: 'Health' })
+}).annotate({ title: 'Health', identifier: 'Health' })
 
 export type ProjectDto = typeof ProjectDto.Type
 export type WorkspaceHandleDto = typeof WorkspaceHandleDto.Type

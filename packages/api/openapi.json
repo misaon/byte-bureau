@@ -16,69 +16,11 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "Success",
+            "description": "Health",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "enum": [
-                        "ok",
-                        "degraded"
-                      ]
-                    },
-                    "version": {
-                      "type": "string"
-                    },
-                    "startedAt": {
-                      "type": "string",
-                      "title": "Timestamp",
-                      "description": "ISO-8601 UTC"
-                    },
-                    "checks": {
-                      "type": "object",
-                      "properties": {
-                        "store": {
-                          "type": "string",
-                          "enum": [
-                            "ok",
-                            "failed"
-                          ]
-                        },
-                        "plugins": {
-                          "type": "object",
-                          "properties": {
-                            "loaded": {
-                              "type": "integer"
-                            },
-                            "failed": {
-                              "type": "integer"
-                            }
-                          },
-                          "required": [
-                            "loaded",
-                            "failed"
-                          ],
-                          "additionalProperties": false
-                        }
-                      },
-                      "required": [
-                        "store",
-                        "plugins"
-                      ],
-                      "additionalProperties": false
-                    }
-                  },
-                  "required": [
-                    "status",
-                    "version",
-                    "startedAt",
-                    "checks"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Health"
+                  "$ref": "#/components/schemas/Health"
                 }
               }
             }
@@ -330,6 +272,67 @@
         "additionalProperties": false,
         "title": "Problem401",
         "description": "RFC 9457 problem details"
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string",
+            "title": "Timestamp",
+            "description": "ISO-8601 UTC"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "store": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "failed"
+                ]
+              },
+              "plugins": {
+                "type": "object",
+                "properties": {
+                  "loaded": {
+                    "type": "integer"
+                  },
+                  "failed": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "loaded",
+                  "failed"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "store",
+              "plugins"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "startedAt",
+          "checks"
+        ],
+        "additionalProperties": false,
+        "title": "Health"
       }
     },
     "securitySchemes": {
