@@ -1985,6 +1985,9 @@ export type EventsStreamData = {
     };
     path?: never;
     query?: {
+        /**
+         * The last seq the client has seen: a whole number of 0 or more
+         */
         since?: string;
         /**
          * UUIDv7

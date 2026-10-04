@@ -1,4 +1,4 @@
-import { Schema } from 'effect'
+import { Schema, SchemaTransformation } from 'effect'
 import { AskAnswer } from '../ask.js'
 import { Id } from '../common.js'
 import { PromptInput } from '../employee.js'
@@ -27,10 +27,19 @@ export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({
   identifier: 'SessionRef',
 })
 
+// The text of a seq in a query string: digits only, which the OpenAPI document tells in the pattern
+// No sign, fraction or exponent goes through, so a client knows the bound from the document itself
+const SeqText = Schema.String.check(Schema.isPattern(/^\d+$/u)).annotate({
+  description: 'The last seq the client has seen: a whole number of 0 or more',
+})
+
+const SeqFromText = SeqText.pipe(
+  Schema.decodeTo(Schema.Natural, SchemaTransformation.numberFromString),
+)
+
 // The query string of GET /events: types is comma-separated, since is the last seq the client has seen (0 or more)
-// HttpApiEndpoint decodes a query through a string-tree codec, so Schema.Natural reads ?since=12
 export const EventsQuery = Schema.Struct({
-  since: Schema.optionalKey(Schema.Natural),
+  since: Schema.optionalKey(SeqFromText),
   session: Schema.optionalKey(Id),
   project: Schema.optionalKey(Id),
   types: Schema.optionalKey(Schema.String),

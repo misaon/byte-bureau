@@ -106,26 +106,33 @@ describe('the API request schemas', () => {
     expect(Schema.decodeUnknownSync(CreateSessionBody)(body)).toStrictEqual(body)
   })
 
-  it('accepts an events query with every filter and with none', () => {
-    const full = {
-      since: 12,
+  it('accepts an events query with every filter and with none, its since read from the text of the query', () => {
+    const filters = {
       session: session.id,
       project: session.projectId,
       types: 'turn.started,turn.completed',
     }
-    expect(Schema.decodeUnknownSync(EventsQuery)(full)).toStrictEqual(full)
+    const query = Schema.decodeUnknownSync(EventsQuery)({ since: '12', ...filters })
+    expect(query).toStrictEqual({ since: 12, ...filters })
     expect(Schema.decodeUnknownSync(EventsQuery)({})).toStrictEqual({})
   })
 
   it.each([-1, 1.5])(
     'refuses a since of %d, in the query and in the filter of the socket',
     (since) => {
-      expect(() => Schema.decodeUnknownSync(EventsQuery)({ since })).toThrow(/since/u)
+      expect(() => Schema.decodeUnknownSync(EventsQuery)({ since: String(since) })).toThrow(
+        /since/u,
+      )
       expect(() => Schema.decodeUnknownSync(EventsFilter)({ since })).toThrow(/since/u)
     },
   )
 
+  it.each(['+5', '1e3', ' 5', ''])('refuses %j as the text of a since in the query', (since) => {
+    expect(() => Schema.decodeUnknownSync(EventsQuery)({ since })).toThrow(/since/u)
+  })
+
   it('takes a since of 0, the start of the log', () => {
+    expect(Schema.decodeUnknownSync(EventsQuery)({ since: '0' })).toStrictEqual({ since: 0 })
     expect(Schema.decodeUnknownSync(EventsFilter)({ since: 0 })).toStrictEqual({ since: 0 })
   })
 })
