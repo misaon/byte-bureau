@@ -15,10 +15,11 @@ export interface HeldLock {
  * Who holds the lock of a home:
  * - gone: the lock names no pid, or a pid that has ended;
  * - daemon: a daemon of the home, whose record names it and whose health answers, or one still on its way up;
- * - silent: the process that wrote the lock, which started before it was written, and does not answer: a daemon of
- *   the home that is stopped or busy, never a stranger;
- * - stranger: a process that started after the lock was written, which only got the pid of its writer after a crash or
- *   a reboot; where the platform cannot tell when a process started, a live process of this user that does not answer;
+ * - silent: a holder that does not answer and started before the lock was written, or within a tolerance after it: the
+ *   daemon that wrote it, stopped or busy, never a stranger;
+ * - stranger: a holder that does not answer and started well after the lock was written, which only got the pid of its
+ *   writer after a crash or a reboot; where the platform cannot tell when a process started, a live process of this
+ *   user that does not answer;
  * - stuck: where the platform cannot tell when a process started, a live process of another user, which this user
  *   cannot look into, and no daemon of the home answers for it.
  */
@@ -65,21 +66,27 @@ const isBooting = (held: HeldLock, judging: Judging = JUDGING): boolean =>
   pidState(held.pid) === 'alive' &&
   Date.now() - held.stamp.mtimeMs < judging.bootMs
 
-// A holder that does not answer: the writer of the lock, by its start, is a daemon that is stopped or busy
+// How much later than the lock its writer may seem to have started: a clock stepped since disagrees by a few seconds
+// So do the file times of a network share or a FAT disk; a holder that started later than that only got the pid
+const START_TOLERANCE_MS = 5000
+
+// A holder that does not answer and is not on its way up, judged by its start: the writer of the lock keeps it
+// That writer is stopped or busy; a holder that started well after the lock was written loses it
 // Without its start, a live process of this user is taken for a stranger, and one of another user cannot be judged
-const unanswered = (pid: number, started: number | undefined): Holder => {
+const unanswered = (pid: number, started: number | undefined, written: number): Holder => {
   const state = pidState(pid)
   if (state === 'dead') {
     return 'gone'
   }
-  if (started !== undefined) {
-    return 'silent'
+  if (started === undefined) {
+    return state === 'foreign' ? 'stuck' : 'stranger'
   }
-  return state === 'foreign' ? 'stuck' : 'stranger'
+  return started > written + START_TOLERANCE_MS ? 'stranger' : 'silent'
 }
 
-// Liveness of the pid alone would take any process that got the pid after a crash or a reboot for the daemon
-// An answer alone would take a daemon that is stopped or busy for a stranger: the start of the holder tells them apart
+// A holder that answers as its record says, or may still be coming up, is the daemon whatever its start says
+// Only then does its start decide: liveness of the pid alone would keep the lock for a process that got the pid later
+// An answer alone would take a daemon that is stopped or busy for a stranger
 export const judgeHolder = async (
   home: string,
   held: HeldLock,
@@ -89,12 +96,9 @@ export const judgeHolder = async (
   if (pid === undefined || pidState(pid) === 'dead') {
     return 'gone'
   }
-  const started = await (judging.startOf ?? processStartedAt)(pid)
-  if (started !== undefined && started > held.stamp.mtimeMs) {
-    return 'stranger'
-  }
   if (isBooting(held, judging) || (await answersWithin(home, pid, Date.now() + judging.graceMs))) {
     return 'daemon'
   }
-  return unanswered(pid, started)
+  const started = await (judging.startOf ?? processStartedAt)(pid)
+  return unanswered(pid, started, held.stamp.mtimeMs)
 }
