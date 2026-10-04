@@ -205,6 +205,12 @@ export const TURN_DONE = event(
   },
   2,
 )
+export const TURN_INTERRUPTED = event(
+  'turn.interrupted',
+  { turnId: 'u1', index: 0, status: 'interrupted' },
+  2,
+)
+export const READY = event('session.ready', { status: 'ready' }, 3)
 export const COMPLETED = event('session.completed', { status: 'completed' }, 3)
 export const STOPPED = event('session.stopped', { status: 'stopped' }, 3)
 export const ERRORED = event(

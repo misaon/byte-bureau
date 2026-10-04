@@ -10,6 +10,7 @@ import { conclude, promptAndFollow, type Ends } from './run-follow.js'
 import { closeFrame, open, refuse } from './run-output.js'
 
 // A run is one turn: its end is the end of its session, which the CLI completes once the turn is over
+// A turn that is interrupted ends the run where the session says what became of it: ready again, stopped or errored
 const RUN_ENDS: Ends = {
   terminal: new Set(['session.completed', 'session.stopped', 'session.errored']),
   completes: true,

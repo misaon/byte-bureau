@@ -61,6 +61,9 @@ const CRASHED = inTurn(
   event('turn.interrupted', { turnId: 'u1', index: 1, status: 'errored' }, 9),
 )
 
+const READY = event('session.ready', { status: 'ready' }, 10)
+const CANCELLED = inTurn('u1', event('ask.cancelled', { askId: 'a1' }, 9))
+
 const BEGUN = [RUNNING, ASKED, WORKING]
 const HISTORY = [...FIRST_TURN, ...STOP_BETWEEN]
 
@@ -110,15 +113,51 @@ describe(promptSession, () => {
   })
 })
 
-describe('promptSession when the turn does not complete', () => {
-  it('exits 3 when the turn is interrupted, and says so', async () => {
+describe('promptSession when the turn is interrupted', () => {
+  it('exits 3 and says so, once the session is ready again', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { bureau } = scripted([...BEGUN, INTERRUPTED])
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, READY])
     await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(3)
     expect(printed.out()).toStrictEqual(['The employee is working…', 'Turn interrupted'])
   })
 
+  it('does not end at the interrupted turn: what comes before its session says what became of it is shown', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, CANCELLED, READY])
+    await promptSession(bureau, PROMPT, contextOf(true))
+    const shown = [ASKED, WORKING, INTERRUPTED, CANCELLED, READY]
+    expect(printed.out()).toStrictEqual(shown.map((each) => JSON.stringify(each)))
+  })
+
+  it('ends with the stop that follows, as a stop by its own signal or by another command makes it', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, CANCELLED, STOPPED])
+    await expect(promptSession(bureau, PROMPT, contextOf(true))).resolves.toBe(3)
+    expect(printed.out().at(-1)).toBe(JSON.stringify(STOPPED))
+  })
+
+  it('takes a session that is ready for no end unless a turn was interrupted', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, READY, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(0)
+    expect(printed.out().at(-1)).toBe('Done — turns: 1, input tokens: 10, output tokens: 5')
+  })
+
+  it('fails when the events end with the interrupted turn and no word of its session', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED])
+    await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toThrow(
+      'the events ended before the session did',
+    )
+  })
+})
+
+describe('promptSession when the turn does not complete otherwise', () => {
   it('exits 3 when the session is stopped, which no turn owns', async () => {
     expect.hasAssertions()
     const printed = captureConsole()

@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { startDaemonProcess, stoppedWithTheTest, type DaemonProcess } from './daemon.js'
-import { jsonLines } from './json-lines.js'
+import { firstField, firstId, jsonLines, listedUnder } from './json-lines.js'
 import { runCli, type CliResult } from './run-cli.js'
 import { NO_DAEMON, ON_FAKE, PROMPT, SCRIPTED, sessionIdIn, workbench } from './workbench.js'
 
@@ -73,8 +73,8 @@ export async function resumedSession(): Promise<Session & { readonly first: CliR
 }
 
 // What `sessions show` tells once the session is in the status; the last look when the deadline passes first
-async function untilStatus(
-  session: Session,
+export async function untilStatus(
+  session: Pick<Session, 'env' | 'id'>,
   status: string,
   deadline = Date.now() + 5000,
 ): Promise<CliResult> {
@@ -92,10 +92,19 @@ export async function ready(session: Session): Promise<CliResult> {
   return shown
 }
 
+// What a turn of the slow script prints once it works, which it does until it is stopped
+export const WORKING = '"type":"turn.started"'
+
+// A session of the slow script that was stopped while it worked, and is resumed; the script is kept across the stop
+export async function resumedSlowSession(): Promise<Session> {
+  const session = await stoppedSession({ BYTEBUREAU_FAKE_SCRIPT: 'slow' }, WORKING)
+  await runCli(['sessions', 'resume', session.id], session.env)
+  return session
+}
+
 // A turn of the slow script that a prompt follows, once the session is at work on it
 export async function slowTurn(): Promise<Session & { readonly prompting: Promise<CliResult> }> {
-  const session = await stoppedSession({ BYTEBUREAU_FAKE_SCRIPT: 'slow' }, '"type":"turn.started"')
-  await runCli(['sessions', 'resume', session.id], session.env)
+  const session = await resumedSlowSession()
   const prompting = runCli(['sessions', 'prompt', session.id, 'go on', '--json'], session.env)
   await untilStatus(session, 'running')
   return { ...session, prompting }
@@ -119,4 +128,42 @@ export async function stoppedInProcess(): Promise<{ readonly env: Env; readonly 
   await runCli(run, env, { signal: 'SIGTERM', afterStdout: WAITING })
   const id = await sessionIdIn(home)
   return { env, id }
+}
+
+// The stdout of `ask ls --json` once an ask waits; the last one when the deadline passes first
+async function asksWaiting(env: Env, deadline: number): Promise<string> {
+  const listed = await runCli(['ask', 'ls', '--json'], env)
+  if (listedUnder(listed.stdout, 'asks').length > 0 || Date.now() >= deadline) {
+    return listed.stdout
+  }
+  await sleep(200)
+  return asksWaiting(env, deadline)
+}
+
+// A run that waits on the ask of the fake agent: off a terminal and without --yes it leaves the ask to another command
+export interface Waiting {
+  readonly env: Env
+  readonly daemon: DaemonProcess
+  readonly run: Promise<CliResult>
+  // What `ask ls --json` told once the ask was there
+  readonly listed: string
+  // The ask it waits on, and the session it belongs to
+  readonly id: string
+  readonly sessionId: string
+}
+
+// The output of the run is its events as JSON lines unless the flags say otherwise
+export async function waitingRun(output: readonly string[] = ['--json']): Promise<Waiting> {
+  const { repo, env, daemon } = await benchWithDaemon()
+  const run = runCli(['run', PROMPT, '--project', repo, ...ON_FAKE, ...output], env)
+  const listed = await asksWaiting(env, Date.now() + 15_000)
+  const sessionId = firstField(listed, 'asks', 'sessionId')
+  return { env, daemon, run, listed, id: firstId(listed, 'asks'), sessionId }
+}
+
+// The ask is answered with --yes, and the run goes on to its end
+export async function finished({ env, run, id }: Waiting): Promise<CliResult> {
+  await runCli(['ask', 'answer', id, '--yes'], env)
+  const result = await run
+  return result
 }

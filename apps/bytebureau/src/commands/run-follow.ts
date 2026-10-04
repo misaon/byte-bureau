@@ -10,6 +10,9 @@ import { EXIT_REFUSED, report, show, type Outcome } from './run-output.js'
 const EXIT_COMPLETED = 0
 const EXIT_STOPPED = 3
 
+// The event of a session that is ready again: it ends the follow of a turn that was interrupted, when no stop or error comes
+const READY = 'session.ready'
+
 // The first of them stops the session, and one of another kind after it does nothing; the second of a kind ends the process as it would without the run
 const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
 
@@ -17,7 +20,7 @@ type Output = Context['output']
 
 // How a follow ends, and what it follows
 export interface Ends {
-  // The types of the events that end it
+  // The types of the events that end it; a turn that was interrupted ends where the session next says what became of it
   readonly terminal: ReadonlySet<string>
   // Whether the end of the turn completes the session: a run is one turn, a prompt leaves the session ready for the next
   readonly completes: boolean
@@ -66,28 +69,22 @@ async function react(run: Following, event: EventEnvelope): Promise<void> {
   }
 }
 
-// A turn that errored is followed by the session that errored, which is what ends the follow and says why
-function isEnd({ ends, context }: Following, event: EventEnvelope): boolean {
-  if (!ends.terminal.has(event.type)) {
-    return false
-  }
-  if (event.type !== 'turn.interrupted') {
-    return true
-  }
-  const turn = readOrSkip(event, context.output, () =>
-    decodeEventPayload('turn.interrupted', event.payload),
-  )
-  return turn === undefined || turn.status !== 'errored'
+// An interrupted turn is no end by itself: the session says next what became of it, ready again, stopped or errored
+// Whoever interrupted the turn or stopped the session, this process by a signal or another command, the events tell the same
+function isEnd({ ends }: Following, event: EventEnvelope, interrupted: boolean): boolean {
+  return ends.terminal.has(event.type) || (interrupted && event.type === READY)
 }
 
 // The events up to the end of the follow, which is the last one shown
 async function follow(run: Following, events: AsyncIterable<EventEnvelope>): Promise<Followed> {
   const seen: EventEnvelope[] = []
+  let interrupted = false
   for await (const event of events) {
     seen.push(event)
     show(event, run.context)
     await react(run, event)
-    if (isEnd(run, event)) {
+    interrupted ||= event.type === 'turn.interrupted'
+    if (isEnd(run, event, interrupted)) {
       return { seen, end: event }
     }
   }
@@ -135,7 +132,8 @@ async function* ofTurn(
   for await (const event of events) {
     const owned = event.turnId === turnId
     begun ||= owned
-    if (owned || (begun && event.turnId === undefined && terminal.has(event.type))) {
+    const sessionEnd = terminal.has(event.type) || event.type === READY
+    if (owned || (begun && event.turnId === undefined && sessionEnd)) {
       yield event
     }
   }
@@ -172,7 +170,7 @@ function outcomeOf(end: EventEnvelope, seen: readonly EventEnvelope[], output: O
     case 'session.stopped': {
       return { code: EXIT_STOPPED, text: m.run_stopped() }
     }
-    case 'turn.interrupted': {
+    case READY: {
       return { code: EXIT_STOPPED, text: m.run_interrupted() }
     }
     case 'session.errored': {

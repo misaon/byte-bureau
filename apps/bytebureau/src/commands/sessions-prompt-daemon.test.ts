@@ -5,11 +5,13 @@ import {
   promptedAgain,
   ready,
   resumedSession,
+  resumedSlowSession,
   slowTurn,
   stoppedInProcess,
   stoppedSession,
   turnsOf,
   WAITING,
+  WORKING,
 } from '../testing/session-bench.js'
 import { NO_DAEMON } from '../testing/workbench.js'
 
@@ -64,19 +66,15 @@ describe('bytebureau sessions resume and prompt through the daemon', () => {
 })
 
 describe('bytebureau sessions prompt and a signal', () => {
-  it('stops the session on SIGTERM while it follows a prompt, and exits 3', async () => {
+  it('stops the session on SIGTERM while it follows a prompt, and exits 3 at the stop', async () => {
     expect.hasAssertions()
-    // The slow script works until it is stopped; the session keeps it across the stop and the resume
-    const working = '"type":"turn.started"'
-    const session = await stoppedSession({ BYTEBUREAU_FAKE_SCRIPT: 'slow' }, working)
-    await runCli(['sessions', 'resume', session.id], session.env)
+    const session = await resumedSlowSession()
     const prompt = ['sessions', 'prompt', session.id, 'go on', '--json']
-    const prompted = await runCli(prompt, session.env, { signal: 'SIGTERM', afterStdout: working })
+    const prompted = await runCli(prompt, session.env, { signal: 'SIGTERM', afterStdout: WORKING })
     const shown = await runCli(['sessions', 'show', session.id], session.env)
-    expect([prompted.code, jsonLines(prompted.stdout).at(-1)]).toMatchObject([
-      3,
-      { type: 'turn.interrupted' },
-    ])
+    const types = jsonLines(prompted.stdout).map((record) => record['type'])
+    expect([prompted.code, types.at(-1)]).toStrictEqual([3, 'session.stopped'])
+    expect(types).toContain('turn.interrupted')
     expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
     await session.daemon.stop()
   })
@@ -91,9 +89,10 @@ describe('bytebureau sessions prompt and a signal', () => {
       0,
       `interrupt: ${slow.id}`,
     ])
-    expect([prompted.code, jsonLines(prompted.stdout).at(-1)]).toMatchObject([
+    const types = jsonLines(prompted.stdout).map((record) => record['type'])
+    expect([prompted.code, types.slice(-2)]).toStrictEqual([
       3,
-      { type: 'turn.interrupted' },
+      ['turn.interrupted', 'session.ready'],
     ])
     expect(shown.stdout).toMatch(/^status\s+ready$/mu)
     await slow.daemon.stop()

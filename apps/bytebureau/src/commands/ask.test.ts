@@ -1,52 +1,9 @@
-import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
-import type { DaemonProcess } from '../testing/daemon.js'
-import {
-  eventLines,
-  firstField,
-  firstId,
-  jsonLines,
-  listedUnder,
-  payloadOf,
-} from '../testing/json-lines.js'
-import { runCli, type CliResult } from '../testing/run-cli.js'
-import { benchWithDaemon, type Env } from '../testing/session-bench.js'
+import { eventLines, firstField, jsonLines, payloadOf } from '../testing/json-lines.js'
+import { runCli } from '../testing/run-cli.js'
+import { benchWithDaemon, finished, waitingRun, type Waiting } from '../testing/session-bench.js'
 import { testHome } from '../testing/temp-repo.js'
-import { NO_DAEMON, ON_FAKE, PROMPT } from '../testing/workbench.js'
-
-// The stdout of `ask ls --json` once an ask waits; the last one when the deadline passes first
-async function asksWaiting(env: Env, deadline: number): Promise<string> {
-  const listed = await runCli(['ask', 'ls', '--json'], env)
-  if (listedUnder(listed.stdout, 'asks').length > 0 || Date.now() >= deadline) {
-    return listed.stdout
-  }
-  await sleep(200)
-  return asksWaiting(env, deadline)
-}
-
-// A run that waits on the ask of the fake agent: off a terminal and without --yes it leaves the ask to another command
-interface Waiting {
-  readonly env: Env
-  readonly daemon: DaemonProcess
-  readonly run: Promise<CliResult>
-  // What `ask ls --json` told once the ask was there
-  readonly listed: string
-  readonly id: string
-}
-
-async function waitingRun(): Promise<Waiting> {
-  const { repo, env, daemon } = await benchWithDaemon()
-  const run = runCli(['run', PROMPT, '--project', repo, ...ON_FAKE, '--json'], env)
-  const listed = await asksWaiting(env, Date.now() + 15_000)
-  return { env, daemon, run, listed, id: firstId(listed, 'asks') }
-}
-
-// The ask is answered with --yes, and the run goes on to its end
-async function finished({ env, run, id }: Waiting): Promise<CliResult> {
-  await runCli(['ask', 'answer', id, '--yes'], env)
-  const result = await run
-  return result
-}
+import { NO_DAEMON } from '../testing/workbench.js'
 
 // The two exit codes of an ask answered with the arguments, and what the events of the run tell of the answer
 async function answeredWith(

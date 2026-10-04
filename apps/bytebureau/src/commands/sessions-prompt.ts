@@ -8,8 +8,9 @@ import { closeFrame, open, refuse } from './run-output.js'
 import { isRefusal } from './run-session.js'
 
 // A prompt ends with its turn, or with the session if that ends first; the session stays ready for the next prompt
+// An interrupted turn ends where the session says what became of it: ready again, stopped or errored
 const PROMPT_ENDS: Ends = {
-  terminal: new Set(['turn.completed', 'turn.interrupted', 'session.stopped', 'session.errored']),
+  terminal: new Set(['turn.completed', 'session.stopped', 'session.errored']),
   completes: false,
   turnOnly: true,
 }
