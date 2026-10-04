@@ -52,9 +52,24 @@ export function onDisk(what: string, work: () => void): void {
   }
 }
 
+const isMissing = (error: unknown): boolean =>
+  error instanceof Error && 'code' in error && error.code === 'ENOENT'
+
+// The exclude file as it is, or nothing when there is none yet: read at once, as a check before the read could go stale
+const readOrEmpty = (file: string): string => {
+  try {
+    return readFileSync(file, 'utf8')
+  } catch (error) {
+    if (isMissing(error)) {
+      return ''
+    }
+    throw error
+  }
+}
+
 // Adds what is missing to the exclude file and keeps what is there
 export function ensureExcluded(excludeFile: string): void {
-  const current = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : ''
+  const current = readOrEmpty(excludeFile)
   const listed = new Set(current.split('\n'))
   const missing = EXCLUDED.filter((line) => !listed.has(line))
   if (missing.length > 0) {
