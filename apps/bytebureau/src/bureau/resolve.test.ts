@@ -19,21 +19,14 @@ const info = {
 const DEAD_PID = 2_147_483_000
 
 describe(resolveServer, () => {
-  it('names the live daemon of the home', () => {
-    const home = tempDir('bb-home-')
-    writeServerInfo(home, info)
-    expect(resolveServer({}, home)).toStrictEqual({
-      kind: 'known',
-      url: 'http://127.0.0.1:4747',
-      token: info.token,
-    })
-  })
-
-  it('names nothing when no daemon is alive, so one can be started', () => {
+  it('names no daemon without --host and --port, not even one server.json calls alive: only its answer will tell', () => {
+    const alive = tempDir('bb-home-')
     const stale = tempDir('bb-home-')
+    writeServerInfo(alive, info)
     writeServerInfo(stale, { ...info, pid: DEAD_PID })
-    expect(resolveServer({}, tempDir('bb-home-'))).toStrictEqual({ kind: 'none' })
+    expect(resolveServer({}, alive)).toStrictEqual({ kind: 'none' })
     expect(resolveServer({}, stale)).toStrictEqual({ kind: 'none' })
+    expect(resolveServer({}, tempDir('bb-home-'))).toStrictEqual({ kind: 'none' })
   })
 
   it('prefers --host and --port, with the token of --token-file, and never starts a daemon for them', () => {

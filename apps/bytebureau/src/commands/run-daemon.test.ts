@@ -1,9 +1,9 @@
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it, onTestFinished } from 'vitest'
-import { readServerInfo } from '../daemon/server-info.js'
+import { readServerInfo, writeServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
+import { freePort, startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
 import { createTempRepo, testHome } from '../testing/temp-repo.js'
@@ -92,6 +92,34 @@ describe('bytebureau run and the daemon of its home', () => {
     const result = await runOn(repo, home, ['--no-daemon', ...SCRIPTED])
     expect(result.code).toBe(0)
     expect(readServerInfo(home).state).toBe('absent')
+  })
+})
+
+// The record of a daemon that crashed, its pid taken over: this test's pid is alive, and nothing listens on the port
+async function writeUnansweredRecord(home: string): Promise<void> {
+  const port = await freePort()
+  const token = 'a'.repeat(64)
+  writeServerInfo(home, {
+    version: '0',
+    host: '127.0.0.1',
+    port,
+    pid: process.pid,
+    token,
+    startedAt: 's',
+  })
+}
+
+describe('bytebureau commands and a record whose daemon does not answer', () => {
+  it('trust no record but an answer: they start a daemon on demand', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    stoppedWithTheTest(home)
+    await writeUnansweredRecord(home)
+    const listed = await runCli(['projects', 'ls', '--json'], { BYTEBUREAU_HOME: home })
+    const record = readServerInfo(home)
+    expect([listed.code, record.state]).toStrictEqual([0, 'alive'])
+    expect(record).not.toMatchObject({ info: { pid: process.pid } })
+    await expect(stopDaemon(home)).resolves.toMatchObject({ outcome: 'stopped' })
   })
 })
 

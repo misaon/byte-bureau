@@ -47,7 +47,7 @@ describe(withBureau, () => {
     expect(stub.authorizations()).toStrictEqual(['Bearer abc'])
   })
 
-  it('talks to the live daemon of the home, with the token of its record', async () => {
+  it('talks to the daemon of the home once it answers, with the token of its record', async () => {
     expect.hasAssertions()
     const home = testHome()
     const stub = await projectsStub()

@@ -23,18 +23,22 @@ export async function healthStub(startedAt: string = STARTED_AT): Promise<number
 
 export interface ProjectsStub {
   readonly port: number
-  // The authorization header of every request, in order
+  // The authorization header of every request for the projects, in order
   readonly authorizations: () => readonly (string | undefined)[]
 }
 
-// A daemon of this test on a free loopback port that knows no projects; it keeps the token of every request
+// A daemon of this test on a free loopback port that knows no projects; it keeps the token of every request for them
+// Its health answers with the start time of recordOn, as the daemon of such a record does
 export async function projectsStub(): Promise<ProjectsStub> {
   const seen: (string | undefined)[] = []
   const server = createServer((request, response) => {
-    seen.push(request.headers.authorization)
-    const found = request.url === '/api/v1/projects'
+    const health = request.url === '/api/v1/health'
+    if (!health) {
+      seen.push(request.headers.authorization)
+    }
+    const found = health || request.url === '/api/v1/projects'
     response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
-    response.end('[]')
+    response.end(health ? JSON.stringify({ status: 'ok', startedAt: STARTED_AT }) : '[]')
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')

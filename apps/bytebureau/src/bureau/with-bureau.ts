@@ -11,15 +11,13 @@ import { resolveServer, type BureauFlags, type ServerFlags } from './resolve.js'
 
 type Env = Readonly<Record<string, string | undefined>>
 
-// The daemon the flags name, else the live one of the home, else one started on demand
+// The daemon the flags name, else the daemon of the home that answers, else one started on demand
+// A record whose daemon does not answer (its pid taken over after a crash, a daemon on its way out) leads to a start, never to a failure
 const openRemote = async (flags: ServerFlags, env: Env): Promise<Bureau> => {
   const home = kernelHome(env)
-  const resolved = resolveServer(flags, home)
-  if (resolved.kind !== 'none') {
-    return remoteBureau(
-      createBureauClient({ baseUrl: resolved.url, token: resolved.token }),
-      resolved.url,
-    )
+  const named = resolveServer(flags, home)
+  if (named.kind === 'explicit') {
+    return remoteBureau(createBureauClient({ baseUrl: named.url, token: named.token }), named.url)
   }
   const info = await ensureDaemon(home, env)
   const url = serverUrl(info)
