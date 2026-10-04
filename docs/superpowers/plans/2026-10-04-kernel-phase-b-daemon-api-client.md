@@ -12277,8 +12277,8 @@ git commit -m "feat(cli): talk to the daemon through a bureau, start it on deman
 ### Task 10: New commands — `sessions`, `ask`, `plugins`, and the bare `bytebureau` status
 
 **Files:**
-- Create: `apps/bytebureau/src/commands/sessions.ts`, `apps/bytebureau/src/commands/sessions-prompt.ts`, `apps/bytebureau/src/commands/ask.ts`, `apps/bytebureau/src/commands/plugins.ts`, `apps/bytebureau/src/commands/status.ts`, `apps/bytebureau/src/render/tables.ts`, `apps/bytebureau/src/render/tables.test.ts`, `apps/bytebureau/src/commands/sessions.test.ts`, `apps/bytebureau/src/commands/ask.test.ts`, `apps/bytebureau/src/commands/plugins-status.test.ts`
-- Modify: `apps/bytebureau/src/main.ts` (subcommands and the root `run`), `apps/bytebureau/src/commands/run-session.ts` (export `follow`/`conclude` for `sessions prompt`, or move them to `run-follow.ts`), `packages/i18n/messages/{en,cs}.json`, `vitest.config.ts` (coverage include for `render/tables.ts`)
+- Create: `apps/bytebureau/src/commands/sessions.ts`, `apps/bytebureau/src/commands/sessions-prompt.ts`, `apps/bytebureau/src/commands/ask.ts`, `apps/bytebureau/src/commands/ask-answer.ts`, `apps/bytebureau/src/commands/plugins.ts`, `apps/bytebureau/src/commands/status.ts`, `apps/bytebureau/src/commands/sub-commands.ts`, `apps/bytebureau/src/commands/refusable.ts`, `apps/bytebureau/src/commands/run-follow.ts`, `apps/bytebureau/src/render/tables.ts`, `apps/bytebureau/src/render/rows.ts`, `apps/bytebureau/src/testing/frames.ts`, `apps/bytebureau/src/testing/session-bench.ts`; tests `apps/bytebureau/src/render/tables.test.ts`, `apps/bytebureau/src/render/rows.test.ts`, `apps/bytebureau/src/commands/sessions.test.ts`, `apps/bytebureau/src/commands/sessions-prompt.test.ts`, `apps/bytebureau/src/commands/sessions-prompt-daemon.test.ts`, `apps/bytebureau/src/commands/ask.test.ts`, `apps/bytebureau/src/commands/ask-answer.test.ts`, `apps/bytebureau/src/commands/plugins-status.test.ts`, `apps/bytebureau/src/commands/refusable.test.ts`, `apps/bytebureau/src/commands/refusals.test.ts`, `apps/bytebureau/src/commands/run-daemon-stops.test.ts`, `apps/bytebureau/src/commands/run-session-interrupted.test.ts`, `apps/bytebureau/src/run-arguments.test.ts`, `apps/bytebureau/src/run-flags.test.ts`, `apps/bytebureau/src/testing/command-tree.ts`
+- Modify: `apps/bytebureau/src/main.ts` (the root `run` is the status when no sub-command is named; the sub-commands from `sub-commands.ts`), `apps/bytebureau/src/run.ts` (global flags before a command name at any level placed after the name of the leaf; a bare `--debug` rewritten to `--debug=`), `apps/bytebureau/src/commands/run-session.ts` (`follow`/`conclude` lifted into `run-follow.ts`), `apps/bytebureau/src/commands/run-output.ts`, `apps/bytebureau/src/commands/projects.ts` (through `refusable`), `apps/bytebureau/src/commands/workspaces.ts` (through `refusable`), `apps/bytebureau/src/cli.test.ts`, `apps/bytebureau/src/commands/{run-daemon,run-session-terminal,projects}.test.ts`, `apps/bytebureau/src/testing/{daemon,events,health-stub,json-lines,workbench,scripted-kernel}.ts`, `packages/i18n/messages/{en,cs}.json`, `cspell-words.txt`, `vitest.config.ts` (coverage include for `commands/{run-follow,refusable,sessions-prompt,ask-answer}.ts`; `render/**` was already covered)
 
 **Interfaces:**
 - Consumes: `Bureau`, `withBureau`, `bureauFlags` (Task 9); `promptAsk` (Phase A); `ensureDaemon` (Task 9) for the status; the DTOs.
@@ -12300,23 +12300,76 @@ import { table } from './tables.js'
 
 describe(table, () => {
   it('pads every column to its widest cell with two spaces between columns', () => {
-    expect(table([['a', 'bb', 'c'], ['dddd', 'e', 'f']])).toStrictEqual(['a     bb  c', 'dddd  e   f'])
+    expect(
+      table([
+        ['a', 'bb', 'c'],
+        ['dddd', 'e', 'f'],
+      ]),
+    ).toStrictEqual(['a     bb  c', 'dddd  e   f'])
   })
 
   it('leaves the last column unpadded and renders no rows as no lines', () => {
     expect(table([['x', 'y']])).toStrictEqual(['x  y'])
     expect(table([])).toStrictEqual([])
   })
+
+  it('ends a line at its last cell, even when that cell is empty', () => {
+    expect(
+      table([
+        ['id', 'note'],
+        ['longer', ''],
+      ]),
+    ).toStrictEqual(['id      note', 'longer'])
+  })
+
+  it('tells a cell that spans lines on one line, so a row stays a line', () => {
+    expect(
+      table([
+        ['a1', 'Run:\n  ls -l\r\n  pwd'],
+        ['a22', 'Write'],
+      ]),
+    ).toStrictEqual(['a1   Run: ls -l pwd', 'a22  Write'])
+  })
+
+  it('keeps the width of a column that a shorter row leaves out', () => {
+    expect(table([['one', 'two', 'three'], ['x'], ['four', 'y']])).toStrictEqual([
+      'one   two  three',
+      'x',
+      'four  y',
+    ])
+  })
 })
 ```
 `apps/bytebureau/src/render/tables.ts`:
 ```ts
+// A cell is told on the one line it belongs to: the title of an ask may hold the lines of a command
+export const flat = (cell: string): string =>
+  /[\r\n]/u.test(cell)
+    ? cell
+        .split(/\r\n|[\r\n]/u)
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+        .join(' ')
+    : cell
+
+// The widest cell of every column, over all the rows, however many cells a row has
+const widthsOf = (rows: readonly (readonly string[])[]): number[] => {
+  const widths: number[] = []
+  for (const row of rows) {
+    for (const [column, cell] of row.entries()) {
+      widths[column] = Math.max(widths[column] ?? 0, cell.length)
+    }
+  }
+  return widths
+}
+
 // Plain columns for a terminal: no borders, so a line stays easy to grep
 export const table = (rows: readonly (readonly string[])[]): string[] => {
-  const widths = rows.reduce<number[]>((acc, row) => row.map((cell, index) => Math.max(acc[index] ?? 0, cell.length)), [])
-  return rows.map((row) =>
+  const cells = rows.map((row) => row.map((cell) => flat(cell)))
+  const widths = widthsOf(cells)
+  return cells.map((row) =>
     row
-      .map((cell, index) => (index === row.length - 1 ? cell : cell.padEnd(widths[index] ?? 0)))
+      .map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column] ?? 0)))
       .join('  ')
       .trimEnd(),
   )
@@ -12328,71 +12381,123 @@ export const table = (rows: readonly (readonly string[])[]): string[] => {
 `apps/bytebureau/src/commands/sessions.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
-import { defineCommand } from 'citty'
-import { withBureau } from '../bureau/with-bureau.js'
-import { bureauFlags, globalArgs, processContext } from '../context.js'
+import type { AskRecord, SessionDto } from '@bytebureau/protocol'
+import { defineCommand, type CommandDef } from 'citty'
+import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
+import { pendingAskLines, sessionFields, sessionRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
-import { promptCommand } from './sessions-prompt.js'
+import { withBureauRefusable } from './refusable.js'
+import { promptSession } from './sessions-prompt.js'
 
-const id = { id: { type: 'positional', description: 'Session id', required: true } } as const
+const sessionArgs = {
+  ...globalArgs,
+  id: { type: 'positional', description: 'Session id', required: true },
+} as const
+
+function tellSessions(context: Context, sessions: readonly SessionDto[]): void {
+  context.output.emit({ command: 'sessions.ls', sessions })
+  if (sessions.length === 0) {
+    context.output.print(m.sessions_none())
+    return
+  }
+  for (const line of table(sessionRows(sessions))) {
+    context.output.print(line)
+  }
+}
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List sessions' },
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const sessions = await withBureau(context, bureauFlags(args), process.env, (bureau) => bureau.sessions.list())
-    context.output.emit({ command: 'sessions.ls', sessions })
-    if (sessions.length === 0) {
-      context.output.print(m.sessions_none())
-      return
-    }
-    for (const line of table(sessions.map((session) => [session.id, session.status, session.title, session.projectId]))) {
-      context.output.print(line)
+    const sessions = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const listed = await bureau.sessions.list()
+      return listed
+    })
+    if (sessions !== undefined) {
+      tellSessions(context, sessions)
     }
   },
 })
 
+// The fields of a session, one to a line, and the asks that wait for an answer to it
+function tellSession(context: Context, session: SessionDto, asks: readonly AskRecord[]): void {
+  for (const line of table(sessionFields(session))) {
+    context.output.print(line)
+  }
+  for (const line of pendingAskLines(asks)) {
+    context.output.print(line)
+  }
+}
+
 const show = defineCommand({
   meta: { name: 'show', description: 'Show one session and its pending asks' },
-  args: { ...globalArgs, ...id },
+  args: sessionArgs,
   async run({ args }) {
     const context = processContext(args)
-    const shown = await withBureau(context, bureauFlags(args), process.env, async (bureau) => {
+    const shown = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       const session = await bureau.sessions.get(args.id)
       const asks = session === undefined ? [] : await bureau.asks.pending(session.id)
       return { session, asks }
     })
+    if (shown === undefined) {
+      return
+    }
     if (shown.session === undefined) {
       context.output.warn(m.sessions_missing({ id: args.id }))
       process.exitCode = 1
       return
     }
-    context.output.emit({ command: 'sessions.show', ...shown })
-    const { session } = shown
-    for (const line of table([
-      ['id', session.id], ['status', session.status], ['title', session.title], ['project', session.projectId],
-      ['employee', session.employee.id], ['provider', session.providerId],
-      ['worktree', session.workspace === null ? '-' : session.workspace.path], ['created', session.createdAt],
-    ])) {
-      context.output.print(line)
-    }
-    for (const ask of shown.asks) {
-      context.output.print(m.sessions_pending_ask({ id: ask.id, title: ask.title }))
+    context.output.emit({ command: 'sessions.show', session: shown.session, asks: shown.asks })
+    tellSession(context, shown.session, shown.asks)
+  },
+})
+
+const prompt = defineCommand({
+  meta: { name: 'prompt', description: 'Prompt a session and follow its turn to the end' },
+  args: {
+    ...globalArgs,
+    id: { type: 'positional', description: 'Session id', required: true },
+    text: { type: 'positional', description: 'The prompt', required: true },
+  },
+  async run({ args }) {
+    const context = processContext(args)
+    const options = { id: args.id, text: args.text, yes: args.yes }
+    const code = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const ended = await promptSession(bureau, options, context)
+      return ended
+    })
+    if (code !== undefined) {
+      process.exitCode = code
     }
   },
 })
 
-// interrupt, stop and resume: one request, one line
-const command = (name: 'interrupt' | 'stop' | 'resume', description: string) =>
+// What each of them tells once it is done, in a line of its own
+const DONE = {
+  interrupt: m.sessions_interrupted,
+  stop: m.sessions_stopped,
+  resume: m.sessions_resumed,
+} as const
+
+// Interrupt, stop and resume: one request, one line
+const steer = (
+  name: 'interrupt' | 'stop' | 'resume',
+  description: string,
+): CommandDef<typeof sessionArgs> =>
   defineCommand({
     meta: { name, description },
-    args: { ...globalArgs, ...id },
+    args: sessionArgs,
     async run({ args }) {
       const context = processContext(args)
-      await withBureau(context, bureauFlags(args), process.env, (bureau) => bureau.sessions[name](args.id))
-      context.output.emit({ command: `sessions.${name}`, id: args.id })
-      context.output.print(m.sessions_done({ action: name, id: args.id }))
+      const done = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+        await bureau.sessions[name](args.id)
+        return true
+      })
+      if (done !== undefined) {
+        context.output.emit({ command: `sessions.${name}`, id: args.id })
+        context.output.print(DONE[name]({ id: args.id }))
+      }
     },
   })
 
@@ -12401,10 +12506,10 @@ export const sessionsCommand = defineCommand({
   subCommands: {
     ls,
     show,
-    prompt: promptCommand,
-    interrupt: command('interrupt', 'Interrupt the running turn of a session'),
-    stop: command('stop', 'Stop a session (resumable later)'),
-    resume: command('resume', 'Resume a stopped or errored session'),
+    prompt,
+    interrupt: steer('interrupt', 'Interrupt the running turn of a session'),
+    stop: steer('stop', 'Stop a session (resumable later)'),
+    resume: steer('resume', 'Resume a stopped or errored session'),
   },
 })
 ```
@@ -12415,83 +12520,60 @@ A refusal of the daemon (`ApiError` with a `4xx` problem) or of the kernel (`Ses
 `apps/bytebureau/src/commands/ask.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
-import type { AskAnswer, AskRecord } from '@bytebureau/protocol'
+import type { AskRecord } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
-import { withBureau } from '../bureau/with-bureau.js'
 import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
-import { promptAsk } from '../render/ask-prompt.js'
+import { askRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
-import { refusable } from './refusable.js'
+import { answerAsk, optionsOf } from './ask-answer.js'
+import { withBureauRefusable } from './refusable.js'
 
-const recommendedOf = (ask: AskRecord): string =>
-  ask.questions
-    .flatMap((question) => question.options.filter((option) => option.recommended).map((option) => option.label))
-    .join(', ')
+function tellAsks(context: Context, asks: readonly AskRecord[]): void {
+  context.output.emit({ command: 'ask.ls', asks })
+  if (asks.length === 0) {
+    context.output.print(m.ask_none())
+    return
+  }
+  for (const line of table(askRows(asks))) {
+    context.output.print(line)
+  }
+}
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List the asks waiting for an answer' },
-  args: { ...globalArgs, session: { type: 'string', description: 'Only the asks of this session' } },
+  args: {
+    ...globalArgs,
+    session: { type: 'string', description: 'Only the asks of this session' },
+  },
   async run({ args }) {
     const context = processContext(args)
-    const asks = await withBureau(context, bureauFlags(args), process.env, (bureau) => bureau.asks.pending(args.session))
-    context.output.emit({ command: 'ask.ls', asks })
-    if (asks.length === 0) {
-      context.output.print(m.ask_none())
-      return
-    }
-    for (const line of table(asks.map((ask) => [ask.id, ask.sessionId, ask.title, recommendedOf(ask)]))) {
-      context.output.print(line)
+    const asks = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const pending = await bureau.asks.pending(args.session)
+      return pending
+    })
+    if (asks !== undefined) {
+      tellAsks(context, asks)
     }
   },
 })
-
-// The answer the flags spell; none means the person is asked, which only a terminal can do
-const answerOf = (
-  options: readonly string[],
-  other: string | undefined,
-  ask: AskRecord,
-  context: Context,
-  yes: boolean,
-): Promise<AskAnswer | undefined> => {
-  if (other !== undefined) {
-    return Promise.resolve({ selected: 'other', otherText: other })
-  }
-  if (options.length > 0) {
-    return Promise.resolve({ selected: [...options] })
-  }
-  return promptAsk(ask, { yes, interactive: context.interactive })
-}
 
 const answer = defineCommand({
   meta: { name: 'answer', description: 'Answer an ask by id' },
   args: {
     ...globalArgs,
     id: { type: 'positional', description: 'Ask id', required: true },
-    option: { type: 'string', description: 'Option id to select (repeatable)' },
+    option: {
+      type: 'string',
+      description: 'Option id to select; once for each question of the ask',
+    },
     other: { type: 'string', description: 'Free-text answer when the ask allows it' },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
     const context = processContext(args)
-    const options = typeof args.option === 'string' ? [args.option] : Array.isArray(args.option) ? args.option : []
-    await refusable(context, () =>
-      withBureau(context, bureauFlags(args), process.env, async (bureau) => {
-        const ask = await bureau.asks.get(args.id)
-        if (ask === undefined || ask.status !== 'pending') {
-          context.output.warn(m.ask_not_pending({ id: args.id }))
-          process.exitCode = 1
-          return
-        }
-        const chosen = await answerOf(options, args.other, ask, context, args.yes)
-        if (chosen === undefined) {
-          context.output.warn(m.ask_needs_answer({ id: args.id }))
-          process.exitCode = 1
-          return
-        }
-        await bureau.asks.answer(ask.id, chosen)
-        context.output.emit({ command: 'ask.answer', id: ask.id, answer: chosen })
-        context.output.print(m.ask_answered({ id: ask.id }))
-      }),
-    )
+    const request = { id: args.id, options: optionsOf(rawArgs), other: args.other, yes: args.yes }
+    await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      await answerAsk(bureau, request, context)
+    })
   },
 })
 
@@ -12506,24 +12588,29 @@ citty gives a repeated `--option` either as a string or as an array; the nested 
 ```ts
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { withBureau } from '../bureau/with-bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
+import { pluginRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
+import { withBureauRefusable } from './refusable.js'
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List the loaded plugins and the ports they offer' },
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const plugins = await withBureau(context, bureauFlags(args), process.env, (bureau) => bureau.plugins.list())
+    const plugins = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const listed = await bureau.plugins.list()
+      return listed
+    })
+    if (plugins === undefined) {
+      return
+    }
     context.output.emit({ command: 'plugins.ls', plugins })
     if (plugins.length === 0) {
       context.output.print(m.plugins_none())
       return
     }
-    for (const line of table(
-      plugins.map((plugin) => [plugin.name, plugin.version, plugin.state, plugin.state === 'failed' ? (plugin.reason ?? '') : plugin.ports.join(',')]),
-    )) {
+    for (const line of table(pluginRows(plugins))) {
       context.output.print(line)
     }
   },
@@ -12538,30 +12625,96 @@ export const pluginsCommand = defineCommand({
 `apps/bytebureau/src/commands/status.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
-import { withBureau } from '../bureau/with-bureau.js'
-import { bureauFlags, processContext, type GlobalArgs } from '../context.js'
-import { readServerInfo } from '../daemon/server-info.js'
+import { serverUrl, type HealthDto } from '@bytebureau/protocol'
+import { defineCommand } from 'citty'
+import type { Bureau } from '../bureau/bureau.js'
+import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
+import { readServerInfo, type ServerRecord } from '../daemon/server-info.js'
 import { kernelHome } from '../kernel-home.js'
+import { withBureauRefusable } from './refusable.js'
 
-// What bytebureau says when it is called with nothing else: the daemon (started on demand), its projects, sessions and asks
-export async function status(args: GlobalArgs): Promise<void> {
-  const context = processContext(args)
-  const counts = await withBureau(context, bureauFlags(args), process.env, async (bureau) => {
-    const [projects, sessions, asks, health] = await Promise.all([
-      bureau.projects.list(), bureau.sessions.list(), bureau.asks.pending(), bureau.health.check(),
-    ])
-    const running = sessions.filter((session) => session.status === 'running').length
-    const waiting = sessions.filter((session) => session.status === 'waiting_for_human').length
-    return { where: bureau.where, health, projects: projects.length, sessions: { running, waiting, total: sessions.length }, pendingAsks: asks.length }
-  })
-  const record = readServerInfo(kernelHome(process.env))
-  const daemon = record.state === 'alive' ? { url: counts.where.kind === 'daemon' ? counts.where.url : '', pid: record.info.pid, version: record.info.version, startedAt: record.info.startedAt } : undefined
-  context.output.emit({ command: 'status', daemon, ...counts })
-  context.output.print(daemon === undefined ? m.status_in_process() : m.status_daemon({ url: daemon.url, pid: daemon.pid, since: daemon.startedAt }))
+interface Counts {
+  readonly projects: number
+  readonly sessions: { readonly running: number; readonly waiting: number; readonly total: number }
+  readonly pendingAsks: number
+}
+
+interface Gathered {
+  readonly where: Bureau['where']
+  readonly health: HealthDto
+  readonly counts: Counts
+}
+
+// The daemon the Bureau talked to; its pid is known only from the record of this home, and only when that record names the same daemon
+interface Daemon {
+  readonly url: string
+  readonly pid: number | undefined
+  readonly version: string
+  readonly startedAt: string
+}
+
+async function gather(bureau: Bureau): Promise<Gathered> {
+  const [projects, sessions, asks, health] = await Promise.all([
+    bureau.projects.list(),
+    bureau.sessions.list(),
+    bureau.asks.pending(),
+    bureau.health.check(),
+  ])
+  const running = sessions.filter((session) => session.status === 'running').length
+  const waiting = sessions.filter((session) => session.status === 'waiting_for_human').length
+  return {
+    where: bureau.where,
+    health,
+    counts: {
+      projects: projects.length,
+      sessions: { running, waiting, total: sessions.length },
+      pendingAsks: asks.length,
+    },
+  }
+}
+
+// None for the kernel in the process of the command; a daemon of another home, named by --host and --port, has no pid here
+function daemonOf({ where, health }: Gathered, record: ServerRecord): Daemon | undefined {
+  if (where.kind === 'in-process') {
+    return undefined
+  }
+  const pid =
+    record.state === 'alive' && serverUrl(record.info) === where.url ? record.info.pid : undefined
+  return { url: where.url, pid, version: health.version, startedAt: health.startedAt }
+}
+
+function daemonLine(daemon: Daemon | undefined): string {
+  if (daemon === undefined) {
+    return m.status_in_process()
+  }
+  const { url, pid, startedAt: since } = daemon
+  return pid === undefined
+    ? m.status_daemon_remote({ url, since })
+    : m.status_daemon({ url, pid, since })
+}
+
+function tell(context: Context, daemon: Daemon | undefined, counts: Counts): void {
+  context.output.emit({ command: 'status', ...(daemon === undefined ? {} : { daemon }), ...counts })
+  context.output.print(daemonLine(daemon))
   context.output.print(m.status_projects({ count: counts.projects }))
   context.output.print(m.status_sessions(counts.sessions))
   context.output.print(m.status_asks({ count: counts.pendingAsks }))
 }
+
+// What bytebureau says when it is called with nothing else: the daemon (started on demand), its projects, sessions and asks
+// It is no command to name: the root of the CLI runs it for a call with no sub-command
+export const statusCommand = defineCommand({
+  meta: { name: 'status', description: 'Tell the daemon, the projects, the sessions and the asks' },
+  args: { ...globalArgs },
+  async run({ args }) {
+    const context = processContext(args)
+    const gathered = await withBureauRefusable(context, bureauFlags(args), gather)
+    if (gathered !== undefined) {
+      const record = readServerInfo(kernelHome(context.env))
+      tell(context, daemonOf(gathered, record), gathered.counts)
+    }
+  },
+})
 ```
 `max-statements` wants the body split (`gather`, `daemonOf`, `print`). `main.ts`: the root command gets `args: { ...globalArgs }` and `run({ args }) { await status(args) }`, and the sub-commands `sessions`, `ask`, `plugins` next to `serve`. citty runs the root `run` only when no sub-command is named.
 
@@ -12572,49 +12725,121 @@ New messages (en / cs): `sessions_none` "No sessions" / "Žádné sezení"; `ses
 `apps/bytebureau/src/commands/sessions.test.ts`:
 ```ts
 import { describe, expect, it } from 'vitest'
-import { startDaemonProcess } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { FAKE, PROMPT, workbench } from '../testing/workbench.js'
+import { benchWithDaemon, completedSession, MISSING, refusal } from '../testing/session-bench.js'
+import { testHome } from '../testing/temp-repo.js'
+import { NO_DAEMON, PROMPT, projectIdIn, SCRIPTED, worktreesOf } from '../testing/workbench.js'
 
-describe('bytebureau sessions', () => {
-  it('lists nothing, then the completed session of a run, shows it, and refuses to stop a completed one', async () => {
+describe('bytebureau sessions ls through the daemon', () => {
+  it('lists nothing before a run, and the session of a run after it', async () => {
     expect.hasAssertions()
-    const { repo, home } = workbench()
-    const daemon = await startDaemonProcess(home)
-    const env = { BYTEBUREAU_HOME: home }
-    expect((await runCli(['sessions', 'ls'], env)).stdout.trim()).toBe('No sessions')
-    expect((await runCli(['run', PROMPT, '--project', repo, ...FAKE], env)).code).toBe(0)
+    const { env, repo, daemon } = await benchWithDaemon()
+    const empty = await runCli(['sessions', 'ls'], env)
+    await runCli(['run', PROMPT, '--project', repo, ...SCRIPTED], env)
     const listed = await runCli(['sessions', 'ls', '--json'], env)
-    const [record] = jsonLines(listed.stdout)
-    expect(record).toMatchObject({ command: 'sessions.ls', sessions: [{ status: 'completed', title: 'Create hello' }] })
-    const sessions: unknown = record === undefined ? [] : record['sessions']
-    const id = Array.isArray(sessions) ? String(Reflect.get(Object(sessions[0]), 'id')) : ''
-    const shown = await runCli(['sessions', 'show', id], env)
-    expect(shown.code).toBe(0)
-    expect(shown.stdout).toMatch(/^status\s+completed$/mu)
-    const stopped = await runCli(['sessions', 'stop', id], env)
-    expect(stopped.code).toBe(1)
-    expect(stopped.stderr.trim()).toMatch(/\(session_invalid_transition\)$/u)
-    const missing = await runCli(['sessions', 'show', '0192f0a0-0000-7000-8000-000000000009'], env)
-    expect(missing.code).toBe(1)
+    expect([empty.code, empty.stdout.trim()]).toStrictEqual([0, 'No sessions'])
+    expect(jsonLines(listed.stdout)).toMatchObject([
+      { command: 'sessions.ls', sessions: [{ status: 'completed', title: PROMPT }] },
+    ])
     await daemon.stop()
   })
 
-  it('prompts an existing session again and follows the turn to its end', async () => {
+  it('lists the id, the status, the title and the project of a session in a row', async () => {
     expect.hasAssertions()
-    const { repo, home } = workbench()
-    const daemon = await startDaemonProcess(home)
-    const env = { BYTEBUREAU_HOME: home }
-    await runCli(['run', PROMPT, '--project', repo, ...FAKE], env)
-    const [record] = jsonLines((await runCli(['sessions', 'ls', '--json'], env)).stdout)
-    const sessions: unknown = record === undefined ? [] : record['sessions']
-    const id = Array.isArray(sessions) ? String(Reflect.get(Object(sessions[0]), 'id')) : ''
-    expect((await runCli(['sessions', 'resume', id], env)).code).toBe(0)
-    const prompted = await runCli(['sessions', 'prompt', id, 'again', '--json', '--yes'], env)
-    expect(prompted.code).toBe(0)
-    expect(jsonLines(prompted.stdout).map((event) => event['type'])).toContain('turn.completed')
+    const { env, home, id, daemon } = await completedSession()
+    const listed = await runCli(['sessions', 'ls'], env)
+    const project = await projectIdIn(home, [])
+    expect(listed.stdout.trim().split('  ')).toStrictEqual([id, 'completed', PROMPT, project])
     await daemon.stop()
+  })
+})
+
+describe('bytebureau sessions show through the daemon', () => {
+  it('tells the fields of a session one to a line', async () => {
+    expect.hasAssertions()
+    const { env, repo, id, daemon } = await completedSession()
+    const shown = await runCli(['sessions', 'show', id], env)
+    expect([shown.code, shown.stderr]).toStrictEqual([0, ''])
+    expect(shown.stdout).toMatch(new RegExp(`^id\\s+${id}$`, 'mu'))
+    expect(shown.stdout).toMatch(/^status\s+completed$/mu)
+    expect(shown.stdout).toMatch(/^provider\s+fake$/mu)
+    expect(shown.stdout).toContain(worktreesOf(repo))
+    await daemon.stop()
+  })
+
+  it('tells the session and its asks as one JSON record', async () => {
+    expect.hasAssertions()
+    const { env, id, daemon } = await completedSession()
+    const shown = await runCli(['sessions', 'show', id, '--json'], env)
+    expect(jsonLines(shown.stdout)).toMatchObject([
+      { command: 'sessions.show', session: { id, status: 'completed' }, asks: [] },
+    ])
+    await daemon.stop()
+  })
+
+  it('refuses a session that is not there, with exit code 1', async () => {
+    expect.hasAssertions()
+    const { env, daemon } = await benchWithDaemon()
+    await expect(refusal(['sessions', 'show', MISSING], env)).resolves.toStrictEqual([
+      1,
+      `No session ${MISSING}`,
+    ])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau sessions steering through the daemon', () => {
+  it('refuses what a completed session cannot do, with the reason of the kernel and exit code 1', async () => {
+    expect.hasAssertions()
+    const { env, id, daemon } = await completedSession()
+    const stop = refusal(['sessions', 'stop', id], env)
+    const resume = refusal(['sessions', 'resume', id], env)
+    const prompt = refusal(['sessions', 'prompt', id, 'again'], env)
+    await expect(stop).resolves.toStrictEqual([1, 'cannot stop a completed session'])
+    await expect(resume).resolves.toStrictEqual([1, 'cannot resume a completed session'])
+    await expect(prompt).resolves.toStrictEqual([1, 'cannot prompt a completed session'])
+    await daemon.stop()
+  })
+
+  it('refuses to interrupt a session that no agent is attached to, and one that is not there', async () => {
+    expect.hasAssertions()
+    const { env, id, daemon } = await completedSession()
+    const interrupt = refusal(['sessions', 'interrupt', id], env)
+    const stop = refusal(['sessions', 'stop', MISSING], env)
+    await expect(interrupt).resolves.toStrictEqual([1, `session ${id} is not running`])
+    await expect(stop).resolves.toStrictEqual([1, `session ${MISSING} does not exist`])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau sessions in the process of the command', () => {
+  it('lists nothing, as JSON', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const listed = await runCli(['sessions', 'ls', '--json', NO_DAEMON], env)
+    expect(jsonLines(listed.stdout)).toStrictEqual([{ command: 'sessions.ls', sessions: [] }])
+  })
+
+  it('tells in Czech with --lang cs', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const none = await runCli(['sessions', 'ls', '--lang', 'cs', NO_DAEMON], env)
+    const missing = refusal(['sessions', 'show', MISSING, '--lang', 'cs', NO_DAEMON], env)
+    expect([none.code, none.stdout.trim()]).toStrictEqual([0, 'Žádné relace'])
+    await expect(missing).resolves.toStrictEqual([1, `Relace ${MISSING} neexistuje`])
+  })
+
+  it('refuses to show, stop, prompt or interrupt a session that is not there, in the words of the kernel', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const does = `session ${MISSING} does not exist`
+    const show = refusal(['sessions', 'show', MISSING, NO_DAEMON], env)
+    await expect(show).resolves.toStrictEqual([1, `No session ${MISSING}`])
+    const stop = refusal(['sessions', 'stop', MISSING, NO_DAEMON], env)
+    await expect(stop).resolves.toStrictEqual([1, does])
+    const prompt = refusal(['sessions', 'prompt', MISSING, 'go', NO_DAEMON], env)
+    await expect(prompt).resolves.toStrictEqual([1, does])
   })
 })
 ```
@@ -12622,55 +12847,197 @@ describe('bytebureau sessions', () => {
 
 `apps/bytebureau/src/commands/ask.test.ts`:
 ```ts
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { startDaemonProcess } from '../testing/daemon.js'
-import { jsonLines } from '../testing/json-lines.js'
-import { childEnv, runCli } from '../testing/run-cli.js'
-import { PROMPT, workbench } from '../testing/workbench.js'
+import { eventLines, firstField, jsonLines, payloadOf } from '../testing/json-lines.js'
+import { runCli } from '../testing/run-cli.js'
+import { benchWithDaemon, finished, waitingRun, type Waiting } from '../testing/session-bench.js'
+import { testHome } from '../testing/temp-repo.js'
+import { NO_DAEMON } from '../testing/workbench.js'
 
-const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
+// The two exit codes of an ask answered with the arguments, and what the events of the run tell of the answer
+async function answeredWith(
+  waiting: Waiting,
+  answer: readonly string[],
+): Promise<readonly unknown[]> {
+  const answered = await runCli(['ask', 'answer', waiting.id, ...answer], waiting.env)
+  const run = await waiting.run
+  await waiting.daemon.stop()
+  return [answered.code, run.code, payloadOf(eventLines(run.stdout), 'ask.answered')]
+}
 
-describe('bytebureau ask', () => {
-  it('lists the ask a run waits on, answers it from another process, and the run completes', async () => {
+describe('bytebureau ask ls through the daemon', () => {
+  it('lists nothing while no ask waits', async () => {
     expect.hasAssertions()
-    const { repo, home } = workbench()
-    const daemon = await startDaemonProcess(home)
-    const env = { BYTEBUREAU_HOME: home }
-    expect((await runCli(['ask', 'ls'], env)).stdout.trim()).toBe('No asks waiting')
-    // A run off a terminal without --yes leaves its ask for someone else
-    const run = spawn('bun', ['run', 'src/main.ts', 'run', PROMPT, '--project', repo, '--provider', 'fake', '--json'], {
-      cwd: CLI_DIRECTORY, env: childEnv(env), stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    run.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk })
-    const exited = new Promise<number | null>((resolve) => { run.once('close', (code) => resolve(code)) })
-    const deadline = Date.now() + 15_000
-    let asks: Record<string, unknown>[] = []
-    while (asks.length === 0 && Date.now() < deadline) {
-      const [record] = jsonLines((await runCli(['ask', 'ls', '--json'], env)).stdout)
-      const listed: unknown = record === undefined ? [] : record['asks']
-      asks = Array.isArray(listed) ? listed : []
-      if (asks.length === 0) {
-        await new Promise((resolve) => { setTimeout(resolve, 200) })
-      }
-    }
-    expect(asks).toHaveLength(1)
-    const [ask] = asks
-    const id = String(ask === undefined ? '' : ask['id'])
-    const refused = await runCli(['ask', 'answer', id], env)
-    expect(refused.code).toBe(1)
-    expect(refused.stderr.trim()).toBe(`Ask ${id} needs --option or --other outside a terminal`)
-    const answered = await runCli(['ask', 'answer', id, '--yes'], env)
-    expect(answered.code).toBe(0)
-    expect(answered.stdout.trim()).toBe(`Answered ${id}`)
-    expect(await exited).toBe(0)
-    expect(jsonLines(stdout).map((event) => event['type']).at(-1)).toBe('session.completed')
-    const again = await runCli(['ask', 'answer', id, '--yes'], env)
-    expect(again.code).toBe(1)
-    expect(again.stderr.trim()).toBe(`Ask ${id} is not pending`)
+    const { env, daemon } = await benchWithDaemon()
+    const none = await runCli(['ask', 'ls'], env)
+    expect([none.code, none.stdout.trim()]).toStrictEqual([0, 'No asks waiting'])
     await daemon.stop()
+  })
+
+  it('lists the ask a run waits on: as JSON, and as a row with the option it recommends', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const text = await runCli(['ask', 'ls'], waiting.env)
+    const sessionId = firstField(waiting.listed, 'asks', 'sessionId')
+    expect(jsonLines(waiting.listed)).toMatchObject([
+      { command: 'ask.ls', asks: [{ status: 'pending', title: 'Export style' }] },
+    ])
+    expect(text.stdout.trim().split('  ')).toStrictEqual([
+      waiting.id,
+      sessionId,
+      'Export style',
+      'Named export (Recommended)',
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+
+  it('lists only the asks of the session it is given', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const sessionId = firstField(waiting.listed, 'asks', 'sessionId')
+    const ofSession = await runCli(['ask', 'ls', '--session', sessionId], waiting.env)
+    const ofOther = await runCli(['ask', 'ls', '--session', 'nobody'], waiting.env)
+    expect(ofSession.stdout.trim().split('  ')[0]).toBe(waiting.id)
+    expect(ofOther.stdout.trim()).toBe('No asks waiting')
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau sessions show and the status, for a run that waits on its ask', () => {
+  it('shows the ask that waits for an answer in its session', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const sessionId = firstField(waiting.listed, 'asks', 'sessionId')
+    const shown = await runCli(['sessions', 'show', sessionId], waiting.env)
+    const json = await runCli(['sessions', 'show', sessionId, '--json'], waiting.env)
+    expect(shown.stdout).toMatch(/^status\s+waiting_for_human$/mu)
+    expect(shown.stdout).toContain(`Waiting for your answer: Export style (${waiting.id})`)
+    expect(jsonLines(json.stdout)).toMatchObject([
+      { command: 'sessions.show', asks: [{ id: waiting.id }] },
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+
+  it('tells the ask that waits, and the counts, in Czech', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const sessionId = firstField(waiting.listed, 'asks', 'sessionId')
+    const shown = await runCli(['sessions', 'show', sessionId, '--lang', 'cs'], waiting.env)
+    const status = await runCli(['--lang', 'cs'], waiting.env)
+    expect(shown.stdout).toContain(`Čeká na Vaši odpověď: Export style (${waiting.id})`)
+    expect(status.stdout.trim().split('\n').slice(2)).toStrictEqual([
+      'Relace: celkem 1, běžící 0, čekající na Vás 1',
+      'Čekající otázky: 1',
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+
+  it('counts the session and the ask in the status', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const status = await runCli([], waiting.env)
+    expect(status.stdout.trim().split('\n').slice(1)).toStrictEqual([
+      'Projects: 1',
+      'Sessions: 0 running, 1 waiting for you, 1 in all',
+      'Pending asks: 1',
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau ask answer through the daemon', () => {
+  it('refuses to answer with nothing to answer with, and with an option the ask does not have', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const { id, env } = waiting
+    const needs = await runCli(['ask', 'answer', id], env)
+    const unknown = await runCli(['ask', 'answer', id, '--option', 'nope'], env)
+    expect([needs.code, needs.stderr.trim()]).toStrictEqual([
+      1,
+      `Ask ${id} needs --option or --other outside a terminal`,
+    ])
+    expect([unknown.code, unknown.stderr.trim()]).toStrictEqual([1, `ask ${id} has no option nope`])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+
+  it('answers with the recommended option for --yes, and the run completes', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const { id, env } = waiting
+    const answered = await runCli(['ask', 'answer', id, '--yes'], env)
+    const run = await waiting.run
+    expect([answered.code, answered.stdout.trim()]).toStrictEqual([0, `Answered ${id}`])
+    expect([run.code, jsonLines(run.stdout).at(-1)]).toMatchObject([
+      0,
+      { type: 'session.completed' },
+    ])
+    await waiting.daemon.stop()
+  })
+
+  it('refuses an ask that is answered already', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    await finished(waiting)
+    const { id, env } = waiting
+    const again = await runCli(['ask', 'answer', id, '--yes'], env)
+    expect([again.code, again.stderr.trim()]).toStrictEqual([1, `Ask ${id} is not pending`])
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau ask answer with a global flag before the group', () => {
+  it('keeps --other with no text from taking the flag that moved behind the group for its text', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const { id, env } = waiting
+    const refused = await runCli(['--json', 'ask', 'answer', id, '--other'], env)
+    expect([refused.code, refused.stdout]).toStrictEqual([1, ''])
+    expect(jsonLines(refused.stderr)).toStrictEqual([
+      { level: 'warn', message: `Ask ${id} needs --option or --other outside a terminal` },
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau ask answer with options and words', () => {
+  it('answers with an option for each question, spelled apart from its id or with an equals sign', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const answered = await answeredWith(waiting, ['--option', 'yes', '--option=default'])
+    expect(answered).toMatchObject([0, 0, { answer: { selected: ['yes', 'default'] } }])
+  })
+
+  it('answers with the words of the person when the ask allows them', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const answered = await answeredWith(waiting, ['--other', 'A barrel file'])
+    expect(answered).toMatchObject([
+      0,
+      0,
+      { answer: { selected: 'other', otherText: 'A barrel file' } },
+    ])
+  })
+})
+
+describe('bytebureau ask in the process of the command', () => {
+  it('lists nothing, as JSON', async () => {
+    expect.hasAssertions()
+    const listed = await runCli(['ask', 'ls', '--json', NO_DAEMON], { BYTEBUREAU_HOME: testHome() })
+    expect(jsonLines(listed.stdout)).toStrictEqual([{ command: 'ask.ls', asks: [] }])
+  })
+
+  it('refuses an ask that is not there', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const missing = await runCli(['ask', 'answer', 'a0', '--yes', NO_DAEMON], env)
+    expect([missing.code, missing.stderr.trim()]).toStrictEqual([1, 'Ask a0 is not pending'])
   })
 })
 ```
@@ -12678,42 +13045,2416 @@ describe('bytebureau ask', () => {
 
 `apps/bytebureau/src/commands/plugins-status.test.ts`:
 ```ts
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { startDaemonProcess } from '../testing/daemon.js'
+import { startDaemonProcess, stoppedWithTheTest, type DaemonProcess } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { tempDir, testHome } from '../testing/temp-repo.js'
+import { NO_DAEMON } from '../testing/workbench.js'
 
-describe('bytebureau plugins ls and the bare status', () => {
-  it('lists the bundled plugins as loaded', async () => {
+const WORKSPACE_LOCAL = /^workspace-local\s+\S+\s+loaded\s+workspaceRuntimes:local$/mu
+const AGENT_FAKE = /^agent-fake\s+\S+\s+loaded\s+agentProviders:fake$/mu
+
+// What `bytebureau --json` tells of a daemon that has nothing yet, in the order of its keys
+const IDLE_DAEMON =
+  /^\{"command":"status","daemon":\{"url":"http:\/\/127\.0\.0\.1:\d+","pid":\d+,"version":"[^"]+","startedAt":"[\d:.TZ-]+"\},"projects":0,"sessions":\{"running":0,"waiting":0,"total":0\},"pendingAsks":0\}$/u
+
+// What it tells of the kernel in the process of the command
+const IN_PROCESS = [
+  'Daemon: not running (in-process)',
+  'Projects: 0',
+  'Sessions: 0 running, 0 waiting for you, 0 in all',
+  'Pending asks: 0',
+]
+
+describe('bytebureau plugins ls', () => {
+  it('lists the bundled plugins as loaded, with the ports they offer', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const daemon = await startDaemonProcess(home)
-    const listed = await runCli(['plugins', 'ls', '--json'], { BYTEBUREAU_HOME: home })
-    expect(jsonLines(listed.stdout)).toMatchObject([{ command: 'plugins.ls', plugins: [{ state: 'loaded' }, { state: 'loaded' }] }])
-    const text = await runCli(['plugins', 'ls'], { BYTEBUREAU_HOME: home })
-    expect(text.stdout).toMatch(/^workspace-local\s+\S+\s+loaded\s+workspaceRuntime/mu)
+    const env = { BYTEBUREAU_HOME: home }
+    const listed = await runCli(['plugins', 'ls', '--json'], env)
+    const text = await runCli(['plugins', 'ls'], env)
+    expect(jsonLines(listed.stdout)).toMatchObject([
+      {
+        command: 'plugins.ls',
+        plugins: [
+          { name: 'workspace-local', state: 'loaded', ports: ['workspaceRuntimes:local'] },
+          { name: 'agent-fake', state: 'loaded', ports: ['agentProviders:fake'] },
+        ],
+      },
+    ])
+    expect(text.stdout).toMatch(WORKSPACE_LOCAL)
+    expect(text.stdout).toMatch(AGENT_FAKE)
     await daemon.stop()
   })
 
-  it('starts the daemon on demand and reports counts', async () => {
+  it('lists them in the process of the command, where no daemon is started', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
+    const text = await runCli(['plugins', 'ls', NO_DAEMON], { BYTEBUREAU_HOME: home })
+    expect(text.stdout).toMatch(WORKSPACE_LOCAL)
+    expect(text.stdout).toMatch(AGENT_FAKE)
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+})
+
+describe('bytebureau with no sub-command', () => {
+  it('starts the daemon on demand, and tells what it has as one JSON record', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    stoppedWithTheTest(home)
     const result = await runCli(['--json'], { BYTEBUREAU_HOME: home })
     expect(result.code).toBe(0)
-    expect(jsonLines(result.stdout)).toMatchObject([
-      { command: 'status', daemon: { url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/u) }, projects: 0, sessions: { running: 0, waiting: 0, total: 0 }, pendingAsks: 0 },
-    ])
+    expect(result.stdout.trim()).toMatch(IDLE_DAEMON)
     expect(readServerInfo(home).state).toBe('alive')
+    await expect(stopDaemon(home)).resolves.toMatchObject({ outcome: 'stopped' })
+  })
+
+  it('tells the daemon of the home with its pid and its start, and its counts', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
     const text = await runCli([], { BYTEBUREAU_HOME: home })
-    expect(text.stdout).toMatch(/^Daemon: http:\/\/127\.0\.0\.1:\d+ \(pid \d+, up since /u)
-    expect(await stopDaemon(home)).toMatchObject({ outcome: 'stopped' })
+    const [line, ...counts] = text.stdout.trim().split('\n')
+    expect(line).toBe(
+      `Daemon: ${daemon.url} (pid ${daemon.info.pid}, up since ${daemon.info.startedAt})`,
+    )
+    expect(counts).toStrictEqual(IN_PROCESS.slice(1))
+    await daemon.stop()
+  })
+})
+
+// The flags that name the daemon from another home: its address, and the file of its token
+function naming(daemon: DaemonProcess): string[] {
+  const tokenFile = path.join(tempDir('bb-token-'), 'token')
+  writeFileSync(tokenFile, daemon.info.token)
+  return ['--host', daemon.info.host, '--port', String(daemon.info.port), '--token-file', tokenFile]
+}
+
+describe('bytebureau with no sub-command, for a daemon that --host and --port name', () => {
+  it('tells it without a pid, which only the home of the daemon knows', async () => {
+    expect.hasAssertions()
+    const daemon = await startDaemonProcess(testHome())
+    const named = naming(daemon)
+    const elsewhere = { BYTEBUREAU_HOME: testHome() }
+    const text = await runCli(named, elsewhere)
+    const json = await runCli([...named, '--json'], elsewhere)
+    expect(text.stdout.split('\n')[0]).toBe(
+      `Daemon: ${daemon.url} (up since ${daemon.info.startedAt})`,
+    )
+    expect(jsonLines(json.stdout)).toMatchObject([{ daemon: { url: daemon.url } }])
+    expect(json.stdout).not.toContain('"pid"')
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau with no sub-command, in the process of the command', () => {
+  it('tells that the kernel runs in the process of the command with --no-daemon, and starts no daemon', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const text = await runCli([NO_DAEMON], { BYTEBUREAU_HOME: home })
+    expect(text.stdout.trim().split('\n')).toStrictEqual(IN_PROCESS)
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+
+  it('leaves the daemon out of the JSON record then', async () => {
+    expect.hasAssertions()
+    const json = await runCli(['--json', NO_DAEMON], { BYTEBUREAU_HOME: testHome() })
+    expect(jsonLines(json.stdout)).toStrictEqual([
+      {
+        command: 'status',
+        projects: 0,
+        sessions: { running: 0, waiting: 0, total: 0 },
+        pendingAsks: 0,
+      },
+    ])
+  })
+
+  it('tells in Czech with --lang cs, which comes before nothing else', async () => {
+    expect.hasAssertions()
+    const text = await runCli(['--lang', 'cs', NO_DAEMON], { BYTEBUREAU_HOME: testHome() })
+    expect(text.stdout.trim().split('\n')).toStrictEqual([
+      'Démon: neběží (v procesu)',
+      'Projekty: 0',
+      'Relace: celkem 0, běžící 0, čekající na Vás 0',
+      'Čekající otázky: 0',
+    ])
+  })
+
+  it('is not told after another command, which would start a daemon of its own', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    stoppedWithTheTest(home)
+    const hello = await runCli(['hello', '--json'], { BYTEBUREAU_HOME: home })
+    expect(jsonLines(hello.stdout)).toStrictEqual([
+      { command: 'hello', message: 'Hello! ByteBureau is ready.' },
+    ])
+    expect(readServerInfo(home).state).toBe('absent')
   })
 })
 ```
 The plugin names and ports are the bundled ones (`workspace-local` offering `workspaceRuntime`, the fake agent offering `agentProvider`); read `PluginStatus.ports` of one `plugins ls --json` once and pin the exact strings.
+
+**Added files (as shipped):**
+
+`apps/bytebureau/src/commands/sessions-prompt.ts` (as shipped):
+
+```ts
+import type { Bureau } from '../bureau/bureau.js'
+import type { Context } from '../context.js'
+import { conclude, promptAndFollow, type Ends } from './run-follow.js'
+import { closeFrame, open } from './run-output.js'
+
+// A prompt ends with its turn, or with the session if that ends first; the session stays ready for the next prompt
+// An interrupted turn ends where the session says what became of it: ready again, stopped or errored
+const PROMPT_ENDS: Ends = {
+  terminal: new Set(['turn.completed', 'session.stopped', 'session.errored']),
+  completes: false,
+  turnOnly: true,
+}
+
+export interface PromptOptions {
+  readonly id: string
+  readonly text: string
+  readonly yes: boolean
+}
+
+async function followPrompt(
+  bureau: Bureau,
+  options: PromptOptions,
+  context: Context,
+): Promise<number> {
+  const run = { bureau, session: { id: options.id }, context, yes: options.yes, ends: PROMPT_ENDS }
+  const followed = await promptAndFollow(run, options.text)
+  return conclude(followed, context)
+}
+
+// Prompts a session and follows the new turn to its end; the exit code is 0 completed, 3 interrupted or stopped, 4 errored
+// A request that is refused, as any other failure, closes the frame and goes on: the command tells a refusal with exit code 1, as every command but run does
+export async function promptSession(
+  bureau: Bureau,
+  options: PromptOptions,
+  context: Context,
+): Promise<number> {
+  open(context, options.text)
+  try {
+    return await followPrompt(bureau, options, context)
+  } catch (error) {
+    closeFrame(context)
+    throw error
+  }
+}
+```
+
+`apps/bytebureau/src/commands/ask-answer.ts` (as shipped):
+
+```ts
+import { m } from '@bytebureau/i18n'
+import type { AskAnswer, AskRecord } from '@bytebureau/protocol'
+import type { Bureau } from '../bureau/bureau.js'
+import type { Context } from '../context.js'
+import { promptAsk, type Prompts } from '../render/ask-prompt.js'
+
+// What the flags of `ask answer` say, and whether --yes is among them
+export interface AnswerFlags {
+  readonly options: readonly string[]
+  readonly other: string | undefined
+  readonly yes: boolean
+  // The prompts a person answers through; a test can put others in place of the terminal's
+  readonly prompts?: Prompts | undefined
+}
+
+export interface Answering extends AnswerFlags {
+  readonly id: string
+}
+
+// An ask with several questions is answered with one --option for each, but citty keeps only the last of a flag that is given twice
+// So the ids are read from the arguments themselves
+export function optionsOf(rawArgs: readonly string[]): string[] {
+  const options: string[] = []
+  for (const [index, arg] of rawArgs.entries()) {
+    if (arg === '--') {
+      break
+    }
+    if (arg === '--option') {
+      const next = rawArgs[index + 1]
+      if (next !== undefined) {
+        options.push(next)
+      }
+    } else if (arg.startsWith('--option=')) {
+      options.push(arg.slice('--option='.length))
+    }
+  }
+  return options
+}
+
+// The answer the flags spell; else the person at a terminal is asked
+// A person who was asked and gave no answer cancelled the prompt; none means nobody could be asked
+export async function answerOf(
+  { options, other, yes, prompts }: AnswerFlags,
+  ask: AskRecord,
+  context: Context,
+): Promise<AskAnswer | 'cancelled' | undefined> {
+  if (other !== undefined && other !== '') {
+    return { selected: 'other', otherText: other }
+  }
+  if (options.length > 0) {
+    return { selected: [...options] }
+  }
+  const answer = await promptAsk(ask, { yes, interactive: context.interactive }, prompts)
+  return answer === undefined && !yes && context.interactive ? 'cancelled' : answer
+}
+
+// The command ends with exit code 1 and the words that say why
+function failWith(context: Context, text: string): void {
+  context.output.warn(text)
+  process.exitCode = 1
+}
+
+// The ask of the id, if it still waits for an answer
+async function pendingAsk(
+  bureau: Bureau,
+  id: string,
+  context: Context,
+): Promise<AskRecord | undefined> {
+  const ask = await bureau.asks.get(id)
+  if (ask === undefined || ask.status !== 'pending') {
+    failWith(context, m.ask_not_pending({ id }))
+    return undefined
+  }
+  return ask
+}
+
+// A cancelled prompt ends the command with exit code 1 and no line: the prompt has shown that it was cancelled
+async function answerFor(
+  request: Answering,
+  ask: AskRecord,
+  context: Context,
+): Promise<AskAnswer | undefined> {
+  const said = await answerOf(request, ask, context)
+  if (said === 'cancelled') {
+    process.exitCode = 1
+    return undefined
+  }
+  if (said === undefined) {
+    // --yes asked for the recommended option, and there is none: the person is not left to wonder about a terminal
+    failWith(
+      context,
+      request.yes
+        ? m.ask_no_recommended({ id: request.id })
+        : m.ask_needs_answer({ id: request.id }),
+    )
+  }
+  return said
+}
+
+// The ask must be pending, and the flags, or the person at a terminal, must answer it
+export async function answerAsk(
+  bureau: Bureau,
+  request: Answering,
+  context: Context,
+): Promise<void> {
+  const ask = await pendingAsk(bureau, request.id, context)
+  if (ask === undefined) {
+    return
+  }
+  const answer = await answerFor(request, ask, context)
+  if (answer !== undefined) {
+    await bureau.asks.answer(ask.id, answer)
+    context.output.emit({ command: 'ask.answer', id: ask.id, answer })
+    context.output.print(m.ask_answered({ id: ask.id }))
+  }
+}
+```
+
+`apps/bytebureau/src/commands/sub-commands.ts` (as shipped):
+
+```ts
+import { askCommand } from './ask.js'
+import { configCommand } from './config.js'
+import { helloCommand } from './hello.js'
+import { pluginsCommand } from './plugins.js'
+import { projectsCommand } from './projects.js'
+import { runCommand } from './run.js'
+import { serveCommand } from './serve.js'
+import { sessionsCommand } from './sessions.js'
+import { workspacesCommand } from './workspaces.js'
+
+// Every command of the CLI by the name it is called with
+export const subCommands = {
+  hello: helloCommand,
+  run: runCommand,
+  config: configCommand,
+  projects: projectsCommand,
+  workspaces: workspacesCommand,
+  serve: serveCommand,
+  sessions: sessionsCommand,
+  ask: askCommand,
+  plugins: pluginsCommand,
+}
+```
+
+`apps/bytebureau/src/commands/refusable.ts` (as shipped):
+
+```ts
+import { ApiError } from '@bytebureau/client'
+import {
+  AskError,
+  ConfigError,
+  ProviderError,
+  SessionError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
+import type { Bureau } from '../bureau/bureau.js'
+import type { BureauFlags } from '../bureau/resolve.js'
+import { withBureau } from '../bureau/with-bureau.js'
+import type { Context } from '../context.js'
+import { oneLine } from './run-output.js'
+
+// What a refusal says: the detail of the problem the daemon answered with, or the reason of the kernel's own error
+// The errors of the kernel that the API answers with a 4xx problem are the refusals in-process, told as the API tells them
+// A failure that is no refusal has none
+function refusalOf(error: unknown): string | undefined {
+  if (error instanceof ApiError) {
+    const { problem } = error
+    return problem !== undefined && error.status < 500 ? problem.detail : undefined
+  }
+  if (error instanceof ConfigError) {
+    return `${error.file}${error.pointer}: ${error.reason}`
+  }
+  if (error instanceof ProviderError) {
+    return error.kind === 'missing' ? error.reason : undefined
+  }
+  if (
+    error instanceof SessionError ||
+    error instanceof AskError ||
+    error instanceof WorkspaceError
+  ) {
+    return error.reason
+  }
+  return undefined
+}
+
+// A request that is refused, by the daemon with a 4xx problem or by the kernel in-process, ends the command with exit code 1 and its reason in one line
+// Any other failure goes on to the runner; nothing comes back for a refusal, so the command prints no success
+export async function refusable<Result>(
+  context: Context,
+  work: () => Promise<Result>,
+): Promise<Result | undefined> {
+  try {
+    const result = await work()
+    return result
+  } catch (error) {
+    const refusal = refusalOf(error)
+    if (refusal === undefined) {
+      throw error
+    }
+    context.output.warn(oneLine(refusal))
+    process.exitCode = 1
+    return undefined
+  }
+}
+
+// The work of a command with its Bureau, refusable: what it came to, or nothing once a refusal has ended the command
+export async function withBureauRefusable<Result>(
+  context: Context,
+  flags: BureauFlags,
+  work: (bureau: Bureau) => Promise<Result>,
+): Promise<Result | undefined> {
+  const result = await refusable(context, async () => {
+    const done = await withBureau(context, flags, work)
+    return done
+  })
+  return result
+}
+```
+
+`apps/bytebureau/src/commands/run-follow.ts` (as shipped):
+
+```ts
+import { m } from '@bytebureau/i18n'
+import { decodeEventPayload, type Ask, type EventEnvelope } from '@bytebureau/protocol'
+import type { Bureau } from '../bureau/bureau.js'
+import type { Context } from '../context.js'
+import { describeError } from '../errors.js'
+import { promptAsk } from '../render/ask-prompt.js'
+import { completionLine, readOrSkip, summarizeRun } from '../render/transcript.js'
+import { EXIT_REFUSED, report, show, type Outcome } from './run-output.js'
+
+const EXIT_COMPLETED = 0
+const EXIT_STOPPED = 3
+
+// The event of a session that is ready again: it ends the follow of a turn that was interrupted, when no stop or error comes
+const READY = 'session.ready'
+
+// The first of them stops the session, and one of another kind after it does nothing; the second of a kind ends the process as it would without the run
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+type Output = Context['output']
+
+// How a follow ends, and what it follows
+export interface Ends {
+  // The types of the events that end it; a turn that was interrupted ends where the session next says what became of it
+  readonly terminal: ReadonlySet<string>
+  // Whether the end of the turn completes the session: a run is one turn, a prompt leaves the session ready for the next
+  readonly completes: boolean
+  // Whether the events of the turn the prompt begins are all it follows: a session that has had turns before has their events too
+  readonly turnOnly: boolean
+}
+
+// What follows a session: the Bureau it asks, the person it asks for an answer, and how it ends
+export interface Following {
+  readonly bureau: Bureau
+  readonly session: { readonly id: string }
+  readonly context: Context
+  readonly yes: boolean
+  readonly ends: Ends
+}
+
+// The events shown, and the one that ended the follow; none when the events ran out first
+export interface Followed {
+  readonly seen: readonly EventEnvelope[]
+  readonly end: EventEnvelope | undefined
+}
+
+// An ask nobody can answer is left to the kernel policy; the person is told the session waits
+async function answerAsk({ bureau, yes, context }: Following, ask: Ask): Promise<void> {
+  const answer = await promptAsk(ask, { yes, interactive: context.interactive })
+  if (answer === undefined) {
+    context.output.warn(m.run_ask_waiting({ title: ask.title }))
+    return
+  }
+  await bureau.asks.answer(ask.id, answer)
+}
+
+// The ask of an ask.requested event, if its payload fits
+function askOf(event: EventEnvelope, output: Output): Ask | undefined {
+  return readOrSkip(event, output, () => decodeEventPayload('ask.requested', event.payload).ask)
+}
+
+// Besides showing an event the CLI answers an ask, and completes the session once its turn is over, where that is its end
+async function react(run: Following, event: EventEnvelope): Promise<void> {
+  const ask = event.type === 'ask.requested' ? askOf(event, run.context.output) : undefined
+  if (ask !== undefined) {
+    await answerAsk(run, ask)
+  }
+  if (event.type === 'turn.completed' && run.ends.completes) {
+    await run.bureau.sessions.complete(run.session.id)
+  }
+}
+
+// An interrupted turn is no end by itself: the session says next what became of it, ready again, stopped or errored
+// Whoever interrupted the turn or stopped the session, this process by a signal or another command, the events tell the same
+function isEnd({ ends }: Following, event: EventEnvelope, interrupted: boolean): boolean {
+  return ends.terminal.has(event.type) || (interrupted && event.type === READY)
+}
+
+// The events up to the end of the follow, which is the last one shown
+async function follow(run: Following, events: AsyncIterable<EventEnvelope>): Promise<Followed> {
+  const seen: EventEnvelope[] = []
+  let interrupted = false
+  for await (const event of events) {
+    seen.push(event)
+    show(event, run.context)
+    await react(run, event)
+    interrupted ||= event.type === 'turn.interrupted'
+    if (isEnd(run, event, interrupted)) {
+      return { seen, end: event }
+    }
+  }
+  return { seen, end: undefined }
+}
+
+// A stop that fails is only reported; the same signal again ends the process
+async function stopSession({ bureau, session, context }: Following): Promise<void> {
+  try {
+    await bureau.sessions.stop(session.id)
+  } catch (error) {
+    context.output.warn(describeError(error))
+  }
+}
+
+// Ctrl-C, SIGTERM and SIGHUP stop the session alike, once; the result is a release that removes the listeners and waits for the stop
+function stopOnSignals(run: Following): () => Promise<void> {
+  let stopping = Promise.resolve()
+  let stopped = false
+  const stop = (): void => {
+    if (!stopped) {
+      stopped = true
+      stopping = stopSession(run)
+    }
+  }
+  for (const signal of STOP_SIGNALS) {
+    process.once(signal, stop)
+  }
+  return async () => {
+    for (const signal of STOP_SIGNALS) {
+      process.off(signal, stop)
+    }
+    await stopping
+  }
+}
+
+// The events of one turn: those it owns, and those of the session that end a follow, which no turn owns
+// A stop or an error from before the turn began is no end of it, so the session's events count only once it has
+async function* ofTurn(
+  events: AsyncIterable<EventEnvelope>,
+  turnId: string,
+  terminal: ReadonlySet<string>,
+): AsyncGenerator<EventEnvelope> {
+  let begun = false
+  for await (const event of events) {
+    const owned = event.turnId === turnId
+    begun ||= owned
+    const sessionEnd = terminal.has(event.type) || event.type === READY
+    if (owned || (begun && event.turnId === undefined && sessionEnd)) {
+      yield event
+    }
+  }
+}
+
+// Prompts the session and follows its events to the end of the follow
+// A signal stops the session; the events then say so and the follow ends with the exit code of a stopped one
+// The children of the kernel run detached, so the terminal does not reach them: only the stop does
+export async function promptAndFollow(run: Following, text: string): Promise<Followed> {
+  const { bureau, session, ends } = run
+  const subscription = new AbortController()
+  const release = stopOnSignals(run)
+  try {
+    // The ephemeral events (text deltas) carry no seq of their own and no transcript line
+    const filter = { sessionId: session.id, since: 0, ephemeral: false }
+    const events = bureau.events.subscribe(filter, subscription.signal)
+    const turn = await bureau.sessions.prompt(session.id, { text })
+    return await follow(run, ends.turnOnly ? ofTurn(events, turn.id, ends.terminal) : events)
+  } finally {
+    subscription.abort()
+    await release()
+  }
+}
+
+// The reason of an errored session; the type of the event stands in for a payload that cannot be read
+function reasonOf(last: EventEnvelope, output: Output): string {
+  const reason = readOrSkip(last, output, () => decodeEventPayload('session.errored', last.payload))
+  return reason === undefined ? last.type : reason.message
+}
+
+// The summary is built only for the words that are printed: JSON output has none
+function outcomeOf(end: EventEnvelope, seen: readonly EventEnvelope[], output: Output): Outcome {
+  switch (end.type) {
+    case 'session.stopped': {
+      return { code: EXIT_STOPPED, text: m.run_stopped() }
+    }
+    case READY: {
+      return { code: EXIT_STOPPED, text: m.run_interrupted() }
+    }
+    case 'session.errored': {
+      return { code: EXIT_REFUSED, text: m.run_errored({ message: reasonOf(end, output) }) }
+    }
+    default: {
+      return {
+        code: EXIT_COMPLETED,
+        text: output.json ? '' : completionLine(summarizeRun(seen, output)),
+      }
+    }
+  }
+}
+
+export function conclude({ seen, end }: Followed, context: Context): number {
+  if (end === undefined) {
+    throw new Error('the events ended before the session did')
+  }
+  const outcome = outcomeOf(end, seen, context.output)
+  report(outcome, context)
+  return outcome.code
+}
+```
+
+`apps/bytebureau/src/render/rows.ts` (as shipped):
+
+```ts
+import { m } from '@bytebureau/i18n'
+import type { AskRecord, PluginStatusDto, SessionDto } from '@bytebureau/protocol'
+import { flat } from './tables.js'
+
+// The rows a listing is told in, for table(): one row to a record, a cell to each of its columns
+
+export const sessionRows = (sessions: readonly SessionDto[]): string[][] =>
+  sessions.map((session) => [session.id, session.status, session.title, session.projectId])
+
+// The fields of one session: a label and a value to each; a session that has no worktree yet has a dash
+export const sessionFields = (session: SessionDto): string[][] => [
+  ['id', session.id],
+  ['status', session.status],
+  ['title', session.title],
+  ['project', session.projectId],
+  ['employee', session.employee.id],
+  ['provider', session.providerId],
+  ['worktree', session.workspace === null ? '-' : session.workspace.path],
+  ['created', session.createdAt],
+]
+
+// What the agent recommends, as the labels of the recommended options of all the questions
+const recommendedOf = (ask: AskRecord): string =>
+  ask.questions
+    .flatMap((question) =>
+      question.options.filter((option) => option.recommended).map((option) => option.label),
+    )
+    .join(', ')
+
+export const askRows = (asks: readonly AskRecord[]): string[][] =>
+  asks.map((ask) => [ask.id, ask.sessionId, ask.title, recommendedOf(ask)])
+
+// The asks that wait for an answer to a session, a line to each: the title of an ask may hold the lines of a command
+export const pendingAskLines = (asks: readonly AskRecord[]): string[] =>
+  asks.map((ask) => m.sessions_pending_ask({ id: ask.id, title: flat(ask.title) }))
+
+// A plugin that failed to load tells why in place of its ports
+export const pluginRows = (plugins: readonly PluginStatusDto[]): string[][] =>
+  plugins.map((plugin) => [
+    plugin.name,
+    plugin.version,
+    plugin.state,
+    plugin.state === 'failed' ? (plugin.reason ?? '') : plugin.ports.join(','),
+  ])
+```
+
+`apps/bytebureau/src/testing/frames.ts` (as shipped):
+
+```ts
+import { stripVTControlCharacters } from 'node:util'
+import { S_BAR_END, S_BAR_START } from '@clack/prompts'
+
+// The lines that begin with the glyph and the two spaces clack puts after it; the ASCII glyphs of TERM=linux turn up inside the words as well (the end of the frame is an em dash)
+function linesStartingWith(text: string, glyph: string): number {
+  const lines = stripVTControlCharacters(text).split('\n')
+  return lines.filter((line) => line.startsWith(`${glyph}  `)).length
+}
+
+// How often the frame of a run was opened and closed on the terminal
+export function frames(text: string): { readonly starts: number; readonly ends: number } {
+  return {
+    starts: linesStartingWith(text, S_BAR_START),
+    ends: linesStartingWith(text, S_BAR_END),
+  }
+}
+```
+
+`apps/bytebureau/src/testing/session-bench.ts` (as shipped):
+
+```ts
+import { setTimeout as sleep } from 'node:timers/promises'
+import { startDaemonProcess, type DaemonProcess } from './daemon.js'
+import { firstField, firstId, jsonLines, listedUnder } from './json-lines.js'
+import { runCli, type CliResult } from './run-cli.js'
+import { NO_DAEMON, ON_FAKE, PROMPT, SCRIPTED, sessionIdIn, workbench } from './workbench.js'
+
+export const MISSING = '0192f0a0-0000-7000-8000-000000000009'
+
+// The agent of the fake provider waits on its ask, which the stop of a run leaves unanswered
+export const WAITING = '"type":"session.waiting"'
+
+export type Env = Readonly<Record<string, string>>
+
+// The exit code and the line of stderr of a command that is refused
+export async function refusal(
+  args: readonly string[],
+  env: Env,
+): Promise<readonly [number, string]> {
+  const result = await runCli(args, env)
+  return [result.code, result.stderr.trim()]
+}
+
+// The turns that the events a command printed belong to
+export function turnsOf(stdout: string): readonly unknown[] {
+  const turns = jsonLines(stdout)
+    .map((record) => record['turnId'])
+    .filter((turnId) => turnId !== undefined)
+  return [...new Set(turns)]
+}
+
+// A daemon for the home of a test, which the test ends gracefully, and a repository to run on
+export interface Bench {
+  readonly repo: string
+  readonly home: string
+  readonly env: Env
+  readonly daemon: DaemonProcess
+}
+
+export type Session = Bench & { readonly id: string }
+
+export async function benchWithDaemon(variables: Env = {}): Promise<Bench> {
+  const { repo, home } = workbench()
+  const daemon = await startDaemonProcess(home)
+  return { repo, home, env: { BYTEBUREAU_HOME: home, ...variables }, daemon }
+}
+
+// A run of the fake agent to its end: a completed session
+export async function completedSession(): Promise<Session> {
+  const bench = await benchWithDaemon()
+  await runCli(['run', PROMPT, '--project', bench.repo, ...SCRIPTED], bench.env)
+  const id = await sessionIdIn(bench.home, [])
+  return { ...bench, id }
+}
+
+// A run that its signal stops once it has printed the text: a stopped session, and what the run printed
+export async function stoppedSession(
+  variables: Env,
+  afterStdout: string,
+): Promise<Session & { readonly first: CliResult }> {
+  const bench = await benchWithDaemon(variables)
+  const run = ['run', PROMPT, '--project', bench.repo, ...ON_FAKE, '--json']
+  const first = await runCli(run, bench.env, { signal: 'SIGTERM', afterStdout })
+  const id = await sessionIdIn(bench.home, [])
+  return { ...bench, id, first }
+}
+
+export async function resumedSession(): Promise<Session & { readonly first: CliResult }> {
+  const stopped = await stoppedSession({}, WAITING)
+  await runCli(['sessions', 'resume', stopped.id], stopped.env)
+  return stopped
+}
+
+// What `sessions show` tells once the session is in the status; the last look when the deadline passes first
+export async function untilStatus(
+  session: Pick<Session, 'env' | 'id'>,
+  status: string,
+  deadline = Date.now() + 5000,
+): Promise<CliResult> {
+  const shown = await runCli(['sessions', 'show', session.id], session.env)
+  if (new RegExp(`^status\\s+${status}$`, 'mu').test(shown.stdout) || Date.now() >= deadline) {
+    return shown
+  }
+  await sleep(100)
+  return untilStatus(session, status, deadline)
+}
+
+// The kernel announces the end of a turn a moment before the session is ready for the next prompt
+export async function ready(session: Session): Promise<CliResult> {
+  const shown = await untilStatus(session, 'ready')
+  return shown
+}
+
+// What a turn of the slow script prints once it works, which it does until it is stopped
+export const WORKING = '"type":"turn.started"'
+
+// A session of the slow script that was stopped while it worked, and is resumed; the script is kept across the stop
+export async function resumedSlowSession(): Promise<Session> {
+  const session = await stoppedSession({ BYTEBUREAU_FAKE_SCRIPT: 'slow' }, WORKING)
+  await runCli(['sessions', 'resume', session.id], session.env)
+  return session
+}
+
+// A turn of the slow script that a prompt follows, once the session is at work on it
+export async function slowTurn(): Promise<Session & { readonly prompting: Promise<CliResult> }> {
+  const session = await resumedSlowSession()
+  const prompting = runCli(['sessions', 'prompt', session.id, 'go on', '--json'], session.env)
+  await untilStatus(session, 'running')
+  return { ...session, prompting }
+}
+
+// A prompt, once the session is ready for it, followed to the end of its turn
+export async function promptedAgain(session: Session, text: string): Promise<CliResult> {
+  await ready(session)
+  const prompted = await runCli(
+    ['sessions', 'prompt', session.id, text, '--json', '--yes'],
+    session.env,
+  )
+  return prompted
+}
+
+// A run in the process of the command that its signal stops while the agent waits on its ask
+export async function stoppedInProcess(): Promise<{ readonly env: Env; readonly id: string }> {
+  const { repo, home } = workbench()
+  const env = { BYTEBUREAU_HOME: home }
+  const run = ['run', PROMPT, '--project', repo, ...ON_FAKE, '--json', NO_DAEMON]
+  await runCli(run, env, { signal: 'SIGTERM', afterStdout: WAITING })
+  const id = await sessionIdIn(home)
+  return { env, id }
+}
+
+// The stdout of `ask ls --json` once an ask waits; the last one when the deadline passes first
+async function asksWaiting(env: Env, deadline: number): Promise<string> {
+  const listed = await runCli(['ask', 'ls', '--json'], env)
+  if (listedUnder(listed.stdout, 'asks').length > 0 || Date.now() >= deadline) {
+    return listed.stdout
+  }
+  await sleep(200)
+  return asksWaiting(env, deadline)
+}
+
+// A run that waits on the ask of the fake agent: off a terminal and without --yes it leaves the ask to another command
+export interface Waiting {
+  readonly env: Env
+  readonly daemon: DaemonProcess
+  readonly run: Promise<CliResult>
+  // What `ask ls --json` told once the ask was there
+  readonly listed: string
+  // The ask it waits on, and the session it belongs to
+  readonly id: string
+  readonly sessionId: string
+}
+
+// The output of the run is its events as JSON lines unless the flags say otherwise
+export async function waitingRun(output: readonly string[] = ['--json']): Promise<Waiting> {
+  const { repo, env, daemon } = await benchWithDaemon()
+  const run = runCli(['run', PROMPT, '--project', repo, ...ON_FAKE, ...output], env)
+  const listed = await asksWaiting(env, Date.now() + 15_000)
+  const sessionId = firstField(listed, 'asks', 'sessionId')
+  return { env, daemon, run, listed, id: firstId(listed, 'asks'), sessionId }
+}
+
+// The ask is answered with --yes, and the run goes on to its end
+export async function finished({ env, run, id }: Waiting): Promise<CliResult> {
+  await runCli(['ask', 'answer', id, '--yes'], env)
+  const result = await run
+  return result
+}
+```
+
+`apps/bytebureau/src/render/rows.test.ts` (as shipped):
+
+```ts
+import type { SessionDto } from '@bytebureau/protocol'
+import { describe, expect, it } from 'vitest'
+import { askOf, option, question } from '../testing/events.js'
+import { ASK, SESSION } from '../testing/records.js'
+import { askRows, pendingAskLines, pluginRows, sessionFields, sessionRows } from './rows.js'
+
+// A session whose worktree is not made yet: the wire tells it as null, which JSON text keeps out of the CLI sources
+function withoutWorktree(session: SessionDto): SessionDto {
+  const bare = { ...session }
+  Reflect.set(bare, 'workspace', JSON.parse('null'))
+  return bare
+}
+
+describe(sessionRows, () => {
+  it('has the id, the status, the title and the project of every session', () => {
+    expect(sessionRows([SESSION])).toStrictEqual([['s1', 'ready', 'Fix the build', 'p1']])
+    expect(sessionRows([])).toStrictEqual([])
+  })
+})
+
+describe(sessionFields, () => {
+  it('labels the fields of a session, down to the path of its worktree', () => {
+    expect(sessionFields(SESSION)).toStrictEqual([
+      ['id', 's1'],
+      ['status', 'ready'],
+      ['title', 'Fix the build'],
+      ['project', 'p1'],
+      ['employee', 'developer'],
+      ['provider', 'fake'],
+      ['worktree', '/repo/.bytebureau/worktrees/s1'],
+      ['created', '2026-10-02T12:00:00.000Z'],
+    ])
+  })
+
+  it('has a dash for the worktree of a session that has none yet', () => {
+    const fields = sessionFields(withoutWorktree({ ...SESSION, status: 'created' }))
+    expect(fields).toContainEqual(['worktree', '-'])
+  })
+})
+
+// An ask of the fixtures, with the questions it asks
+function asking(...questions: ReturnType<typeof question>[]): typeof ASK {
+  return { ...ASK, ...askOf(questions) }
+}
+
+describe(askRows, () => {
+  it('has the id, the session, the title and the recommended option of every ask', () => {
+    const options = [option('a', false), option('b', true)]
+    const rows = askRows([asking(question(options))])
+    expect(rows).toStrictEqual([['a1', 's1', 'Export style', 'Option b']])
+  })
+
+  it('lists the recommended options of every question, and none for an ask that recommends nothing', () => {
+    const several = asking(question([option('a', true)]), question([option('b', true)]))
+    const none = asking(question([option('a', false)]))
+    expect(askRows([several, none])).toStrictEqual([
+      ['a1', 's1', 'Export style', 'Option a, Option b'],
+      ['a1', 's1', 'Export style', ''],
+    ])
+  })
+})
+
+describe(pluginRows, () => {
+  it('has the name, the version, the state and the ports of a plugin, which are joined', () => {
+    const loaded = {
+      name: 'agent-fake',
+      version: '0.1.0',
+      state: 'loaded',
+      ports: ['a', 'b'],
+    } as const
+    expect(pluginRows([loaded])).toStrictEqual([['agent-fake', '0.1.0', 'loaded', 'a,b']])
+  })
+
+  it('has the reason of a plugin that failed in place of its ports', () => {
+    const failed = {
+      name: 'broken',
+      version: '1.0.0',
+      state: 'failed',
+      ports: [],
+      reason: 'no hostApi',
+    } as const
+    const nothing = { name: 'odd', version: '1.0.0', state: 'failed', ports: [] } as const
+    expect(pluginRows([failed, nothing])).toStrictEqual([
+      ['broken', '1.0.0', 'failed', 'no hostApi'],
+      ['odd', '1.0.0', 'failed', ''],
+    ])
+  })
+})
+
+describe(pendingAskLines, () => {
+  it('tells every ask on a line of its own, and its title on that one line', () => {
+    const permission = { ...ASK, id: 'a2', title: 'Run:\n  ls -l\r\n  pwd' }
+    expect(pendingAskLines([ASK, permission])).toStrictEqual([
+      'Waiting for your answer: Export style (a1)',
+      'Waiting for your answer: Run: ls -l pwd (a2)',
+    ])
+  })
+})
+```
+
+`apps/bytebureau/src/commands/sessions-prompt.test.ts` (as shipped):
+
+```ts
+import { SessionError, WorkspaceError } from '@bytebureau/kernel'
+import { describe, expect, it } from 'vitest'
+import { askOf, event, inTurn, option, question } from '../testing/events.js'
+import { frames } from '../testing/frames.js'
+import { problemError } from '../testing/records.js'
+import {
+  captureConsole,
+  captureTerminal,
+  contextOf,
+  ERRORED,
+  rejecting,
+  scripted,
+  STOPPED,
+} from '../testing/scripted-kernel.js'
+import { promptSession, type PromptOptions } from './sessions-prompt.js'
+
+const PROMPT: PromptOptions = { id: 's1', text: 'And again', yes: false }
+
+// The scripted Bureau answers a prompt with the turn u1; u0 is the turn before it
+const USAGE = { inputTokens: 10, outputTokens: 5 }
+const FIRST_TURN = [
+  inTurn('u0', event('message.user', { text: 'First' }, 1)),
+  inTurn(
+    'u0',
+    event(
+      'turn.completed',
+      { turnId: 'u0', index: 0, status: 'completed', stopReason: 'end_turn', usage: USAGE },
+      2,
+    ),
+  ),
+]
+// A session that was stopped, and resumed, between the turns
+const STOP_BETWEEN = [
+  event('session.stopped', { status: 'stopped' }, 3),
+  event('session.resumed', { status: 'ready' }, 4),
+]
+const RUNNING = event('session.running', { status: 'running' }, 5)
+const ASKED = inTurn('u1', event('message.user', { text: 'And again' }, 6))
+const WORKING = inTurn(
+  'u1',
+  event('turn.started', { turnId: 'u1', index: 1, status: 'running' }, 7),
+)
+const SAID = inTurn(
+  'u1',
+  event('message.assistant.completed', { text: 'Fixed it', content: [] }, 8),
+)
+const DONE = inTurn(
+  'u1',
+  event(
+    'turn.completed',
+    { turnId: 'u1', index: 1, status: 'completed', stopReason: 'end_turn', usage: USAGE },
+    9,
+  ),
+)
+const INTERRUPTED = inTurn(
+  'u1',
+  event('turn.interrupted', { turnId: 'u1', index: 1, status: 'interrupted' }, 9),
+)
+const CRASHED = inTurn(
+  'u1',
+  event('turn.interrupted', { turnId: 'u1', index: 1, status: 'errored' }, 9),
+)
+
+const READY = event('session.ready', { status: 'ready' }, 10)
+const CANCELLED = inTurn('u1', event('ask.cancelled', { askId: 'a1' }, 9))
+
+const BEGUN = [RUNNING, ASKED, WORKING]
+const HISTORY = [...FIRST_TURN, ...STOP_BETWEEN]
+
+describe(promptSession, () => {
+  it('prompts the session and follows its new turn only, which leaves the session ready', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, calls } = scripted([...HISTORY, ...BEGUN, SAID, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(0)
+    expect(calls).toStrictEqual([
+      'subscribe {"sessionId":"s1","since":0,"ephemeral":false}',
+      'prompt s1 And again',
+    ])
+    expect(printed.out()).toStrictEqual([
+      'The employee is working…',
+      'Fixed it',
+      'Done — turns: 1, input tokens: 10, output tokens: 5',
+    ])
+  })
+
+  it('prints the events of that turn as JSON lines, and nothing of the turns before it', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...HISTORY, ...BEGUN, SAID, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf(true))).resolves.toBe(0)
+    const turn = [ASKED, WORKING, SAID, DONE]
+    expect(printed.out()).toStrictEqual(turn.map((each) => JSON.stringify(each)))
+    expect(printed.err()).toStrictEqual([])
+  })
+
+  it('takes no stop or error of an earlier day for the end of the turn', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const earlier = [...HISTORY, ERRORED, STOPPED]
+    const { bureau } = scripted([...earlier, ...BEGUN, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(0)
+    expect(printed.err()).toStrictEqual([])
+  })
+
+  it('subscribes with a signal of its own and aborts it once the turn has ended', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const script = scripted([...BEGUN, DONE])
+    await promptSession(script.bureau, PROMPT, contextOf())
+    expect(script.signals).toHaveLength(1)
+    expect(script.signals[0]).toMatchObject({ aborted: true })
+  })
+})
+
+describe('promptSession when the turn is interrupted', () => {
+  it('exits 3 and says so, once the session is ready again', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, READY])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(3)
+    expect(printed.out()).toStrictEqual(['The employee is working…', 'Turn interrupted'])
+  })
+
+  it('does not end at the interrupted turn: what comes before its session says what became of it is shown', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, CANCELLED, READY])
+    await promptSession(bureau, PROMPT, contextOf(true))
+    const shown = [ASKED, WORKING, INTERRUPTED, CANCELLED, READY]
+    expect(printed.out()).toStrictEqual(shown.map((each) => JSON.stringify(each)))
+  })
+
+  it('ends with the stop that follows, as a stop by its own signal or by another command makes it', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED, CANCELLED, STOPPED])
+    await expect(promptSession(bureau, PROMPT, contextOf(true))).resolves.toBe(3)
+    expect(printed.out().at(-1)).toBe(JSON.stringify(STOPPED))
+  })
+
+  it('takes a session that is ready for no end unless a turn was interrupted', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, READY, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(0)
+    expect(printed.out().at(-1)).toBe('Done — turns: 1, input tokens: 10, output tokens: 5')
+  })
+
+  it('fails when the events end with the interrupted turn and no word of its session', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau } = scripted([...BEGUN, INTERRUPTED])
+    await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toThrow(
+      'the events ended before the session did',
+    )
+  })
+})
+
+describe('promptSession when the turn does not complete otherwise', () => {
+  it('exits 3 when the session is stopped, which no turn owns', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, STOPPED])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(3)
+    expect(printed.out()).toStrictEqual(['The employee is working…', 'Session stopped'])
+  })
+
+  it('exits 4 and says why when the provider failed, once the errored session tells', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([...BEGUN, CRASHED, ERRORED])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(4)
+    expect(printed.out()).toStrictEqual(['The employee is working…'])
+    expect(printed.err()).toStrictEqual(['The provider failed: the agent died'])
+  })
+
+  it('fails when the events end before the turn does', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau } = scripted([...BEGUN, SAID])
+    await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toThrow(
+      'the events ended before the session did',
+    )
+  })
+
+  it('fails when the events end with a turn that errored and no session to say why', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau } = scripted([...BEGUN, CRASHED])
+    await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toThrow(
+      'the events ended before the session did',
+    )
+  })
+})
+
+describe('promptSession with an ask', () => {
+  const ask = askOf([question([option('yes', true)])])
+  const asked = inTurn('u1', event('ask.requested', { ask }, 8))
+
+  it('answers it with the recommended option when --yes is given', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau, answered } = scripted([...BEGUN, asked, DONE])
+    await promptSession(bureau, { ...PROMPT, yes: true }, contextOf())
+    expect(answered).toStrictEqual([{ askId: 'a1', answer: { selected: ['yes'] } }])
+  })
+
+  it('leaves it to the kernel policy, and says that the session waits, when nobody can answer it', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([...BEGUN, asked, DONE])
+    await expect(promptSession(bureau, PROMPT, contextOf())).resolves.toBe(0)
+    expect(answered).toStrictEqual([])
+    expect(printed.err()).toStrictEqual([
+      'The employee is waiting for your answer to "Export style" (not answered automatically)',
+    ])
+  })
+})
+
+describe('promptSession when the request is refused', () => {
+  const provider = new SessionError({
+    code: 'provider_missing',
+    reason: 'provider "claude" is not available; available: fake',
+  })
+  const worktree = new WorkspaceError({ code: 'git_failed', reason: 'git worktree add failed' })
+  const unprompted = new SessionError({
+    code: 'invalid_transition',
+    reason: 'cannot prompt a completed session',
+  })
+
+  it.each([
+    ['the kernel refuses the provider', provider],
+    ['the kernel refuses the worktree', worktree],
+    ['the kernel refuses a prompt that the session cannot take', unprompted],
+    [
+      'the daemon refuses the worktree',
+      problemError(422, 'workspace_git_failed', 'git worktree add failed'),
+    ],
+    [
+      'the daemon refuses the provider',
+      problemError(422, 'session_provider_missing', 'provider "claude" is not available'),
+    ],
+    [
+      'the daemon does not know the session',
+      problemError(404, 'session_not_found', 'no session s1'),
+    ],
+  ])('passes the refusal on, to be told by the command, when %s', async (_what, refusal) => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([DONE], { prompt: rejecting(refusal) })
+    await expect(promptSession(bureau, PROMPT, contextOf())).rejects.toBe(refusal)
+    expect(printed.err()).toStrictEqual([])
+  })
+})
+
+describe('promptSession at a terminal', () => {
+  it.each([
+    ['a failure that is no refusal', new Error('the store is gone')],
+    ['a refusal', new SessionError({ code: 'not_found', reason: 'session s1 does not exist' })],
+  ])('closes the frame it opened, and lets %s go on', async (_what, failure) => {
+    expect.hasAssertions()
+    captureConsole()
+    const written = captureTerminal()
+    const { bureau } = scripted([DONE], { prompt: rejecting(failure) })
+    await expect(promptSession(bureau, PROMPT, contextOf(false, true))).rejects.toBe(failure)
+    expect(frames(written())).toStrictEqual({ starts: 1, ends: 1 })
+  })
+})
+```
+
+`apps/bytebureau/src/commands/sessions-prompt-daemon.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { jsonLines } from '../testing/json-lines.js'
+import { runCli } from '../testing/run-cli.js'
+import {
+  promptedAgain,
+  ready,
+  resumedSession,
+  resumedSlowSession,
+  slowTurn,
+  stoppedInProcess,
+  stoppedSession,
+  turnsOf,
+  WAITING,
+  WORKING,
+} from '../testing/session-bench.js'
+import { NO_DAEMON } from '../testing/workbench.js'
+
+describe('bytebureau sessions resume and prompt through the daemon', () => {
+  it('resumes a stopped session', async () => {
+    expect.hasAssertions()
+    const session = await stoppedSession({}, WAITING)
+    const stopped = await runCli(['sessions', 'show', session.id], session.env)
+    const resumed = await runCli(['sessions', 'resume', session.id], session.env)
+    const shown = await ready(session)
+    expect(stopped.stdout).toMatch(/^status\s+stopped$/mu)
+    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `Resumed ${session.id}`])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    await session.daemon.stop()
+  })
+
+  it('prompts it again, to the end of the new turn', async () => {
+    expect.hasAssertions()
+    const session = await resumedSession()
+    const prompted = await promptedAgain(session, 'again')
+    expect([prompted.code, jsonLines(prompted.stdout).at(-1)]).toMatchObject([
+      0,
+      { type: 'turn.completed' },
+    ])
+    await session.daemon.stop()
+  })
+
+  it('follows the new turn only: nothing of the turn before it, nor of the stop', async () => {
+    expect.hasAssertions()
+    const session = await resumedSession()
+    const prompted = await promptedAgain(session, 'again')
+    const types = jsonLines(prompted.stdout).map((record) => record['type'])
+    expect(types).toStrictEqual(expect.arrayContaining(['ask.requested', 'ask.answered']))
+    expect(types).not.toContain('session.stopped')
+    expect(turnsOf(prompted.stdout)).toHaveLength(1)
+    expect(turnsOf(prompted.stdout)).not.toStrictEqual(turnsOf(session.first.stdout))
+    await session.daemon.stop()
+  })
+
+  it('leaves the session ready, for any number of prompts, until it is stopped', async () => {
+    expect.hasAssertions()
+    const session = await resumedSession()
+    const second = await promptedAgain(session, 'again')
+    const third = await promptedAgain(session, 'once more')
+    const shown = await ready(session)
+    const turns = [session.first, second, third].flatMap((result) => turnsOf(result.stdout))
+    expect([second.code, third.code]).toStrictEqual([0, 0])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    expect(new Set(turns).size).toBe(3)
+    await session.daemon.stop()
+  })
+})
+
+describe('bytebureau sessions prompt and a signal', () => {
+  it('stops the session on SIGTERM while it follows a prompt, and exits 3 at the stop', async () => {
+    expect.hasAssertions()
+    const session = await resumedSlowSession()
+    const prompt = ['sessions', 'prompt', session.id, 'go on', '--json']
+    const prompted = await runCli(prompt, session.env, { signal: 'SIGTERM', afterStdout: WORKING })
+    const shown = await runCli(['sessions', 'show', session.id], session.env)
+    const types = jsonLines(prompted.stdout).map((record) => record['type'])
+    expect([prompted.code, types.at(-1)]).toStrictEqual([3, 'session.stopped'])
+    expect(types).toContain('turn.interrupted')
+    expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
+    await session.daemon.stop()
+  })
+
+  it('ends with exit code 3 when the turn it follows is interrupted, and the session is ready again', async () => {
+    expect.hasAssertions()
+    const slow = await slowTurn()
+    const interrupted = await runCli(['sessions', 'interrupt', slow.id], slow.env)
+    const prompted = await slow.prompting
+    const shown = await ready(slow)
+    expect([interrupted.code, interrupted.stdout.trim()]).toStrictEqual([
+      0,
+      `Interrupted ${slow.id}`,
+    ])
+    const types = jsonLines(prompted.stdout).map((record) => record['type'])
+    expect([prompted.code, types.slice(-2)]).toStrictEqual([
+      3,
+      ['turn.interrupted', 'session.ready'],
+    ])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    await slow.daemon.stop()
+  })
+
+  it('stops a session that is ready, and tells it in one line', async () => {
+    expect.hasAssertions()
+    const session = await resumedSession()
+    await ready(session)
+    const stopped = await runCli(['sessions', 'stop', session.id], session.env)
+    const shown = await runCli(['sessions', 'show', session.id], session.env)
+    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `Stopped ${session.id}`])
+    expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
+    await session.daemon.stop()
+  })
+})
+
+describe('bytebureau sessions resume and prompt in the process of the command', () => {
+  it('resumes a stopped session', async () => {
+    expect.hasAssertions()
+    const { env, id } = await stoppedInProcess()
+    const resumed = await runCli(['sessions', 'resume', id, NO_DAEMON], env)
+    const shown = await runCli(['sessions', 'show', id, NO_DAEMON], env)
+    expect([resumed.code, resumed.stdout.trim()]).toStrictEqual([0, `Resumed ${id}`])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+  })
+
+  it('prompts a resumed session, and follows the turn to its end', async () => {
+    expect.hasAssertions()
+    const { env, id } = await stoppedInProcess()
+    await runCli(['sessions', 'resume', id, NO_DAEMON], env)
+    const prompt = ['sessions', 'prompt', id, 'again', '--json', '--yes', NO_DAEMON]
+    const prompted = await runCli(prompt, env)
+    expect([prompted.code, jsonLines(prompted.stdout).at(-1)]).toMatchObject([
+      0,
+      { type: 'turn.completed' },
+    ])
+  })
+})
+```
+
+`apps/bytebureau/src/commands/ask-answer.test.ts` (as shipped):
+
+```ts
+import type { AskRecord } from '@bytebureau/protocol'
+import { CANCEL_SYMBOL } from '@clack/prompts'
+import { describe, expect, it } from 'vitest'
+import type { Prompts } from '../render/ask-prompt.js'
+import { askOf, option, question } from '../testing/events.js'
+import { ASK } from '../testing/records.js'
+import { captureConsole, contextOf, keepExitCode, scripted } from '../testing/scripted-kernel.js'
+import { createContext } from '../context.js'
+import { answerAsk, answerOf, optionsOf, type Answering } from './ask-answer.js'
+
+describe(optionsOf, () => {
+  it('reads every --option, spelled apart from its id or with an equals sign', () => {
+    expect(
+      optionsOf(['a1', '--option', 'yes', '--yes', '--option=default', '--option', 'x']),
+    ).toStrictEqual(['yes', 'default', 'x'])
+  })
+
+  it('finds none when none is given, and none after --', () => {
+    expect(optionsOf(['a1', '--other', 'words'])).toStrictEqual([])
+    expect(optionsOf(['a1', '--', '--option', 'yes'])).toStrictEqual([])
+  })
+
+  it('keeps an id that begins with a dash, and leaves out an --option with no id after it', () => {
+    expect(optionsOf(['--option', '-1', '--option'])).toStrictEqual(['-1'])
+  })
+})
+
+const RECOMMENDED = { ...ASK, ...askOf([question([option('yes', true), option('no', false)])]) }
+const UNRECOMMENDED = { ...ASK, ...askOf([question([option('a', false)])], 'none') }
+
+describe(answerOf, () => {
+  const nothing = { options: [], other: undefined, yes: false }
+
+  it('answers with the options the flags name', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, options: ['no', 'yes'] }
+    await expect(answerOf(flags, RECOMMENDED, contextOf())).resolves.toStrictEqual({
+      selected: ['no', 'yes'],
+    })
+  })
+
+  it('answers with the words of the person, over any option', async () => {
+    expect.hasAssertions()
+    const flags = { options: ['yes'], other: 'A barrel file', yes: false }
+    await expect(answerOf(flags, RECOMMENDED, contextOf())).resolves.toStrictEqual({
+      selected: 'other',
+      otherText: 'A barrel file',
+    })
+  })
+
+  it('takes no empty words for an answer', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, other: '' }
+    await expect(answerOf(flags, RECOMMENDED, contextOf())).resolves.toBeUndefined()
+  })
+
+  it('picks the recommended option for --yes, off a terminal as well', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, yes: true }
+    await expect(answerOf(flags, RECOMMENDED, contextOf())).resolves.toStrictEqual({
+      selected: ['yes'],
+    })
+  })
+
+  it('has no answer for an ask nobody can answer: no flag, no terminal, nothing recommended', async () => {
+    expect.hasAssertions()
+    await expect(answerOf(nothing, RECOMMENDED, contextOf())).resolves.toBeUndefined()
+    await expect(
+      answerOf({ ...nothing, yes: true }, UNRECOMMENDED, contextOf()),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// A person at a terminal who cancels whatever they are asked, as with Ctrl-C
+const CANCELLING: Prompts = {
+  select: async () => {
+    await Promise.resolve()
+    return CANCEL_SYMBOL
+  },
+  text: async () => {
+    await Promise.resolve()
+    return CANCEL_SYMBOL
+  },
+}
+
+// A person at a terminal who picks the option of the id
+const picking = (id: string): Prompts => ({
+  select: async () => {
+    await Promise.resolve()
+    return id
+  },
+  text: CANCELLING.text,
+})
+
+const AT_A_TERMINAL = contextOf(false, true)
+
+describe('answerOf with a person at a terminal', () => {
+  const nothing = { options: [], other: undefined, yes: false }
+
+  it('answers with what the person picks', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, prompts: picking('no') }
+    await expect(answerOf(flags, RECOMMENDED, AT_A_TERMINAL)).resolves.toStrictEqual({
+      selected: ['no'],
+    })
+  })
+
+  it('tells that the person cancelled the prompt, which asked them and got no answer', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, prompts: CANCELLING }
+    await expect(answerOf(flags, RECOMMENDED, AT_A_TERMINAL)).resolves.toBe('cancelled')
+  })
+
+  it('has no cancel to tell for --yes, which asks nobody: an ask with no recommendation has no answer', async () => {
+    expect.hasAssertions()
+    const flags = { ...nothing, yes: true, prompts: CANCELLING }
+    await expect(answerOf(flags, UNRECOMMENDED, AT_A_TERMINAL)).resolves.toBeUndefined()
+  })
+})
+
+const PENDING: AskRecord = { ...RECOMMENDED, id: 'a1' }
+const REQUEST: Answering = { id: 'a1', options: [], other: undefined, yes: false }
+
+// An ask that the kernel holds, or none
+const holding = (ask: AskRecord | undefined) => async (): Promise<AskRecord | undefined> => {
+  await Promise.resolve()
+  return ask
+}
+
+describe(answerAsk, () => {
+  it('answers the ask with the flags, and tells so', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(PENDING) })
+    await answerAsk(bureau, { ...REQUEST, options: ['yes'] }, contextOf())
+    expect(answered).toStrictEqual([{ askId: 'a1', answer: { selected: ['yes'] } }])
+    expect([printed.out(), printed.err(), process.exitCode]).toStrictEqual([
+      ['Answered a1'],
+      [],
+      undefined,
+    ])
+  })
+
+  it('ends a prompt that the person cancelled with exit code 1 and no line, and answers nothing', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(PENDING) })
+    await answerAsk(bureau, { ...REQUEST, prompts: CANCELLING }, AT_A_TERMINAL)
+    expect([answered, printed.out(), printed.err()]).toStrictEqual([[], [], []])
+    expect(process.exitCode).toBe(1)
+  })
+})
+
+describe('answerAsk with --yes on an ask that recommends nothing', () => {
+  const unrecommended: AskRecord = {
+    ...PENDING,
+    ...askOf([question([option('a', false)])], 'none'),
+  }
+
+  it.each([
+    ['off a terminal', contextOf()],
+    ['at a terminal, where nobody is asked for it', AT_A_TERMINAL],
+  ])('refuses with its own line, %s', async (_where, context) => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(unrecommended) })
+    await answerAsk(bureau, { ...REQUEST, yes: true, prompts: CANCELLING }, context)
+    expect([answered, process.exitCode]).toStrictEqual([[], 1])
+    expect(printed.err()).toStrictEqual([
+      'Ask a1 has no recommended option; pass --option or --other',
+    ])
+  })
+})
+
+describe('answerAsk in Czech', () => {
+  it('tells that an ask recommends nothing, and what to pass, in the words of the language', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const czech = createContext({ json: false, color: false, yes: true, lang: 'cs' }, {}, false)
+    const unrecommended: AskRecord = {
+      ...PENDING,
+      ...askOf([question([option('a', false)])], 'none'),
+    }
+    const { bureau } = scripted([], { getAsk: holding(unrecommended) })
+    await answerAsk(bureau, { ...REQUEST, yes: true }, czech)
+    expect(printed.err()).toStrictEqual([
+      'Otázka a1 nemá doporučenou volbu; zadejte --option nebo --other',
+    ])
+  })
+})
+
+describe('answerAsk when there is no answer', () => {
+  it('refuses when there is nobody to ask and nothing in the flags', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(PENDING) })
+    await answerAsk(bureau, REQUEST, contextOf())
+    expect([answered, process.exitCode]).toStrictEqual([[], 1])
+    expect(printed.err()).toStrictEqual(['Ask a1 needs --option or --other outside a terminal'])
+  })
+
+  it.each([
+    ['an ask that is not there', undefined],
+    ['an ask that is answered already', { ...PENDING, status: 'answered' } as const],
+  ])('refuses %s', async (_what, held) => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(held) })
+    await answerAsk(bureau, { ...REQUEST, yes: true }, contextOf())
+    expect([answered, process.exitCode]).toStrictEqual([[], 1])
+    expect(printed.err()).toStrictEqual(['Ask a1 is not pending'])
+  })
+
+  it('tells the answer as a JSON record when the output is machine-readable', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau } = scripted([], { getAsk: holding(PENDING) })
+    await answerAsk(bureau, { ...REQUEST, other: 'A barrel file' }, contextOf(true))
+    const answer = { selected: 'other', otherText: 'A barrel file' }
+    expect(printed.out()).toStrictEqual([
+      JSON.stringify({ command: 'ask.answer', id: 'a1', answer }),
+    ])
+  })
+})
+```
+
+`apps/bytebureau/src/commands/refusable.test.ts` (as shipped):
+
+```ts
+import { ApiError } from '@bytebureau/client'
+import {
+  AskError,
+  ConfigError,
+  ProviderError,
+  SessionError,
+  StoreError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
+import { describe, expect, it } from 'vitest'
+import type { Bureau } from '../bureau/bureau.js'
+import { createContext, type Context } from '../context.js'
+import { projectsStub, refusingStub } from '../testing/health-stub.js'
+import { problemError } from '../testing/records.js'
+import { captureConsole, contextOf, keepExitCode, rejecting } from '../testing/scripted-kernel.js'
+import { testHome } from '../testing/temp-repo.js'
+import { refusable, withBureauRefusable } from './refusable.js'
+
+const succeeding = async (): Promise<string> => {
+  await Promise.resolve()
+  return 'done'
+}
+
+describe(refusable, () => {
+  it('gives the result of the work and says nothing when it succeeds', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    await expect(refusable(contextOf(), succeeding)).resolves.toBe('done')
+    expect([printed.out(), printed.err(), process.exitCode]).toStrictEqual([[], [], undefined])
+  })
+
+  it.each([
+    [404, 'session_not_found', 'session s1 is not running'],
+    [409, 'session_invalid_transition', 'cannot stop a completed session'],
+    [422, 'ask_invalid_answer', 'ask a1 has no option nope'],
+  ])('tells the detail of a %d problem and ends with exit code 1', async (status, code, detail) => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const work = rejecting(problemError(status, code, detail))
+    await expect(refusable(contextOf(), work)).resolves.toBeUndefined()
+    expect([printed.err(), printed.out(), process.exitCode]).toStrictEqual([[detail], [], 1])
+  })
+
+  it('tells the refusal as a JSON record on stderr when the output is machine-readable', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    await refusable(contextOf(true), rejecting(problemError(409, 'x', 'it is taken')))
+    expect(printed.err()).toStrictEqual([JSON.stringify({ level: 'warn', message: 'it is taken' })])
+  })
+})
+
+describe('refusable and the kernel in the process of the command', () => {
+  it.each([
+    [
+      'a session',
+      new SessionError({ code: 'invalid_transition', reason: 'cannot prompt a completed session' }),
+    ],
+    ['an ask', new AskError({ code: 'not_pending', reason: 'ask a1 is answered' })],
+    [
+      'a provider that is missing',
+      new ProviderError({
+        kind: 'missing',
+        reason: 'provider "claude" is not available; available: fake',
+        retryable: false,
+      }),
+    ],
+    [
+      'a workspace',
+      new WorkspaceError({ code: 'has_sessions', reason: 'project repo still has 1 session' }),
+    ],
+  ])(
+    'tells the reason of the kernel refusing %s, and ends with exit code 1',
+    async (_what, refusal) => {
+      expect.hasAssertions()
+      keepExitCode()
+      const printed = captureConsole()
+      await expect(refusable(contextOf(), rejecting(refusal))).resolves.toBeUndefined()
+      expect([printed.err(), process.exitCode]).toStrictEqual([[refusal.reason], 1])
+    },
+  )
+})
+
+describe('refusable and what the kernel says in its own way', () => {
+  it('tells an invalid configuration as the daemon does: the file and the pointer, then the reason', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const invalid = new ConfigError({
+      file: 'bytebureau.json',
+      pointer: '/employees/developer',
+      reason: 'provider is required',
+    })
+    await expect(refusable(contextOf(), rejecting(invalid))).resolves.toBeUndefined()
+    expect(printed.err()).toStrictEqual([
+      'bytebureau.json/employees/developer: provider is required',
+    ])
+    expect(process.exitCode).toBe(1)
+  })
+
+  it('tells a reason that spans lines as one line', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const git = new WorkspaceError({
+      code: 'git_failed',
+      reason: 'git failed\nhint: commit first\n',
+    })
+    await refusable(contextOf(), rejecting(git))
+    expect(printed.err()).toStrictEqual(['git failed; hint: commit first'])
+  })
+})
+
+describe('refusable and the failures that are no refusal', () => {
+  it.each([
+    [
+      'a problem of the daemon that is its own failure',
+      problemError(500, 'internal', 'unexpected'),
+    ],
+    ['a provider that failed behind the daemon', problemError(502, 'provider_crash', 'it exited')],
+    ['a daemon that cannot be reached', new ApiError(0, undefined, 'http://127.0.0.1:9/api/v1/x')],
+    [
+      'an answer that is no problem',
+      new ApiError(404, undefined, 'http://127.0.0.1:4747/api/v1/x'),
+    ],
+    [
+      'a provider that crashed',
+      new ProviderError({ kind: 'crash', reason: 'it', retryable: true }),
+    ],
+    [
+      'a provider that is not logged in',
+      new ProviderError({ kind: 'auth', reason: 'it', retryable: false }),
+    ],
+    ['the store of the kernel', new StoreError({ cause: new Error('disk full') })],
+    ['any other error', new Error('boom')],
+  ])('passes %s on and leaves the exit code alone', async (_what, failure) => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    await expect(refusable(contextOf(), rejecting(failure))).rejects.toBe(failure)
+    expect([printed.err(), process.exitCode]).toStrictEqual([[], undefined])
+  })
+})
+
+// The context of a command on the home: never the home of the person who runs the tests
+const contextIn = (home: string): Context =>
+  createContext({ json: false, color: false, yes: false }, { BYTEBUREAU_HOME: home }, false)
+
+const projectsOf = async (bureau: Bureau): Promise<unknown> => {
+  const projects = await bureau.projects.list()
+  return projects
+}
+
+describe(withBureauRefusable, () => {
+  it('opens the Bureau of the flags for the work, and gives what the work gives', async () => {
+    expect.hasAssertions()
+    const stub = await projectsStub()
+    const flags = { daemon: true, host: '127.0.0.1', port: stub.port }
+    const context = contextIn(testHome())
+    await expect(withBureauRefusable(context, flags, projectsOf)).resolves.toStrictEqual([])
+  })
+
+  it('tells the problem the daemon refuses the request of the work with, and ends with exit code 1', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const port = await refusingStub(409, 'project_locked', 'the project is locked')
+    const printed = captureConsole()
+    const flags = { daemon: true, host: '127.0.0.1', port }
+    const result = await withBureauRefusable(contextIn(testHome()), flags, projectsOf)
+    expect([result, printed.err(), process.exitCode]).toStrictEqual([
+      undefined,
+      ['the project is locked'],
+      1,
+    ])
+  })
+})
+```
+
+`apps/bytebureau/src/commands/refusals.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { refusingStub } from '../testing/health-stub.js'
+import { runCli } from '../testing/run-cli.js'
+import { testHome } from '../testing/temp-repo.js'
+
+// Every command that talks to a daemon, run aside: it has exit codes of its own
+const COMMANDS: readonly (readonly [string, readonly string[]])[] = [
+  ['projects ls', ['projects', 'ls']],
+  ['projects add', ['projects', 'add', 'somewhere']],
+  ['projects rm', ['projects', 'rm', 'p1']],
+  ['workspaces ls', ['workspaces', 'ls']],
+  ['workspaces prune', ['workspaces', 'prune']],
+  ['sessions ls', ['sessions', 'ls']],
+  ['sessions show', ['sessions', 'show', 's1']],
+  ['sessions interrupt', ['sessions', 'interrupt', 's1']],
+  ['sessions stop', ['sessions', 'stop', 's1']],
+  ['sessions resume', ['sessions', 'resume', 's1']],
+  ['sessions prompt', ['sessions', 'prompt', 's1', 'go']],
+  ['ask ls', ['ask', 'ls']],
+  ['ask answer', ['ask', 'answer', 'a1', '--yes']],
+  ['plugins ls', ['plugins', 'ls']],
+  ['the bare status', []],
+]
+
+describe('a request that the daemon refuses with a 4xx problem', () => {
+  it.each(COMMANDS)(
+    'ends %s with exit code 1 and the detail of the problem',
+    async (_name, command) => {
+      expect.hasAssertions()
+      const port = await refusingStub(409, 'locked', 'the daemon says no')
+      const daemon = ['--host', '127.0.0.1', '--port', String(port)]
+      const refused = await runCli([...command, ...daemon], { BYTEBUREAU_HOME: testHome() })
+      expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, 'the daemon says no'])
+    },
+  )
+})
+
+// The problems that a run ends with exit code 4: the exit code of a prompt of an existing session is 1 for them, as for any other command
+const RUN_REFUSALS = [
+  ['workspace_git_failed', 'git worktree add failed'],
+  ['session_provider_missing', 'provider "claude" is not available'],
+  ['provider_missing', 'provider "claude" is not available'],
+] as const
+
+describe('a request that the daemon refuses with a problem that a run ends with exit code 4', () => {
+  it.each(RUN_REFUSALS)(
+    'ends sessions prompt with exit code 1 and the detail for %s',
+    async (code, detail) => {
+      expect.hasAssertions()
+      const port = await refusingStub(422, code, detail)
+      const command = [
+        'sessions',
+        'prompt',
+        's1',
+        'go',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(port),
+      ]
+      const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
+      expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, detail])
+    },
+  )
+
+  it.each(RUN_REFUSALS)(
+    'still ends run with exit code 4, which is its own contract, for %s',
+    async (code, detail) => {
+      expect.hasAssertions()
+      const port = await refusingStub(422, code, detail)
+      const command = [
+        'run',
+        'go',
+        '--project',
+        '/somewhere',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(port),
+      ]
+      const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
+      expect([refused.code, refused.stderr.trim()]).toStrictEqual([4, `${detail} (${code})`])
+    },
+  )
+})
+```
+
+`apps/bytebureau/src/commands/run-daemon-stops.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { jsonLines } from '../testing/json-lines.js'
+import { runCli } from '../testing/run-cli.js'
+import { untilStatus, waitingRun } from '../testing/session-bench.js'
+
+// The last line a command printed
+function lastLine(stdout: string): string | undefined {
+  return stdout.trim().split('\n').at(-1)
+}
+
+describe('bytebureau run when another command interrupts its turn', () => {
+  it('ends with exit code 3 and the line that the turn was interrupted, and the session is ready', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const interrupted = await runCli(['sessions', 'interrupt', sessionId], env)
+    const run = await waiting.run
+    const shown = await untilStatus({ env, id: sessionId }, 'ready')
+    expect([interrupted.code, interrupted.stdout.trim()]).toStrictEqual([
+      0,
+      `Interrupted ${sessionId}`,
+    ])
+    expect([run.code, lastLine(run.stdout)]).toStrictEqual([3, 'Turn interrupted'])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    await waiting.daemon.stop()
+  })
+
+  it('leaves the session ready in the listing as well, for another prompt', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    await runCli(['sessions', 'interrupt', sessionId], env)
+    await waiting.run
+    await untilStatus({ env, id: sessionId }, 'ready')
+    const listed = await runCli(['sessions', 'ls'], env)
+    expect(listed.stdout.trim().split('  ').slice(0, 2)).toStrictEqual([sessionId, 'ready'])
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau sessions interrupt, stop and resume in Czech', () => {
+  it('tells that the turn is interrupted with the verb of the action', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const interrupted = await runCli(['sessions', 'interrupt', sessionId, '--lang', 'cs'], env)
+    await waiting.run
+    expect(interrupted.stdout.trim()).toBe(`Přerušeno: ${sessionId}`)
+    await waiting.daemon.stop()
+  })
+
+  it('tells that the session is stopped, and that it is resumed', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const stopped = await runCli(['sessions', 'stop', sessionId, '--lang', 'cs'], env)
+    await waiting.run
+    const resumed = await runCli(['sessions', 'resume', sessionId, '--lang', 'cs'], env)
+    expect(stopped.stdout.trim()).toBe(`Zastaveno: ${sessionId}`)
+    expect(resumed.stdout.trim()).toBe(`Obnoveno: ${sessionId}`)
+    await waiting.daemon.stop()
+  })
+})
+
+describe('bytebureau run when another command stops its session', () => {
+  it('ends with exit code 3 and the line that the session was stopped', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun([])
+    const { env, sessionId } = waiting
+    const stopped = await runCli(['sessions', 'stop', sessionId], env)
+    const run = await waiting.run
+    expect([stopped.code, stopped.stdout.trim()]).toStrictEqual([0, `Stopped ${sessionId}`])
+    expect([run.code, lastLine(run.stdout)]).toStrictEqual([3, 'Session stopped'])
+    await waiting.daemon.stop()
+  })
+
+  it('ends with the stop in its events as well, as JSON lines', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    await runCli(['sessions', 'stop', waiting.sessionId], waiting.env)
+    const run = await waiting.run
+    const types = jsonLines(run.stdout).map((record) => record['type'])
+    expect(run.code).toBe(3)
+    expect(types.slice(-3)).toStrictEqual(['turn.interrupted', 'ask.cancelled', 'session.stopped'])
+    await waiting.daemon.stop()
+  })
+})
+```
+
+`apps/bytebureau/src/commands/run-session-interrupted.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import {
+  captureConsole,
+  COMPLETED,
+  contextOf,
+  OPTIONS,
+  READY,
+  scripted,
+  STOPPED,
+  TURN_DONE,
+  TURN_INTERRUPTED,
+} from '../testing/scripted-kernel.js'
+import { runSession } from './run-session.js'
+
+describe('runSession when another command interrupts the turn', () => {
+  it('exits 3 and says that the turn was interrupted, once the session is ready again', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, calls } = scripted([TURN_INTERRUPTED, READY])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(3)
+    expect(printed.out()).toStrictEqual(['Turn interrupted'])
+    expect(calls).not.toContain('complete s1')
+  })
+
+  it('does not end at the interrupted turn: the events that come before its session says what became of it are shown', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([TURN_INTERRUPTED, READY])
+    await runSession(bureau, OPTIONS, contextOf(true))
+    expect(printed.out()).toStrictEqual([JSON.stringify(TURN_INTERRUPTED), JSON.stringify(READY)])
+  })
+
+  it('fails when the events end with the interrupted turn and no word of its session', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const { bureau } = scripted([TURN_INTERRUPTED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).rejects.toThrow(
+      'the events ended before the session did',
+    )
+  })
+})
+
+describe('runSession when the session is stopped after an interrupted turn', () => {
+  it('ends with the stop, as a stop by its own signal or by another command makes it', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([TURN_INTERRUPTED, STOPPED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(3)
+    expect(printed.out()).toStrictEqual(['Session stopped'])
+  })
+
+  it('takes a session that is ready for no end of the run, unless a turn was interrupted', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([READY, TURN_DONE, READY, COMPLETED])
+    await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(0)
+    expect(printed.out()).toStrictEqual(['Done — turns: 1, input tokens: 10, output tokens: 5'])
+  })
+})
+```
+
+`apps/bytebureau/src/run-arguments.test.ts` (as shipped):
+
+```ts
+import type { CommandDef } from 'citty'
+import { describe, expect, it } from 'vitest'
+import { flagsAtLeaf, subCommandIndex } from './run.js'
+import { tree } from './testing/command-tree.js'
+
+const FLAGS = {
+  json: { type: 'boolean' },
+  lang: { type: 'string' },
+  'log-level': { type: 'string' },
+  mode: { type: 'string', alias: 'm' },
+} as const
+
+// The arguments of a line, which has no argument with a space in it
+function words(line: string): string[] {
+  return line === '' ? [] : line.split(' ')
+}
+
+describe(subCommandIndex, () => {
+  it.each([
+    [[], -1],
+    [['--json'], -1],
+    [['hello'], 0],
+    [['--json', 'hello'], 1],
+    [['--lang', 'cs', 'hello'], 2],
+    [['--lang=cs', 'hello'], 1],
+    [['--log-level', 'debug', 'hello'], 2],
+    [['--logLevel', 'debug', 'hello'], 2],
+    [['-m', 'fast', 'hello'], 2],
+    [['--unknown', 'hello'], 1],
+    [['--json', '--', 'hello'], -1],
+    [['--lang'], -1],
+  ])('finds the sub-command as citty does, in %j at %d', (argv, index) => {
+    expect(subCommandIndex(argv, FLAGS)).toBe(index)
+  })
+})
+
+describe(flagsAtLeaf, () => {
+  it.each([
+    ['', ''],
+    ['--json', '--json'],
+    ['hello', 'hello'],
+    ['hello Ondřej --json', 'hello Ondřej --json'],
+    ['--json hello', 'hello --json'],
+    ['--lang cs hello --lang en', 'hello --lang cs --lang en'],
+    ['projects --json ls', 'projects ls --json'],
+    ['--json projects --lang cs ls x', 'projects ls --json --lang cs x'],
+    ['projects --host H --port P ls', 'projects ls --host H --port P'],
+    ['--json ask answer a1 --other', 'ask answer --json a1 --other'],
+    ['projects', 'projects'],
+    ['--json projects', 'projects --json'],
+    ['--json nope', 'nope --json'],
+    ['projects --lang cs nope', 'projects nope --lang cs'],
+  ])('puts the flags of "%s" right behind the last name: "%s"', async (given, expected) => {
+    expect.hasAssertions()
+    await expect(flagsAtLeaf(tree().command, words(given))).resolves.toStrictEqual(words(expected))
+  })
+})
+
+// A tree that gives its args, its sub-commands and its leaf lazily, as citty allows
+function lazyTree(): CommandDef {
+  const ls: CommandDef = { meta: { name: 'ls' }, args: { json: { type: 'boolean' } } }
+  const group: CommandDef = { meta: { name: 'group' }, subCommands: () => ({ ls: () => ls }) }
+  return {
+    meta: { name: 'bb' },
+    args: () => ({ lang: { type: 'string' } }),
+    subCommands: () => ({ group }),
+  }
+}
+
+describe('flagsAtLeaf and a tree given lazily', () => {
+  it('walks the args and the sub-commands that are given as functions', async () => {
+    expect.hasAssertions()
+    const argv = words('--lang cs group --json ls x')
+    await expect(flagsAtLeaf(lazyTree(), argv)).resolves.toStrictEqual(
+      words('group ls --lang cs --json x'),
+    )
+  })
+})
+
+describe('flagsAtLeaf and a --', () => {
+  it.each([
+    ['--json -- hello', '--json -- hello'],
+    ['hello -- --json', 'hello -- --json'],
+    ['--json hello -- --lang cs', 'hello --json -- --lang cs'],
+    ['projects -- ls', 'projects -- ls'],
+    ['--json projects -- ls', 'projects --json -- ls'],
+  ])(
+    'moves nothing from behind a -- and reads no name there: "%s" into "%s"',
+    async (given, expected) => {
+      expect.hasAssertions()
+      await expect(flagsAtLeaf(tree().command, words(given))).resolves.toStrictEqual(
+        words(expected),
+      )
+    },
+  )
+})
+```
+
+`apps/bytebureau/src/run-flags.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it, vi } from 'vitest'
+import { run } from './run.js'
+import { tree } from './testing/command-tree.js'
+
+describe('run with a global flag before a command, at any level of the tree', () => {
+  it('hands a flag before the sub-command to the sub-command, which parses its flags', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await expect(run(command, ['--json', 'projects', 'ls'])).resolves.toBe(0)
+    expect(given).toMatchObject([{ command: 'ls', json: true, rawArgs: ['--json'] }])
+  })
+
+  it('hands a flag between a group and its leaf on to the leaf', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await expect(run(command, ['projects', '--json', 'ls'])).resolves.toBe(0)
+    expect(given).toMatchObject([{ command: 'ls', json: true, rawArgs: ['--json'] }])
+  })
+
+  it('skips the values of the flags that take one to find the leaf, and hands both on', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['projects', '--host', 'H', '--port', 'P', 'ls'])
+    expect(given).toMatchObject([{ host: 'H', port: 'P', rawArgs: ['--host', 'H', '--port', 'P'] }])
+  })
+})
+
+describe('run with the flags of the levels above a leaf and the flags of the leaf', () => {
+  it('keeps the flags of every level before what the leaf is given itself', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['--json', 'projects', '--lang', 'cs', 'ls', 'fix it'])
+    expect(given).toMatchObject([
+      {
+        json: true,
+        lang: 'cs',
+        positional: 'fix it',
+        rawArgs: ['--json', '--lang', 'cs', 'fix it'],
+      },
+    ])
+  })
+
+  it('lets the flag that comes later win, which is the one the leaf was given itself', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['--lang', 'cs', 'hello', '--lang', 'en'])
+    expect(given).toMatchObject([{ command: 'hello', lang: 'en' }])
+  })
+
+  it('keeps a flag of the leaf that has no value from taking the flag that moved for its value', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['--json', 'ask', 'answer', 'a1', '--other'])
+    expect(given).toMatchObject([{ command: 'answer', json: true, positional: 'a1', other: '' }])
+  })
+})
+
+describe('run with a -- or a bare --debug among the arguments', () => {
+  it('keeps what follows -- behind the flags that move, since it is no flag', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['--json', 'projects', 'ls', '--', '--debug'])
+    expect(given).toMatchObject([
+      { json: true, debug: undefined, rawArgs: ['--json', '--', '--debug'] },
+    ])
+  })
+
+  it('reads no sub-command behind a --, so none runs', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await expect(run(command, ['--json', '--', 'projects', 'ls'])).resolves.toBe(0)
+    expect(given).toStrictEqual([])
+  })
+
+  it('takes a bare --debug before the sub-command for a flag with no value', async () => {
+    expect.hasAssertions()
+    const { command, given } = tree()
+    await run(command, ['--debug', 'projects', 'ls'])
+    expect(given).toMatchObject([{ debug: '', rawArgs: ['--debug='] }])
+  })
+})
+
+describe('run with a call that has no leaf or no sub-command', () => {
+  it('leaves a call with no sub-command to the root, and the arguments after a leaf where they are', async () => {
+    expect.hasAssertions()
+    const { command, given, rooted } = tree()
+    await run(command, ['--json'])
+    await run(command, ['projects', 'ls', '--json'])
+    expect(rooted).toStrictEqual([['--json']])
+    expect(given).toMatchObject([{ rawArgs: ['--json'] }])
+  })
+
+  it('leaves a group with no leaf to its own usage, as a usage error', async () => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    const { command } = tree()
+    await expect(run(command, ['--json', 'projects'])).resolves.toBe(1)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('List the projects of the bureau'))
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('No command specified'))
+  })
+})
+
+describe('run and the usage of a command named after a flag with a value', () => {
+  it.each([
+    ['--lang', 'cs', 'projects', '--help'],
+    ['--debug', 'projects', '--help'],
+    ['projects', '--lang', 'cs', '--help'],
+  ])('prints the usage of the group, not of what the value names: %j', async (...argv) => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const { command } = tree()
+    await expect(run(command, argv)).resolves.toBe(0)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('List the projects of the bureau'))
+  })
+
+  it('prints the usage of the root for a name only the prototype of an object has', async () => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const { command } = tree()
+    await expect(run(command, ['constructor', '--help'])).resolves.toBe(0)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Greet'))
+  })
+
+  it('prints the usage of the leaf after the flags of a group and of the root', async () => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const { command } = tree()
+    await expect(
+      run(command, ['--json', 'projects', '--lang', 'cs', 'ls', '--help']),
+    ).resolves.toBe(0)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('PROMPT'))
+  })
+})
+```
+
+`apps/bytebureau/src/testing/command-tree.ts` (as shipped):
+
+```ts
+import { defineCommand, type CommandDef } from 'citty'
+import { globalArgs, type GlobalArgs } from '../context.js'
+
+// What a leaf was given: its raw arguments, the global flags it parsed, and the positional and the flag of its own
+interface Given {
+  readonly command: string
+  readonly rawArgs: readonly string[]
+  readonly json: boolean
+  readonly lang: string | undefined
+  readonly debug: string | undefined
+  readonly host: string | undefined
+  readonly port: string | undefined
+  readonly other: string | undefined
+  readonly positional: string | undefined
+}
+
+export interface Tree {
+  readonly command: CommandDef
+  // What the leaves were given
+  readonly given: Given[]
+  // What the root was given, when it ran itself
+  readonly rooted: (readonly string[])[]
+}
+
+interface Seen {
+  readonly rawArgs: readonly string[]
+  readonly args: GlobalArgs
+}
+
+interface Own {
+  readonly other?: string | undefined
+  readonly positional?: string | undefined
+}
+
+function givenBy(command: string, seen: Seen, own: Own = {}): Given {
+  const { rawArgs, args } = seen
+  return {
+    command,
+    rawArgs,
+    json: args.json,
+    lang: args.lang,
+    debug: args.debug,
+    host: args.host,
+    port: args.port,
+    other: own.other,
+    positional: own.positional,
+  }
+}
+
+const HELLO_ARGS = { ...globalArgs, name: { type: 'positional', required: false } } as const
+const LS_ARGS = { ...globalArgs, prompt: { type: 'positional', required: false } } as const
+const ANSWER_ARGS = {
+  ...globalArgs,
+  id: { type: 'positional', required: false },
+  other: { type: 'string' },
+} as const
+
+function helloOf(given: Given[]): CommandDef<typeof HELLO_ARGS> {
+  return defineCommand({
+    meta: { name: 'hello', description: 'Greet' },
+    args: HELLO_ARGS,
+    run(context) {
+      given.push(givenBy('hello', context, { positional: context.args.name }))
+    },
+  })
+}
+
+function lsOf(given: Given[]): CommandDef<typeof LS_ARGS> {
+  return defineCommand({
+    meta: { name: 'ls', description: 'List the projects of the bureau' },
+    args: LS_ARGS,
+    run(context) {
+      given.push(givenBy('ls', context, { positional: context.args.prompt }))
+    },
+  })
+}
+
+function answerOf(given: Given[]): CommandDef<typeof ANSWER_ARGS> {
+  return defineCommand({
+    meta: { name: 'answer', description: 'Answer an ask' },
+    args: ANSWER_ARGS,
+    run(context) {
+      const { id, other } = context.args
+      given.push(givenBy('answer', context, { positional: id, other }))
+    },
+  })
+}
+
+// The tree of bytebureau as it is built: a root with the global flags that tells the status when no sub-command is named, a leaf, and two groups of a leaf
+export function tree(): Tree {
+  const given: Given[] = []
+  const rooted: (readonly string[])[] = []
+  const projects = defineCommand({
+    meta: { name: 'projects', description: 'Manage projects' },
+    subCommands: { ls: lsOf(given) },
+  })
+  const ask = defineCommand({
+    meta: { name: 'ask', description: 'List and answer asks' },
+    subCommands: { answer: answerOf(given) },
+  })
+  const command: CommandDef = {
+    meta: { name: 'bb', description: 'Root' },
+    args: { ...globalArgs },
+    subCommands: { hello: helloOf(given), projects, ask },
+    run({ rawArgs, args }) {
+      if (args._.length === 0) {
+        rooted.push(rawArgs)
+      }
+    },
+  }
+  return { command, given, rooted }
+}
+```
+
+**Semantics (as shipped, commits 6111cb6, 676137e, 523906a, 7a21cb6, 8edac8f, 1b37781, f230bc2, 0dade32, cf1389a, b1989e1, ef5b9ee, 0c45e1e, 32fb931, 5235e85, 2675413, 0c14004, ffa0d10, e1706b1):** `commands/sub-commands.ts` holds the sub-command map (`main.ts` is at its import cap); the root command is typed `CommandDef` and runs `statusCommand` through `runCommand(statusCommand, { rawArgs })` only when `args._` is empty, because citty runs the root `run` after a sub-command too (the brief assumed otherwise) — `status` is not a sub-command one can name. Global flags may go before or after a command name at any level: `run.ts` walks the command tree as `printUsage` does (root → group → leaf, skipping the values of each level's known flags, stopping at `--`), collects the flags found before the leaf and places them right after the leaf's name, before the leaf's own arguments — so `bytebureau --lang cs hello` prints Czech, `bytebureau sessions --json ls` emits JSON, `bytebureau projects --host H --port P ls` talks to H:P and starts nothing, a later duplicate flag wins and a trailing `--other` without a value stays no answer (the root's `args: { ...globalArgs }` had made citty drop flags before a sub-command silently, and a group declares no arguments at all); a bare `--debug` is rewritten to `--debug=` so the usage of a sub-command shows. The status opens the Bureau through `withBureau` (a daemon is started on demand), counts `projects.list`, `sessions.list`, `asks.pending` and takes version and start from `health.check`; the `Daemon:` line takes the pid from `server.json` only when the record's URL is the Bureau's, a daemon of another home (`--host`/`--port`) prints `status_daemon_remote` without a pid, `--no-daemon` prints `status_in_process`; the record is exactly `{ command: 'status', daemon?: { url, pid?, version, startedAt }, projects, sessions: { running, waiting, total }, pendingAsks }`. `sessions ls|show|prompt|interrupt|stop|resume`, `ask ls [--session]`, `ask answer <id> [--option]... [--other]` and `plugins ls` are as the brief says, with these shipped details: citty keeps only the last of a repeated flag, so `optionsOf` reads every `--option x`/`--option=x` from `rawArgs` (nothing after `--`); an empty `--other` is no answer; at a terminal without `--option`/`--other` the interactive prompt runs (`--yes` picks the recommended option, or `ask_no_recommended` refuses when the ask has none; a cancel ends with exit 1 and no line), elsewhere `ask_needs_answer` is the refusal; `render/tables.ts` pads every column but the last and flattens a multi-line cell onto one line (linear, no regex backtracking), `render/rows.ts` builds the rows (a dash for a session without a worktree, a multi-question ask, a failed plugin's reason); plugin ports are pinned exactly (`workspaceRuntimes:local`, `agentProviders:fake`). `commands/refusable.ts` (`refusable(context, work)`, `withBureauRefusable`) ends a refused request — an `ApiError` with a `4xx` problem, or the kernel's `SessionError`/`WorkspaceError`/ask errors — with the detail or reason as one line on stderr and exit 1 through `process.exitCode`; it also covers the kernel's `ConfigError` and `ProviderError` of the `missing` kind (what the API answers with 422), and it wraps every command but `run`: the sessions, ask and plugins commands (a refused `sessions prompt` exits 1 with the detail; its turn outcomes keep 0/3/4), the status, `projects ls|add|rm` and `workspaces ls|prune` (the Phase A `projects add` test moved from exit 2 to exit 1 with the reason line — a deliberate contract change; `run` keeps 4 for its refusals). `commands/run-follow.ts` holds `follow`/`react`/`conclude`/`promptAndFollow`, shared by `run` and `sessions prompt` through `Ends { terminal, completes, turnOnly }`: `run` completes the session after `turn.completed` and ends at `session.completed`; `sessions prompt` leaves the session `ready` for the next prompt, subscribes from `since: 0` and shows only the events the new turn owns (the `TurnDto`'s id, from the turn's first event on) plus the session-level terminal events, so an earlier stop and resume in the log cannot end it; `turn.interrupted` is no end by itself — the follow ends at the session's next event: `session.ready` → exit 3 and `run_interrupted`, `session.stopped` → exit 3 and `run_stopped`, `session.errored` → exit 4 — so a `run` interrupted from another terminal ends with exit 3 and the session stays `ready`, a stop this process requested by its signal ends at `session.stopped` as the Phase A tests pin, and the restarted daemon's recovery (`turn.interrupted`, `ask.cancelled`, `session.stopped`) ends the run at `session.stopped`. Messages: the brief's list with `sessions_done` replaced by `sessions_interrupted`/`sessions_stopped`/`sessions_resumed`, plus `run_interrupted`, `status_daemon_remote` and `ask_no_recommended`; the Czech `status_sessions` is label-first ("Relace: celkem {total}, běžící {running}, čekající na Vás {waiting}") so the numbers need no agreement; Czech says "relace" as the existing messages do, polite pronouns capitalised as `run_ask_waiting`. Tests: `render/{tables,rows}.test.ts`; `sessions.test.ts` (daemon-backed; the resume case stops a run by SIGTERM while the fake agent waits on its ask, then resumes and prompts — a completed session cannot be resumed), `sessions-prompt.test.ts` (unit, scripted Bureau), `sessions-prompt-daemon.test.ts` (SIGTERM ends at `session.stopped`), `ask.test.ts`, `ask-answer.test.ts` (fake prompts, the cancel), `plugins-status.test.ts` (ports, the status of a daemon of another home, the counts of a waiting run), `refusable.test.ts`, `refusals.test.ts` (every command against a stub daemon that answers 409 → exit 1 and the detail), `run-daemon-stops.test.ts` (a run interrupted by `sessions interrupt` from a second process → exit 3 and the session `ready`; a stop from another terminal → exit 3 and `run_stopped`), `run-session-interrupted.test.ts` (unit: the follow ends at the session's next event), `run-arguments.test.ts` and `run-flags.test.ts` (the flag placement, on the command tree of `testing/command-tree.ts`), `cli.test.ts` (`bytebureau hello` starts no daemon); helpers `testing/frames.ts`, `testing/session-bench.ts`; coverage include gains `commands/{run-follow,refusable,sessions-prompt,ask-answer}.ts` (`sessions-prompt.ts` holds `promptSession` only, the citty handler lives in `sessions.ts` with the other subprocess-only commands). `sessions show` flattens the pending-ask lines as the table does; every test that starts a daemon registers `stoppedWithTheTest(home)`. Accepted as shipped: global flags go after the sub-command (`bytebureau --lang cs hello` ignores the flag); `sessions prompt` replays the whole log of the session; the kernel publishes `turn.completed` a moment before the session is `ready` and a session interrupted while `paused_usage_limit` publishes no `session.ready` (both for the final wave).
 
 - [ ] **Step 4: Run, then the gates**
 
