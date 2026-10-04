@@ -114,21 +114,25 @@ export const makeDefault = (
 ): Effect.Effect<void, ProfileError | StoreError> =>
   Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id))
 
-const openSessionsOf = (sql: SqlClient.SqlClient, id: string): Effect.Effect<number, StoreError> =>
+// The sessions under a profile that run or can still resume: every one but a completed session, as a stopped or errored one resumes
+const holdingSessionsOf = (
+  sql: SqlClient.SqlClient,
+  id: string,
+): Effect.Effect<number, StoreError> =>
   sql<{
-    readonly open: number
-  }>`SELECT COUNT(*) AS open FROM sessions WHERE profile_id = ${id} AND status NOT IN ('completed', 'stopped', 'errored')`.pipe(
+    readonly holding: number
+  }>`SELECT COUNT(*) AS holding FROM sessions WHERE profile_id = ${id} AND status <> 'completed'`.pipe(
     Effect.mapError(toStoreError),
-    Effect.map(([row]) => (row === undefined ? 0 : row.open)),
+    Effect.map(([row]) => (row === undefined ? 0 : row.holding)),
   )
 
-const inUse = (id: string, open: number): ProfileError =>
+const inUse = (id: string, holding: number): ProfileError =>
   new ProfileError({
     code: 'in_use',
-    reason: `profile "${id}" is in use: ${open} ${open === 1 ? 'session has' : 'sessions have'} not ended`,
+    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete or remove them first`,
   })
 
-// A session that has not ended keeps its profile; those that have let go of it, as the store refers to no profile that is gone
+// A session that runs or can resume keeps its profile; the completed ones let go of it, as the store refers to no profile that is gone
 // The count, the release and the delete share one transaction, so a session created in between cannot slip past
 export const deleteProfile = (
   sql: SqlClient.SqlClient,
@@ -137,11 +141,11 @@ export const deleteProfile = (
   sql
     .withTransaction(
       Effect.gen(function* deletesProfile() {
-        const open = yield* openSessionsOf(sql, id)
-        if (open > 0) {
-          return yield* inUse(id, open)
+        const holding = yield* holdingSessionsOf(sql, id)
+        if (holding > 0) {
+          return yield* inUse(id, holding)
         }
-        yield* sql`UPDATE sessions SET profile_id = NULL WHERE profile_id = ${id}`.pipe(
+        yield* sql`UPDATE sessions SET profile_id = NULL WHERE profile_id = ${id} AND status = 'completed'`.pipe(
           Effect.mapError(toStoreError),
         )
         const deleted = yield* sql<Row>`DELETE FROM profiles WHERE id = ${id} RETURNING *`.pipe(
