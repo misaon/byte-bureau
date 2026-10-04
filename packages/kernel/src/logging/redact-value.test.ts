@@ -68,4 +68,21 @@ describe(redactValue, () => {
     const redacted = redactValue(nested(PATH, DEEP_SECRET))
     expect(valueAt(redacted, PATH)).toBe(DEEP_SECRET)
   })
+
+  it('still reaches a secret ten levels deep, the last level it walks', () => {
+    const tenLevels = PATH.slice(0, 10)
+    const redacted = redactValue(nested(tenLevels, DEEP_SECRET))
+    expect(valueAt(redacted, tenLevels)).toBe('[REDACTED]')
+  })
+
+  it('replaces a secret-named field down to the last record it walks, and none below', () => {
+    const walked = PATH.slice(0, 9)
+    const below = PATH.slice(0, 10)
+    const kept = redactValue(nested(below, { token: 'plain' }))
+    const replaced = redactValue(nested(walked, { token: 'plain' }))
+    expect([
+      valueAt(replaced, [...walked, 'token']),
+      valueAt(kept, [...below, 'token']),
+    ]).toStrictEqual(['[REDACTED]', 'plain'])
+  })
 })
