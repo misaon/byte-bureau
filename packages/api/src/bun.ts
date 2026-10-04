@@ -18,10 +18,7 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024
 type ServeOptions = Parameters<typeof BunHttpServer.layer>[0]
 type ServerLayer = ReturnType<typeof BunHttpServer.layer>
 type KernelLayer = Awaited<ReturnType<typeof kernelBunLayer>>
-type DaemonRuntime = ManagedRuntime.ManagedRuntime<
-  PluginHost | SessionManager | HttpServer.HttpServer,
-  unknown
->
+type DaemonRuntime = ManagedRuntime.ManagedRuntime<HttpServer.HttpServer, unknown>
 
 // Bun's own knobs: the hostname must be passed, as Bun binds every interface otherwise; its 10 s idle timeout would cut an SSE stream
 // Bun's body limit holds where Effect's does not; at 10 MiB it sits above the API's 10 MB check, which answers a declared length first
@@ -62,8 +59,9 @@ interface ServerSection {
   readonly port?: number | undefined
 }
 
-// The port the start asked for, known once the configuration has been read inside the runtime: a refusal names it
+// The address the start asked for, known once the configuration has been read inside the runtime: a refusal names it
 interface Requested {
+  host: string
   port: number
 }
 
@@ -102,14 +100,24 @@ const resolveServer = (
 ): Layer.Layer<Layer.Success<ServerLayer>, Layer.Error<ServerLayer>, Config> =>
   Layer.unwrap(
     Effect.map(configuredServer(options.env), (configured) => {
-      const address = {
-        host: options.host ?? configured.host ?? DEFAULT_HOST,
-        port: options.port ?? configured.port ?? DEFAULT_PORT,
-      }
-      requested.port = address.port
-      return BunHttpServer.layer(serveOptions(address))
+      requested.host = options.host ?? configured.host ?? DEFAULT_HOST
+      requested.port = options.port ?? configured.port ?? DEFAULT_PORT
+      return BunHttpServer.layer(serveOptions(requested))
     }),
   )
+
+// The plugins load and the sessions a previous process left at work are recovered before the server is built, so no request comes first
+const Boot = Layer.effectDiscard(
+  Effect.gen(function* boots() {
+    yield* PluginHost.use((host) => host.load())
+    const recovered = yield* SessionManager.use((sessions) => sessions.recover())
+    if (recovered.length > 0) {
+      yield* Effect.sync(() => {
+        logger.info('recovered sessions left by a previous process', { sessions: recovered })
+      })
+    }
+  }),
+)
 
 // The API of this start; a defect behind either of its doors is logged under bb.api
 const apiOf = (options: DaemonOptions, startedAt: string): ReturnType<typeof serveApi> => {
@@ -130,24 +138,18 @@ interface Built {
   readonly requested: Requested
 }
 
-// The kernel, the API and the Bun server as one runtime
+// The kernel, the boot, the Bun server and the API as one runtime, built in that order
 const buildRuntime = (options: DaemonOptions, kernel: KernelLayer, startedAt: string): Built => {
-  const requested: Requested = { port: options.port ?? DEFAULT_PORT }
+  const requested: Requested = {
+    host: options.host ?? DEFAULT_HOST,
+    port: options.port ?? DEFAULT_PORT,
+  }
+  const server = resolveServer(options, requested).pipe(Layer.provide(Boot))
   const layer = apiOf(options, startedAt).pipe(
-    Layer.provideMerge(resolveServer(options, requested)),
+    Layer.provideMerge(server),
     Layer.provideMerge(kernel),
   )
   return { runtime: ManagedRuntime.make(layer), requested }
-}
-
-// The plugins load and the sessions a previous process left at work are recovered before the address is given out
-async function boot(runtime: DaemonRuntime): Promise<BoundAddress> {
-  await runtime.runPromise(PluginHost.use((host) => host.load()))
-  const recovered = await runtime.runPromise(SessionManager.use((sessions) => sessions.recover()))
-  if (recovered.length > 0) {
-    logger.info('recovered sessions left by a previous process', { sessions: recovered })
-  }
-  return boundAddress(await runtime.runPromise(formattedAddress))
 }
 
 /**
@@ -159,7 +161,7 @@ export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon
   const startedAt = nowIso()
   const { runtime, requested } = buildRuntime(options, kernel, startedAt)
   try {
-    const address = await boot(runtime)
+    const address = boundAddress(await runtime.runPromise(formattedAddress))
     return {
       address,
       startedAt,
@@ -169,6 +171,6 @@ export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon
     }
   } catch (error) {
     await Promise.allSettled([runtime.dispose()])
-    throw portInUse(error, requested.port) ?? error
+    throw portInUse(error, requested) ?? error
   }
 }

@@ -20,6 +20,11 @@ const logged: Logged[] = []
 
 const DEFECT = { message: 'a handler failed with a defect', error: 'the prune broke' }
 
+// Bun gives EADDRINUSE for a taken port and for an address this machine does not have alike
+const EITHER = "the port is taken or the address is not this machine's"
+
+const LOOPBACK = { host: '127.0.0.1', port: 4747 }
+
 const messagesOf = (entries: readonly Logged[]): readonly object[] =>
   entries.map(({ message, error }) => ({ message, error }))
 
@@ -47,17 +52,28 @@ const ReportingLayer = serveApi(testOptions()).pipe(
 )
 
 describe(portInUse, () => {
-  it('names the port of a start that Bun refused and lets any other failure through', () => {
+  it('names the address of a start that Bun refused, and lets any other failure through', () => {
     const taken = Object.assign(new Error('Failed to start server. Is port 4747 in use?'), {
       code: 'EADDRINUSE',
     })
-    const coded = Object.assign(new Error('bind'), { code: 'EADDRINUSE' })
-    const refused = portInUse(taken, 4747)
+    const refused = portInUse(taken, { host: '127.0.0.1', port: 4747 })
     expect(refused).toBeInstanceOf(PortInUseError)
-    expect(refused).toMatchObject({ message: 'port 4747 is already in use', cause: taken })
-    expect(portInUse(coded, 1)).toBeInstanceOf(PortInUseError)
-    expect(portInUse(new Error('the store is locked'), 4747)).toBeUndefined()
-    expect(portInUse('EADDRINUSE', 4747)).toBeUndefined()
+    expect(refused).toMatchObject({
+      message: `cannot listen on 127.0.0.1:4747: ${EITHER}`,
+      cause: taken,
+    })
+    expect(portInUse(taken, { host: '::1', port: 4747 })).toMatchObject({
+      message: `cannot listen on [::1]:4747: ${EITHER}`,
+    })
+    expect(portInUse(new Error('the store is locked'), LOOPBACK)).toBeUndefined()
+    expect(portInUse('EADDRINUSE', LOOPBACK)).toBeUndefined()
+  })
+
+  it('reads the code alone too, which Bun also gives for an address this machine does not have', () => {
+    const coded = Object.assign(new Error('bind'), { code: 'EADDRINUSE' })
+    expect(portInUse(coded, { host: '192.0.2.1', port: 1 })).toMatchObject({
+      message: `cannot listen on 192.0.2.1:1: ${EITHER}`,
+    })
   })
 })
 

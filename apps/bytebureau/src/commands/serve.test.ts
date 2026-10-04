@@ -13,6 +13,10 @@ const modeOf = (file: string): number => statSync(file).mode % 0o1000
 
 const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } })
 
+// What a start that cannot bind says: Bun cannot tell a taken port from an address this machine does not have
+const cannotListen = (port: string): string =>
+  `cannot listen on 127.0.0.1:${port}: the port is taken or the address is not this machine's`
+
 // What --json prints for the daemon of the home: where it listens, its pid and its version, never its token
 const describedDaemon = (home: string): Record<string, unknown> => {
   const record = readServerInfo(home)
@@ -95,7 +99,7 @@ describe('bytebureau serve --no-daemonize refusals', () => {
     const other = await runCli(['serve', '--no-daemonize', '--port', port], {
       BYTEBUREAU_HOME: tempDir('bb-home-'),
     })
-    expect([other.code, other.stderr.trim()]).toStrictEqual([1, `port ${port} is already in use`])
+    expect([other.code, other.stderr.trim()]).toStrictEqual([1, cannotListen(port)])
     await expect(daemon.stop()).resolves.toBe(0)
   })
 
@@ -155,7 +159,7 @@ describe('bytebureau serve (detached) that cannot start', () => {
     const started = await runCli(['serve', '--port', port], stoppedWithTheTest(home))
     const gaveUp = `The daemon did not come up in time; see ${daemonLogPath(home)}`
     expect([started.code, started.stderr.trim()]).toStrictEqual([1, gaveUp])
-    expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(`port ${port} is already in use`)
+    expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(cannotListen(port))
     await expect(daemon.stop()).resolves.toBe(0)
   })
 })

@@ -1,14 +1,22 @@
 import { Cause, ErrorReporter, type Layer } from 'effect'
+import type { BoundAddress } from './bun-address.js'
 
 export class PortInUseError extends Error {
   public override readonly name = 'PortInUseError'
 }
 
-// Bun.serve throws when the port is taken, so the start fails with that defect rather than a ServeError: one line for the CLI to print
-export const portInUse = (error: unknown, port: number): PortInUseError | undefined =>
+const hostPort = ({ host, port }: BoundAddress): string =>
+  host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`
+
+// Bun.serve throws when it cannot bind, so the start fails with that defect rather than a ServeError: one line for the CLI to print
+// Bun says EADDRINUSE for an address this machine does not have as well, so the line keeps both readings
+export const portInUse = (error: unknown, address: BoundAddress): PortInUseError | undefined =>
   error instanceof Error &&
   (Reflect.get(error, 'code') === 'EADDRINUSE' || error.message.includes('Is port'))
-    ? new PortInUseError(`port ${port} is already in use`, { cause: error })
+    ? new PortInUseError(
+        `cannot listen on ${hostPort(address)}: the port is taken or the address is not this machine's`,
+        { cause: error },
+      )
     : undefined
 
 export type DefectLog = (message: string, properties: Readonly<Record<string, unknown>>) => void
