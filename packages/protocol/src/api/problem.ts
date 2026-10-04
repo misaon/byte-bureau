@@ -14,6 +14,7 @@ export const PROBLEM_CODES = [
   'config_invalid',
   'store_unavailable',
   'plugin_failed',
+  'project_path_not_absolute',
   'session_not_found',
   'session_invalid_transition',
   'session_provider_missing',
@@ -36,6 +37,7 @@ export const PROBLEM_CODES = [
   'workspace_git_failed',
   'workspace_fs_failed',
   'workspace_runtime_missing',
+  'workspace_not_found',
 ] as const
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number]
