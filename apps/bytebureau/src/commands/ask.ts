@@ -1,11 +1,10 @@
 import { m } from '@bytebureau/i18n'
-import type { AskAnswer, AskRecord } from '@bytebureau/protocol'
+import type { AskRecord } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
-import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
 import { askRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
-import { answerOf, optionsOf, type AnswerFlags } from './ask-answer.js'
+import { answerAsk, optionsOf } from './ask-answer.js'
 import { withBureauRefusable } from './refusable.js'
 
 function tellAsks(context: Context, asks: readonly AskRecord[]): void {
@@ -37,42 +36,6 @@ const ls = defineCommand({
   },
 })
 
-// The command ends with exit code 1 and the words that say why
-function failWith(context: Context, text: string): void {
-  context.output.warn(text)
-  process.exitCode = 1
-}
-
-function tellAnswered(context: Context, id: string, answer: AskAnswer): void {
-  context.output.emit({ command: 'ask.answer', id, answer })
-  context.output.print(m.ask_answered({ id }))
-}
-
-interface Answering {
-  readonly id: string
-  readonly flags: AnswerFlags
-}
-
-// The ask must be pending, and the flags, or the person at a terminal, must answer it
-async function answerAsk(
-  bureau: Bureau,
-  { id, flags }: Answering,
-  context: Context,
-): Promise<void> {
-  const ask = await bureau.asks.get(id)
-  if (ask === undefined || ask.status !== 'pending') {
-    failWith(context, m.ask_not_pending({ id }))
-    return
-  }
-  const answer = await answerOf(flags, ask, context)
-  if (answer === undefined) {
-    failWith(context, m.ask_needs_answer({ id }))
-    return
-  }
-  await bureau.asks.answer(id, answer)
-  tellAnswered(context, id, answer)
-}
-
 const answer = defineCommand({
   meta: { name: 'answer', description: 'Answer an ask by id' },
   args: {
@@ -86,9 +49,9 @@ const answer = defineCommand({
   },
   async run({ args, rawArgs }) {
     const context = processContext(args)
-    const flags = { options: optionsOf(rawArgs), other: args.other, yes: args.yes }
+    const request = { id: args.id, options: optionsOf(rawArgs), other: args.other, yes: args.yes }
     await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
-      await answerAsk(bureau, { id: args.id, flags }, context)
+      await answerAsk(bureau, request, context)
     })
   },
 })

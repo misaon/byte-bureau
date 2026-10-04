@@ -6,23 +6,14 @@ import {
   StoreError,
   WorkspaceError,
 } from '@bytebureau/kernel'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { Bureau } from '../bureau/bureau.js'
 import { createContext, type Context } from '../context.js'
 import { projectsStub, refusingStub } from '../testing/health-stub.js'
 import { problemError } from '../testing/records.js'
-import { captureConsole, contextOf, rejecting } from '../testing/scripted-kernel.js'
+import { captureConsole, contextOf, keepExitCode, rejecting } from '../testing/scripted-kernel.js'
 import { testHome } from '../testing/temp-repo.js'
 import { refusable, withBureauRefusable } from './refusable.js'
-
-// The exit code of the test process is the command's only while the test runs
-function keepExitCode(): void {
-  const before = process.exitCode
-  onTestFinished(() => {
-    process.exitCode = before
-  })
-  process.exitCode = undefined
-}
 
 const succeeding = async (): Promise<string> => {
   await Promise.resolve()

@@ -1,5 +1,5 @@
 import type { AskAnswer, EventEnvelope } from '@bytebureau/protocol'
-import { vi } from 'vitest'
+import { onTestFinished, vi } from 'vitest'
 import type { Bureau } from '../bureau/bureau.js'
 import type { RunOptions } from '../commands/run-session.js'
 import { createContext, type Context } from '../context.js'
@@ -25,6 +25,7 @@ export interface Overrides {
   readonly create?: Bureau['sessions']['create']
   readonly prompt?: Bureau['sessions']['prompt']
   readonly stop?: Bureau['sessions']['stop']
+  readonly getAsk?: Bureau['asks']['get']
   // The events do not come before the gate is open
   readonly gate?: Promise<boolean>
 }
@@ -135,7 +136,7 @@ export function scripted(events: readonly EventEnvelope[], overrides: Overrides 
     sessions: sessionsOf(calls, overrides),
     asks: {
       pending: notScripted(),
-      get: notScripted(),
+      get: overrides.getAsk ?? notScripted(),
       answer: async (askId, answer) => {
         answered.push({ askId, answer })
         await Promise.resolve()
@@ -155,6 +156,15 @@ export function scripted(events: readonly EventEnvelope[], overrides: Overrides 
 // The context of a run: machine-readable or not, at a terminal or not
 export function contextOf(json = false, terminal = false): Context {
   return createContext({ json, color: false, yes: false }, {}, terminal)
+}
+
+// The exit code of the test process is the command's only while the test runs
+export function keepExitCode(): void {
+  const before = process.exitCode
+  onTestFinished(() => {
+    process.exitCode = before
+  })
+  process.exitCode = undefined
 }
 
 // What the run prints; the console is the test's until the test is over
