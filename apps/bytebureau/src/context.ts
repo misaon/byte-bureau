@@ -3,6 +3,7 @@ import { m, setLocale } from '@bytebureau/i18n'
 import type { BureauFlags } from './bureau/resolve.js'
 import { resolveLocale } from './locale.js'
 import { colorEnabled, createOutput, type Output } from './output.js'
+import { usageError } from './usage-error.js'
 
 export const globalArgs = {
   lang: { type: 'string', description: 'UI language: en or cs' },
@@ -85,9 +86,6 @@ export function createContext(
 export function processContext(args: GlobalArgs): Context {
   return createContext(args, process.env, isatty(process.stdout.fd))
 }
-
-const usageError = (message: string): Error =>
-  Object.assign(new Error(message), { name: 'CLIError' })
 
 // A port is a whole number up to 65535; 0 asks for a free one
 export const portOf = (text: string | undefined): number | undefined => {

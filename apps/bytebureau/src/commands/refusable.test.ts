@@ -13,7 +13,7 @@ import { createContext, type Context } from '../context.js'
 import { projectsStub, refusingStub } from '../testing/health-stub.js'
 import { problemError } from '../testing/records.js'
 import { captureConsole, contextOf, keepExitCode, rejecting } from '../testing/scripted-kernel.js'
-import { testHome } from '../testing/temp-repo.js'
+import { testHome, tokenFile } from '../testing/temp-repo.js'
 import { refusable, withBureauRefusable } from './refusable.js'
 
 const succeeding = async (): Promise<string> => {
@@ -157,7 +157,7 @@ describe(withBureauRefusable, () => {
   it('opens the Bureau of the flags for the work, and gives what the work gives', async () => {
     expect.hasAssertions()
     const stub = await projectsStub()
-    const flags = { daemon: true, host: '127.0.0.1', port: stub.port }
+    const flags = { daemon: true, host: '127.0.0.1', port: stub.port, tokenFile: tokenFile() }
     const context = contextIn(testHome())
     await expect(withBureauRefusable(context, flags, projectsOf)).resolves.toStrictEqual([])
   })
@@ -167,12 +167,23 @@ describe(withBureauRefusable, () => {
     keepExitCode()
     const port = await refusingStub(409, 'project_locked', 'the project is locked')
     const printed = captureConsole()
-    const flags = { daemon: true, host: '127.0.0.1', port }
+    const flags = { daemon: true, host: '127.0.0.1', port, tokenFile: tokenFile() }
     const result = await withBureauRefusable(contextIn(testHome()), flags, projectsOf)
     expect([result, printed.err(), process.exitCode]).toStrictEqual([
       undefined,
       ['the project is locked'],
       1,
     ])
+  })
+
+  it('tells a daemon named on the command line that refuses the token where its token goes', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const port = await refusingStub(401, 'unauthorized', 'a valid API token is required')
+    const printed = captureConsole()
+    const flags = { daemon: true, host: '127.0.0.1', port, tokenFile: tokenFile('wrong') }
+    await withBureauRefusable(contextIn(testHome()), flags, projectsOf)
+    const hint = 'a valid API token is required (pass the token of that daemon with --token-file)'
+    expect([printed.err(), process.exitCode]).toStrictEqual([[hint], 1])
   })
 })

@@ -1,10 +1,9 @@
-import { writeFileSync } from 'node:fs'
-import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createContext, type Context } from '../context.js'
 import { writeServerInfo } from '../daemon/server-info.js'
 import { healthStub, projectsStub, recordOn } from '../testing/health-stub.js'
-import { testHome } from '../testing/temp-repo.js'
+import { watchedPort } from '../testing/daemon.js'
+import { testHome, tokenFile } from '../testing/temp-repo.js'
 import type { Bureau } from './bureau.js'
 import { DaemonRunningError } from './open-local.js'
 import { withBureau } from './with-bureau.js'
@@ -37,9 +36,7 @@ describe(withBureau, () => {
     expect.hasAssertions()
     const home = testHome()
     const stub = await projectsStub()
-    const tokenFile = path.join(home, 'token')
-    writeFileSync(tokenFile, 'abc\n')
-    const flags = { daemon: true, host: '127.0.0.1', port: stub.port, tokenFile }
+    const flags = { daemon: true, host: '127.0.0.1', port: stub.port, tokenFile: tokenFile('abc') }
     await expect(withBureau(contextIn(home), flags, projectsIn)).resolves.toStrictEqual({
       projects: [],
       where: { kind: 'daemon', url: `http://127.0.0.1:${stub.port}` },
@@ -53,6 +50,34 @@ describe(withBureau, () => {
     const stub = await projectsStub()
     writeServerInfo(home, recordOn(stub.port))
     await expect(withBureau(contextIn(home), { daemon: true }, projectsIn)).resolves.toMatchObject({
+      projects: [],
+    })
+    expect(stub.authorizations()).toStrictEqual([`Bearer ${'a'.repeat(64)}`])
+  })
+})
+
+describe('withBureau and the token of the home', () => {
+  it('refuses a daemon the record of the home does not name without --token-file, before any request', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const stub = await projectsStub()
+    writeServerInfo(home, recordOn(stub.port))
+    const elsewhere = await watchedPort()
+    const work = vi.fn<(bureau: Bureau) => Promise<unknown>>()
+    const flags = { daemon: true, host: '127.0.0.1', port: elsewhere.port }
+    await expect(withBureau(contextIn(home), flags, work)).rejects.toThrow(
+      `no daemon of this home listens on http://127.0.0.1:${elsewhere.port}: pass the token of the daemon there with --token-file`,
+    )
+    expect([work.mock.calls.length, elsewhere.connections()]).toStrictEqual([0, 0])
+  })
+
+  it('sends the token of the record to the daemon the record names when --host and --port name it', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const stub = await projectsStub()
+    writeServerInfo(home, recordOn(stub.port))
+    const flags = { daemon: true, host: '127.0.0.1', port: stub.port }
+    await expect(withBureau(contextIn(home), flags, projectsIn)).resolves.toMatchObject({
       projects: [],
     })
     expect(stub.authorizations()).toStrictEqual([`Bearer ${'a'.repeat(64)}`])

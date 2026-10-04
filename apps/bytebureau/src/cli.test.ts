@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { readServerInfo } from './daemon/server-info.js'
 import { freePort, stoppedWithTheTest } from './testing/daemon.js'
 import { runCli } from './testing/run-cli.js'
-import { testHome } from './testing/temp-repo.js'
+import { testHome, tokenFile } from './testing/temp-repo.js'
 import { NO_DAEMON, PROMPT, SCRIPTED, workbench } from './testing/workbench.js'
 
 const ESCAPE = '\u001B'
@@ -144,7 +144,8 @@ describe('bytebureau global flags before the sub-command', () => {
       // Were the flags dropped, the command would start a daemon of its own on demand
       stoppedWithTheTest(home)
       const port = await freePort()
-      const argv = lsWith('projects', place, ['--host', '127.0.0.1', '--port', String(port)])
+      const named = ['--host', '127.0.0.1', '--port', String(port), '--token-file', tokenFile()]
+      const argv = lsWith('projects', place, named)
       const result = await runCli(argv, { BYTEBUREAU_HOME: home })
       expect([result.code, result.stderr.trim()]).toStrictEqual([
         2,

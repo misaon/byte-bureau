@@ -148,3 +148,21 @@ export async function freePort(): Promise<number> {
   await close()
   return port
 }
+
+export interface WatchedPort {
+  readonly port: number
+  // The connections made to the port so far
+  readonly connections: () => number
+}
+
+// A loopback port that counts every connection made to it and answers none, closed when the test ends
+export async function watchedPort(): Promise<WatchedPort> {
+  const seen = { connections: 0 }
+  const server = createServer((socket) => {
+    seen.connections += 1
+    socket.destroy()
+  })
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return { port, connections: () => seen.connections }
+}

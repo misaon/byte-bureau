@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { refusingStub } from '../testing/health-stub.js'
 import { runCli } from '../testing/run-cli.js'
-import { testHome } from '../testing/temp-repo.js'
+import { testHome, tokenFile } from '../testing/temp-repo.js'
 
 // Every command that talks to a daemon, run aside: it has exit codes of its own
 const COMMANDS: readonly (readonly [string, readonly string[]])[] = [
@@ -28,7 +28,7 @@ describe('a request that the daemon refuses with a 4xx problem', () => {
     async (_name, command) => {
       expect.hasAssertions()
       const port = await refusingStub(409, 'locked', 'the daemon says no')
-      const daemon = ['--host', '127.0.0.1', '--port', String(port)]
+      const daemon = ['--host', '127.0.0.1', '--port', String(port), '--token-file', tokenFile()]
       const refused = await runCli([...command, ...daemon], { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, 'the daemon says no'])
     },
@@ -57,6 +57,8 @@ describe('a request that the daemon refuses with a problem that a run ends with 
         '127.0.0.1',
         '--port',
         String(port),
+        '--token-file',
+        tokenFile(),
       ]
       const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, detail])
@@ -77,6 +79,8 @@ describe('a request that the daemon refuses with a problem that a run ends with 
         '127.0.0.1',
         '--port',
         String(port),
+        '--token-file',
+        tokenFile(),
       ]
       const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([4, `${detail} (${code})`])

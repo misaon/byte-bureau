@@ -1,4 +1,5 @@
 import { ApiError } from '@bytebureau/client'
+import { m } from '@bytebureau/i18n'
 import {
   AskError,
   ConfigError,
@@ -12,13 +13,23 @@ import { withBureau } from '../bureau/with-bureau.js'
 import type { Context } from '../context.js'
 import { oneLine } from './run-output.js'
 
+// The detail of a 4xx problem; a daemon named on the command line that refuses the token is told where its token goes
+function problemRefusal(error: ApiError, named: boolean): string | undefined {
+  const { problem } = error
+  if (problem === undefined || error.status >= 500) {
+    return undefined
+  }
+  return named && error.status === 401
+    ? m.bureau_token_hint({ detail: problem.detail })
+    : problem.detail
+}
+
 // What a refusal says: the detail of the problem the daemon answered with, or the reason of the kernel's own error
 // The errors of the kernel that the API answers with a 4xx problem are the refusals in-process, told as the API tells them
 // A failure that is no refusal has none
-function refusalOf(error: unknown): string | undefined {
+function refusalOf(error: unknown, named: boolean): string | undefined {
   if (error instanceof ApiError) {
-    const { problem } = error
-    return problem !== undefined && error.status < 500 ? problem.detail : undefined
+    return problemRefusal(error, named)
   }
   if (error instanceof ConfigError) {
     return `${error.file}${error.pointer}: ${error.reason}`
@@ -38,15 +49,17 @@ function refusalOf(error: unknown): string | undefined {
 
 // A request that is refused, by the daemon with a 4xx problem or by the kernel in-process, ends the command with exit code 1 and its reason in one line
 // Any other failure goes on to the runner; nothing comes back for a refusal, so the command prints no success
+// Named: the daemon is one --host or --port names
 export async function refusable<Result>(
   context: Context,
   work: () => Promise<Result>,
+  named = false,
 ): Promise<Result | undefined> {
   try {
     const result = await work()
     return result
   } catch (error) {
-    const refusal = refusalOf(error)
+    const refusal = refusalOf(error, named)
     if (refusal === undefined) {
       throw error
     }
@@ -62,9 +75,14 @@ export async function withBureauRefusable<Result>(
   flags: BureauFlags,
   work: (bureau: Bureau) => Promise<Result>,
 ): Promise<Result | undefined> {
-  const result = await refusable(context, async () => {
-    const done = await withBureau(context, flags, work)
-    return done
-  })
+  const named = flags.host !== undefined || flags.port !== undefined
+  const result = await refusable(
+    context,
+    async () => {
+      const done = await withBureau(context, flags, work)
+      return done
+    },
+    named,
+  )
   return result
 }

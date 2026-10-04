@@ -36,6 +36,13 @@ export function testHome(): string {
   return home
 }
 
+// A file holding the token of a daemon named on the command line, removed when the test ends
+export function tokenFile(token: string = 'a'.repeat(64)): string {
+  const file = path.join(tempDir('bb-token-'), 'token')
+  writeFileSync(file, `${token}\n`)
+  return file
+}
+
 // A repository with one commit on `main`
 export function createTempRepo(): string {
   const dir = tempDir('bb-repo-')

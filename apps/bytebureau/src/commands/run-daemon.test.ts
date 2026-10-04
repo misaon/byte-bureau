@@ -3,10 +3,10 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readServerInfo, writeServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { freePort, startDaemonProcess, stoppedWithTheTest } from '../testing/daemon.js'
+import { freePort, startDaemonProcess, stoppedWithTheTest, watchedPort } from '../testing/daemon.js'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
-import { createTempRepo, tempDir, testHome } from '../testing/temp-repo.js'
+import { createTempRepo, tempDir, testHome, tokenFile } from '../testing/temp-repo.js'
 import { PROMPT, projectIdIn, SCRIPTED, workbench, worktreesOf } from '../testing/workbench.js'
 
 // Without --yes and off a terminal the run waits on the question of the fake provider
@@ -139,12 +139,26 @@ describe('bytebureau commands and a record whose daemon does not answer', () => 
 })
 
 describe('bytebureau commands and a daemon named on the command line', () => {
+  it('refuse a daemon the home does not run without --token-file: exit 1, and no request leaves', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    // Were the flags dropped, the command would start a daemon of its own on demand
+    stoppedWithTheTest(home)
+    const elsewhere = await watchedPort()
+    const named = ['--host', '127.0.0.1', '--port', String(elsewhere.port)]
+    const result = await runCli(['projects', 'ls', ...named], { BYTEBUREAU_HOME: home })
+    expect([result.code, elsewhere.connections()]).toStrictEqual([1, 0])
+    expect(result.stderr).toContain(
+      `no daemon of this home listens on http://127.0.0.1:${elsewhere.port}: pass the token of the daemon there with --token-file`,
+    )
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+
   it('fail with exit 2 and the url when --host and --port name a daemon that is not there', async () => {
     expect.hasAssertions()
     const home = testHome()
-    const result = await runCli(['projects', 'ls', '--host', '127.0.0.1', '--port', '9'], {
-      BYTEBUREAU_HOME: home,
-    })
+    const named = ['--host', '127.0.0.1', '--port', '9', '--token-file', tokenFile()]
+    const result = await runCli(['projects', 'ls', ...named], { BYTEBUREAU_HOME: home })
     expect(result.code).toBe(2)
     expect(result.stderr.trim()).toBe(
       'cannot reach the daemon at http://127.0.0.1:9/api/v1/projects',
