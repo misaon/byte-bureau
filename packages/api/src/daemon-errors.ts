@@ -1,4 +1,5 @@
 import { Cause, ErrorReporter, type Layer } from 'effect'
+import { HttpServerError } from 'effect/http'
 import type { BoundAddress } from './bun-address.js'
 
 export class PortInUseError extends Error {
@@ -21,12 +22,23 @@ export const portInUse = (error: unknown, address: BoundAddress): PortInUseError
 
 export type DefectLog = (message: string, properties: Readonly<Record<string, unknown>>) => void
 
-// Every failure behind either door is reported, the problems the API answers on purpose too, so only a cause with a defect is logged
+// A body the server could not read, such as one over Bun's size limit that came without a length, is the client's fault: Bun answers it 413
+const isClientFault = (defect: unknown): boolean =>
+  HttpServerError.isHttpServerError(defect) &&
+  defect.reason instanceof HttpServerError.RequestParseError
+
+const daemonDefects = (cause: Cause.Cause<unknown>): readonly unknown[] =>
+  cause.reasons
+    .filter(Cause.isDieReason)
+    .map((reason) => reason.defect)
+    .filter((defect) => !isClientFault(defect))
+
+// Every failure behind either door is reported, the problems the API answers on purpose too, so only a cause with a defect of the daemon is logged
 // Such a defect is otherwise silent: a REST handler answers an empty 500, an RPC procedure an Exit with a Die
 export const DefectReporter = (log: DefectLog): Layer.Layer<never> =>
   ErrorReporter.layer([
     ErrorReporter.make(({ cause, error }) => {
-      if (Cause.hasDies(cause)) {
+      if (daemonDefects(cause).length > 0) {
         log('a handler failed with a defect', { error: error.message, cause: Cause.pretty(cause) })
       }
     }),
