@@ -2,8 +2,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { m } from '@bytebureau/i18n'
 import type { ServerInfo } from '@bytebureau/protocol'
 import { JUDGING, judgeHolder, type Judging } from './lock-holder.js'
+import { keptBy } from './lock-lines.js'
 import { heldLock } from './lock.js'
-import { lockPath } from './server-info.js'
 import { daemonLogPath } from './daemon-log.js'
 import { spawnDaemon, type DaemonChild } from './spawn.js'
 import { runningDaemon } from './wait.js'
@@ -30,8 +30,8 @@ const failureOf = async (home: string, judging: Judging): Promise<string | undef
   if (holder === 'daemon') {
     return undefined
   }
-  if (holder === 'stuck' && held !== undefined && held.pid !== undefined) {
-    return m.serve_lock_stuck({ lock: lockPath(home), pid: held.pid })
+  if ((holder === 'stuck' || holder === 'silent') && held !== undefined && held.pid !== undefined) {
+    return keptBy(holder, home, held.pid)
   }
   return m.serve_failed({ log: daemonLogPath(home) })
 }
@@ -58,8 +58,9 @@ const awaited = async (
 
 /**
  * Waits for the daemon a start made: up once the daemon of the home answers, whichever start made it.
- * A start whose process ended is a failure at once, naming the log, or the lock with the way out when a process that is no
- * daemon of the home and not this user's holds it; while the daemon that holds the lock is on its way up, the wait goes on.
+ * A start whose process ended is a failure at once, naming the log, or the lock and its pid when a daemon of the home that
+ * does not answer keeps it, or a process of another user that cannot be judged; while the daemon that holds the lock is
+ * on its way up, the wait goes on.
  */
 export const awaitStart = async ({
   home,

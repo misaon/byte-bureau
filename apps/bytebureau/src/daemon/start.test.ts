@@ -1,7 +1,8 @@
-import { utimesSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
+import { unknownStart } from '../testing/old-lock.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { lockPath, writeServerInfo } from './server-info.js'
 import { daemonLogPath } from './daemon-log.js'
@@ -55,17 +56,31 @@ describe(awaitStart, () => {
 
 describe('awaitStart when the process of the start has ended', () => {
   it.skipIf(ROOT)(
-    'names the lock, its pid and the way out when a process of another user holds it',
+    'names the lock, its pid and the way out when a process of another user holds it, whose start cannot be told',
     async () => {
       expect.hasAssertions()
       const home = tempDir('bb-home-')
       writeFileSync(lockPath(home), '1')
-      const anHourAgo = new Date(Date.now() - 3_600_000)
-      utimesSync(lockPath(home), anHourAgo, anHourAgo)
-      const started = await awaitStart({ home, child: ENDED, judging: QUICK })
+      const judging = { ...QUICK, startOf: unknownStart }
+      const started = await awaitStart({ home, child: ENDED, judging })
       expect(started).toStrictEqual({
         up: false,
         reason: `The lock ${lockPath(home)} names pid 1, which does not answer as a daemon of this home; if none is running, clear the lock with bytebureau serve --stop`,
+      })
+    },
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'names the lock and its pid when the daemon that wrote it holds it without answering',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      // Written by this test's own process, which started before it: a daemon stopped or busy, past its start
+      writeFileSync(lockPath(home), String(process.pid))
+      const judging = { graceMs: 200, bootMs: 0 }
+      await expect(awaitStart({ home, child: ENDED, judging })).resolves.toStrictEqual({
+        up: false,
+        reason: `A daemon of this home (pid ${process.pid}) holds the lock ${lockPath(home)} but does not answer; it may be stopped or busy`,
       })
     },
   )

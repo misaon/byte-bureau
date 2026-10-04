@@ -1,10 +1,10 @@
 import { PortInUseError, startDaemon, type RunningDaemon } from '@bytebureau/api/bun'
-import { m } from '@bytebureau/i18n'
 import type { Context } from '../context.js'
 import { version } from '../version.js'
-import { acquireLock, releaseLock, type LockOutcome } from './lock.js'
+import { keptBy } from './lock-lines.js'
+import { acquireLock, releaseLock } from './lock.js'
 import { publish } from './publish.js'
-import { lockPath, removeServerInfoIf } from './server-info.js'
+import { removeServerInfoIf } from './server-info.js'
 import { tokenFor } from './token.js'
 
 export interface ForegroundOptions {
@@ -80,12 +80,6 @@ async function serveLocked(options: ForegroundOptions, context: Context): Promis
   return 0
 }
 
-// Why the lock went to another: a daemon of the home has it, or a process that is no daemon of the home and not this user's to take it from
-const refusal = (lock: Extract<LockOutcome, { acquired: false }>, home: string): string =>
-  lock.stuck
-    ? m.serve_lock_stuck({ lock: lockPath(home), pid: lock.pid })
-    : `a daemon is already running (pid ${lock.pid})`
-
 // Runs until SIGINT, SIGTERM or SIGHUP; one daemon per home, which the lock decides atomically, naming the pid of the one that holds it
 export async function serveForeground(
   options: ForegroundOptions,
@@ -93,7 +87,7 @@ export async function serveForeground(
 ): Promise<number> {
   const lock = await acquireLock(options.home)
   if (!lock.acquired) {
-    context.output.warn(refusal(lock, options.home))
+    context.output.warn(keptBy(lock.holder, options.home, lock.pid))
     return 1
   }
   try {

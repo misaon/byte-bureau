@@ -3,6 +3,7 @@ import { defineCommand } from 'citty'
 import { commonArgs, portOf, processContext, refuseBureauFlags, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
 import { startDetached as started } from '../daemon/start.js'
+import { lockPath } from '../daemon/server-info.js'
 import { stopDaemon, type StopOutcome } from '../daemon/stop.js'
 import { runningDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
@@ -23,7 +24,15 @@ const flagsOf = (flags: ServeFlags): string[] => [
   ...(flags.debug === undefined ? [] : [`--debug=${flags.debug}`]),
 ]
 
-const stopped = (result: Exclude<StopOutcome, { outcome: 'still_running' }>): string => {
+// What a stop that leaves the daemon running says: one that did not end in time, or one that does not answer
+const kept = (result: Extract<StopOutcome, { pid: number }>, home: string): string =>
+  result.outcome === 'silent'
+    ? m.serve_lock_silent({ lock: lockPath(home), pid: result.pid })
+    : m.serve_still_running({ pid: result.pid })
+
+const stopped = (
+  result: Exclude<StopOutcome, { outcome: 'still_running' } | { outcome: 'silent' }>,
+): string => {
   if (result.outcome === 'stopped') {
     return m.serve_stopped({ pid: result.pid })
   }
@@ -32,12 +41,13 @@ const stopped = (result: Exclude<StopOutcome, { outcome: 'still_running' }>): st
     : m.serve_not_running()
 }
 
-// A daemon that is not running is what was asked for, and so is a lock cleared that no daemon of the home held; one that outlives the wait is a failure
+// A daemon that is not running is what was asked for, and so is a lock cleared that no daemon of the home held
+// One that outlives the wait, or that holds the lock without answering, is a failure: it goes on running
 async function stop(home: string, context: Context): Promise<number> {
   const result = await stopDaemon(home)
   context.output.emit({ command: 'serve.stop', ...result })
-  if (result.outcome === 'still_running') {
-    context.output.warn(m.serve_still_running({ pid: result.pid }))
+  if (result.outcome === 'still_running' || result.outcome === 'silent') {
+    context.output.warn(kept(result, home))
     return 1
   }
   context.output.print(stopped(result))

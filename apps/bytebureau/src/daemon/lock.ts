@@ -4,10 +4,13 @@ import { JUDGING, judgeHolder, type HeldLock, type Judging } from './lock-holder
 import { clearLeftovers, withTakeoverMutex } from './lock-mutex.js'
 import { lockHolder, lockPath } from './server-info.js'
 
+// A holder that keeps the lock: a daemon of the home that answers or is on its way up, one that is stopped or busy (silent)
+// Stuck: a process of another user whose start the platform cannot tell, and no daemon of the home answers for it
+export type Keeper = 'daemon' | 'silent' | 'stuck'
+
 export type LockOutcome =
   | { readonly acquired: true }
-  // Stuck: the holder is no daemon of the home that answers, but it is not this user's process to take the lock from
-  | { readonly acquired: false; readonly pid: number; readonly stuck: boolean }
+  | { readonly acquired: false; readonly pid: number; readonly holder: Keeper }
 
 // The lock of the home as it is now, or nothing when there is none
 export const heldLock = (home: string): HeldLock | undefined => {
@@ -32,8 +35,8 @@ const judged = async (home: string, judging: Judging): Promise<LockOutcome | und
     return undefined
   }
   const holder = await judgeHolder(home, held, judging)
-  if (held.pid !== undefined && (holder === 'daemon' || holder === 'stuck')) {
-    return { acquired: false, pid: held.pid, stuck: holder === 'stuck' }
+  if (held.pid !== undefined && holder !== 'gone' && holder !== 'stranger') {
+    return { acquired: false, pid: held.pid, holder }
   }
   takeOverLock(home, held)
   return undefined
@@ -80,9 +83,11 @@ export type Cleared =
   | { readonly kind: 'cleared'; readonly pid: number }
   // A daemon of the home holds the lock: it answers, or it is still on its way up
   | { readonly kind: 'held'; readonly pid: number }
+  // The daemon that wrote the lock holds it but does not answer: stopped or busy, it keeps it
+  | { readonly kind: 'silent'; readonly pid: number }
 
 // The lock of a holder that is no daemon of the home, cleared on request: a process that got the pid after a crash or a reboot, of this user or another
-// The lock of a holder that is gone goes without a word
+// The lock of a holder that is gone goes without a word; a daemon of the home keeps its lock, whether it answers or not
 export const clearStaleLock = async (
   home: string,
   judging: Judging = JUDGING,
@@ -93,8 +98,8 @@ export const clearStaleLock = async (
       return { kind: 'none' }
     }
     const holder = await judgeHolder(home, held, judging)
-    if (holder === 'daemon' && held.pid !== undefined) {
-      return { kind: 'held', pid: held.pid }
+    if (held.pid !== undefined && (holder === 'daemon' || holder === 'silent')) {
+      return { kind: holder === 'daemon' ? 'held' : 'silent', pid: held.pid }
     }
     const removed = takeOverLock(home, held)
     return removed && holder !== 'gone' && held.pid !== undefined

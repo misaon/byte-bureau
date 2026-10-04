@@ -10,6 +10,8 @@ export type StopOutcome =
   | { readonly outcome: 'still_running'; readonly pid: number }
   // The lock of a process that is no daemon of the home, which kept every daemon out
   | { readonly outcome: 'cleared'; readonly pid: number }
+  // A daemon of the home holds the lock but does not answer: stopped or busy, it is neither signalled nor cleared
+  | { readonly outcome: 'silent'; readonly pid: number }
 
 const ended = async (pid: number, deadline: number): Promise<boolean> => {
   const alive = isAlive(pid)
@@ -79,8 +81,8 @@ const byTheLock = async (home: string, { timeoutMs, judging }: Stopping): Promis
   if (lock.kind === 'cleared') {
     return { outcome: 'cleared', pid: lock.pid }
   }
-  if (!(await answering(home, lock.pid, Date.now() + timeoutMs))) {
-    return { outcome: 'still_running', pid: lock.pid }
+  if (lock.kind === 'silent' || !(await answering(home, lock.pid, Date.now() + timeoutMs))) {
+    return { outcome: 'silent', pid: lock.pid }
   }
   return terminated(home, lock.pid, timeoutMs)
 }
@@ -88,8 +90,9 @@ const byTheLock = async (home: string, { timeoutMs, judging }: Stopping): Promis
 /**
  * SIGTERM lets the daemon end its sessions and remove its record; it goes only to a daemon that answers as its record says.
  * A record is removed only once its pid is gone: a live pid that does not answer is never signalled.
- * Without a daemon that answers, the lock decides: a daemon still on its way up is stopped once it answers, and the lock of a
- * process that is no daemon of the home (a pid taken over after a crash or a reboot) is cleared.
+ * Without a daemon that answers, the lock decides: a daemon still on its way up is stopped once it answers, one that does
+ * not answer keeps its lock, and the lock of a process that is no daemon of the home (a pid taken over after a crash or a
+ * reboot) is cleared.
  */
 export const stopDaemon = async (
   home: string,
