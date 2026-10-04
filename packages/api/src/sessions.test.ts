@@ -132,6 +132,22 @@ it.layer(ApiTestLayer())('POST /api/v1/sessions/:id/interrupt without a turn at 
         assert.containSubset(missing.body, { code: 'session_not_found' })
       }),
   )
+
+  suite.effect('refuses with 409 a session whose turn has ended, its agent still attached', () =>
+    Effect.gen(function* refusesBetweenTurns() {
+      const { session, ask } = yield* askedSession
+      const answer = { selected: [(yield* recommendedOption(ask)).id] }
+      assert.strictEqual((yield* post(`/asks/${ask.id}/answer`, answer)).status, 204)
+      // The end of the turn is told once the session is ready again, its agent kept for the next prompt
+      yield* firstEvent(session.id, 'turn.completed')
+      const idle = yield* post(`/sessions/${session.id}/interrupt`)
+      assert.strictEqual(idle.status, 409)
+      assert.containSubset(idle.body, {
+        code: 'session_invalid_transition',
+        detail: 'cannot interrupt a ready session: no turn of it is at work',
+      })
+    }),
+  )
 })
 
 it.layer(ApiTestLayer())('GET /api/v1/usage/sessions/:id over the fake provider', (suite) => {
