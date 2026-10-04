@@ -116,15 +116,32 @@ const endEvent = (session: Owner, turn: TurnRef, outcome: Outcome): KernelEvent 
     : { type: 'turn.interrupted', ...ids, payload }
 }
 
+// The end of the turn that is running, made in the store, and the event that tells of it, which the caller publishes
+export interface EndedTurn {
+  readonly turn: TurnRef
+  readonly announcement: KernelEvent
+}
+
+export const endTurn = (
+  deps: TurnDeps,
+  session: Owner,
+  outcome: Outcome,
+): Effect.Effect<EndedTurn | undefined, StoreError> =>
+  claimTurn(deps.sql, session.id, outcome).pipe(
+    Effect.map((turn) =>
+      turn === undefined ? undefined : { turn, announcement: endEvent(session, turn, outcome) },
+    ),
+  )
+
 export const finishTurn = (
   deps: TurnDeps,
   session: Owner,
   outcome: Outcome,
 ): Effect.Effect<TurnRef | undefined, StoreError> =>
   Effect.gen(function* finishesTurn() {
-    const turn = yield* claimTurn(deps.sql, session.id, outcome)
-    if (turn !== undefined) {
-      yield* deps.log.publish(endEvent(session, turn, outcome))
+    const ended = yield* endTurn(deps, session, outcome)
+    if (ended !== undefined) {
+      yield* deps.log.publish(ended.announcement)
     }
-    return turn
+    return ended === undefined ? undefined : ended.turn
   })
