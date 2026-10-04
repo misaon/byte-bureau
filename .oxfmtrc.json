@@ -9,6 +9,7 @@
     "**/coverage/**",
     "packages/i18n/src/paraglide/**",
     "packages/protocol/schemas/**",
+    "packages/api/openapi.json",
     "docs/research/**",
     "**/*.md",
     "**/*.mdx"

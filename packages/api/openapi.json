@@ -1,0 +1,377 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ByteBureau API",
+    "version": "v1",
+    "description": "The local daemon of ByteBureau: projects, sessions, asks, usage, workspaces, plugins and the event stream."
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "operationId": "health.check",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok",
+                        "degraded"
+                      ]
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "startedAt": {
+                      "type": "string",
+                      "title": "Timestamp",
+                      "description": "ISO-8601 UTC"
+                    },
+                    "checks": {
+                      "type": "object",
+                      "properties": {
+                        "store": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "failed"
+                          ]
+                        },
+                        "plugins": {
+                          "type": "object",
+                          "properties": {
+                            "loaded": {
+                              "type": "integer"
+                            },
+                            "failed": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "loaded",
+                            "failed"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "store",
+                        "plugins"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "version",
+                    "startedAt",
+                    "checks"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Health"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Problem400",
+                  "description": "RFC 9457 problem details"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemas/config.json": {
+      "get": {
+        "tags": [
+          "schemas"
+        ],
+        "operationId": "schemas.config",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "JsonSchemaDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Problem400",
+                  "description": "RFC 9457 problem details"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        401
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Problem401",
+                  "description": "RFC 9457 problem details"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemas/events.json": {
+      "get": {
+        "tags": [
+          "schemas"
+        ],
+        "operationId": "schemas.events",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "JsonSchemaDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Problem400",
+                  "description": "RFC 9457 problem details"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        401
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "title": "Problem401",
+                  "description": "RFC 9457 problem details"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {},
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "Bearer"
+      }
+    }
+  },
+  "security": [],
+  "tags": [
+    {
+      "name": "health"
+    },
+    {
+      "name": "schemas"
+    }
+  ]
+}

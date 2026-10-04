@@ -1,0 +1,33 @@
+{
+  "name": "@bytebureau/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau API: the HTTP API, SSE and RPC adapters over the kernel",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "default": "./src/testing.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/generate-openapi.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bytebureau/kernel": "workspace:*",
+    "@bytebureau/protocol": "workspace:*",
+    "@effect/platform-bun": "4.0.0",
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*",
+    "@effect/platform-node": "4.0.0",
+    "@effect/vitest": "4.0.0"
+  }
+}

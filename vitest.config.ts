@@ -7,6 +7,7 @@ export default defineConfig({
       'packages/protocol',
       'packages/plugin-api',
       'packages/kernel',
+      'packages/api',
       'plugins/workspace-local',
       'apps/bytebureau',
       'apps/docs',

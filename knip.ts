@@ -12,6 +12,12 @@ const config: KnipConfig = {
       entry: ['scripts/*.ts'],
       project: ['src/**/*.{ts,mjs,astro,mdx}', 'scripts/**/*.ts'],
     },
+    'packages/api': {
+      entry: ['scripts/*.ts'],
+      project: ['src/**/*.ts', 'scripts/**/*.ts'],
+      // BunHttpServer serves the API in the daemon of Task 8; until then nothing imports the package
+      ignoreDependencies: ['@effect/platform-bun'],
+    },
     'packages/i18n': {
       project: ['src/**/*.ts', 'scripts/**/*.ts'],
       // Loaded by the inlang SDK from project.inlang/settings.json (modules), never imported
