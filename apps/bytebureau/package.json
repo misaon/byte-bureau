@@ -13,6 +13,7 @@
     "build": "bun run ../../scripts/build-binaries.ts --host --outdir dist"
   },
   "dependencies": {
+    "@bytebureau/api": "workspace:*",
     "@bytebureau/i18n": "workspace:*",
     "@bytebureau/kernel": "workspace:*",
     "@bytebureau/protocol": "workspace:*",

@@ -4,6 +4,7 @@ import { configCommand } from './commands/config.js'
 import { helloCommand } from './commands/hello.js'
 import { projectsCommand } from './commands/projects.js'
 import { runCommand } from './commands/run.js'
+import { serveCommand } from './commands/serve.js'
 import { workspacesCommand } from './commands/workspaces.js'
 import { run } from './run.js'
 import { version } from './version.js'
@@ -29,6 +30,7 @@ const main = defineCommand({
     config: configCommand,
     projects: projectsCommand,
     workspaces: workspacesCommand,
+    serve: serveCommand,
   },
 })
 
