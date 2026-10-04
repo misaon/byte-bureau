@@ -25,6 +25,13 @@ describe(describeError, () => {
     )
   })
 
+  it('names the kind of a provider error', () => {
+    const error = new ProviderError({ kind: 'auth', reason: 'not logged in', retryable: false })
+    expect(describeError(error)).toBe('ProviderError: not logged in (auth)')
+  })
+})
+
+describe('describeError for a configuration error', () => {
   it('names the file and the JSON pointer of a configuration error', () => {
     const error = new ConfigError({
       file: '/repo/bytebureau.json',
@@ -32,7 +39,7 @@ describe(describeError, () => {
       reason: 'Expected a string',
     })
     expect(describeError(error)).toBe(
-      'ConfigError: Expected a string (/repo/bytebureau.json/employees/developer/model)',
+      'ConfigError: /repo/bytebureau.json/employees/developer/model: Expected a string',
     )
   })
 
@@ -42,12 +49,16 @@ describe(describeError, () => {
       pointer: '',
       reason: 'both exist',
     })
-    expect(describeError(error)).toBe('ConfigError: both exist (/repo/bytebureau.json)')
+    expect(describeError(error)).toBe('ConfigError: /repo/bytebureau.json: both exist')
   })
 
-  it('names the kind of a provider error', () => {
-    const error = new ProviderError({ kind: 'auth', reason: 'not logged in', retryable: false })
-    expect(describeError(error)).toBe('ProviderError: not logged in (auth)')
+  it('names the place of a configuration error once, when its reason names it already', () => {
+    const error = new ConfigError({
+      file: '/repo/bytebureau.json',
+      pointer: '/version',
+      reason: '/repo/bytebureau.json/version: Expected 1',
+    })
+    expect(describeError(error)).toBe('ConfigError: /repo/bytebureau.json/version: Expected 1')
   })
 })
 

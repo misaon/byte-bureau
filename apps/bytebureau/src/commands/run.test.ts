@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines, payloadOf } from '../testing/json-lines.js'
@@ -106,6 +106,22 @@ describe('bytebureau run when it cannot start', () => {
       `WorkspaceError: ${directory} is not inside a git repository (not_a_repository)`,
     )
     expect(readdirSync(directory)).toStrictEqual([])
+  })
+})
+
+describe('bytebureau run with an invalid configuration of its project', () => {
+  it('exits 2 with the place of the error named once, in the process of the command', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    writeFileSync(path.join(repo, 'bytebureau.json'), '{ "version": 2 }\n')
+    const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE, NO_DAEMON], {
+      BYTEBUREAU_HOME: home,
+    })
+    expect(result.code).toBe(2)
+    expect(result.stderr.trim()).toMatch(
+      /^ConfigError: \S+\/bytebureau\.json\/version: Expected 1$/u,
+    )
+    expect(result.stderr.split('bytebureau.json/version')).toHaveLength(2)
   })
 })
 
