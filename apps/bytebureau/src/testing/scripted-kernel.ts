@@ -173,7 +173,12 @@ export function captureTerminal(): () => string {
   return () => written.join('')
 }
 
-export const OPTIONS: RunOptions = { prompt: 'Fix the build', project: '/repo', yes: false }
+export const OPTIONS: RunOptions = {
+  prompt: 'Fix the build',
+  project: '/repo',
+  env: {},
+  yes: false,
+}
 
 export const TURN_DONE = event(
   'turn.completed',

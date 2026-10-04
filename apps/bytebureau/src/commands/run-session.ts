@@ -34,6 +34,8 @@ export interface RunOptions {
   readonly branch?: string | undefined
   readonly employee?: string | undefined
   readonly provider?: string | undefined
+  // The BYTEBUREAU_* variables of the command, for the agent: a daemon does not read the environment of the command
+  readonly env: Readonly<Record<string, string>>
   readonly yes: boolean
 }
 
@@ -199,6 +201,7 @@ function sessionBody(projectId: string, options: RunOptions): CreateSessionBody 
     ...(options.employee === undefined ? {} : { employeeId: options.employee }),
     ...(options.provider === undefined ? {} : { providerId: options.provider }),
     ...(options.branch === undefined ? {} : { branch: options.branch }),
+    env: options.env,
   }
 }
 

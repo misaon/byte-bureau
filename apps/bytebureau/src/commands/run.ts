@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { defineCommand } from 'citty'
+import { sessionChoices } from '../bureau/session-env.js'
 import { withBureau } from '../bureau/with-bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
 import { runSession } from './run-session.js'
@@ -20,10 +21,9 @@ export const runCommand = defineCommand({
       prompt: args.prompt,
       // The daemon would resolve a relative path in its own working directory
       project: path.resolve(args.project ?? process.cwd()),
-      branch: args.branch,
-      employee: args.employee,
       provider: args.provider,
       yes: args.yes,
+      ...sessionChoices(args, context.env),
     }
     process.exitCode = await withBureau(context, bureauFlags(args), async (bureau) => {
       const code = await runSession(bureau, options, context)

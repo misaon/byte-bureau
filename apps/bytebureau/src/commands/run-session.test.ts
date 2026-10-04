@@ -1,5 +1,7 @@
+import type { CreateSessionBody } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { askOf, event, option, question } from '../testing/events.js'
+import { SESSION } from '../testing/records.js'
 import {
   captureConsole,
   COMPLETED,
@@ -44,6 +46,26 @@ describe(runSession, () => {
     const { bureau } = scripted([STOPPED])
     await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(3)
     expect(printed.out()).toStrictEqual(['Session stopped'])
+  })
+})
+
+describe('runSession and the session it creates', () => {
+  it('names what the options name, with the BYTEBUREAU_* variables of the command', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const bodies: CreateSessionBody[] = []
+    const { bureau } = scripted([COMPLETED], {
+      create: async (body) => {
+        bodies.push(body)
+        await Promise.resolve()
+        return SESSION
+      },
+    })
+    const env = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+    await runSession(bureau, { ...OPTIONS, employee: 'reviewer', branch: 'dev', env }, contextOf())
+    expect(bodies).toStrictEqual([
+      { projectId: 'p1', title: 'Fix the build', employeeId: 'reviewer', branch: 'dev', env },
+    ])
   })
 })
 
