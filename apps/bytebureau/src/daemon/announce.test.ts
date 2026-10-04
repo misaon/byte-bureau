@@ -12,8 +12,8 @@ describe(announce, () => {
     const context = createContext(TEXT, {}, false)
     announce(recordOn(4747), context)
     announce({ ...recordOn(4747), host: '192.168.1.5' }, context)
-    // Bound to every interface, the daemon is recorded with the loopback clients use
-    announce(recordOn(4747), context, '0.0.0.0')
+    // Bound to every interface, the daemon is recorded with the loopback clients use, and with the address it is bound to
+    announce({ ...recordOn(4747), bind: '0.0.0.0' }, context)
     expect(log.mock.calls).toStrictEqual([
       ['Daemon listening on http://127.0.0.1:4747'],
       ['Daemon listening on http://192.168.1.5:4747'],

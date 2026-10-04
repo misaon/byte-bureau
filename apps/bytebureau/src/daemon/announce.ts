@@ -10,13 +10,19 @@ const emitted = (info: ServerInfo, context: Context): string => {
   return url
 }
 
-// Where the daemon listens; one the network can reach is announced with the warning of spec §11.1, naming the address it is bound to
+// The warning of spec §11.1 for a daemon the network can reach, naming the address it is bound to
 // That address is the recorded host unless the daemon is bound to every interface, which clients reach through the loopback
-export const announce = (info: ServerInfo, context: Context, bound: string = info.host): void => {
-  context.output.print(m.serve_started({ url: emitted(info, context) }))
+export const warnIfReachable = (info: ServerInfo, context: Context): void => {
+  const bound = info.bind ?? info.host
   if (!isLoopback(bound)) {
     context.output.warn(m.serve_lan_warning({ host: bound }))
   }
+}
+
+// Where the daemon listens, and the warning when the network can reach it
+export const announce = (info: ServerInfo, context: Context): void => {
+  context.output.print(m.serve_started({ url: emitted(info, context) }))
+  warnIfReachable(info, context)
 }
 
 // A daemon already serving the home is what was asked for

@@ -51,8 +51,7 @@ async function startDetached(home: string, flags: ServeFlags, context: Context):
     context.output.warn(start.reason)
     return 1
   }
-  // The record names the host clients use; a wildcard bind is known here by the flag alone
-  announce(start.info, context, flags.host ?? start.info.host)
+  announce(start.info, context)
   return 0
 }
 

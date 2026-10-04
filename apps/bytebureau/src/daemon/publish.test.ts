@@ -27,7 +27,7 @@ describe(publish, () => {
     )
     expect(readServerInfo(home)).toMatchObject({
       state: 'alive',
-      info: { host: '127.0.0.1', port: 4747, pid: process.pid, token: TOKEN },
+      info: { host: '127.0.0.1', port: 4747, pid: process.pid, token: TOKEN, bind: '0.0.0.0' },
     })
     expect(error.mock.calls).toStrictEqual([
       ['Listening on 0.0.0.0: anyone on the network with the token can use this daemon'],
@@ -44,6 +44,7 @@ describe(publish, () => {
       createContext({ json: false, color: false, yes: false }, {}, false),
     )
     expect(readServerInfo(home)).toMatchObject({ state: 'alive', info: { host: '::1' } })
+    expect(readServerInfo(home)).not.toHaveProperty(['info', 'bind'])
     expect([log.mock.calls, error.mock.calls]).toStrictEqual([
       [['Daemon listening on http://[::1]:4747']],
       [],
