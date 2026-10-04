@@ -95,6 +95,15 @@ describe('bytebureau sessions in the process of the command', () => {
     expect(jsonLines(listed.stdout)).toStrictEqual([{ command: 'sessions.ls', sessions: [] }])
   })
 
+  it('tells in Czech with --lang cs', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const none = await runCli(['sessions', 'ls', '--lang', 'cs', NO_DAEMON], env)
+    const missing = refusal(['sessions', 'show', MISSING, '--lang', 'cs', NO_DAEMON], env)
+    expect([none.code, none.stdout.trim()]).toStrictEqual([0, 'Žádné relace'])
+    await expect(missing).resolves.toStrictEqual([1, `Relace ${MISSING} neexistuje`])
+  })
+
   it('refuses to show, stop, prompt or interrupt a session that is not there, in the words of the kernel', async () => {
     expect.hasAssertions()
     const env = { BYTEBUREAU_HOME: testHome() }

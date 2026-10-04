@@ -115,6 +115,21 @@ describe('bytebureau sessions show and the status, for a run that waits on its a
     await waiting.daemon.stop()
   })
 
+  it('tells the ask that waits, and the counts, in Czech', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingRun()
+    const sessionId = firstField(waiting.listed, 'asks', 'sessionId')
+    const shown = await runCli(['sessions', 'show', sessionId, '--lang', 'cs'], waiting.env)
+    const status = await runCli(['--lang', 'cs'], waiting.env)
+    expect(shown.stdout).toContain(`Čeká na Vaši odpověď: Export style (${waiting.id})`)
+    expect(status.stdout.trim().split('\n').slice(2)).toStrictEqual([
+      'Relace: 0 běží, 1 čeká na Vás, 1 celkem',
+      'Čekající otázky: 1',
+    ])
+    await finished(waiting)
+    await waiting.daemon.stop()
+  })
+
   it('counts the session and the ask in the status', async () => {
     expect.hasAssertions()
     const waiting = await waitingRun()
