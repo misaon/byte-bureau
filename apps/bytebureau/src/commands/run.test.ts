@@ -4,7 +4,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines, payloadOf } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { tempDir, testHome } from '../testing/temp-repo.js'
 import {
   configureEmployeeProvider,
   FAKE,
@@ -99,7 +99,7 @@ describe('bytebureau run when it cannot start', () => {
     expect.hasAssertions()
     const directory = tempDir('bb-plain-')
     const result = await runCli(['run', 'x', '--project', directory, ...ON_FAKE, NO_DAEMON], {
-      BYTEBUREAU_HOME: tempDir('bb-home-'),
+      BYTEBUREAU_HOME: testHome(),
     })
     expect(result.code).toBe(4)
     expect(result.stderr.trim()).toBe(
@@ -131,7 +131,7 @@ describe('bytebureau run on a repository without a commit', () => {
     const repo = tempDir('bb-empty-')
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
     const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE, NO_DAEMON], {
-      BYTEBUREAU_HOME: tempDir('bb-home-'),
+      BYTEBUREAU_HOME: testHome(),
     })
     expect(result.code).toBe(4)
     const lines = result.stderr.trim().split('\n')

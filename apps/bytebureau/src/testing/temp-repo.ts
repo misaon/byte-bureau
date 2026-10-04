@@ -31,10 +31,22 @@ export function tempDir(prefix: string): string {
   return dir
 }
 
-// A home whose daemons listen on a free port, as every daemon of a test must: its config.json says port 0
+// What every test home's config.json says: daemons on a free port, secrets in a file under the home and never in the keychain of whoever runs the tests
+const TEST_CONFIG = { server: { port: 0 }, secrets: { backend: 'file' } }
+
+// The config.json of a test home: the sections given in place of those of every test home, the others as they are
+export function configureHome(
+  home: string,
+  sections: Readonly<Record<string, unknown>> = {},
+): void {
+  const config = { ...TEST_CONFIG, ...sections }
+  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify(config)}\n`)
+}
+
+// A home whose daemons listen on a free port and keep their secrets in a file, as every kernel of a test must
 export function testHome(): string {
   const home = tempDir('bb-home-')
-  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify({ server: { port: 0 } })}\n`)
+  configureHome(home)
   return home
 }
 

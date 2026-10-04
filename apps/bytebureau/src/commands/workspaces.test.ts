@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { testHome } from '../testing/temp-repo.js'
 import { fakeRun, NO_DAEMON, workbench, worktreesOf } from '../testing/workbench.js'
 
 describe('bytebureau workspaces', () => {
   it('lists nothing before any session ran', async () => {
     expect.hasAssertions()
     const listed = await runCli(['workspaces', 'ls', NO_DAEMON], {
-      BYTEBUREAU_HOME: tempDir('bb-home-'),
+      BYTEBUREAU_HOME: testHome(),
     })
     expect(listed.stdout.trim()).toBe('No workspaces')
   })
@@ -56,7 +56,7 @@ describe('bytebureau workspaces prune', () => {
   it('has nothing to prune before any session ran', async () => {
     expect.hasAssertions()
     const pruned = await runCli(['workspaces', 'prune', NO_DAEMON], {
-      BYTEBUREAU_HOME: tempDir('bb-home-'),
+      BYTEBUREAU_HOME: testHome(),
     })
     expect(pruned.code).toBe(0)
     expect(pruned.stdout.trim()).toBe('Removed 0 worktree(s), kept 0')
