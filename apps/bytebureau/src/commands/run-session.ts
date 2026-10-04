@@ -19,7 +19,7 @@ const EXIT_STOPPED = 3
 
 const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
 
-// Each stops the session once; the second of a kind ends the process as it would without the run
+// The first of them stops the session, and one of another kind after it does nothing; the second of a kind ends the process as it would without the run
 const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
 
 // Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
@@ -124,11 +124,15 @@ async function stopSession({ bureau, session, context }: Run): Promise<void> {
   }
 }
 
-// Ctrl-C, SIGTERM and SIGHUP stop the session alike; the result is a release that removes the listeners and waits for the stop
+// Ctrl-C, SIGTERM and SIGHUP stop the session alike, once; the result is a release that removes the listeners and waits for the stop
 function stopOnSignals(run: Run): () => Promise<void> {
   let stopping = Promise.resolve()
+  let stopped = false
   const stop = (): void => {
-    stopping = stopSession(run)
+    if (!stopped) {
+      stopped = true
+      stopping = stopSession(run)
+    }
   }
   for (const signal of STOP_SIGNALS) {
     process.once(signal, stop)

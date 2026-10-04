@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { ApiError } from '@bytebureau/client'
 import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
 import { describe, expect, it } from 'vitest'
@@ -162,9 +163,12 @@ function listening(before: ReadonlySet<unknown>): number {
   return STOP_SIGNALS.reduce((count, signal) => count + addedSince(before, signal).length, 0)
 }
 
-function send(signal: StopSignal, before: ReadonlySet<unknown>): void {
-  for (const listener of addedSince(before, signal)) {
-    listener(signal)
+// The signals, one after the other, to the listeners the run put on them
+function send(signals: readonly StopSignal[], before: ReadonlySet<unknown>): void {
+  for (const signal of signals) {
+    for (const listener of addedSince(before, signal)) {
+      listener(signal)
+    }
   }
 }
 
@@ -174,8 +178,11 @@ interface Interrupted {
   readonly listeners: number
 }
 
-// A run whose events wait at a gate: it is sent the signal once it has prompted, and then the gate opens
-async function interruptedRun(signal: StopSignal, stop?: Overrides['stop']): Promise<Interrupted> {
+// A run whose events wait at a gate: it is sent the signals once it has prompted, and then the gate opens
+async function interruptedRun(
+  signals: readonly StopSignal[],
+  stop?: Overrides['stop'],
+): Promise<Interrupted> {
   const gate = latch()
   const prompted = latch()
   const before = listenersNow()
@@ -190,7 +197,7 @@ async function interruptedRun(signal: StopSignal, stop?: Overrides['stop']): Pro
   })
   const run = runSession(bureau, OPTIONS, contextOf())
   await prompted.opened
-  send(signal, before)
+  send(signals, before)
   gate.open()
   const code = await run
   return { code, calls, listeners: listening(before) }
@@ -202,7 +209,7 @@ describe('runSession and the signals that stop it', () => {
     async (signal) => {
       expect.hasAssertions()
       captureConsole()
-      const { code, calls } = await interruptedRun(signal)
+      const { code, calls } = await interruptedRun([signal])
       const stops = calls.filter((call) => call.startsWith('stop'))
       expect([code, stops]).toStrictEqual([3, ['stop s1']])
     },
@@ -211,14 +218,14 @@ describe('runSession and the signals that stop it', () => {
   it('listens to none of them once the run is over', async () => {
     expect.hasAssertions()
     captureConsole()
-    const { listeners } = await interruptedRun('SIGINT')
+    const { listeners } = await interruptedRun(['SIGINT'])
     expect(listeners).toBe(0)
   })
 
   it('reports a stop that fails and keeps following the session', async () => {
     expect.hasAssertions()
     const printed = captureConsole()
-    const { code } = await interruptedRun('SIGTERM', rejecting(new Error('the store is locked')))
+    const { code } = await interruptedRun(['SIGTERM'], rejecting(new Error('the store is locked')))
     expect(code).toBe(3)
     expect(printed.err()).toStrictEqual(['the store is locked'])
   })
@@ -232,5 +239,21 @@ describe('runSession and the signals that stop it', () => {
     })
     await expect(runSession(bureau, OPTIONS, contextOf())).rejects.toThrow('the prompt was lost')
     expect(listening(before)).toBe(0)
+  })
+})
+
+describe('runSession and a second signal', () => {
+  it('stops once, for the first signal: one of another kind after it does nothing, and the run waits for that stop', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const order: string[] = []
+    const slowStop = async (): Promise<void> => {
+      order.push('stop')
+      await sleep(20)
+      order.push('stopped')
+    }
+    await interruptedRun(['SIGINT', 'SIGHUP'], slowStop)
+    order.push('run ended')
+    expect(order).toStrictEqual(['stop', 'stopped', 'run ended'])
   })
 })
