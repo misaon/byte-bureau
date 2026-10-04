@@ -206,7 +206,7 @@ export type WorkspaceInfo = {
     path: string;
     branch: string;
     baseRef: string;
-    sessionStatus: string;
+    sessionStatus: 'created' | 'provisioning' | 'ready' | 'running' | 'waiting_for_human' | 'paused_usage_limit' | 'completed' | 'stopped' | 'errored';
     exists: boolean;
 };
 

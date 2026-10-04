@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { HealthDto, PluginStatusDto, SessionDto, TurnDto } from './dto.js'
+import { HealthDto, PluginStatusDto, SessionDto, TurnDto, WorkspaceInfoDto } from './dto.js'
 import { CreateSessionBody, EventsFilter, EventsQuery } from './requests.js'
 
 const employee = {
@@ -78,6 +78,25 @@ describe('the API DTO schemas', () => {
       checks: { store: 'failed', plugins: { loaded: 2, failed: 1 } },
     }
     expect(Schema.decodeUnknownSync(HealthDto)(health)).toStrictEqual(health)
+  })
+})
+
+describe('the worktree DTO', () => {
+  const worktree = {
+    sessionId: session.id,
+    projectId: session.projectId,
+    path: '/tmp/repo/.bytebureau/worktrees/x',
+    branch: 'bb/create-hello',
+    baseRef: 'main',
+    sessionStatus: 'completed',
+    exists: true,
+  }
+
+  it('carries the status of its session as one of the session statuses', () => {
+    expect(Schema.decodeUnknownSync(WorkspaceInfoDto)(worktree)).toStrictEqual(worktree)
+    expect(() =>
+      Schema.decodeUnknownSync(WorkspaceInfoDto)({ ...worktree, sessionStatus: 'dancing' }),
+    ).toThrow(/sessionStatus/u)
   })
 })
 

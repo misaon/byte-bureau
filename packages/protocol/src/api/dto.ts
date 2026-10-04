@@ -61,7 +61,7 @@ export const WorkspaceInfoDto = Schema.Struct({
   path: Schema.String,
   branch: Schema.String,
   baseRef: Schema.String,
-  sessionStatus: Schema.String,
+  sessionStatus: SessionStatus,
   exists: Schema.Boolean,
 }).annotate({ title: 'WorkspaceInfo', identifier: 'WorkspaceInfo' })
 

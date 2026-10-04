@@ -4225,7 +4225,18 @@
             "type": "string"
           },
           "sessionStatus": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "created",
+              "provisioning",
+              "ready",
+              "running",
+              "waiting_for_human",
+              "paused_usage_limit",
+              "completed",
+              "stopped",
+              "errored"
+            ]
           },
           "exists": {
             "type": "boolean"
