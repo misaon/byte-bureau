@@ -132,8 +132,19 @@ const inUse = (id: string, holding: number): ProfileError =>
     reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete or remove them first`,
   })
 
+// The default passes to the oldest profile left of the provider, when the removed one held it
+const passDefault = (
+  sql: SqlClient.SqlClient,
+  removed: Profile,
+): Effect.Effect<void, StoreError> =>
+  removed.isDefault
+    ? Effect.flatMap(oldestProfileOf(sql, removed.providerId), (next) =>
+        next === undefined ? Effect.void : markDefault(sql, removed.providerId, next.id),
+      )
+    : Effect.void
+
 // A session that runs or can resume keeps its profile; the completed ones let go of it, as the store refers to no profile that is gone
-// The count, the release and the delete share one transaction, so a session created in between cannot slip past
+// The count, the release, the delete and the passing of the default share one transaction: a session created in between cannot slip past, and two removals cannot leave a provider without its default
 export const deleteProfile = (
   sql: SqlClient.SqlClient,
   id: string,
@@ -155,6 +166,7 @@ export const deleteProfile = (
         if (deleted === undefined) {
           return yield* missing(id)
         }
+        yield* passDefault(sql, deleted)
         return deleted
       }),
     )

@@ -22,13 +22,13 @@ export const doubtingPlugin: Plugin = definePlugin({
   },
 })
 
-const kept = new InMemorySecretStore()
+const lockedStore = new InMemorySecretStore()
 
 // A secret store that refuses to keep a secret, as a locked keychain would
 export const refusingSecrets: SecretsShape = {
   backend: 'keychain',
   get: async (key) => {
-    const value = await kept.get(key)
+    const value = await lockedStore.get(key)
     return value
   },
   set: async () => {
@@ -36,6 +36,24 @@ export const refusingSecrets: SecretsShape = {
     throw new Error('the keychain is locked')
   },
   delete: async (key) => {
-    await kept.delete(key)
+    await lockedStore.delete(key)
+  },
+}
+
+const stickyStore = new InMemorySecretStore()
+
+// A secret store that keeps what it is given and refuses to let it go, as a file it cannot rewrite would
+export const stickySecrets: SecretsShape = {
+  backend: 'file',
+  get: async (key) => {
+    const value = await stickyStore.get(key)
+    return value
+  },
+  set: async (key, value) => {
+    await stickyStore.set(key, value)
+  },
+  delete: async () => {
+    await Promise.resolve()
+    throw new Error('the secrets file cannot be written')
   },
 }

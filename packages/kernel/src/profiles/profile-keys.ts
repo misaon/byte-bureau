@@ -3,7 +3,8 @@ import { toStoreError, type StoreError } from '../errors.js'
 import type { SecretsShape } from '../secrets/secrets.js'
 
 // The kernel's keys start with @bytebureau/, which no plugin name can: a plugin's are <plugin>/<key>, its name a kebab-case word
-const keyOf = (profileId: string): string => `@bytebureau/profiles/${profileId}/api_key`
+export const secretKeyOf = (profileId: string): string =>
+  `@bytebureau/profiles/${profileId}/api_key`
 
 // A secret store that fails has failed like the store, not like the kernel
 export const readKey = (
@@ -12,7 +13,7 @@ export const readKey = (
 ): Effect.Effect<string | undefined, StoreError> =>
   Effect.tryPromise({
     try: async () => {
-      const value = await secrets.get(keyOf(profileId))
+      const value = await secrets.get(secretKeyOf(profileId))
       return value
     },
     catch: toStoreError,
@@ -25,7 +26,7 @@ export const writeKey = (
 ): Effect.Effect<void, StoreError> =>
   Effect.tryPromise({
     try: async () => {
-      await secrets.set(keyOf(profileId), value)
+      await secrets.set(secretKeyOf(profileId), value)
     },
     catch: toStoreError,
   })
@@ -36,7 +37,7 @@ export const dropKey = (
 ): Effect.Effect<void, StoreError> =>
   Effect.tryPromise({
     try: async () => {
-      await secrets.delete(keyOf(profileId))
+      await secrets.delete(secretKeyOf(profileId))
     },
     catch: toStoreError,
   })
