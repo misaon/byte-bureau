@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { startDaemonProcess } from '../testing/daemon.js'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { stopDaemon } from '../daemon/stop.js'
+import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { eventLines, payloadOf } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
 import { FAKE, PROMPT, workbench } from '../testing/workbench.js'
@@ -68,5 +69,35 @@ describe('bytebureau run through the daemon and the environment of the command',
     expect(payloadOf(events, 'session.created')).toMatchObject({ employeeId: 'reviewer' })
     expect([result.code, events.at(-1)]).toMatchObject([3, { type: 'session.stopped' }])
     await daemon.stop()
+  })
+})
+
+// The employee of the session a run through the daemon of the home creates, with the variables given to that run
+async function employeeOfRun(
+  repo: string,
+  env: Readonly<Record<string, string>>,
+): Promise<unknown> {
+  const result = await runCli(
+    ['run', PROMPT, '--project', repo, '--provider', 'fake', '--json', '--yes'],
+    env,
+  )
+  return payloadOf(eventLines(result.stdout), 'session.created')
+}
+
+describe('a daemon that a run starts on demand', () => {
+  it('keeps the choices of that run to it: the next run gets the default employee', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    twoEmployees(repo)
+    onTestFinished(async () => {
+      await stopDaemonOf(home)
+    })
+    const first = await employeeOfRun(repo, {
+      BYTEBUREAU_HOME: home,
+      BYTEBUREAU_EMPLOYEE: 'reviewer',
+    })
+    const second = await employeeOfRun(repo, { BYTEBUREAU_HOME: home })
+    expect([first, second]).toMatchObject([{ employeeId: 'reviewer' }, { employeeId: 'developer' }])
+    await expect(stopDaemon(home)).resolves.toMatchObject({ outcome: 'stopped' })
   })
 })
