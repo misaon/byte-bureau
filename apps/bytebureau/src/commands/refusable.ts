@@ -1,5 +1,11 @@
 import { ApiError } from '@bytebureau/client'
-import { AskError, SessionError, WorkspaceError } from '@bytebureau/kernel'
+import {
+  AskError,
+  ConfigError,
+  ProviderError,
+  SessionError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
 import type { Bureau } from '../bureau/bureau.js'
 import type { BureauFlags } from '../bureau/resolve.js'
 import { withBureau } from '../bureau/with-bureau.js'
@@ -7,11 +13,18 @@ import type { Context } from '../context.js'
 import { oneLine } from './run-output.js'
 
 // What a refusal says: the detail of the problem the daemon answered with, or the reason of the kernel's own error
+// The errors of the kernel that the API answers with a 4xx problem are the refusals in-process, told as the API tells them
 // A failure that is no refusal has none
 function refusalOf(error: unknown): string | undefined {
   if (error instanceof ApiError) {
     const { problem } = error
     return problem !== undefined && error.status < 500 ? problem.detail : undefined
+  }
+  if (error instanceof ConfigError) {
+    return `${error.file}${error.pointer}: ${error.reason}`
+  }
+  if (error instanceof ProviderError) {
+    return error.kind === 'missing' ? error.reason : undefined
   }
   if (
     error instanceof SessionError ||

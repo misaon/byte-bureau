@@ -1,6 +1,7 @@
 import { ApiError } from '@bytebureau/client'
 import {
   AskError,
+  ConfigError,
   ProviderError,
   SessionError,
   StoreError,
@@ -59,6 +60,14 @@ describe('refusable and the kernel in the process of the command', () => {
     ],
     ['an ask', new AskError({ code: 'not_pending', reason: 'ask a1 is answered' })],
     [
+      'a provider that is missing',
+      new ProviderError({
+        kind: 'missing',
+        reason: 'provider "claude" is not available; available: fake',
+        retryable: false,
+      }),
+    ],
+    [
       'a workspace',
       new WorkspaceError({ code: 'has_sessions', reason: 'project repo still has 1 session' }),
     ],
@@ -72,6 +81,24 @@ describe('refusable and the kernel in the process of the command', () => {
       expect([printed.err(), process.exitCode]).toStrictEqual([[refusal.reason], 1])
     },
   )
+})
+
+describe('refusable and what the kernel says in its own way', () => {
+  it('tells an invalid configuration as the daemon does: the file and the pointer, then the reason', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const invalid = new ConfigError({
+      file: 'bytebureau.json',
+      pointer: '/employees/developer',
+      reason: 'provider is required',
+    })
+    await expect(refusable(contextOf(), rejecting(invalid))).resolves.toBeUndefined()
+    expect(printed.err()).toStrictEqual([
+      'bytebureau.json/employees/developer: provider is required',
+    ])
+    expect(process.exitCode).toBe(1)
+  })
 
   it('tells a reason that spans lines as one line', async () => {
     expect.hasAssertions()
@@ -99,8 +126,12 @@ describe('refusable and the failures that are no refusal', () => {
       new ApiError(404, undefined, 'http://127.0.0.1:4747/api/v1/x'),
     ],
     [
-      'a provider of the kernel',
+      'a provider that crashed',
       new ProviderError({ kind: 'crash', reason: 'it', retryable: true }),
+    ],
+    [
+      'a provider that is not logged in',
+      new ProviderError({ kind: 'auth', reason: 'it', retryable: false }),
     ],
     ['the store of the kernel', new StoreError({ cause: new Error('disk full') })],
     ['any other error', new Error('boom')],
