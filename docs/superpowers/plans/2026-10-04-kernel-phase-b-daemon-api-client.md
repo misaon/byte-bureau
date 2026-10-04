@@ -8365,6 +8365,8 @@ Verified facts this task relies on (fact sheet §1, §4.3, §8): `@effect/platfo
 
 Semantics: **`startDaemon`** (Effect, in `packages/api` so that `apps/bytebureau` imports no Effect, ADR-0003) composes `serveApi(options)` over `BunHttpServer.layer({ hostname, port })` over `kernelBunLayer(...)`, builds the runtime, loads the plugins, runs the recovery of Task 2, and returns the bound address and a `close()` that disposes the runtime (which stops the server, the agents and the store). The host and port come from the flags, else the user configuration's `server.host`/`server.port` (read through the kernel's `Config` so that one loader serves both), else `127.0.0.1` and `4747`. **`server.json`** — `<home>/server.json`, mode 0600, holds `ServerInfo` (`version`, `host`, `port`, `pid`, `token`, `startedAt`); it is written after the server is bound (so the port is the real one) by an atomic rename of a temp file, and removed when the daemon ends; a file whose `pid` is not alive is stale and is replaced. The token is generated at the first start and kept across restarts (spec §11.1 "generated on first start"), so a client that read it keeps working. **`serve`** — by default starts the daemon detached (the same executable with `serve --no-daemonize` and the same flags, stdin and stdout ignored, stderr appended to `<home>/logs/daemon.log`), waits up to ten seconds for `server.json` and a healthy `/api/v1/health`, prints the URL and exits 0; `--no-daemonize` runs in the foreground until `SIGINT`, `SIGTERM` or `SIGHUP`, then stops the sessions and removes `server.json`; `--stop` sends `SIGTERM` to the pid of `server.json` and waits up to five seconds for it to end; a second daemon on the same home is refused with exit 1 and the pid of the running one (one writer per store, ADR-0010); `--host` other than a loopback address prints the LAN warning of spec §11.1. `--json` prints one record `{ command: 'serve', url, pid, version }` on stdout.
 
+Semantics (as shipped, commits 9cc3c70, 526ca5a, b26ff56, 795ac6a, c222e71, 80faaa8, 7949614, 34bb23d, 5d525a1, c4099cf): the **token persists in `<home>/daemon.token`** (0600) and is copied into `server.json` while a daemon runs (`server.json` goes with the daemon); both files and the lock are written through `private-file.ts` (temp + fsync + chmod + rename at 0600, directories 0700); the **lock** is written aside as `daemon.lock.<pid>` and linked into place (always holds the pid), and a stale lock is **taken over by atomic rename** (`daemon.lock.<pid>.stale`): only the moved file is judged — a dead holder is removed, a live one is linked back and refused with its pid; a lock that keeps changing hands fails after five rounds; **boot before serve** — the plugin load and the recovery are a layer the server layer depends on, so no request is served before recovery (`bun.ts` `Boot`); a bind failure reads `cannot listen on <host>:<port>: the port is taken or the address is not this machine's` (`daemon-errors.ts` `PortInUseError`; Bun reports EADDRINUSE for a foreign address too) and the same module holds the **error reporter** that logs a handler defect of either door under `bb.api`; `startDaemon` picks host and port from the flags, else the user configuration's `server.host`/`server.port` read inside the same runtime, else 127.0.0.1/4747; a **wildcard bind** (`0.0.0.0`/`::`) records `127.0.0.1`/`::1` as the client host (`hosts.ts`) and the LAN warning names the bound host; `--stop` and the detached `serve` act only on a daemon whose health answers with the `startedAt` of `server.json` (`wait.ts` `daemonAnswers`/`runningDaemon`) and **`--stop` removes a record only when its pid is dead** — a live pid that does not answer keeps its record and `--stop` exits 1; `foreground.ts` is loaded with a dynamic import only in the `--no-daemonize` branch, so no other command loads the API stack; `windowsHide: true` on the detached spawn; the `--json` record is `{ command: 'serve', url, pid, version }` (and `serve.stop` for `--stop`); `--port` is validated; `testHome()` (`testing/temp-repo.ts`) writes `config.json` with `server.port: 0` so test daemons never bind 4747, and `startDaemonProcess(home, extra?)` ends its daemon through the lock's pid as a fallback. Known for the whole-branch review: a crash or a failed link inside the two-syscall takeover window can leave a live daemon without its lock, and a third start in the instant a displaced lock is put back could acquire beside it (a takeover mutex would close both); leftover `daemon.lock.<pid>.stale`/draft files after a crash are never removed; removing a stale record is check-then-act over two syscalls; a wildcard host from `config.json` gets its LAN warning only in `daemon.log`; a failed detached start waits the full 10 s.
+
 - [ ] **Step 1: `startDaemon` in `packages/api`**
 
 `packages/api/package.json` exports gain `"./bun": { "types": "./src/bun.ts", "default": "./src/bun.ts" }`.
@@ -8377,9 +8379,13 @@ export interface BoundAddress {
 }
 
 // The host and port of the address the platform prints, with or without a scheme; an IPv6 host loses its brackets
+// The URL parser drops port 80, the default of the scheme
 export const boundAddress = (formatted: string): BoundAddress => {
   const url = new URL(formatted.startsWith('http') ? formatted : `http://${formatted}`)
-  return { host: url.hostname.replace(/^\[|\]$/gu, ''), port: Number(url.port) }
+  return {
+    host: url.hostname.replaceAll(/^\[|\]$/gu, ''),
+    port: url.port === '' ? 80 : Number(url.port),
+  }
 }
 ```
 `packages/api/src/bun-address.test.ts`:
@@ -8390,44 +8396,62 @@ import { boundAddress } from './bun-address.js'
 describe(boundAddress, () => {
   it('reads host and port from a URL and from a bare address', () => {
     expect(boundAddress('http://127.0.0.1:4747')).toStrictEqual({ host: '127.0.0.1', port: 4747 })
-    expect(boundAddress('127.0.0.1:51234')).toStrictEqual({ host: '127.0.0.1', port: 51234 })
+    expect(boundAddress('127.0.0.1:51234')).toStrictEqual({ host: '127.0.0.1', port: 51_234 })
     expect(boundAddress('http://[::1]:4747')).toStrictEqual({ host: '::1', port: 4747 })
+  })
+
+  it('keeps port 80, which a URL leaves out as the default of its scheme', () => {
+    expect(boundAddress('http://127.0.0.1:80')).toStrictEqual({ host: '127.0.0.1', port: 80 })
   })
 })
 ```
 
 `packages/api/src/bun.ts`:
 ```ts
+import { Config, kernelLogger, nowIso, PluginHost, SessionManager } from '@bytebureau/kernel'
 import { kernelBunLayer, type KernelOptions } from '@bytebureau/kernel/bun'
-import { Config, nowIso, PluginHost, SessionManager, kernelLogger } from '@bytebureau/kernel'
 import { BunHttpServer } from '@effect/platform-bun'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { HttpServer } from 'effect/http'
 import { boundAddress, type BoundAddress } from './bun-address.js'
 import { DEFAULT_API_OPTIONS } from './config.js'
+import { DefectReporter, portInUse } from './daemon-errors.js'
 import { serveApi } from './layer.js'
+
+export { PortInUseError } from './daemon-errors.js'
+export type { BoundAddress } from './bun-address.js'
 
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 4747
 const MAX_BODY_BYTES = 10 * 1024 * 1024
 
-// Bun's own knobs (fact sheet §1.6–1.9, §4.3): the hostname must be passed (Bun binds every interface otherwise), its 10 s idle timeout would cut an SSE stream,
-// maxRequestBodySize is the body limit that holds on Bun, open streams must not delay a shutdown by the 20 s default, and a WebSocket client that stops reading is closed instead of buffered without bound
-const serveOptions = (hostname: string, port: number) => ({
-  hostname,
+type ServeOptions = Parameters<typeof BunHttpServer.layer>[0]
+type ServerLayer = ReturnType<typeof BunHttpServer.layer>
+type KernelLayer = Awaited<ReturnType<typeof kernelBunLayer>>
+type DaemonRuntime = ManagedRuntime.ManagedRuntime<HttpServer.HttpServer, unknown>
+
+// Bun's own knobs: the hostname must be passed, as Bun binds every interface otherwise; its 10 s idle timeout would cut an SSE stream
+// Bun's body limit holds where Effect's does not; at 10 MiB it sits above the API's 10 MB check, which answers a declared length first
+// Open streams must not delay a shutdown by the 20 s default
+// A WebSocket client that stops reading is closed instead of buffered without bound, and its frames are capped like a body
+const serveOptions = ({ host, port }: BoundAddress): ServeOptions => ({
+  hostname: host,
   port,
   idleTimeout: 60,
   maxRequestBodySize: MAX_BODY_BYTES,
   gracefulShutdownTimeout: '2 seconds',
-  // WebSocket frames are outside the HTTP body limit: cap them at the same size
-  websocket: { closeOnBackpressureLimit: true, backpressureLimit: 1024 * 1024, maxPayloadLength: MAX_BODY_BYTES },
+  websocket: {
+    closeOnBackpressureLimit: true,
+    backpressureLimit: 1024 * 1024,
+    maxPayloadLength: MAX_BODY_BYTES,
+  },
 })
 
 export interface DaemonOptions extends KernelOptions {
   readonly version: string
-  // Plain text here: the CLI that passes it imports no Effect; it is wrapped in Redacted at once
+  // Plain text here, as the CLI that passes it imports no Effect; it is wrapped in Redacted at once
   readonly token: string
-  // Flags win; what is absent comes from the user configuration, then the defaults
+  // Flags win; what they leave out comes from the user configuration, then the defaults
   readonly host?: string | undefined
   readonly port?: number | undefined
   readonly corsOrigins?: readonly string[] | undefined
@@ -8436,48 +8460,128 @@ export interface DaemonOptions extends KernelOptions {
 export interface RunningDaemon {
   readonly address: BoundAddress
   readonly startedAt: string
+  // Stops the server, the agents and the store
   readonly close: () => Promise<void>
 }
 
-// The server section of the user configuration, empty when the configuration cannot be read (the kernel logs why)
-const configuredServer = (
-  options: DaemonOptions,
-): Effect.Effect<{ readonly host?: string | undefined; readonly port?: number | undefined }, never, Config> =>
-  Config.use((config) => config.load({ env: options.env })).pipe(
-    Effect.map((resolved) => resolved.user.server ?? {}),
-    Effect.catch(() => Effect.succeed({})),
-  )
+interface ServerSection {
+  readonly host?: string | undefined
+  readonly port?: number | undefined
+}
+
+// The address the start asked for, known once the configuration has been read inside the runtime: a refusal names it
+interface Requested {
+  host: string
+  port: number
+}
 
 const logger = kernelLogger(['bb', 'api'])
 
-// The kernel, the API and the Bun server as one layer; the plugins load and the sessions of a previous process are recovered before the address is given out
-export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon> {
-  const kernel = await kernelBunLayer(options)
-  const startedAt = nowIso()
-  const configured = await Effect.runPromise(configuredServer(options).pipe(Effect.provide(kernel)))
-  const hostname = options.host ?? configured.host ?? DEFAULT_HOST
-  const port = options.port ?? configured.port ?? DEFAULT_PORT
-  const api = serveApi({
+const formattedAddress = HttpServer.addressFormattedWith((address) => Effect.succeed(address))
+
+// The kernel is given what it reads, and never the token
+const kernelOptionsOf = ({
+  home,
+  env,
+  logging,
+  extraPlugins,
+  pluginConfig,
+}: DaemonOptions): KernelOptions => ({ home, env, logging, extraPlugins, pluginConfig })
+
+// The server section of the user configuration; one that cannot be read leaves the address to the flags and the defaults, and says so
+const configuredServer = (env: KernelOptions['env']): Effect.Effect<ServerSection, never, Config> =>
+  Config.use((config) => config.load({ env })).pipe(
+    Effect.map((resolved): ServerSection => resolved.user.server ?? {}),
+    Effect.catchTag('ConfigError', (failure) =>
+      Effect.sync((): ServerSection => {
+        logger.warn('the user configuration cannot be read: its server section is not applied', {
+          file: failure.file,
+          reason: failure.reason,
+        })
+        return {}
+      }),
+    ),
+  )
+
+// The Bun server on the address of the flags, else of the user configuration (read through the kernel's Config of this runtime), else the defaults
+const resolveServer = (
+  options: DaemonOptions,
+  requested: Requested,
+): Layer.Layer<Layer.Success<ServerLayer>, Layer.Error<ServerLayer>, Config> =>
+  Layer.unwrap(
+    Effect.map(configuredServer(options.env), (configured) => {
+      requested.host = options.host ?? configured.host ?? DEFAULT_HOST
+      requested.port = options.port ?? configured.port ?? DEFAULT_PORT
+      return BunHttpServer.layer(serveOptions(requested))
+    }),
+  )
+
+// The plugins load and the sessions a previous process left at work are recovered before the server is built, so no request comes first
+const Boot = Layer.effectDiscard(
+  Effect.gen(function* boots() {
+    yield* PluginHost.use((host) => host.load())
+    const recovered = yield* SessionManager.use((sessions) => sessions.recover())
+    if (recovered.length > 0) {
+      yield* Effect.sync(() => {
+        logger.info('recovered sessions left by a previous process', { sessions: recovered })
+      })
+    }
+  }),
+)
+
+// The API of this start; a defect behind either of its doors is logged under bb.api
+const apiOf = (options: DaemonOptions, startedAt: string): ReturnType<typeof serveApi> => {
+  const reporter = DefectReporter((message, properties) => {
+    logger.error(message, properties)
+  })
+  return serveApi({
     ...DEFAULT_API_OPTIONS,
     version: options.version,
     startedAt,
     token: Redacted.make(options.token),
     corsOrigins: options.corsOrigins ?? DEFAULT_API_OPTIONS.corsOrigins,
-  })
-  const runtime = ManagedRuntime.make(
-    api.pipe(Layer.provideMerge(BunHttpServer.layer(serveOptions(hostname, port))), Layer.provideMerge(kernel)),
+  }).pipe(Layer.provide(reporter))
+}
+
+interface Built {
+  readonly runtime: DaemonRuntime
+  readonly requested: Requested
+}
+
+// The kernel, the boot, the Bun server and the API as one runtime, built in that order
+const buildRuntime = (options: DaemonOptions, kernel: KernelLayer, startedAt: string): Built => {
+  const requested: Requested = {
+    host: options.host ?? DEFAULT_HOST,
+    port: options.port ?? DEFAULT_PORT,
+  }
+  const server = resolveServer(options, requested).pipe(Layer.provide(Boot))
+  const layer = apiOf(options, startedAt).pipe(
+    Layer.provideMerge(server),
+    Layer.provideMerge(kernel),
   )
+  return { runtime: ManagedRuntime.make(layer), requested }
+}
+
+/**
+ * Starts the kernel with the API on Bun and resolves once the daemon serves: its plugins loaded, the sessions of a previous process recovered, the address bound (port 0 becomes a free one).
+ * A start that fails is disposed before the failure is passed on; a taken port fails with PortInUseError.
+ */
+export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon> {
+  const kernel = await kernelBunLayer(kernelOptionsOf(options))
+  const startedAt = nowIso()
+  const { runtime, requested } = buildRuntime(options, kernel, startedAt)
   try {
-    await runtime.runPromise(PluginHost.use((host) => host.load()))
-    const recovered = await runtime.runPromise(SessionManager.use((sessions) => sessions.recover()))
-    if (recovered.length > 0) {
-      logger.info('recovered sessions left by a previous process', { sessions: recovered })
+    const address = boundAddress(await runtime.runPromise(formattedAddress))
+    return {
+      address,
+      startedAt,
+      close: async () => {
+        await runtime.dispose()
+      },
     }
-    const formatted = await runtime.runPromise(HttpServer.addressFormattedWith((address) => Effect.succeed(address)))
-    return { address: boundAddress(formatted), startedAt, close: () => runtime.dispose() }
   } catch (error) {
     await Promise.allSettled([runtime.dispose()])
-    throw portInUse(error, port) ?? error
+    throw portInUse(error, requested) ?? error
   }
 }
 ```
@@ -8487,11 +8591,17 @@ Two more things the daemon composes (notes from Tasks 3–6): `serveApi` passes 
 
 `apps/bytebureau/src/daemon/server-info.test.ts`:
 ```ts
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
-import { acquireLock, isAlive, lockPath, readServerInfo, releaseLock, removeServerInfo, serverInfoPath, writeServerInfo } from './server-info.js'
+import {
+  isAlive,
+  readServerInfo,
+  removeServerInfo,
+  serverInfoPath,
+  writeServerInfo,
+} from './server-info.js'
 
 const info = {
   version: '0.1.0',
@@ -8502,45 +8612,46 @@ const info = {
   startedAt: '2026-10-04T10:00:00.000Z',
 }
 
+// No process has this pid: the highest a system hands out is far below it
+const DEAD_PID = 2_147_483_000
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
 describe('server.json', () => {
   it('is written for the user alone and read back', () => {
     const home = tempDir('bb-home-')
     writeServerInfo(home, info)
-    expect(statSync(serverInfoPath(home)).mode & 0o777).toBe(0o600)
+    const written: unknown = JSON.parse(readFileSync(serverInfoPath(home), 'utf8'))
+    expect(modeOf(serverInfoPath(home))).toBe(0o600)
     expect(readServerInfo(home)).toStrictEqual({ state: 'alive', info })
-    expect(JSON.parse(readFileSync(serverInfoPath(home), 'utf8'))).toStrictEqual(info)
+    expect(written).toStrictEqual(info)
   })
 
   it('is absent when no daemon ever ran, stale when its pid is gone, and removed on request', () => {
     const home = tempDir('bb-home-')
     expect(readServerInfo(home)).toStrictEqual({ state: 'absent' })
-    writeServerInfo(home, { ...info, pid: 2_147_483_000 })
-    expect(readServerInfo(home)).toStrictEqual({ state: 'stale', info: { ...info, pid: 2_147_483_000 } })
+    writeServerInfo(home, { ...info, pid: DEAD_PID })
+    expect(readServerInfo(home)).toStrictEqual({ state: 'stale', info: { ...info, pid: DEAD_PID } })
     removeServerInfo(home)
     expect(existsSync(path.join(home, 'server.json'))).toBe(false)
+    removeServerInfo(home)
   })
 
   it('reports a file that is not a server record as stale with no info', () => {
     const home = tempDir('bb-home-')
     writeServerInfo(home, info)
-    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     writeFileSync(serverInfoPath(home), '{"nope":1}')
+    expect(readServerInfo(home)).toStrictEqual({ state: 'stale' })
+    writeFileSync(serverInfoPath(home), 'not json')
     expect(readServerInfo(home)).toStrictEqual({ state: 'stale' })
   })
 
   it('knows a live pid from a dead one', () => {
     expect(isAlive(process.pid)).toBe(true)
-    expect(isAlive(2_147_483_000)).toBe(false)
-  })
-
-  it('hands the lock to one holder, names a live holder to the next, and takes over a dead one', () => {
-    const home = tempDir('bb-home-')
-    expect(acquireLock(home)).toStrictEqual({ acquired: true })
-    expect(acquireLock(home)).toStrictEqual({ acquired: false, pid: process.pid })
-    releaseLock(home)
-    writeFileSync(lockPath(home), '2147483000')
-    expect(acquireLock(home)).toStrictEqual({ acquired: true })
-    releaseLock(home)
+    expect(isAlive(DEAD_PID)).toBe(false)
+    // Signal 0 to pid 0 or -1 would reach a whole group of processes: neither is a daemon
+    expect(isAlive(0)).toBe(false)
+    expect(isAlive(-1)).toBe(false)
   })
 })
 ```
@@ -8548,23 +8659,36 @@ Import `writeFileSync` at the top instead of the `require` line (it is only ther
 
 `apps/bytebureau/src/daemon/token.test.ts`:
 ```ts
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
-import { writeServerInfo } from './server-info.js'
-import { freshToken, tokenFor } from './token.js'
+import { freshToken, tokenFor, tokenPath } from './token.js'
+
+const TOKEN = /^[0-9a-f]{64}$/u
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
 
 describe('the daemon token', () => {
   it('is 64 hex characters and differs every time', () => {
-    expect(freshToken()).toMatch(/^[0-9a-f]{64}$/u)
+    expect(freshToken()).toMatch(TOKEN)
     expect(freshToken()).not.toBe(freshToken())
   })
 
-  it('is kept across restarts when server.json still has one, fresh otherwise', () => {
+  it('is generated at the first start of a home, kept for the user alone, and the same at every later one', () => {
     const home = tempDir('bb-home-')
     const first = tokenFor(home)
-    writeServerInfo(home, { version: '0', host: '127.0.0.1', port: 1, pid: 2_147_483_000, token: first, startedAt: 't' })
+    expect(first).toMatch(TOKEN)
+    expect(modeOf(tokenPath(home))).toBe(0o600)
     expect(tokenFor(home)).toBe(first)
     expect(tokenFor(tempDir('bb-home-'))).not.toBe(first)
+  })
+
+  it('replaces a token file that holds no token', () => {
+    const home = tempDir('bb-home-')
+    writeFileSync(tokenPath(home), 'not a token\n')
+    const token = tokenFor(home)
+    expect(token).toMatch(TOKEN)
+    expect(readFileSync(tokenPath(home), 'utf8').trim()).toBe(token)
   })
 })
 ```
@@ -8574,18 +8698,25 @@ describe('the daemon token', () => {
 import { describe, expect, it } from 'vitest'
 import { daemonExecArgs } from './exec-args.js'
 
+const BINARY = '/opt/bytebureau'
+const BUN = '/usr/bin/bun'
+const ENTRY = '/repo/apps/bytebureau/src/main.ts'
+
 describe(daemonExecArgs, () => {
   it('runs the compiled binary itself with serve --no-daemonize and the flags', () => {
-    expect(daemonExecArgs({ execPath: '/opt/bytebureau', argv: ['/opt/bytebureau', 'serve'] }, ['--port', '4747'])).toStrictEqual({
-      command: '/opt/bytebureau',
-      args: ['serve', '--no-daemonize', '--port', '4747'],
-    })
+    expect(
+      daemonExecArgs({ execPath: BINARY, argv: [BINARY, 'serve'] }, ['--port', '4747']),
+    ).toStrictEqual({ command: BINARY, args: ['serve', '--no-daemonize', '--port', '4747'] })
+    // As Bun 1.4.2 lays out the arguments of a compiled binary: a virtual path stands where a script would
+    expect(
+      daemonExecArgs({ execPath: BINARY, argv: ['bun', '/$bunfs/root/bytebureau', 'serve'] }, []),
+    ).toStrictEqual({ command: BINARY, args: ['serve', '--no-daemonize'] })
   })
 
   it('runs the source through bun when the CLI runs from a .ts entry', () => {
-    expect(daemonExecArgs({ execPath: '/usr/bin/bun', argv: ['/usr/bin/bun', '/repo/apps/bytebureau/src/main.ts', 'serve'] }, [])).toStrictEqual({
-      command: '/usr/bin/bun',
-      args: ['run', '/repo/apps/bytebureau/src/main.ts', 'serve', '--no-daemonize'],
+    expect(daemonExecArgs({ execPath: BUN, argv: [BUN, ENTRY, 'serve'] }, [])).toStrictEqual({
+      command: BUN,
+      args: ['run', ENTRY, 'serve', '--no-daemonize'],
     })
   })
 })
@@ -8600,107 +8731,202 @@ Expected: FAIL — the modules do not exist.
 
 `apps/bytebureau/src/daemon/server-info.ts`:
 ```ts
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { decodeServerInfo, type ServerInfo } from '@bytebureau/protocol'
+import { writePrivateFile } from './private-file.js'
 
 export const serverInfoPath = (home: string): string => path.join(home, 'server.json')
+
+export const lockPath = (home: string): string => path.join(home, 'daemon.lock')
 
 export type ServerRecord =
   | { readonly state: 'absent' }
   | { readonly state: 'alive'; readonly info: ServerInfo }
-  // The daemon the file names is gone, or the file is not a record at all
+  // The daemon the file names is gone, or the file is no record at all
   | { readonly state: 'stale'; readonly info?: ServerInfo }
 
-// Signal 0 tests the pid: a dead one throws ESRCH, a live one of another user throws EPERM
+export type LockOutcome =
+  | { readonly acquired: true }
+  | { readonly acquired: false; readonly pid: number }
+
+const codeOf = (error: unknown): unknown =>
+  error instanceof Error && 'code' in error ? error.code : undefined
+
+// Signal 0 tests the pid: a dead one throws ESRCH, a live one of another user EPERM; 0 and below would name a group of processes
 export const isAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false
+  }
   try {
     process.kill(pid, 0)
     return true
   } catch (error) {
-    return error instanceof Error && 'code' in error && error.code === 'EPERM'
+    return codeOf(error) === 'EPERM'
   }
 }
 
-const readRecord = (home: string): ServerInfo | undefined => {
+// The text of the file, or nothing when there is no file
+const readIfThere = (file: string): string | undefined => {
   try {
-    return decodeServerInfo(JSON.parse(readFileSync(serverInfoPath(home), 'utf8')))
+    return readFileSync(file, 'utf8')
+  } catch (error) {
+    if (codeOf(error) === 'ENOENT') {
+      return undefined
+    }
+    throw error
+  }
+}
+
+const removeIfThere = (file: string): void => {
+  try {
+    unlinkSync(file)
+  } catch (error) {
+    if (codeOf(error) !== 'ENOENT') {
+      throw error
+    }
+  }
+}
+
+const decoded = (text: string): ServerInfo | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return decodeServerInfo(parsed)
   } catch {
     return undefined
   }
 }
 
-const exists = (file: string): boolean => {
-  try {
-    readFileSync(file)
-    return true
-  } catch {
-    return false
-  }
-}
-
 export const readServerInfo = (home: string): ServerRecord => {
-  if (!exists(serverInfoPath(home))) {
+  const text = readIfThere(serverInfoPath(home))
+  if (text === undefined) {
     return { state: 'absent' }
   }
-  const info = readRecord(home)
+  const info = decoded(text)
   if (info === undefined) {
     return { state: 'stale' }
   }
   return isAlive(info.pid) ? { state: 'alive', info } : { state: 'stale', info }
 }
 
-// Written beside its final name, flushed and renamed into place, so a reader never sees half a record; for the user alone
 export const writeServerInfo = (home: string, info: ServerInfo): void => {
-  mkdirSync(home, { recursive: true, mode: 0o700 })
-  const target = serverInfoPath(home)
-  const temp = `${target}.${process.pid}.tmp`
-  const fd = openSync(temp, 'w', 0o600)
-  try {
-    writeSync(fd, `${JSON.stringify(info, undefined, 2)}\n`)
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-  chmodSync(temp, 0o600)
-  renameSync(temp, target)
-}
-
-export const lockPath = (home: string): string => path.join(home, 'daemon.lock')
-
-// One daemon per home, decided atomically: the lock file is created exclusively (O_EXCL) with the pid inside; a lock whose pid is dead is stale and is taken over
-export const acquireLock = (home: string): { readonly acquired: true } | { readonly acquired: false; readonly pid: number } => {
-  mkdirSync(home, { recursive: true, mode: 0o700 })
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const fd = openSync(lockPath(home), 'wx', 0o600)
-      writeSync(fd, String(process.pid))
-      closeSync(fd)
-      return { acquired: true }
-    } catch {
-      const holder = Number(readFileSync(lockPath(home), 'utf8').trim())
-      if (Number.isInteger(holder) && isAlive(holder)) {
-        return { acquired: false, pid: holder }
-      }
-      unlinkSync(lockPath(home))
-    }
-  }
-  return { acquired: false, pid: 0 }
-}
-
-export const releaseLock = (home: string): void => {
-  try {
-    unlinkSync(lockPath(home))
-  } catch {
-    // Already gone
-  }
+  writePrivateFile(serverInfoPath(home), `${JSON.stringify(info, undefined, 2)}\n`)
 }
 
 export const removeServerInfo = (home: string): void => {
+  removeIfThere(serverInfoPath(home))
+}
+
+// The pid a lock file names, if it names one
+const pidIn = (file: string): number | undefined => {
+  const text = readIfThere(file)
+  const pid = Number(text === undefined ? undefined : text.trim())
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined
+}
+
+// The lock appears with the pid already in it: written aside, then linked into place, which fails when a lock is there
+const tryLock = (home: string): boolean => {
+  const draft = `${lockPath(home)}.${process.pid}`
+  writeFileSync(draft, String(process.pid), { mode: 0o600 })
+  chmodSync(draft, 0o600)
   try {
-    unlinkSync(serverInfoPath(home))
-  } catch {
-    // Already gone
+    linkSync(draft, lockPath(home))
+    return true
+  } catch (error) {
+    if (codeOf(error) === 'EEXIST') {
+      return false
+    }
+    throw error
+  } finally {
+    unlinkSync(draft)
+  }
+}
+
+// False when another taker moved the lock first
+const movedAside = (lock: string, aside: string): boolean => {
+  try {
+    renameSync(lock, aside)
+    return true
+  } catch (error) {
+    if (codeOf(error) === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
+}
+
+// Back where its holder expects it, never over a lock made since
+const putBack = (aside: string, lock: string): void => {
+  try {
+    linkSync(aside, lock)
+  } catch (error) {
+    if (codeOf(error) !== 'EEXIST') {
+      throw error
+    }
+  } finally {
+    unlinkSync(aside)
+  }
+}
+
+/**
+ * Takes a lock whose holder was seen gone out of the way, as one round of acquireLock.
+ * A rename moves it, which only one taker can win, and only what was moved is judged: the lock of a holder that is gone is removed (undefined, the caller tries again); a lock a live process made since it was read is put back and names that process.
+ */
+export const takeOverLock = (home: string): LockOutcome | undefined => {
+  const aside = `${lockPath(home)}.${process.pid}.stale`
+  if (!movedAside(lockPath(home), aside)) {
+    return undefined
+  }
+  const holder = pidIn(aside)
+  if (holder === undefined || !isAlive(holder)) {
+    unlinkSync(aside)
+    return undefined
+  }
+  putBack(aside, lockPath(home))
+  return { acquired: false, pid: holder }
+}
+
+// Rounds before a lock that keeps changing hands is given up on; racing takers settle within a round or two
+const ROUNDS = 5
+
+// Each round takes the lock, names its live holder, or moves the lock of a holder that is gone out of the way and goes again
+const lockOf = (home: string, rounds: number): LockOutcome => {
+  if (tryLock(home)) {
+    return { acquired: true }
+  }
+  const holder = pidIn(lockPath(home))
+  const refused: LockOutcome | undefined =
+    holder !== undefined && isAlive(holder) ? { acquired: false, pid: holder } : takeOverLock(home)
+  if (refused !== undefined) {
+    return refused
+  }
+  if (rounds <= 1) {
+    throw new Error(`the lock ${lockPath(home)} keeps changing hands; try again`)
+  }
+  return lockOf(home, rounds - 1)
+}
+
+// One daemon per home, decided atomically: a live holder is named, and a lock whose holder is gone, or that names none, is taken over
+export const acquireLock = (home: string): LockOutcome => {
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  return lockOf(home, ROUNDS)
+}
+
+// The pid the lock of the home names, if it names one
+export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
+
+// Only the lock of this process is released: a lock another daemon has taken over is that daemon's
+export const releaseLock = (home: string): void => {
+  if (lockHolder(home) === process.pid) {
+    removeIfThere(lockPath(home))
   }
 }
 ```
@@ -8709,14 +8935,36 @@ Sort the `node:fs` import names as the lint wants (`sort-imports` is off, `impor
 `apps/bytebureau/src/daemon/token.ts`:
 ```ts
 import { randomBytes } from 'node:crypto'
-import { readServerInfo } from './server-info.js'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { writePrivateFile } from './private-file.js'
+
+const TOKEN = /^[0-9a-f]{64}$/u
+
+export const tokenPath = (home: string): string => path.join(home, 'daemon.token')
 
 export const freshToken = (): string => randomBytes(32).toString('hex')
 
-// The token of the home: the one a previous daemon left in server.json, so clients that read it keep working; fresh otherwise
+// The token an earlier start of the home kept, if its file holds one
+const keptToken = (home: string): string | undefined => {
+  try {
+    const kept = readFileSync(tokenPath(home), 'utf8').trim()
+    return TOKEN.test(kept) ? kept : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Generated at the first start of the home and kept for every later one, so a client that read it keeps working across a restart
+// The file outlives server.json, which carries a copy only while a daemon runs
 export const tokenFor = (home: string): string => {
-  const record = readServerInfo(home)
-  return record.state === 'absent' || record.info === undefined ? freshToken() : record.info.token
+  const kept = keptToken(home)
+  if (kept !== undefined) {
+    return kept
+  }
+  const token = freshToken()
+  writePrivateFile(tokenPath(home), `${token}\n`)
+  return token
 }
 ```
 
@@ -8733,8 +8981,9 @@ export interface ExecArgs {
 }
 
 // The daemon is this very program run again in the foreground: the compiled binary, or bun with the source entry
+// A compiled binary names a virtual path where the entry would be, which is no source file
 export const daemonExecArgs = (current: ProcessLike, extra: readonly string[]): ExecArgs => {
-  const entry = current.argv[1]
+  const [, entry] = current.argv
   const fromSource = entry !== undefined && /\.[cm]?[jt]s$/u.test(entry)
   return fromSource
     ? { command: current.execPath, args: ['run', entry, 'serve', '--no-daemonize', ...extra] }
@@ -8745,13 +8994,14 @@ export const daemonExecArgs = (current: ProcessLike, extra: readonly string[]): 
 `apps/bytebureau/src/daemon/spawn.ts`:
 ```ts
 import { spawn } from 'node:child_process'
-import { mkdirSync, openSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync } from 'node:fs'
 import path from 'node:path'
 import { daemonExecArgs } from './exec-args.js'
 
 export const daemonLogPath = (home: string): string => path.join(home, 'logs', 'daemon.log')
 
-// The daemon starts in its own process group with nothing of this terminal: its stderr goes to the log of the home
+// The daemon starts in its own process group with nothing of this terminal: its output goes to the log of the home
+// The child holds its own copy of the log, so this process lets go of its own at once
 export const spawnDaemon = (
   home: string,
   env: Readonly<Record<string, string | undefined>>,
@@ -8759,95 +9009,148 @@ export const spawnDaemon = (
 ): number | undefined => {
   mkdirSync(path.dirname(daemonLogPath(home)), { recursive: true, mode: 0o700 })
   const log = openSync(daemonLogPath(home), 'a', 0o600)
-  const { command, args } = daemonExecArgs(process, extra)
-  const child = spawn(command, args, {
-    detached: true,
-    // Bun moves a detached child without a cwd to $HOME (Bun issue 44372, one source): the home is as good a place as any
-    cwd: home,
-    stdio: ['ignore', log, log],
-    env: { ...env, BYTEBUREAU_HOME: home },
-  })
-  child.unref()
-  return child.pid
+  try {
+    const { command, args } = daemonExecArgs(process, extra)
+    const child = spawn(command, args, {
+      detached: true,
+      // Bun moves a detached child without a cwd to $HOME (Bun issue 44372): the home is as good a place as any
+      cwd: home,
+      stdio: ['ignore', log, log],
+      env: { ...env, BYTEBUREAU_HOME: home },
+      // No console window of its own on Windows; ignored elsewhere
+      windowsHide: true,
+    })
+    child.unref()
+    return child.pid
+  } finally {
+    closeSync(log)
+  }
 }
 ```
 
 `apps/bytebureau/src/daemon/wait.ts`:
 ```ts
+import { setTimeout as sleep } from 'node:timers/promises'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { readServerInfo } from './server-info.js'
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
 
-const healthy = async (info: ServerInfo): Promise<boolean> => {
+// The daemon of the record answers its health with the start time the record names; a process that took over its pid or its port does not
+export const daemonAnswers = async (info: ServerInfo): Promise<boolean> => {
   try {
-    const response = await fetch(`${serverUrl(info)}/api/v1/health`, { signal: AbortSignal.timeout(1000) })
-    return response.ok
+    const response = await fetch(`${serverUrl(info)}/api/v1/health`, {
+      signal: AbortSignal.timeout(1000),
+    })
+    const text = await response.text()
+    const body: unknown = response.ok ? JSON.parse(text) : undefined
+    return isRecord(body) && body['startedAt'] === info.startedAt
   } catch {
     return false
   }
 }
 
-// The daemon is up once server.json names a live pid and its health answers; a daemon that takes longer than the limit is given up on
-export const waitForDaemon = async (home: string, timeoutMs = 10_000): Promise<ServerInfo | undefined> => {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const record = readServerInfo(home)
-    if (record.state === 'alive' && (await healthy(record.info))) {
-      return record.info
-    }
-    await sleep(100)
+// The daemon that serves the home now: server.json names a live pid and the daemon answers
+export const runningDaemon = async (home: string): Promise<ServerInfo | undefined> => {
+  const record = readServerInfo(home)
+  return record.state === 'alive' && (await daemonAnswers(record.info)) ? record.info : undefined
+}
+
+const poll = async (home: string, deadline: number): Promise<ServerInfo | undefined> => {
+  const running = await runningDaemon(home)
+  if (running !== undefined || Date.now() >= deadline) {
+    return running
   }
-  return undefined
+  await sleep(100)
+  return poll(home, deadline)
+}
+
+// The daemon is up once server.json names it and it answers; a daemon that takes longer than the limit is given up on
+export const waitForDaemon = async (
+  home: string,
+  timeoutMs = 10_000,
+): Promise<ServerInfo | undefined> => {
+  const running = await poll(home, Date.now() + timeoutMs)
+  return running
 }
 ```
 Note `BYTEBUREAU_HOME` of the child is the resolved home, so a relative `BYTEBUREAU_HOME` of the parent still means the same directory. `await` inside the loop is intended (`no-await-in-loop` is an oxlint rule: disable it for that line with a comment that says why, or write the loop with a recursive helper).
 
 `apps/bytebureau/src/daemon/stop.ts`:
 ```ts
-import { isAlive, readServerInfo, removeServerInfo, type ServerRecord } from './server-info.js'
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
+import { setTimeout as sleep } from 'node:timers/promises'
+import { isAlive, readServerInfo, removeServerInfo } from './server-info.js'
+import { daemonAnswers } from './wait.js'
 
 export type StopOutcome =
   | { readonly outcome: 'stopped'; readonly pid: number }
   | { readonly outcome: 'not_running' }
   | { readonly outcome: 'still_running'; readonly pid: number }
 
-// SIGTERM lets the daemon end its sessions and remove its record; a stale record is removed here
+const ended = async (pid: number, deadline: number): Promise<boolean> => {
+  const alive = isAlive(pid)
+  if (!alive || Date.now() >= deadline) {
+    return !alive
+  }
+  await sleep(100)
+  return ended(pid, deadline)
+}
+
+// A daemon that ended since it answered has nothing left to stop
+const terminate = (pid: number): void => {
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) {
+      throw error
+    }
+  }
+}
+
+// The record of the daemon that ended, unless a daemon started since has written its own
+const forget = (home: string, pid: number): void => {
+  const record = readServerInfo(home)
+  if (record.state === 'stale' && (record.info === undefined || record.info.pid === pid)) {
+    removeServerInfo(home)
+  }
+}
+
+// SIGTERM, then the wait for the pid to end; the record goes once it has
+const terminated = async (home: string, pid: number, timeoutMs: number): Promise<StopOutcome> => {
+  terminate(pid)
+  if (!(await ended(pid, Date.now() + timeoutMs))) {
+    return { outcome: 'still_running', pid }
+  }
+  forget(home, pid)
+  return { outcome: 'stopped', pid }
+}
+
+// SIGTERM lets the daemon end its sessions and remove its record; it goes only to a daemon that answers as its record says
+// A record is removed only once its pid is gone: a live pid that does not answer is neither signalled nor forgotten
+// Such a pid is a daemon shutting down or stalled, or a process that took over the pid of a stale record
 export const stopDaemon = async (home: string, timeoutMs = 5000): Promise<StopOutcome> => {
-  const record: ServerRecord = readServerInfo(home)
+  const record = readServerInfo(home)
   if (record.state !== 'alive') {
     removeServerInfo(home)
     return { outcome: 'not_running' }
   }
   const { pid } = record.info
-  process.kill(pid, 'SIGTERM')
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (!isAlive(pid)) {
-      removeServerInfo(home)
-      return { outcome: 'stopped', pid }
-    }
-    await sleep(100)
+  if (!(await daemonAnswers(record.info))) {
+    return { outcome: 'still_running', pid }
   }
-  return { outcome: 'still_running', pid }
+  const outcome = await terminated(home, pid, timeoutMs)
+  return outcome
 }
 ```
 
 `apps/bytebureau/src/daemon/foreground.ts`:
 ```ts
-import { startDaemon } from '@bytebureau/api/bun'
-import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
+import { PortInUseError, startDaemon, type RunningDaemon } from '@bytebureau/api/bun'
 import type { Context } from '../context.js'
 import { version } from '../version.js'
-import { acquireLock, releaseLock, removeServerInfo, writeServerInfo } from './server-info.js'
+import { publish } from './publish.js'
+import { acquireLock, releaseLock, removeServerInfo } from './server-info.js'
 import { tokenFor } from './token.js'
 
 export interface ForegroundOptions {
@@ -8859,32 +9162,80 @@ export interface ForegroundOptions {
 
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
 
-const isLoopback = (host: string): boolean =>
-  host === '127.0.0.1' || host === 'localhost' || host === '::1'
-
-// One daemon per home: the lock decides, atomically, and names the pid of the one that holds it
-const refusal = (home: string): string | undefined => {
-  const lock = acquireLock(home)
-  return lock.acquired ? undefined : `a daemon is already running (pid ${lock.pid})`
+// Resolves at the first of the signals; the next one does what it did before (it ends the process), so a stuck shutdown can be cut short
+async function signalled(): Promise<NodeJS.Signals> {
+  const { promise, resolve } = Promise.withResolvers<NodeJS.Signals>()
+  const settle = (signal: NodeJS.Signals): void => {
+    for (const name of SIGNALS) {
+      process.off(name, settle)
+    }
+    resolve(signal)
+  }
+  for (const name of SIGNALS) {
+    process.on(name, settle)
+  }
+  const signal = await promise
+  return signal
 }
 
-// Runs until a signal arrives; the record exists from the moment the server is bound to the moment it is gone
-export async function serveForeground(options: ForegroundOptions, context: Context): Promise<number> {
-  const refused = refusal(options.home)
-  if (refused !== undefined) {
-    context.output.warn(refused)
+// The daemon of this process, or nothing when its port is taken, which is said in one line
+async function started(
+  options: ForegroundOptions,
+  token: string,
+  context: Context,
+): Promise<RunningDaemon | undefined> {
+  try {
+    return await startDaemon({ ...options, version, token, logging: context.logging })
+  } catch (error) {
+    if (!(error instanceof PortInUseError)) {
+      throw error
+    }
+    context.output.warn(error.message)
+    return undefined
+  }
+}
+
+async function closed(daemon: RunningDaemon, home: string): Promise<void> {
+  try {
+    await daemon.close()
+  } finally {
+    removeServerInfo(home)
+  }
+}
+
+// The record exists from the moment the server is bound to the moment it is gone
+// The signals are listened for before it exists, so the first one always ends the daemon cleanly, one during the start included
+async function serveLocked(options: ForegroundOptions, context: Context): Promise<number> {
+  const stopped = signalled()
+  const token = tokenFor(options.home)
+  const daemon = await started(options, token, context)
+  if (daemon === undefined) {
     return 1
   }
-  const token = tokenFor(options.home)
-  const daemon = await startDaemon({ ...options, version, token, logging: context.logging })
-  const info: ServerInfo = { version, host: daemon.address.host, port: daemon.address.port, pid: process.pid, token, startedAt: daemon.startedAt }
-  writeServerInfo(options.home, info)
-  announce(info, context)
-  await signalled()
-  await daemon.close()
-  removeServerInfo(options.home)
-  releaseLock(options.home)
+  try {
+    publish(options.home, { daemon, token }, context)
+    await stopped
+  } finally {
+    await closed(daemon, options.home)
+  }
   return 0
+}
+
+// Runs until SIGINT, SIGTERM or SIGHUP; one daemon per home, which the lock decides atomically, naming the pid of the one that holds it
+export async function serveForeground(
+  options: ForegroundOptions,
+  context: Context,
+): Promise<number> {
+  const lock = acquireLock(options.home)
+  if (!lock.acquired) {
+    context.output.warn(`a daemon is already running (pid ${lock.pid})`)
+    return 1
+  }
+  try {
+    return await serveLocked(options, context)
+  } finally {
+    releaseLock(options.home)
+  }
 }
 ```
 The lock is released on every way out (a failed `startDaemon` included — wrap the start in `try/finally` around `releaseLock`), and the detached start of `serve` waits for `server.json`, which the daemon writes only once it holds the lock and is bound.
@@ -8895,38 +9246,124 @@ The lock is released on every way out (a failed `startDaemon` included — wrap 
 `apps/bytebureau/src/commands/serve.ts`:
 ```ts
 import { m } from '@bytebureau/i18n'
-import { serverUrl } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext } from '../context.js'
-import { serveForeground } from '../daemon/foreground.js'
-import { readServerInfo } from '../daemon/server-info.js'
-import { spawnDaemon } from '../daemon/spawn.js'
+import { globalArgs, processContext, type Context } from '../context.js'
+import { alreadyRunning, announce } from '../daemon/announce.js'
+import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { waitForDaemon } from '../daemon/wait.js'
+import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
 
+interface ServeFlags {
+  readonly host?: string | undefined
+  readonly port?: string | undefined
+  readonly 'log-level'?: string | undefined
+  readonly debug?: string | undefined
+}
+
+const usageError = (message: string): Error =>
+  Object.assign(new Error(message), { name: 'CLIError' })
+
+// A port is a whole number up to 65535; 0 asks for a free one
+const portOf = (text: string | undefined): number | undefined => {
+  if (text === undefined) {
+    return undefined
+  }
+  const port = Number(text)
+  if (!/^\d+$/u.test(text) || port > 65_535) {
+    throw usageError(`--port takes a whole number from 0 to 65535, not ${text}`)
+  }
+  return port
+}
+
+// What the detached daemon is started with: the address and the logging of this command
+const flagsOf = (flags: ServeFlags): string[] => [
+  ...(flags.host === undefined ? [] : ['--host', flags.host]),
+  ...(flags.port === undefined ? [] : ['--port', flags.port]),
+  ...(flags['log-level'] === undefined ? [] : ['--log-level', flags['log-level']]),
+  // A bare --debug arrives here as an empty value, which only the = form passes on as it is
+  ...(flags.debug === undefined ? [] : [`--debug=${flags.debug}`]),
+]
+
+// A daemon that is not running is what was asked for; one that outlives the wait is a failure
+async function stop(home: string, context: Context): Promise<number> {
+  const result = await stopDaemon(home)
+  context.output.emit({ command: 'serve.stop', ...result })
+  if (result.outcome === 'still_running') {
+    context.output.warn(m.serve_still_running({ pid: result.pid }))
+    return 1
+  }
+  context.output.print(
+    result.outcome === 'stopped' ? m.serve_stopped({ pid: result.pid }) : m.serve_not_running(),
+  )
+  return 0
+}
+
+async function startDetached(home: string, flags: ServeFlags, context: Context): Promise<number> {
+  spawnDaemon(home, process.env, flagsOf(flags))
+  const info = await waitForDaemon(home)
+  if (info === undefined) {
+    context.output.warn(m.serve_timeout({ log: daemonLogPath(home) }))
+    return 1
+  }
+  // The record names the host clients use; a wildcard bind is known here by the flag alone
+  announce(info, context, flags.host ?? info.host)
+  return 0
+}
+
+// A daemon already serving the home is what was asked for; otherwise one is started detached and waited for
+async function detach(home: string, flags: ServeFlags, context: Context): Promise<number> {
+  const running = await runningDaemon(home)
+  if (running !== undefined) {
+    alreadyRunning(running, context)
+    return 0
+  }
+  const code = await startDetached(home, flags, context)
+  return code
+}
+
+interface ServeArgs extends ServeFlags {
+  readonly daemonize: boolean
+}
+
+// Detached unless --no-daemonize; only the daemon itself loads the API and its server, so every other command stays clear of them
+async function serve(home: string, args: ServeArgs, context: Context): Promise<number> {
+  const port = portOf(args.port)
+  if (args.daemonize) {
+    const code = await detach(home, args, context)
+    return code
+  }
+  const { serveForeground } = await import('../daemon/foreground.js')
+  const code = await serveForeground({ home, env: process.env, host: args.host, port }, context)
+  return code
+}
+
 export const serveCommand = defineCommand({
-  meta: { name: 'serve', description: 'Start the ByteBureau daemon (detached unless --no-daemonize)' },
+  meta: {
+    name: 'serve',
+    description: 'Start the ByteBureau daemon (detached unless --no-daemonize)',
+  },
   args: {
     ...globalArgs,
-    host: { type: 'string', description: 'Address to listen on (default: 127.0.0.1 or server.host)' },
-    port: { type: 'string', description: 'Port to listen on (default: 4747 or server.port; 0 picks a free one)' },
-    daemonize: { type: 'boolean', description: 'Detach; pass --no-daemonize to stay in the foreground', default: true },
+    host: {
+      type: 'string',
+      description: 'Address to listen on (default: 127.0.0.1 or server.host)',
+    },
+    port: {
+      type: 'string',
+      description: 'Port to listen on (default: 4747 or server.port; 0 picks a free one)',
+    },
+    daemonize: {
+      type: 'boolean',
+      description: 'Detach; pass --no-daemonize to stay in the foreground',
+      default: true,
+    },
     stop: { type: 'boolean', description: 'Stop the running daemon of this home', default: false },
   },
   async run({ args }) {
     const context = processContext(args)
     const home = kernelHome(process.env)
-    if (args.stop) {
-      process.exitCode = await stop(home, context)
-      return
-    }
-    const port = args.port === undefined ? undefined : Number(args.port)
-    if (!args.daemonize) {
-      process.exitCode = await serveForeground({ home, env: process.env, host: args.host, port }, context)
-      return
-    }
-    process.exitCode = await detach(home, args, context)
+    process.exitCode = args.stop ? await stop(home, context) : await serve(home, args, context)
   },
 })
 ```
@@ -8937,10 +9374,12 @@ New messages (`en.json` / `cs.json`): `serve_started` = "Daemon listening on {ur
 `apps/bytebureau/src/testing/daemon.ts`:
 ```ts
 import { spawn, type ChildProcess } from 'node:child_process'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
-import { readServerInfo } from '../daemon/server-info.js'
+import { isAlive, lockHolder, readServerInfo } from '../daemon/server-info.js'
+import { stopDaemon } from '../daemon/stop.js'
 import { childEnv } from './run-cli.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
@@ -8949,109 +9388,974 @@ export interface DaemonProcess {
   readonly info: ServerInfo
   readonly url: string
   readonly child: ChildProcess
+  readonly stdout: () => string
   readonly stderr: () => string
+  // SIGTERM, then the exit code of the daemon
   readonly stop: () => Promise<number | null>
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
+interface Output {
+  stdout: string
+  stderr: string
+}
 
-// A foreground daemon on a free port in the home; killed when the test ends if it is still there
-export async function startDaemonProcess(home: string, extra: readonly string[] = []): Promise<DaemonProcess> {
-  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', '--port', '0', ...extra], {
+const captured = (child: ChildProcess): Output => {
+  const output: Output = { stdout: '', stderr: '' }
+  if (child.stdout !== null) {
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      output.stdout += chunk
+    })
+  }
+  if (child.stderr !== null) {
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      output.stderr += chunk
+    })
+  }
+  return output
+}
+
+// The record the daemon of the child writes once it serves; nothing when the child ended first or took too long
+const recordOf = async (
+  home: string,
+  child: ChildProcess,
+  deadline: number,
+): Promise<ServerInfo | undefined> => {
+  const record = readServerInfo(home)
+  if (record.state === 'alive' && record.info.pid === child.pid) {
+    return record.info
+  }
+  if (child.exitCode !== null || child.signalCode !== null || Date.now() >= deadline) {
+    return undefined
+  }
+  await sleep(100)
+  return recordOf(home, child, deadline)
+}
+
+// A foreground daemon of the home, run from source; killed when the test ends if it is still there
+// The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
+export async function startDaemonProcess(
+  home: string,
+  flags: readonly string[] = ['--port', '0'],
+): Promise<DaemonProcess> {
+  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', ...flags], {
     cwd: CLI_DIRECTORY,
     env: childEnv({ BYTEBUREAU_HOME: home }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  let stderr = ''
-  child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk })
-  onTestFinished(() => { child.kill('SIGKILL') })
-  const exited = new Promise<number | null>((resolve) => { child.once('close', (code) => resolve(code)) })
-  const deadline = Date.now() + 15_000
-  while (Date.now() < deadline) {
-    const record = readServerInfo(home)
-    if (record.state === 'alive' && record.info.pid === child.pid) {
-      return { info: record.info, url: serverUrl(record.info), child, stderr: () => stderr, stop: async () => { child.kill('SIGTERM'); return exited } }
-    }
-    await sleep(100)
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  const output = captured(child)
+  const { promise: exited, resolve } = Promise.withResolvers<number | null>()
+  child.once('close', (code) => {
+    resolve(code)
+  })
+  const info = await recordOf(home, child, Date.now() + 15_000)
+  if (info === undefined) {
+    throw new Error(`the daemon did not write server.json in time: ${output.stderr}`)
   }
-  throw new Error(`the daemon did not write server.json in time: ${stderr}`)
+  const stop = async (): Promise<number | null> => {
+    child.kill('SIGTERM')
+    const code = await exited
+    return code
+  }
+  return {
+    info,
+    url: serverUrl(info),
+    child,
+    stdout: () => output.stdout,
+    stderr: () => output.stderr,
+    stop,
+  }
+}
+
+const ended = async (pid: number, deadline: number): Promise<boolean> => {
+  const alive = isAlive(pid)
+  if (!alive || Date.now() >= deadline) {
+    return !alive
+  }
+  await sleep(100)
+  return ended(pid, deadline)
+}
+
+// A pid that ended meanwhile has nothing left to signal
+const signal = (pid: number, name: NodeJS.Signals): void => {
+  try {
+    process.kill(pid, name)
+  } catch {
+    // Gone already
+  }
+}
+
+// The daemon of the home ends with the test: as --stop ends it, else through the pid of its lock, which a daemon holds from its start on
+// One that does not end within the wait is killed; both waits together stay within the 10 s a test hook is given
+export async function stopDaemonOf(home: string): Promise<void> {
+  await stopDaemon(home, 4000)
+  const holder = lockHolder(home)
+  if (holder === undefined || !isAlive(holder)) {
+    return
+  }
+  signal(holder, 'SIGTERM')
+  if (!(await ended(holder, Date.now() + 4000))) {
+    signal(holder, 'SIGKILL')
+  }
 }
 ```
 
 `apps/bytebureau/src/commands/serve.test.ts`:
 ```ts
-import { existsSync, statSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { serverUrl } from '@bytebureau/protocol'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
-import { startDaemonProcess } from '../testing/daemon.js'
+import { daemonLogPath } from '../daemon/spawn.js'
+import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { tempDir, testHome } from '../testing/temp-repo.js'
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } })
+
+// What a start that cannot bind says: Bun cannot tell a taken port from an address this machine does not have
+const cannotListen = (port: string): string =>
+  `cannot listen on 127.0.0.1:${port}: the port is taken or the address is not this machine's`
+
+// What --json prints for the daemon of the home: where it listens, its pid and its version, never its token
+const describedDaemon = (home: string): Record<string, unknown> => {
+  const record = readServerInfo(home)
+  return record.state === 'alive'
+    ? {
+        command: 'serve',
+        url: serverUrl(record.info),
+        pid: record.info.pid,
+        version: record.info.version,
+      }
+    : { state: record.state }
+}
+
+// A detached daemon of the home ends with the test, should an assertion fail before the test stops it
+const stoppedWithTheTest = (home: string): Record<string, string> => {
+  onTestFinished(async () => {
+    await stopDaemonOf(home)
+  })
+  return { BYTEBUREAU_HOME: home }
+}
 
 describe('bytebureau serve --no-daemonize', () => {
-  it('writes server.json for the user alone, answers health with and without the token, and cleans up on SIGTERM', async () => {
+  it('writes server.json for the user alone, on the loopback, and removes it on SIGTERM', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
     const daemon = await startDaemonProcess(home)
-    expect(statSync(serverInfoPath(home)).mode & 0o777).toBe(0o600)
+    expect(modeOf(serverInfoPath(home))).toBe(0o600)
     expect(daemon.info.token).toMatch(/^[0-9a-f]{64}$/u)
     expect(daemon.info.host).toBe('127.0.0.1')
-    const health = await fetch(`${daemon.url}/api/v1/health`)
-    expect(health.status).toBe(200)
-    expect(await health.json()).toMatchObject({ status: 'ok' })
-    const denied = await fetch(`${daemon.url}/api/v1/projects`)
-    expect(denied.status).toBe(401)
-    const allowed = await fetch(`${daemon.url}/api/v1/projects`, { headers: { authorization: `Bearer ${daemon.info.token}` } })
-    expect(await allowed.json()).toStrictEqual([])
-    expect(await daemon.stop()).toBe(0)
-    expect(existsSync(serverInfoPath(home))).toBe(false)
+    // The line follows the record, so it may still be on its way through the pipe
+    await vi.waitFor(() => {
+      expect(daemon.stdout()).toBe(`Daemon listening on ${daemon.url}\n`)
+    })
+    expect([await daemon.stop(), existsSync(serverInfoPath(home))]).toStrictEqual([0, false])
   })
 
-  it('refuses a second daemon on the same home with exit 1 and the pid of the first', async () => {
+  it('answers health to anyone and the rest of the API only with the token', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
-    const daemon = await startDaemonProcess(home)
-    const second = await runCli(['serve', '--no-daemonize', '--port', '0'], { BYTEBUREAU_HOME: home })
-    expect(second.code).toBe(1)
-    expect(second.stderr.trim()).toBe(`a daemon is already running (pid ${daemon.info.pid})`)
-    await daemon.stop()
+    const daemon = await startDaemonProcess(tempDir('bb-home-'))
+    const health = await fetch(`${daemon.url}/api/v1/health`)
+    // The plugins have loaded before the server answers anything
+    await expect(health.json()).resolves.toMatchObject({
+      status: 'ok',
+      startedAt: daemon.info.startedAt,
+      checks: { plugins: { loaded: 2, failed: 0 } },
+    })
+    const denied = await fetch(`${daemon.url}/api/v1/projects`)
+    const allowed = await fetch(`${daemon.url}/api/v1/projects`, bearer(daemon.info.token))
+    expect([health.status, denied.status, allowed.status]).toStrictEqual([200, 401, 200])
+    await expect(allowed.json()).resolves.toStrictEqual([])
+    await expect(daemon.stop()).resolves.toBe(0)
   })
 
   it('keeps the token across a restart', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
     const first = await startDaemonProcess(home)
-    const token = first.info.token
-    await first.stop()
+    await expect(first.stop()).resolves.toBe(0)
     const second = await startDaemonProcess(home)
-    expect(second.info.token).toBe(token)
-    await second.stop()
+    expect(second.info.token).toBe(first.info.token)
+    await expect(second.stop()).resolves.toBe(0)
+  })
+})
+
+describe('bytebureau serve --no-daemonize refusals', () => {
+  it('refuses a second daemon on the same home with exit 1 and the pid of the first', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const daemon = await startDaemonProcess(home)
+    const second = await runCli(['serve', '--no-daemonize', '--port', '0'], {
+      BYTEBUREAU_HOME: home,
+    })
+    const refusal = `a daemon is already running (pid ${daemon.info.pid})`
+    expect([second.code, second.stderr.trim()]).toStrictEqual([1, refusal])
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+
+  it('refuses a port that is taken with exit 1 and one line', async () => {
+    expect.hasAssertions()
+    const daemon = await startDaemonProcess(tempDir('bb-home-'))
+    const port = String(daemon.info.port)
+    const other = await runCli(['serve', '--no-daemonize', '--port', port], {
+      BYTEBUREAU_HOME: tempDir('bb-home-'),
+    })
+    expect([other.code, other.stderr.trim()]).toStrictEqual([1, cannotListen(port)])
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+
+  it('refuses a port that is no port as a usage error', async () => {
+    expect.hasAssertions()
+    const refused = await runCli(['serve', '--port', '80a'])
+    expect(refused.code).toBe(1)
+    expect(refused.stderr).toContain('--port takes a whole number from 0 to 65535, not 80a')
   })
 })
 
 describe('bytebureau serve (detached) and serve --stop', () => {
-  it('starts the daemon detached, reports its url as JSON, and --stop ends it', async () => {
+  it('starts the daemon detached on the loopback and reports its url, pid and version as JSON', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
-    const started = await runCli(['serve', '--port', '0', '--json'], { BYTEBUREAU_HOME: home })
+    const started = await runCli(['serve', '--port', '0', '--json'], stoppedWithTheTest(home))
     expect(started.code).toBe(0)
-    const [record] = jsonLines(started.stdout)
-    expect(record).toMatchObject({ command: 'serve', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/u) })
-    const alive = readServerInfo(home)
-    expect(alive.state).toBe('alive')
-    const again = await runCli(['serve', '--port', '0'], { BYTEBUREAU_HOME: home })
-    expect(again.code).toBe(0)
-    expect(again.stdout).toMatch(/^Daemon already running on /u)
-    const stopped = await runCli(['serve', '--stop'], { BYTEBUREAU_HOME: home })
-    expect(stopped.code).toBe(0)
-    expect(stopped.stdout.trim()).toMatch(/^Stopped daemon \(pid \d+\)$/u)
-    expect(readServerInfo(home).state).toBe('absent')
-    const none = await runCli(['serve', '--stop'], { BYTEBUREAU_HOME: home })
-    expect(none.stdout.trim()).toBe('No daemon is running')
+    expect(jsonLines(started.stdout)).toStrictEqual([describedDaemon(home)])
+    expect(readServerInfo(home)).toMatchObject({ state: 'alive', info: { host: '127.0.0.1' } })
+  })
+
+  it('names the daemon that serves the home already instead of starting another', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const env = stoppedWithTheTest(home)
+    await expect(runCli(['serve', '--port', '0'], env)).resolves.toMatchObject({ code: 0 })
+    const { url, pid } = describedDaemon(home)
+    const again = await runCli(['serve', '--port', '0'], env)
+    const named = `Daemon already running on ${String(url)} (pid ${String(pid)})\n`
+    expect([again.code, again.stdout]).toStrictEqual([0, named])
+  })
+
+  it('ends the daemon with --stop, and then finds none to stop', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const env = stoppedWithTheTest(home)
+    await expect(runCli(['serve', '--port', '0'], env)).resolves.toMatchObject({ code: 0 })
+    const { pid } = describedDaemon(home)
+    const stopped = await runCli(['serve', '--stop'], env)
+    const said = `Stopped daemon (pid ${String(pid)})\n`
+    expect([stopped.code, stopped.stdout, readServerInfo(home).state]).toStrictEqual([
+      0,
+      said,
+      'absent',
+    ])
+    const none = await runCli(['serve', '--stop'], env)
+    expect([none.code, none.stdout]).toStrictEqual([0, 'No daemon is running\n'])
+  })
+})
+
+describe('bytebureau serve (detached) that cannot start', () => {
+  it('gives up on a daemon that does not come up, naming the log that says why', async () => {
+    expect.hasAssertions()
+    const daemon = await startDaemonProcess(tempDir('bb-home-'))
+    const home = tempDir('bb-home-')
+    const port = String(daemon.info.port)
+    const started = await runCli(['serve', '--port', port], stoppedWithTheTest(home))
+    const gaveUp = `The daemon did not come up in time; see ${daemonLogPath(home)}`
+    expect([started.code, started.stderr.trim()]).toStrictEqual([1, gaveUp])
+    expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(cannotListen(port))
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+})
+
+describe('bytebureau serve and the user configuration', () => {
+  it('listens on the port the configuration of the home names when no flag names one', async () => {
+    expect.hasAssertions()
+    // The configuration of a test home says port 0: a free port, never the default 4747
+    const daemon = await startDaemonProcess(testHome(), [])
+    expect(daemon.info.port).not.toBe(4747)
+    expect(daemon.info.port).toBeGreaterThan(0)
+    const health = await fetch(`${daemon.url}/api/v1/health`)
+    expect(health.status).toBe(200)
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+
+  it('starts on the flags and says so when the configuration of the home cannot be read', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    writeFileSync(path.join(home, 'config.json'), '{ "server": { "port": "not a port" } }\n')
+    const daemon = await startDaemonProcess(home)
+    await vi.waitFor(() => {
+      expect(daemon.stderr()).toContain(
+        'the user configuration cannot be read: its server section is not applied',
+      )
+    })
+    await expect(daemon.stop()).resolves.toBe(0)
   })
 })
 ```
 The detached daemon of the last test is stopped by `--stop`; should an assertion fail before that line, the test's `tempDir` home still names it in `server.json` — add `onTestFinished(() => { stopDaemon(home) })` at the top of that test so no daemon outlives the test run.
+
+`packages/api/src/daemon-errors.ts` (added during execution):
+```ts
+import { Cause, ErrorReporter, type Layer } from 'effect'
+import type { BoundAddress } from './bun-address.js'
+
+export class PortInUseError extends Error {
+  public override readonly name = 'PortInUseError'
+}
+
+const hostPort = ({ host, port }: BoundAddress): string =>
+  host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`
+
+// Bun.serve throws when it cannot bind, so the start fails with that defect rather than a ServeError: one line for the CLI to print
+// Bun says EADDRINUSE for an address this machine does not have as well, so the line keeps both readings
+export const portInUse = (error: unknown, address: BoundAddress): PortInUseError | undefined =>
+  error instanceof Error &&
+  (Reflect.get(error, 'code') === 'EADDRINUSE' || error.message.includes('Is port'))
+    ? new PortInUseError(
+        `cannot listen on ${hostPort(address)}: the port is taken or the address is not this machine's`,
+        { cause: error },
+      )
+    : undefined
+
+export type DefectLog = (message: string, properties: Readonly<Record<string, unknown>>) => void
+
+// Every failure behind either door is reported, the problems the API answers on purpose too, so only a cause with a defect is logged
+// Such a defect is otherwise silent: a REST handler answers an empty 500, an RPC procedure an Exit with a Die
+export const DefectReporter = (log: DefectLog): Layer.Layer<never> =>
+  ErrorReporter.layer([
+    ErrorReporter.make(({ cause, error }) => {
+      if (Cause.hasDies(cause)) {
+        log('a handler failed with a defect', { error: error.message, cause: Cause.pretty(cause) })
+      }
+    }),
+  ])
+```
+`packages/api/src/daemon-errors.test.ts` (added during execution):
+```ts
+import { createServer } from 'node:http'
+import { WorkspaceManager } from '@bytebureau/kernel'
+import { NodeHttpServer } from '@effect/platform-node'
+import { assert, describe, expect, it } from '@effect/vitest'
+import { Effect, Layer } from 'effect'
+import { DefectReporter, PortInUseError, portInUse } from './daemon-errors.js'
+import { serveApi } from './layer.js'
+import { BootedKernel } from './testing-kernel.js'
+import { get, post, TEST_TOKEN, testOptions } from './testing.js'
+import { called, connected } from './testing-ws.js'
+
+interface Logged {
+  readonly message: string
+  readonly error: string
+  readonly cause: string
+}
+
+// What the reporter of the suite logged; each test takes what its own calls added
+const logged: Logged[] = []
+
+const DEFECT = { message: 'a handler failed with a defect', error: 'the prune broke' }
+
+// Bun gives EADDRINUSE for a taken port and for an address this machine does not have alike
+const EITHER = "the port is taken or the address is not this machine's"
+
+const LOOPBACK = { host: '127.0.0.1', port: 4747 }
+
+const messagesOf = (entries: readonly Logged[]): readonly object[] =>
+  entries.map(({ message, error }) => ({ message, error }))
+
+// The kernel of the tests with a prune that dies, as a bug behind a handler would
+const DyingPrune = Layer.effect(
+  WorkspaceManager,
+  WorkspaceManager.use((workspaces) =>
+    Effect.succeed({ ...workspaces, prune: () => Effect.die(new Error('the prune broke')) }),
+  ),
+)
+
+const ReportingLayer = serveApi(testOptions()).pipe(
+  Layer.provide(
+    DefectReporter((message, properties) => {
+      logged.push({
+        message,
+        error: String(properties['error']),
+        cause: String(properties['cause']),
+      })
+    }),
+  ),
+  Layer.provide(DyingPrune),
+  Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
+  Layer.provideMerge(BootedKernel),
+)
+
+describe(portInUse, () => {
+  it('names the address of a start that Bun refused, and lets any other failure through', () => {
+    const taken = Object.assign(new Error('Failed to start server. Is port 4747 in use?'), {
+      code: 'EADDRINUSE',
+    })
+    const refused = portInUse(taken, { host: '127.0.0.1', port: 4747 })
+    expect(refused).toBeInstanceOf(PortInUseError)
+    expect(refused).toMatchObject({
+      message: `cannot listen on 127.0.0.1:4747: ${EITHER}`,
+      cause: taken,
+    })
+    expect(portInUse(taken, { host: '::1', port: 4747 })).toMatchObject({
+      message: `cannot listen on [::1]:4747: ${EITHER}`,
+    })
+    expect(portInUse(new Error('the store is locked'), LOOPBACK)).toBeUndefined()
+    expect(portInUse('EADDRINUSE', LOOPBACK)).toBeUndefined()
+  })
+
+  it('reads the code alone too, which Bun also gives for an address this machine does not have', () => {
+    const coded = Object.assign(new Error('bind'), { code: 'EADDRINUSE' })
+    expect(portInUse(coded, { host: '192.0.2.1', port: 1 })).toMatchObject({
+      message: `cannot listen on 192.0.2.1:1: ${EITHER}`,
+    })
+  })
+})
+
+it.layer(ReportingLayer)('the defect reporter of the daemon', (suite) => {
+  suite.effect('logs nothing for a refusal the API answers on purpose', () =>
+    Effect.gen(function* refuses() {
+      const missing = yield* get('/sessions/0192f0a0-0000-7000-8000-000000000009')
+      assert.strictEqual(missing.status, 404)
+      assert.deepStrictEqual(logged.splice(0), [])
+    }),
+  )
+
+  suite.effect('logs a defect behind a REST handler, which answers an empty 500', () =>
+    Effect.gen(function* failsOverRest() {
+      const pruned = yield* post('/workspaces/prune', {})
+      assert.strictEqual(pruned.status, 500)
+      const entries = logged.splice(0)
+      assert.deepStrictEqual(messagesOf(entries), [DEFECT])
+      assert.match(entries.map(({ cause }) => cause).join('\n'), /Error: the prune broke/u)
+    }),
+  )
+
+  suite.effect('logs a defect behind an RPC procedure, which ends with a Die', () =>
+    Effect.gen(function* failsOverRpc() {
+      const client = yield* connected()
+      const prune = { id: 'prune', tag: 'workspaces.prune', payload: {}, token: TEST_TOKEN }
+      assert.containSubset(yield* called(client, prune), {
+        _tag: 'Exit',
+        exit: { _tag: 'Failure', cause: [{ _tag: 'Die' }] },
+      })
+      assert.deepStrictEqual(messagesOf(logged.splice(0)), [DEFECT])
+    }),
+  )
+})
+```
+`apps/bytebureau/src/daemon/private-file.ts` (added during execution):
+```ts
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  writeSync,
+} from 'node:fs'
+import path from 'node:path'
+
+// Written beside its final name, flushed and renamed into place, so a reader never sees half of it; for the user alone, whatever the umask
+export const writePrivateFile = (file: string, text: string): void => {
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const temp = `${file}.${process.pid}.tmp`
+  const fd = openSync(temp, 'w', 0o600)
+  try {
+    writeSync(fd, text)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  chmodSync(temp, 0o600)
+  renameSync(temp, file)
+}
+```
+`apps/bytebureau/src/daemon/hosts.ts` (added during execution):
+```ts
+// The loopback names, and every address of 127.0.0.0/8
+export const isLoopback = (host: string): boolean =>
+  host === 'localhost' || host === '::1' || host.startsWith('127.')
+
+const WILDCARDS: Readonly<Record<string, string>> = { '0.0.0.0': '127.0.0.1', '::': '::1' }
+
+// The host clients use for a daemon bound to it: one bound to every interface is reached through the loopback of its family
+// A wildcard address is no destination everywhere: Windows refuses to connect to it
+export const clientHost = (bound: string): string => WILDCARDS[bound] ?? bound
+```
+`apps/bytebureau/src/daemon/hosts.test.ts` (added during execution):
+```ts
+import { describe, expect, it } from 'vitest'
+import { clientHost, isLoopback } from './hosts.js'
+
+describe(isLoopback, () => {
+  it('tells the loopback names and addresses from those the network reaches', () => {
+    const loopback = ['127.0.0.1', '127.0.0.2', 'localhost', '::1']
+    const network = ['0.0.0.0', '::', '192.168.1.5', '10.0.0.5', 'example.com']
+    expect(loopback.filter((host) => !isLoopback(host))).toStrictEqual([])
+    expect(network.filter((host) => isLoopback(host))).toStrictEqual([])
+  })
+})
+
+describe(clientHost, () => {
+  it('records the loopback of the same family for a daemon bound to every interface', () => {
+    expect(clientHost('0.0.0.0')).toBe('127.0.0.1')
+    expect(clientHost('::')).toBe('::1')
+  })
+
+  it('records any other address as it was bound', () => {
+    const bound = ['127.0.0.1', '::1', '192.168.1.5', 'fe80::1']
+    expect(bound.map((host) => clientHost(host))).toStrictEqual(bound)
+  })
+})
+```
+`apps/bytebureau/src/daemon/publish.ts` (added during execution):
+```ts
+import type { RunningDaemon } from '@bytebureau/api/bun'
+import type { ServerInfo } from '@bytebureau/protocol'
+import type { Context } from '../context.js'
+import { version } from '../version.js'
+import { announce } from './announce.js'
+import { clientHost } from './hosts.js'
+import { writeServerInfo } from './server-info.js'
+
+export interface Published {
+  readonly daemon: RunningDaemon
+  readonly token: string
+}
+
+// What server.json says of the daemon of this process: the host clients use, which for a wildcard bind is the loopback
+const recordOf = ({ daemon, token }: Published): ServerInfo => ({
+  version,
+  host: clientHost(daemon.address.host),
+  port: daemon.address.port,
+  pid: process.pid,
+  token,
+  startedAt: daemon.startedAt,
+})
+
+// From here on clients find the daemon; the warning for a daemon the network can reach names the address it is bound to
+export const publish = (home: string, published: Published, context: Context): void => {
+  const info = recordOf(published)
+  writeServerInfo(home, info)
+  announce(info, context, published.daemon.address.host)
+}
+```
+`apps/bytebureau/src/daemon/publish.test.ts` (added during execution):
+```ts
+import type { RunningDaemon } from '@bytebureau/api/bun'
+import { describe, expect, it, vi } from 'vitest'
+import { createContext } from '../context.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { publish } from './publish.js'
+import { readServerInfo } from './server-info.js'
+
+const TOKEN = 'b'.repeat(64)
+
+const daemonOn = (host: string): RunningDaemon => ({
+  address: { host, port: 4747 },
+  startedAt: '2026-10-04T10:00:00.000Z',
+  close: async () => {
+    // Nothing runs behind this stand-in
+  },
+})
+
+describe(publish, () => {
+  it('records the loopback for a daemon bound to every interface, and warns with the address it is bound to', () => {
+    vi.spyOn(console, 'log').mockReturnValue()
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    const home = tempDir('bb-home-')
+    publish(
+      home,
+      { daemon: daemonOn('0.0.0.0'), token: TOKEN },
+      createContext({ json: false, color: false, yes: false }, {}, false),
+    )
+    expect(readServerInfo(home)).toMatchObject({
+      state: 'alive',
+      info: { host: '127.0.0.1', port: 4747, pid: process.pid, token: TOKEN },
+    })
+    expect(error.mock.calls).toStrictEqual([
+      ['Listening on 0.0.0.0: anyone on the network with the token can use this daemon'],
+    ])
+  })
+
+  it('records a daemon bound to the loopback as it is bound, without a warning', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    const home = tempDir('bb-home-')
+    publish(
+      home,
+      { daemon: daemonOn('::1'), token: TOKEN },
+      createContext({ json: false, color: false, yes: false }, {}, false),
+    )
+    expect(readServerInfo(home)).toMatchObject({ state: 'alive', info: { host: '::1' } })
+    expect([log.mock.calls, error.mock.calls]).toStrictEqual([
+      [['Daemon listening on http://[::1]:4747']],
+      [],
+    ])
+  })
+})
+```
+`apps/bytebureau/src/daemon/announce.ts` (added during execution):
+```ts
+import { m } from '@bytebureau/i18n'
+import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
+import type { Context } from '../context.js'
+import { isLoopback } from './hosts.js'
+
+// The daemon as --json describes it, where it listens, its pid and its version but never its token; the url for the text
+const emitted = (info: ServerInfo, context: Context): string => {
+  const url = serverUrl(info)
+  context.output.emit({ command: 'serve', url, pid: info.pid, version: info.version })
+  return url
+}
+
+// Where the daemon listens; one the network can reach is announced with the warning of spec §11.1, naming the address it is bound to
+// That address is the recorded host unless the daemon is bound to every interface, which clients reach through the loopback
+export const announce = (info: ServerInfo, context: Context, bound: string = info.host): void => {
+  context.output.print(m.serve_started({ url: emitted(info, context) }))
+  if (!isLoopback(bound)) {
+    context.output.warn(m.serve_lan_warning({ host: bound }))
+  }
+}
+
+// A daemon already serving the home is what was asked for
+export const alreadyRunning = (info: ServerInfo, context: Context): void => {
+  context.output.print(m.serve_already_running({ url: emitted(info, context), pid: info.pid }))
+}
+```
+`apps/bytebureau/src/daemon/announce.test.ts` (added during execution):
+```ts
+import { describe, expect, it, vi } from 'vitest'
+import { createContext, type GlobalArgs } from '../context.js'
+import { recordOn } from '../testing/health-stub.js'
+import { alreadyRunning, announce } from './announce.js'
+
+const TEXT: GlobalArgs = { json: false, color: false, yes: false }
+
+describe(announce, () => {
+  it('prints where the daemon listens, and warns when the network can reach it', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    const context = createContext(TEXT, {}, false)
+    announce(recordOn(4747), context)
+    announce({ ...recordOn(4747), host: '192.168.1.5' }, context)
+    // Bound to every interface, the daemon is recorded with the loopback clients use
+    announce(recordOn(4747), context, '0.0.0.0')
+    expect(log.mock.calls).toStrictEqual([
+      ['Daemon listening on http://127.0.0.1:4747'],
+      ['Daemon listening on http://192.168.1.5:4747'],
+      ['Daemon listening on http://127.0.0.1:4747'],
+    ])
+    expect(error.mock.calls).toStrictEqual([
+      ['Listening on 192.168.1.5: anyone on the network with the token can use this daemon'],
+      ['Listening on 0.0.0.0: anyone on the network with the token can use this daemon'],
+    ])
+  })
+
+  it('emits the url, the pid and the version as JSON, never the token', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const context = createContext({ ...TEXT, json: true }, {}, false)
+    announce(recordOn(4747, 42), context)
+    alreadyRunning(recordOn(4747, 42), context)
+    const record = {
+      command: 'serve',
+      url: 'http://127.0.0.1:4747',
+      pid: 42,
+      version: '0.0.0-test',
+    }
+    expect(log.mock.calls).toStrictEqual([[JSON.stringify(record)], [JSON.stringify(record)]])
+  })
+})
+
+describe(alreadyRunning, () => {
+  it('names the daemon that serves the home already', () => {
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    alreadyRunning(recordOn(4747, 42), createContext(TEXT, {}, false))
+    expect(log.mock.calls).toStrictEqual([
+      ['Daemon already running on http://127.0.0.1:4747 (pid 42)'],
+    ])
+  })
+})
+```
+`apps/bytebureau/src/daemon/server-info-lock.test.ts` (added during execution):
+```ts
+import { spawn } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { tempDir } from '../testing/temp-repo.js'
+import { acquireLock, lockPath, releaseLock, takeOverLock } from './server-info.js'
+
+// No process has this pid: the highest a system hands out is far below it
+const DEAD_PID = 2_147_483_000
+
+const SERVER_INFO = fileURLToPath(new URL('server-info.ts', import.meta.url))
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+interface Taker {
+  readonly pid: number
+  readonly outcome: unknown
+}
+
+// A process that reaches for the lock of the home at the moment given, prints what it got and stays alive, so a lock it took stays live
+async function taker(home: string, at: number): Promise<Taker> {
+  const script = [
+    `import { acquireLock } from ${JSON.stringify(SERVER_INFO)}`,
+    `await Bun.sleep(Math.max(0, ${at} - 20 - Date.now()))`,
+    `while (Date.now() < ${at}) {}`,
+    `console.log(JSON.stringify(acquireLock(${JSON.stringify(home)})))`,
+    'setInterval(() => {}, 1000)',
+  ].join('\n')
+  const child = spawn('bun', ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] })
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  const { promise, resolve } = Promise.withResolvers<string>()
+  child.stdout.setEncoding('utf8').once('data', (chunk: string) => {
+    resolve(chunk)
+  })
+  const outcome: unknown = JSON.parse(await promise)
+  return { pid: child.pid ?? 0, outcome }
+}
+
+const tookIt = ({ outcome }: Taker): boolean =>
+  JSON.stringify(outcome) === JSON.stringify({ acquired: true })
+
+// Two takers reach for the stale lock of a home at the same moment: one takes it, and the other names the one that did
+async function race(): Promise<{
+  readonly got: readonly unknown[]
+  readonly expected: readonly unknown[]
+}> {
+  const home = tempDir('bb-home-')
+  writeFileSync(lockPath(home), String(DEAD_PID))
+  const at = Date.now() + 1000
+  const [first, second] = await Promise.all([taker(home, at), taker(home, at)])
+  const expected = tookIt(first)
+    ? [{ acquired: true }, { acquired: false, pid: first.pid }]
+    : [{ acquired: false, pid: second.pid }, { acquired: true }]
+  return { got: [first.outcome, second.outcome], expected }
+}
+
+describe('the daemon lock', () => {
+  it('hands the lock to one holder, names a live holder to the next, and takes over a dead one', () => {
+    const home = tempDir('bb-home-')
+    expect(acquireLock(home)).toStrictEqual({ acquired: true })
+    expect(modeOf(lockPath(home))).toBe(0o600)
+    expect(acquireLock(home)).toStrictEqual({ acquired: false, pid: process.pid })
+    releaseLock(home)
+    writeFileSync(lockPath(home), String(DEAD_PID))
+    expect(acquireLock(home)).toStrictEqual({ acquired: true })
+    releaseLock(home)
+    expect(existsSync(lockPath(home))).toBe(false)
+  })
+
+  it('takes over a lock that names no process, and leaves the lock of another holder alone', () => {
+    const home = tempDir('bb-home-')
+    writeFileSync(lockPath(home), 'not a pid')
+    expect(acquireLock(home)).toStrictEqual({ acquired: true })
+    // Pid 1 is alive on every system and is never this process
+    writeFileSync(lockPath(home), '1')
+    releaseLock(home)
+    expect(readFileSync(lockPath(home), 'utf8')).toBe('1')
+  })
+
+  it('goes to exactly one of two takers that reach for a stale lock at the same moment', async () => {
+    expect.hasAssertions()
+    const rounds = await Promise.all([race(), race(), race()])
+    expect(rounds.map(({ got }) => got)).toStrictEqual(rounds.map(({ expected }) => expected))
+  })
+})
+
+describe(takeOverLock, () => {
+  it('removes the lock of a holder that is gone, and leaves nothing aside', () => {
+    const home = tempDir('bb-home-')
+    writeFileSync(lockPath(home), String(DEAD_PID))
+    expect(takeOverLock(home)).toBeUndefined()
+    expect(readdirSync(home)).toStrictEqual([])
+  })
+
+  it('puts back a lock that a live process made since the stale one was read, and names that process', () => {
+    const home = tempDir('bb-home-')
+    // Pid 1 is alive on every system: its lock stands for one a racing taker has just made
+    writeFileSync(lockPath(home), '1')
+    expect(takeOverLock(home)).toStrictEqual({ acquired: false, pid: 1 })
+    expect(readdirSync(home)).toStrictEqual(['daemon.lock'])
+    expect(readFileSync(lockPath(home), 'utf8')).toBe('1')
+  })
+
+  it('lets a taker that read the stale holder before another took the lock over leave that lock in place', () => {
+    const home = tempDir('bb-home-')
+    writeFileSync(lockPath(home), String(DEAD_PID))
+    // Both takers have read the dead holder; the first takes the lock over, then the second moves what is there now
+    expect(acquireLock(home)).toStrictEqual({ acquired: true })
+    expect(takeOverLock(home)).toStrictEqual({ acquired: false, pid: process.pid })
+    expect(readFileSync(lockPath(home), 'utf8')).toBe(String(process.pid))
+    releaseLock(home)
+  })
+
+  it('finds nothing to do when another taker moved the lock first', () => {
+    const home = tempDir('bb-home-')
+    expect(takeOverLock(home)).toBeUndefined()
+    expect(readdirSync(home)).toStrictEqual([])
+  })
+})
+```
+`apps/bytebureau/src/daemon/stop.test.ts` (added during execution):
+```ts
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { healthStub, recordOn } from '../testing/health-stub.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { readServerInfo, writeServerInfo } from './server-info.js'
+import { stopDaemon } from './stop.js'
+
+// A process that stands in for the daemon of a record, killed when the test ends; one that ignores SIGTERM outlives a stop
+async function standIn(ignoresSigterm: boolean): Promise<number> {
+  const handler = ignoresSigterm ? "process.on('SIGTERM', () => {});" : ''
+  const script = `${handler} setInterval(() => {}, 1000); console.log('ready')`
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] })
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  await once(child.stdout, 'data')
+  return child.pid ?? 0
+}
+
+describe(stopDaemon, () => {
+  it('finds no daemon in a home without one, and removes a record whose pid is gone', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    await expect(stopDaemon(home)).resolves.toStrictEqual({ outcome: 'not_running' })
+    writeServerInfo(home, recordOn(1, 2_147_483_000))
+    await expect(stopDaemon(home)).resolves.toStrictEqual({ outcome: 'not_running' })
+    expect(readServerInfo(home)).toStrictEqual({ state: 'absent' })
+  })
+
+  it('neither signals nor forgets a live pid that does not answer as the daemon of the record', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    // The record names this very process, on a port where no daemon answers: a SIGTERM would end the test run
+    writeServerInfo(home, recordOn(1, process.pid))
+    await expect(stopDaemon(home)).resolves.toStrictEqual({
+      outcome: 'still_running',
+      pid: process.pid,
+    })
+    expect(readServerInfo(home)).toStrictEqual({ state: 'alive', info: recordOn(1, process.pid) })
+  })
+
+  it('ends the daemon that answers and removes its record', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const pid = await standIn(false)
+    writeServerInfo(home, recordOn(await healthStub(), pid))
+    await expect(stopDaemon(home)).resolves.toStrictEqual({ outcome: 'stopped', pid })
+    expect(readServerInfo(home)).toStrictEqual({ state: 'absent' })
+  })
+
+  it('tells of a daemon that outlives the limit and keeps its record', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const pid = await standIn(true)
+    writeServerInfo(home, recordOn(await healthStub(), pid))
+    await expect(stopDaemon(home, 300)).resolves.toStrictEqual({ outcome: 'still_running', pid })
+    expect(readServerInfo(home).state).toBe('alive')
+  })
+})
+```
+`apps/bytebureau/src/daemon/wait.test.ts` (added during execution):
+```ts
+import { setTimeout as sleep } from 'node:timers/promises'
+import { describe, expect, it } from 'vitest'
+import { healthStub, recordOn } from '../testing/health-stub.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { writeServerInfo } from './server-info.js'
+import { daemonAnswers, runningDaemon, waitForDaemon } from './wait.js'
+
+// Nothing listens on port 1 of the loopback: a connection there is refused at once
+const NOBODY = 1
+
+describe(waitForDaemon, () => {
+  it('gives the record once its daemon has written it and answers, and nothing when none comes up in time', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const port = await healthStub()
+    await expect(waitForDaemon(home, 300)).resolves.toBeUndefined()
+    const waited = waitForDaemon(home, 5000)
+    await sleep(200)
+    writeServerInfo(home, recordOn(port))
+    await expect(waited).resolves.toStrictEqual(recordOn(port))
+  })
+
+  it('takes no answer from another start, or from a port without a daemon, for the daemon of the record', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const port = await healthStub('2026-10-04T09:00:00.000Z')
+    writeServerInfo(home, recordOn(port))
+    await expect(daemonAnswers(recordOn(port))).resolves.toBe(false)
+    await expect(daemonAnswers(recordOn(NOBODY))).resolves.toBe(false)
+    await expect(waitForDaemon(home, 300)).resolves.toBeUndefined()
+  })
+})
+
+describe(runningDaemon, () => {
+  it('names the daemon of the home only while its pid lives and its health answers', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const port = await healthStub()
+    await expect(runningDaemon(home)).resolves.toBeUndefined()
+    writeServerInfo(home, recordOn(port))
+    await expect(runningDaemon(home)).resolves.toStrictEqual(recordOn(port))
+    writeServerInfo(home, recordOn(NOBODY))
+    await expect(runningDaemon(home)).resolves.toBeUndefined()
+    writeServerInfo(home, recordOn(port, 2_147_483_000))
+    await expect(runningDaemon(home)).resolves.toBeUndefined()
+  })
+})
+```
+`apps/bytebureau/src/testing/health-stub.ts` (added during execution):
+```ts
+import { once } from 'node:events'
+import { createServer } from 'node:http'
+import type { ServerInfo } from '@bytebureau/protocol'
+import { onTestFinished } from 'vitest'
+
+const STARTED_AT = '2026-10-04T10:00:00.000Z'
+
+// A stand-in for the health of a daemon on a free loopback port, closed when the test ends; it answers with the start time it is given
+export async function healthStub(startedAt: string = STARTED_AT): Promise<number> {
+  const server = createServer((request, response) => {
+    const found = request.url === '/api/v1/health'
+    response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ status: 'ok', startedAt }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  onTestFinished(() => {
+    server.close()
+  })
+  const address = server.address()
+  return typeof address === 'object' && address !== null ? address.port : 0
+}
+
+// The record of a daemon of this test on the port, as server.json holds it
+export const recordOn = (port: number, pid: number = process.pid): ServerInfo => ({
+  version: '0.0.0-test',
+  host: '127.0.0.1',
+  port,
+  pid,
+  token: 'a'.repeat(64),
+  startedAt: STARTED_AT,
+})
+```
 
 - [ ] **Step 6: Run everything**
 
@@ -9264,6 +10568,7 @@ describe(resolveServer, () => {
 import { readFileSync } from 'node:fs'
 import { serverUrl } from '@bytebureau/protocol'
 import { readServerInfo } from '../daemon/server-info.js'
+import { tokenPath } from '../daemon/token.js'
 
 export interface ServerFlags {
   readonly host?: string | undefined
@@ -9278,12 +10583,21 @@ export type ResolvedServer =
   | { readonly kind: 'known'; readonly url: string; readonly token: string }
   | { readonly kind: 'none' }
 
+// The token of the home is the one its daemon.token keeps (Task 8); reading it here never generates one — tokenFor would
+const keptToken = (home: string): string => {
+  try {
+    return readFileSync(tokenPath(home), 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
 const tokenOf = (flags: ServerFlags, home: string): string => {
   if (flags.tokenFile !== undefined) {
     return readFileSync(flags.tokenFile, 'utf8').trim()
   }
   const record = readServerInfo(home)
-  return record.state === 'absent' || record.info === undefined ? '' : record.info.token
+  return record.state === 'alive' ? record.info.token : keptToken(home)
 }
 
 export const resolveServer = (flags: ServerFlags, home: string): ResolvedServer => {
@@ -9302,22 +10616,22 @@ export const resolveServer = (flags: ServerFlags, home: string): ResolvedServer 
 `apps/bytebureau/src/bureau/ensure-daemon.ts`:
 ```ts
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
-import { readServerInfo } from '../daemon/server-info.js'
 import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
-import { waitForDaemon } from '../daemon/wait.js'
+import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
 
 export class DaemonUnavailable extends Error {
   public override readonly name = 'DaemonUnavailable'
 }
 
-// The daemon of the home, started detached when none is alive; a start that does not come up in time is a failure that names the log
+// The daemon of the home, started detached when none answers; a start that does not come up in time is a failure that names the log
+// runningDaemon (Task 8) accepts only a daemon whose health answers with the start time of server.json, never a process that took over its pid
 export const ensureDaemon = async (
   home: string,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<ServerInfo> => {
-  const record = readServerInfo(home)
-  if (record.state === 'alive') {
-    return record.info
+  const running = await runningDaemon(home)
+  if (running !== undefined) {
+    return running
   }
   spawnDaemon(home, env, [])
   const info = await waitForDaemon(home)
@@ -9380,7 +10694,7 @@ Task 7's `client.projects.get(id)` resolves `undefined` on a 404 and throws `Api
 import { createBureauClient } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
 import type { Context } from '../context.js'
-import { readServerInfo } from '../daemon/server-info.js'
+import { runningDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
 import { openKernel } from '../kernel.js'
 import { withResource } from '../resource.js'
@@ -9402,9 +10716,9 @@ export class DaemonRunning extends Error {
 // The store has one writer: an in-process kernel is refused while the daemon of the same home is alive
 const openLocal = async (context: Context, env: Readonly<Record<string, string | undefined>>): Promise<Bureau> => {
   const home = kernelHome(env)
-  const record = readServerInfo(home)
-  if (record.state === 'alive') {
-    throw new DaemonRunning(m.bureau_daemon_running({ pid: record.info.pid, url: urlOf(record.info) }))
+  const running = await runningDaemon(home)
+  if (running !== undefined) {
+    throw new DaemonRunning(m.bureau_daemon_running({ pid: running.pid, url: urlOf(running) }))
   }
   return localBureau(await openKernel(context, env), version)
 }
@@ -9560,6 +10874,8 @@ describe('bytebureau run through the daemon', () => {
 ```
 `runCli`'s `Interruption` (Phase A's `testing/run-cli.ts`) signals the CLI child once its stdout contains a text; this test needs the signal sent to another process — extend `Interruption` with an optional `target: ChildProcess` that receives the signal instead of the CLI child. The `sessions ls` listing comes from Task 10; until then the parallel-run test asserts on the two exit codes and on two worktrees under each repository. The remote adapter passes `retryFor: 15_000` to `subscribeEvents`, so a run gives up fifteen seconds after the daemon stops answering, and the next `serve` recovers the session as `stopped` (Task 2).
 
+Test homes (ruling after Task 8): a daemon a test starts on demand must not bind the default port 4747 — `testHome()` in `apps/bytebureau/src/testing/temp-repo.ts` (landed in Task 8's fix round: a `tempDir('bb-home-')` into which it writes `config.json` with `{ "server": { "port": 0 } }`; the daemon reads `server.port` from the user configuration) is what `workbench()` and `childEnv`'s default home must use from this task on, and every test of this task and of Task 10 that may start a daemon takes its home from it; `startDaemonProcess` passes `--port 0` itself.
+
 The Phase A `run.test.ts`, `projects.test.ts`, `workspaces.test.ts` and `config.test.ts` run the CLI without a daemon alive and without `--no-daemon`: under the new default they would start a daemon on demand in every test — pass `--no-daemon` in their `runCli` calls (one edit in `workbench.ts`'s `FAKE`/`fakeRun` and in the tests that spell their own arguments), so the Phase A tests keep testing the in-process path and the daemon path has the tests above. If a `workbench` run starts a daemon anyway, `run-daemon.test.ts`'s second test is the one that wants it.
 
 - [ ] **Step 6: Run everything**
@@ -9589,7 +10905,7 @@ Commands (spec §11.3; every one takes the global flags, `--json` emits one reco
 - `sessions ls` — `id  status  title  project` per session (`No sessions` when empty); `sessions show <id>` — the session's fields one per line and its pending asks; `sessions prompt <id> "<text>"` — prompts and follows the turn like `run` does (exit 0 when the turn completes, 3 stopped, 4 errored); `sessions interrupt|stop|resume <id>`.
 - `ask ls [--session <id>]` — the pending asks (`id  session  title  recommended option`); `ask answer <id> [--option <id>]... [--other <text>]` — answers; without `--option`/`--other` an interactive prompt at a terminal (`--yes` picks the recommended option), a refusal otherwise.
 - `plugins ls` — `name  version  state  ports` (a failed plugin shows its reason).
-A command whose request the daemon refuses (`409`, `404`, `422` problems) prints the problem's detail and exits 1 — the same shape as `projects rm` of Phase A (`sessions interrupt` on a session with no agent attached is such a refusal: the kernel answers `session_not_found`).
+Every test home comes from `testHome()`/`workbench()` (Task 9: a user configuration with `server.port: 0`, so a daemon started on demand never binds 4747). A command whose request the daemon refuses (`409`, `404`, `422` problems) prints the problem's detail and exits 1 — the same shape as `projects rm` of Phase A (`sessions interrupt` on a session with no agent attached is such a refusal: the kernel answers `session_not_found`).
 
 - [ ] **Step 1: The table renderer — test first**
 
