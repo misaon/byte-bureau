@@ -61,7 +61,10 @@ const answersWithin = async (home: string, pid: number, deadline: number): Promi
 }
 
 // A daemon still on its way up: a live process of this user whose lock is younger than a start may take
+// No allowance means none: a lock written this very millisecond reads a little younger than nothing, its time being finer
+// A lock that reads from the future, as after a clock stepped back, stays within an allowance there is
 const isBooting = (held: HeldLock, judging: Judging = JUDGING): boolean =>
+  judging.bootMs > 0 &&
   held.pid !== undefined &&
   pidState(held.pid) === 'alive' &&
   Date.now() - held.stamp.mtimeMs < judging.bootMs
