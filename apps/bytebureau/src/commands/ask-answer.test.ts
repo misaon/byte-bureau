@@ -5,6 +5,7 @@ import type { Prompts } from '../render/ask-prompt.js'
 import { askOf, option, question } from '../testing/events.js'
 import { ASK } from '../testing/records.js'
 import { captureConsole, contextOf, keepExitCode, scripted } from '../testing/scripted-kernel.js'
+import { createContext } from '../context.js'
 import { answerAsk, answerOf, optionsOf, type Answering } from './ask-answer.js'
 
 describe(optionsOf, () => {
@@ -149,6 +150,46 @@ describe(answerAsk, () => {
     await answerAsk(bureau, { ...REQUEST, prompts: CANCELLING }, AT_A_TERMINAL)
     expect([answered, printed.out(), printed.err()]).toStrictEqual([[], [], []])
     expect(process.exitCode).toBe(1)
+  })
+})
+
+describe('answerAsk with --yes on an ask that recommends nothing', () => {
+  const unrecommended: AskRecord = {
+    ...PENDING,
+    ...askOf([question([option('a', false)])], 'none'),
+  }
+
+  it.each([
+    ['off a terminal', contextOf()],
+    ['at a terminal, where nobody is asked for it', AT_A_TERMINAL],
+  ])('refuses with its own line, %s', async (_where, context) => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const { bureau, answered } = scripted([], { getAsk: holding(unrecommended) })
+    await answerAsk(bureau, { ...REQUEST, yes: true, prompts: CANCELLING }, context)
+    expect([answered, process.exitCode]).toStrictEqual([[], 1])
+    expect(printed.err()).toStrictEqual([
+      'Ask a1 has no recommended option; pass --option or --other',
+    ])
+  })
+})
+
+describe('answerAsk in Czech', () => {
+  it('tells that an ask recommends nothing, and what to pass, in the words of the language', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const czech = createContext({ json: false, color: false, yes: true, lang: 'cs' }, {}, false)
+    const unrecommended: AskRecord = {
+      ...PENDING,
+      ...askOf([question([option('a', false)])], 'none'),
+    }
+    const { bureau } = scripted([], { getAsk: holding(unrecommended) })
+    await answerAsk(bureau, { ...REQUEST, yes: true }, czech)
+    expect(printed.err()).toStrictEqual([
+      'Otázka a1 nemá doporučenou volbu; zadejte --option nebo --other',
+    ])
   })
 })
 

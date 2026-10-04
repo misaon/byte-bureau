@@ -36,6 +36,7 @@
   "ask_none": "Žádné otázky nečekají",
   "ask_not_pending": "Otázka {id} nečeká na odpověď",
   "ask_needs_answer": "Otázka {id} potřebuje mimo terminál --option nebo --other",
+  "ask_no_recommended": "Otázka {id} nemá doporučenou volbu; zadejte --option nebo --other",
   "ask_answered": "Odpovězeno: {id}",
   "plugins_none": "Žádné pluginy",
   "status_daemon": "Démon: {url} (pid {pid}, běží od {since})",

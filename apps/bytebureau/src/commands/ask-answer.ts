@@ -86,7 +86,13 @@ async function answerFor(
     return undefined
   }
   if (said === undefined) {
-    failWith(context, m.ask_needs_answer({ id: request.id }))
+    // --yes asked for the recommended option, and there is none: the person is not left to wonder about a terminal
+    failWith(
+      context,
+      request.yes
+        ? m.ask_no_recommended({ id: request.id })
+        : m.ask_needs_answer({ id: request.id }),
+    )
   }
   return said
 }

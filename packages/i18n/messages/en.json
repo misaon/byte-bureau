@@ -36,6 +36,7 @@
   "ask_none": "No asks waiting",
   "ask_not_pending": "Ask {id} is not pending",
   "ask_needs_answer": "Ask {id} needs --option or --other outside a terminal",
+  "ask_no_recommended": "Ask {id} has no recommended option; pass --option or --other",
   "ask_answered": "Answered {id}",
   "plugins_none": "No plugins loaded",
   "status_daemon": "Daemon: {url} (pid {pid}, up since {since})",
