@@ -83,7 +83,7 @@ docs/decisions/0012-event-payloads-are-redacted-at-publish.md, 0013-api-transpor
 ### Task 1: `packages/protocol` — the API contract: DTOs, request bodies, problem details, server info, the RPC group
 
 **Files:**
-- Create: `packages/protocol/src/api/dto.ts`, `packages/protocol/src/api/requests.ts`, `packages/protocol/src/api/problem.ts`, `packages/protocol/src/api/server-info.ts`, `packages/protocol/src/api/rpc.ts`, `packages/protocol/src/api/dto.test.ts`, `packages/protocol/src/api/problem.test.ts`, `packages/protocol/src/api/rpc.test.ts`
+- Create: `packages/protocol/src/api/dto.ts`, `packages/protocol/src/api/requests.ts`, `packages/protocol/src/api/problem.ts`, `packages/protocol/src/api/server-info.ts`, `packages/protocol/src/api/rpc.ts`, `packages/protocol/src/api/dto.test.ts`, `packages/protocol/src/api/problem.test.ts`, `packages/protocol/src/api/rpc.test.ts`, `packages/protocol/src/api/server-info.test.ts`
 - Modify: `packages/protocol/src/index.ts` (re-export the five modules), `cspell-words.txt` (add `ndjson` if the spell check asks for it)
 
 **Interfaces:**
@@ -93,6 +93,8 @@ docs/decisions/0012-event-payloads-are-redacted-at-publish.md, 0013-api-transpor
 Verified facts this task relies on (fact sheet §1, §4): `effect@4.0.0` exports `Rpc` and `RpcGroup` from `effect/rpc` (`Rpc.make(tag, { payload, success, error, stream })`, `RpcGroup.make(...rpcs)`, `group.requests` is a `ReadonlyMap<string, Rpc>`); `Schema.fromJsonString`, `Schema.optionalKey`, `Schema.NullOr`, `Schema.Literals`, `Schema.Record`, `Schema.Int`, `Schema.Finite`, `Schema.Union`, `Schema.decodeUnknownSync` exist in `effect` 4.0.0 (used by Phase A). Every schema here is a plain `Schema.Struct`, so `Schema.toJsonSchemaDocument` (OpenAPI generation in Task 3) renders it as a closed object the same way `schemas/events.json` is rendered today.
 
 Semantics: the DTOs mirror the kernel records field for field (`Session`, `Turn`, `Project`, `WorkspaceInfo`, `PruneReport`, `SessionUsage`, `PluginStatus` in `packages/kernel/src`); Task 4 pins the mirror with `Schema.encodeSync(SessionDto)(session)` calls that only type-check while the two stay identical. `null` means "absent" on the wire, exactly as the kernel records say it. `Problem` is RFC 9457: `type` is `https://bytebureau.dev/problems/<code>`, `status` the HTTP status, `code` a ByteBureau error code (a string; the well-known ones are listed in `PROBLEM_CODES` and documented, new ones may appear as `workspace_<code>` or `provider_<kind>`), `detail` the one-line reason. `ServerInfo` is the record of `~/.bytebureau/server.json`; the token inside is a secret and is never logged (Task 8 writes the file with mode 0600). `BureauRpcs` is the WebSocket contract (Task 6 serves it, Task 7 speaks it): one streaming procedure `events.subscribe` plus one procedure per mutation; every mutation fails with a `Problem`.
+
+Semantics (as shipped, commit 5febde0): the gates reshaped the brief in four places — `PrunePayload` is a named constant in `rpc.ts` (`unicorn/max-nested-calls`), the tests call `expect.hasAssertions()` and use lower-case `describe` titles, the snake-case check of `problem.test.ts` is a per-word check instead of the brief's regex (`security/detect-unsafe-regex` of the long-tail ESLint), and `server-info.test.ts` covers the IPv6 bracketing of `serverUrl` and the strict refusal of `decodeServerInfo`. `PROBLEM_CODES` gains `workspace_runtime_missing` in Task 3.
 
 - [ ] **Step 1: Write the failing DTO and request tests**
 
@@ -137,7 +139,7 @@ const session = {
   endedAt: null,
 }
 
-describe('API DTO schemas', () => {
+describe('the API DTO schemas', () => {
   it('decodes a session with a workspace and no external ref', () => {
     expect(Schema.decodeUnknownSync(SessionDto)(session)).toStrictEqual(session)
   })
@@ -161,7 +163,12 @@ describe('API DTO schemas', () => {
       endedAt: '2026-10-04T10:00:01.000Z',
     }
     expect(Schema.decodeUnknownSync(TurnDto)(turn)).toStrictEqual(turn)
-    const plugin = { name: 'fake-agent', version: '0.0.0', state: 'loaded', ports: ['agentProvider'] }
+    const plugin = {
+      name: 'fake-agent',
+      version: '0.0.0',
+      state: 'loaded',
+      ports: ['agentProvider'],
+    }
     expect(Schema.decodeUnknownSync(PluginStatusDto)(plugin)).toStrictEqual(plugin)
   })
 
@@ -176,14 +183,19 @@ describe('API DTO schemas', () => {
   })
 })
 
-describe('API request schemas', () => {
+describe('the API request schemas', () => {
   it('accepts a session creation with only the required fields', () => {
     const body = { projectId: session.projectId, title: 'x' }
     expect(Schema.decodeUnknownSync(CreateSessionBody)(body)).toStrictEqual(body)
   })
 
   it('accepts an events query with every filter and with none', () => {
-    const full = { since: 12, session: session.id, project: session.projectId, types: 'turn.started,turn.completed' }
+    const full = {
+      since: 12,
+      session: session.id,
+      project: session.projectId,
+      types: 'turn.started,turn.completed',
+    }
     expect(Schema.decodeUnknownSync(EventsQuery)(full)).toStrictEqual(full)
     expect(Schema.decodeUnknownSync(EventsQuery)({})).toStrictEqual({})
   })
@@ -215,9 +227,12 @@ describe('problem details', () => {
   })
 
   it('lists the well-known codes once each, in snake case', () => {
+    expect.hasAssertions()
     expect(new Set(PROBLEM_CODES).size).toBe(PROBLEM_CODES.length)
     for (const code of PROBLEM_CODES) {
-      expect(code).toMatch(/^[a-z]+(?:_[a-z]+)*$/u)
+      for (const word of code.split('_')) {
+        expect(word, code).toMatch(/^[a-z]+$/u)
+      }
     }
   })
 })
@@ -244,6 +259,39 @@ describe('the RPC group', () => {
       'workspaces.prune',
     ])
     expect([...BureauRpcs.requests.keys()]).toStrictEqual(RPC_TAGS)
+  })
+})
+```
+
+`packages/protocol/src/api/server-info.test.ts` (added during execution):
+```ts
+import { describe, expect, it } from 'vitest'
+import { decodeServerInfo, serverUrl } from './server-info.js'
+
+const info = {
+  version: '0.1.0',
+  host: '127.0.0.1',
+  port: 4747,
+  pid: 4242,
+  token: 'test-token',
+  startedAt: '2026-10-04T10:00:00.000Z',
+}
+
+describe(serverUrl, () => {
+  it('names an IPv4 host as it is and brackets an IPv6 host', () => {
+    expect(serverUrl(info)).toBe('http://127.0.0.1:4747')
+    expect(serverUrl({ host: '::1', port: 4747 })).toBe('http://[::1]:4747')
+  })
+})
+
+describe(decodeServerInfo, () => {
+  it('reads the record of the server file', () => {
+    expect(decodeServerInfo(info)).toStrictEqual(info)
+  })
+
+  it('refuses a record with a field it does not know or without one it needs', () => {
+    expect(() => decodeServerInfo({ ...info, extra: 1 })).toThrow(/extra/u)
+    expect(() => decodeServerInfo({ ...info, token: undefined })).toThrow(/token/u)
   })
 })
 ```
@@ -403,7 +451,7 @@ export const AnswerAskBody = AskAnswer
 export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({ title: 'SessionRef' })
 
 // The query string of GET /events: types is comma-separated, since is the last seq the client has seen
-// HttpApiEndpoint wraps a query schema in a string-tree codec, so Schema.Int decodes ?since=12; if it refuses a string, use Schema.FiniteFromString here (fact sheet §3)
+// HttpApiEndpoint decodes a query through a string-tree codec, so Schema.Int reads ?since=12
 export const EventsQuery = Schema.Struct({
   since: Schema.optionalKey(Schema.Int),
   session: Schema.optionalKey(Id),
@@ -484,7 +532,10 @@ export const Problem = Schema.Struct({
   detail: Schema.String,
   code: Schema.String,
   instance: Schema.optionalKey(Schema.String),
-}).annotate({ title: 'Problem', description: 'RFC 9457 problem details with a ByteBureau error code' })
+}).annotate({
+  title: 'Problem',
+  description: 'RFC 9457 problem details with a ByteBureau error code',
+})
 
 export type Problem = typeof Problem.Type
 ```
@@ -528,10 +579,16 @@ import { ProjectDto, PruneReportDto, SessionDto, TurnDto } from './dto.js'
 import { Problem } from './problem.js'
 import { CreateSessionBody, EventsFilter, RegisterProjectBody, SessionRef } from './requests.js'
 
+const PrunePayload = Schema.Struct({ projectId: Schema.optionalKey(Id) })
+
 // The WebSocket contract: a streaming subscription and one procedure per mutation; every mutation fails with a Problem
 export const BureauRpcs = RpcGroup.make(
   Rpc.make('events.subscribe', { payload: EventsFilter, success: EventEnvelope, stream: true }),
-  Rpc.make('projects.register', { payload: RegisterProjectBody, success: ProjectDto, error: Problem }),
+  Rpc.make('projects.register', {
+    payload: RegisterProjectBody,
+    success: ProjectDto,
+    error: Problem,
+  }),
   Rpc.make('projects.remove', { payload: Schema.Struct({ id: Id }), error: Problem }),
   Rpc.make('sessions.create', { payload: CreateSessionBody, success: SessionDto, error: Problem }),
   Rpc.make('sessions.prompt', {
@@ -547,11 +604,7 @@ export const BureauRpcs = RpcGroup.make(
     payload: Schema.Struct({ askId: Id, answer: AskAnswer }),
     error: Problem,
   }),
-  Rpc.make('workspaces.prune', {
-    payload: Schema.Struct({ projectId: Schema.optionalKey(Id) }),
-    success: PruneReportDto,
-    error: Problem,
-  }),
+  Rpc.make('workspaces.prune', { payload: PrunePayload, success: PruneReportDto, error: Problem }),
 )
 
 export const RPC_TAGS: readonly string[] = [...BureauRpcs.requests.keys()]
@@ -2480,8 +2533,8 @@ export const PluginsHandlers = HttpApiBuilder.group(BureauApi, 'plugins', (handl
 ```ts
 import { EventLog } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
-import { Schema, SessionDto, type EventEnvelope, type ProjectDto } from '@bytebureau/protocol'
-import { Effect, Stream } from 'effect'
+import { SessionDto, type EventEnvelope, type ProjectDto } from '@bytebureau/protocol'
+import { Effect, Schema, Stream } from 'effect'
 import { authorized, baseUrl, json } from './testing.js'
 
 // A project file whose default employee works with the bundled fake provider
@@ -2530,7 +2583,7 @@ export const firstEvent = (sessionId: string, type: string): Effect.Effect<Event
 export const post = (base: string, path: string): Promise<Response> =>
   fetch(`${base}${path}`, authorized({ method: 'POST' }))
 ```
-`Schema` is re-exported by the protocol only if Task 1 added it; otherwise import `Schema` from `effect` (the api package may). `Stream.runCollect` returns an array in Effect 4 (`dist/Stream.d.ts` line 14891).
+`Schema` comes from `effect` (the protocol barrel does not re-export it; the api package may import `effect`). `Stream.runCollect` returns an array in Effect 4 (`dist/Stream.d.ts` line 14891).
 
 `packages/api/src/projects.test.ts`:
 ```ts
