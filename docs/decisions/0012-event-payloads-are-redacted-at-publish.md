@@ -14,5 +14,6 @@ Phase A stored event payloads as the kernel's services and plugins handed them i
 ## Consequences
 
 - One place to audit; a reader cannot forget.
+- Each payload is redacted on its own: a secret split across two `message.assistant.delta` events reaches live subscribers whole, while the completed message that follows is redacted.
 - Redaction is lossy for legitimate text that looks like a secret (a document quoting `sk-ant-…`); the UI shows `[REDACTED]` there. Acceptable: no feature of ByteBureau needs the raw secret, and the agent's own context is unaffected (events are a projection).
 - A payload field named like a secret but holding none (`token` counting tokens, say) is replaced too; event schemas use `inputTokens`/`outputTokens`, which do not match `token$`. New schemas must avoid the reserved names, which `redact-value.test.ts` documents.

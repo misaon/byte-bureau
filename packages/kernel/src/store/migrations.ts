@@ -133,8 +133,13 @@ CREATE TABLE plugin_kv (
 `,
   },
   {
-    id: '0002_session_env',
+    id: '0002_session_env_owner',
     // The BYTEBUREAU_* variables given at creation, read back when a later process resumes the session
-    sql: `ALTER TABLE sessions ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'`,
+    // The process and the kernel that registered or resumed the session: the recovery of another kernel leaves a session alone while they live
+    sql: `
+ALTER TABLE sessions ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sessions ADD COLUMN owner_pid INTEGER;
+ALTER TABLE sessions ADD COLUMN owner_instance TEXT
+`,
   },
 ]

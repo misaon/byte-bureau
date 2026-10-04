@@ -21,7 +21,7 @@ export type SessionRequirements =
   | Config
 
 // The services the session manager works with, and a scope of its own for the fibers it forks
-export type CollectedDeps = Omit<SessionDeps, 'env' | 'live'>
+export type CollectedDeps = Omit<SessionDeps, 'env' | 'live' | 'instance'>
 
 export const collectDeps: Effect.Effect<CollectedDeps, never, SessionRequirements> = Effect.gen(
   function* collectsDeps() {

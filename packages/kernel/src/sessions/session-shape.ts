@@ -24,7 +24,7 @@ export interface SessionManagerShape {
     sessionId: string,
   ) => Effect.Effect<Session, SessionError | StoreError | ConfigError>
   readonly list: () => Effect.Effect<readonly Session[], StoreError>
-  // Stops what a previous process left provisioning, running, waiting or paused, and gives the ids of those sessions
+  // Stops the sessions at work that no kernel still running owns or has attached, and gives their ids; meant for the start of a process
   readonly recover: () => Effect.Effect<readonly string[], SessionError | StoreError>
   readonly get: (id: string) => Effect.Effect<Session | undefined, StoreError>
 }

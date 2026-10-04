@@ -42,7 +42,10 @@ export interface Kernel {
     readonly resume: (sessionId: string) => Promise<Session>
     readonly list: () => Promise<readonly Session[]>
     readonly get: (id: string) => Promise<Session | undefined>
-    /** Stops the sessions a previous process left at work and resolves with their ids; the kernel runs it once as it starts. */
+    /**
+     * Stops the sessions left at work by kernels that are gone and resolves with their ids.
+     * Meant for the start of a process: the kernel runs it once as it starts, and a session that a running kernel owns is left alone.
+     */
     readonly recover: () => Promise<readonly string[]>
   }
   readonly asks: {

@@ -12,7 +12,7 @@ import {
   rememberRef,
   settle,
 } from './session-live.js'
-import { requireSession } from './session-records.js'
+import { claimOwner, requireSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
 import { ensureAllowed, move } from './session-status.js'
 import type { Outcome } from './session-turns.js'
@@ -76,6 +76,7 @@ export const makeComplete =
     )
 
 // The environment is read before the session moves, so a configuration that cannot be read leaves the session stopped
+// The kernel that resumes the session owns it from then on
 export const makeResume =
   (deps: SessionDeps): SessionManagerShape['resume'] =>
   (sessionId) =>
@@ -85,6 +86,7 @@ export const makeResume =
         const stopped = yield* requireSession(deps.sql, sessionId)
         yield* ensureAllowed(stopped, 'resume')
         const environment = yield* storedEnvironment(deps, stopped)
+        yield* claimOwner(deps.sql, sessionId, deps.instance)
         const session = yield* move(deps, sessionId, 'resume')
         deps.live.setEnvironment(session.id, environment)
         return session

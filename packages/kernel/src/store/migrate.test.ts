@@ -71,18 +71,20 @@ it.layer(StoreTest)('Store', (suite) => {
   )
 })
 
-it.layer(StoreTest)('Store session environment', (suite) => {
-  suite.effect('gives a session an empty environment unless one is stored', () =>
+it.layer(StoreTest)('Store session environment and owner', (suite) => {
+  suite.effect('gives a session an empty environment and no owner unless they are stored', () =>
     Effect.gen(function* defaultsEnvironment() {
       const sql = yield* SqlClient.SqlClient
       yield* sql.unsafe(PROJECT)
       yield* sql.unsafe(session('s-env', 'p'))
       const rows = yield* sql<{
         readonly env_json: string
-      }>`SELECT env_json FROM sessions WHERE id = 's-env'`
+        readonly owner_pid: number | null
+        readonly owner_instance: string | null
+      }>`SELECT env_json, owner_pid, owner_instance FROM sessions WHERE id = 's-env'`
       assert.deepStrictEqual(
-        rows.map((row) => row.env_json),
-        ['{}'],
+        rows.map((row) => [row.env_json, row.owner_pid, row.owner_instance]),
+        [['{}', null, null]],
       )
     }),
   )
