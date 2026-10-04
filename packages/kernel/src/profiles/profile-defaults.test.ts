@@ -2,7 +2,7 @@ import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { EventLog } from '../events/event-log.js'
 import { warnings } from '../plugins/log-fixtures.js'
-import { stickySecrets } from './failing-fixtures.js'
+import { doubtingPlugin, stickySecrets } from './failing-fixtures.js'
 import { loadedProfiles, profileWorld } from './profile-fixtures.js'
 import type { Profile, ProfileServiceShape } from './profile-service.js'
 
@@ -89,5 +89,40 @@ it.layer(sticky.layer)('ProfileService over a secret store that cannot delete', 
   suite.effect(
     'removes the profile and passes the default all the same, and warns of the key it leaves',
     () => leavesKeyBehind,
+  )
+})
+
+const movesOnAdd = Effect.gen(function* movesOnAdd() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.add({ providerId: 'fake', name: 'first', kind: 'login' })
+  yield* profiles.add({ providerId: 'doubting', name: 'other', kind: 'login' })
+  const second = yield* profiles.add({
+    providerId: 'fake',
+    name: 'second',
+    kind: 'login',
+    makeDefault: true,
+  })
+  assert.deepStrictEqual(
+    [second.isDefault, defaultsOf(yield* profiles.list())],
+    [true, ['doubting/other', 'fake/second']],
+  )
+})
+
+const keepsOtherDefault = Effect.gen(function* keepsOtherDefault() {
+  const profiles = yield* loadedProfiles
+  yield* profiles.setDefault('fake/first')
+  assert.deepStrictEqual(defaultsOf(yield* profiles.list()), ['doubting/other', 'fake/first'])
+})
+
+const twoProviders = profileWorld([doubtingPlugin])
+
+it.layer(twoProviders.layer)('ProfileService defaults of two providers', (suite) => {
+  suite.effect(
+    'moves the default of a provider to a profile added with makeDefault',
+    () => movesOnAdd,
+  )
+  suite.effect(
+    "moves the default of one provider and leaves the other provider's default as it is",
+    () => keepsOtherDefault,
   )
 })
