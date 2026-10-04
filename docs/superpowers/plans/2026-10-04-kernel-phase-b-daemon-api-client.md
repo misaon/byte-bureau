@@ -104,8 +104,8 @@ Semantics (as shipped, commit 5febde0): the gates reshaped the brief in four pla
 ```ts
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { HealthDto, PluginStatusDto, SessionDto, TurnDto } from './dto.js'
-import { CreateSessionBody, EventsQuery } from './requests.js'
+import { HealthDto, PluginStatusDto, SessionDto, TurnDto, WorkspaceInfoDto } from './dto.js'
+import { CreateSessionBody, EventsFilter, EventsQuery } from './requests.js'
 
 const employee = {
   id: 'developer',
@@ -185,21 +185,59 @@ describe('the API DTO schemas', () => {
   })
 })
 
+describe('the worktree DTO', () => {
+  const worktree = {
+    sessionId: session.id,
+    projectId: session.projectId,
+    path: '/tmp/repo/.bytebureau/worktrees/x',
+    branch: 'bb/create-hello',
+    baseRef: 'main',
+    sessionStatus: 'completed',
+    exists: true,
+  }
+
+  it('carries the status of its session as one of the session statuses', () => {
+    expect(Schema.decodeUnknownSync(WorkspaceInfoDto)(worktree)).toStrictEqual(worktree)
+    expect(() =>
+      Schema.decodeUnknownSync(WorkspaceInfoDto)({ ...worktree, sessionStatus: 'dancing' }),
+    ).toThrow(/sessionStatus/u)
+  })
+})
+
 describe('the API request schemas', () => {
   it('accepts a session creation with only the required fields', () => {
     const body = { projectId: session.projectId, title: 'x' }
     expect(Schema.decodeUnknownSync(CreateSessionBody)(body)).toStrictEqual(body)
   })
 
-  it('accepts an events query with every filter and with none', () => {
-    const full = {
-      since: 12,
+  it('accepts an events query with every filter and with none, its since read from the text of the query', () => {
+    const filters = {
       session: session.id,
       project: session.projectId,
       types: 'turn.started,turn.completed',
     }
-    expect(Schema.decodeUnknownSync(EventsQuery)(full)).toStrictEqual(full)
+    const query = Schema.decodeUnknownSync(EventsQuery)({ since: '12', ...filters })
+    expect(query).toStrictEqual({ since: 12, ...filters })
     expect(Schema.decodeUnknownSync(EventsQuery)({})).toStrictEqual({})
+  })
+
+  it.each([-1, 1.5])(
+    'refuses a since of %d, in the query and in the filter of the socket',
+    (since) => {
+      expect(() => Schema.decodeUnknownSync(EventsQuery)({ since: String(since) })).toThrow(
+        /since/u,
+      )
+      expect(() => Schema.decodeUnknownSync(EventsFilter)({ since })).toThrow(/since/u)
+    },
+  )
+
+  it.each(['+5', '1e3', ' 5', ''])('refuses %j as the text of a since in the query', (since) => {
+    expect(() => Schema.decodeUnknownSync(EventsQuery)({ since })).toThrow(/since/u)
+  })
+
+  it('takes a since of 0, the start of the log', () => {
+    expect(Schema.decodeUnknownSync(EventsQuery)({ since: '0' })).toStrictEqual({ since: 0 })
+    expect(Schema.decodeUnknownSync(EventsFilter)({ since: 0 })).toStrictEqual({ since: 0 })
   })
 })
 ```
@@ -242,25 +280,41 @@ describe('problem details', () => {
 
 `packages/protocol/src/api/rpc.test.ts`:
 ```ts
+import { RpcSchema } from 'effect/rpc'
 import { describe, expect, it } from 'vitest'
+import { Problem } from './problem.js'
 import { BureauRpcs, RPC_TAGS } from './rpc.js'
+
+const MUTATIONS = [
+  'projects.register',
+  'projects.remove',
+  'sessions.create',
+  'sessions.prompt',
+  'sessions.interrupt',
+  'sessions.stop',
+  'sessions.resume',
+  'sessions.complete',
+  'asks.answer',
+  'workspaces.prune',
+]
+
+// Each procedure of the group, by its tag
+const procedures = [...BureauRpcs.requests.entries()]
 
 describe('the RPC group', () => {
   it('declares one streaming subscription and one procedure per mutation of the API', () => {
-    expect(RPC_TAGS).toStrictEqual([
-      'events.subscribe',
-      'projects.register',
-      'projects.remove',
-      'sessions.create',
-      'sessions.prompt',
-      'sessions.interrupt',
-      'sessions.stop',
-      'sessions.resume',
-      'sessions.complete',
-      'asks.answer',
-      'workspaces.prune',
-    ])
-    expect([...BureauRpcs.requests.keys()]).toStrictEqual(RPC_TAGS)
+    expect(RPC_TAGS).toStrictEqual(['events.subscribe', ...MUTATIONS])
+  })
+
+  it('streams the events of the subscription alone, and answers every mutation once', () => {
+    const streaming = procedures.filter(([, rpc]) => RpcSchema.isStreamSchema(rpc.successSchema))
+    expect(streaming.map(([tag]) => tag)).toStrictEqual(['events.subscribe'])
+  })
+
+  it('fails every mutation with a problem', () => {
+    const mutations = procedures.filter(([tag]) => tag !== 'events.subscribe')
+    expect(mutations.map(([tag]) => tag)).toStrictEqual(MUTATIONS)
+    expect(mutations.filter(([, rpc]) => rpc.errorSchema !== Problem)).toStrictEqual([])
   })
 })
 ```
@@ -287,8 +341,10 @@ describe(serverUrl, () => {
 })
 
 describe(decodeServerInfo, () => {
-  it('reads the record of the server file', () => {
+  it('reads the record of the server file, with the address of a daemon bound to every interface', () => {
     expect(decodeServerInfo(info)).toStrictEqual(info)
+    const wildcard = { ...info, bind: '0.0.0.0' }
+    expect(decodeServerInfo(wildcard)).toStrictEqual(wildcard)
   })
 
   it('refuses a record with a field it does not know or without one it needs', () => {
@@ -321,7 +377,7 @@ export const ProjectDto = Schema.Struct({
   config: ProjectConfig,
   createdAt: Timestamp,
   updatedAt: Timestamp,
-}).annotate({ title: 'Project' })
+}).annotate({ title: 'Project', identifier: 'Project' })
 
 // The handle of a worktree as the kernel keeps it: the id is the session id
 export const WorkspaceHandleDto = Schema.Struct({
@@ -330,12 +386,12 @@ export const WorkspaceHandleDto = Schema.Struct({
   path: Schema.String,
   branch: Schema.String,
   baseRef: Schema.String,
-}).annotate({ title: 'WorkspaceHandle' })
+}).annotate({ title: 'WorkspaceHandle', identifier: 'WorkspaceHandle' })
 
 export const ExternalRefDto = Schema.Struct({
   providerId: Schema.String,
   ref: Schema.String,
-}).annotate({ title: 'ExternalSessionRef' })
+}).annotate({ title: 'ExternalSessionRef', identifier: 'ExternalSessionRef' })
 
 export const SessionDto = Schema.Struct({
   id: Id,
@@ -350,7 +406,7 @@ export const SessionDto = Schema.Struct({
   createdAt: Timestamp,
   startedAt: Schema.NullOr(Timestamp),
   endedAt: Schema.NullOr(Timestamp),
-}).annotate({ title: 'Session' })
+}).annotate({ title: 'Session', identifier: 'Session' })
 
 export const TurnDto = Schema.Struct({
   id: Id,
@@ -362,7 +418,7 @@ export const TurnDto = Schema.Struct({
   usage: Schema.NullOr(Usage),
   startedAt: Timestamp,
   endedAt: Schema.NullOr(Timestamp),
-}).annotate({ title: 'Turn' })
+}).annotate({ title: 'Turn', identifier: 'Turn' })
 
 export const WorkspaceInfoDto = Schema.Struct({
   sessionId: Id,
@@ -370,14 +426,14 @@ export const WorkspaceInfoDto = Schema.Struct({
   path: Schema.String,
   branch: Schema.String,
   baseRef: Schema.String,
-  sessionStatus: Schema.String,
+  sessionStatus: SessionStatus,
   exists: Schema.Boolean,
-}).annotate({ title: 'WorkspaceInfo' })
+}).annotate({ title: 'WorkspaceInfo', identifier: 'WorkspaceInfo' })
 
 export const PruneReportDto = Schema.Struct({
   removed: Schema.Array(Schema.String),
   retained: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
-}).annotate({ title: 'PruneReport' })
+}).annotate({ title: 'PruneReport', identifier: 'PruneReport' })
 
 export const SessionUsageDto = Schema.Struct({
   turns: Schema.Int,
@@ -385,7 +441,7 @@ export const SessionUsageDto = Schema.Struct({
   outputTokens: Schema.Int,
   costUsd: Schema.NullOr(Schema.Finite),
   contextPct: Schema.NullOr(Schema.Finite),
-}).annotate({ title: 'SessionUsage' })
+}).annotate({ title: 'SessionUsage', identifier: 'SessionUsage' })
 
 export const PluginStatusDto = Schema.Struct({
   name: Schema.String,
@@ -393,12 +449,12 @@ export const PluginStatusDto = Schema.Struct({
   state: Schema.Literals(['loaded', 'failed']),
   reason: Schema.optionalKey(Schema.String),
   ports: Schema.Array(Schema.String),
-}).annotate({ title: 'PluginStatus' })
+}).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
 
 export const ProviderDto = Schema.Struct({
   id: Schema.String,
   displayName: Schema.String,
-}).annotate({ title: 'Provider' })
+}).annotate({ title: 'Provider', identifier: 'Provider' })
 
 export const HealthDto = Schema.Struct({
   status: Schema.Literals(['ok', 'degraded']),
@@ -408,7 +464,7 @@ export const HealthDto = Schema.Struct({
     store: Schema.Literals(['ok', 'failed']),
     plugins: Schema.Struct({ loaded: Schema.Int, failed: Schema.Int }),
   }),
-}).annotate({ title: 'Health' })
+}).annotate({ title: 'Health', identifier: 'Health' })
 
 export type ProjectDto = typeof ProjectDto.Type
 export type WorkspaceHandleDto = typeof WorkspaceHandleDto.Type
@@ -427,16 +483,17 @@ export type HealthDto = typeof HealthDto.Type
 
 `packages/protocol/src/api/requests.ts`:
 ```ts
-import { Schema } from 'effect'
+import { Schema, SchemaTransformation } from 'effect'
 import { AskAnswer } from '../ask.js'
 import { Id } from '../common.js'
 import { PromptInput } from '../employee.js'
 
 export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annotate({
   title: 'RegisterProject',
+  identifier: 'RegisterProject',
 })
 
-// The same fields as the kernel's CreateSessionInput; env carries BYTEBUREAU_* names only, the kernel drops the rest
+// The same fields as the kernel's CreateSessionInput; env carries BYTEBUREAU_* names only, the kernel drops the rest and its own (home, log level, workspace runtime)
 export const CreateSessionBody = Schema.Struct({
   projectId: Id,
   title: Schema.String,
@@ -445,30 +502,42 @@ export const CreateSessionBody = Schema.Struct({
   profileId: Schema.optionalKey(Schema.String),
   branch: Schema.optionalKey(Schema.String),
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
-}).annotate({ title: 'CreateSession' })
+}).annotate({ title: 'CreateSession', identifier: 'CreateSession' })
 
 export const PromptBody = PromptInput
 export const AnswerAskBody = AskAnswer
 
-export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({ title: 'SessionRef' })
+export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({
+  title: 'SessionRef',
+  identifier: 'SessionRef',
+})
 
-// The query string of GET /events: types is comma-separated, since is the last seq the client has seen
-// HttpApiEndpoint decodes a query through a string-tree codec, so Schema.Int reads ?since=12
+// The text of a seq in a query string: digits only, which the OpenAPI document tells in the pattern
+// No sign, fraction or exponent goes through, so a client knows the bound from the document itself
+const SeqText = Schema.String.check(Schema.isPattern(/^\d+$/u)).annotate({
+  description: 'The last seq the client has seen: a whole number of 0 or more',
+})
+
+const SeqFromText = SeqText.pipe(
+  Schema.decodeTo(Schema.Natural, SchemaTransformation.numberFromString),
+)
+
+// The query string of GET /events: types is comma-separated, since is the last seq the client has seen (0 or more)
 export const EventsQuery = Schema.Struct({
-  since: Schema.optionalKey(Schema.Int),
+  since: Schema.optionalKey(SeqFromText),
   session: Schema.optionalKey(Id),
   project: Schema.optionalKey(Id),
   types: Schema.optionalKey(Schema.String),
-}).annotate({ title: 'EventsQuery' })
+}).annotate({ title: 'EventsQuery', identifier: 'EventsQuery' })
 
 // The filter of the RPC subscription, the shape of the kernel's EventFilter
 export const EventsFilter = Schema.Struct({
-  since: Schema.optionalKey(Schema.Int),
+  since: Schema.optionalKey(Schema.Natural),
   sessionId: Schema.optionalKey(Id),
   projectId: Schema.optionalKey(Id),
   types: Schema.optionalKey(Schema.Array(Schema.String)),
   ephemeral: Schema.optionalKey(Schema.Boolean),
-}).annotate({ title: 'EventsFilter' })
+}).annotate({ title: 'EventsFilter', identifier: 'EventsFilter' })
 
 export type RegisterProjectBody = typeof RegisterProjectBody.Type
 export type CreateSessionBody = typeof CreateSessionBody.Type
@@ -499,6 +568,7 @@ export const PROBLEM_CODES = [
   'config_invalid',
   'store_unavailable',
   'plugin_failed',
+  'project_path_not_absolute',
   'session_not_found',
   'session_invalid_transition',
   'session_provider_missing',
@@ -520,6 +590,8 @@ export const PROBLEM_CODES = [
   'workspace_git_too_old',
   'workspace_git_failed',
   'workspace_fs_failed',
+  'workspace_runtime_missing',
+  'workspace_not_found',
 ] as const
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number]
@@ -536,6 +608,7 @@ export const Problem = Schema.Struct({
   instance: Schema.optionalKey(Schema.String),
 }).annotate({
   title: 'Problem',
+  identifier: 'Problem',
   description: 'RFC 9457 problem details with a ByteBureau error code',
 })
 
@@ -548,6 +621,7 @@ import { Schema } from 'effect'
 import { Timestamp } from '../common.js'
 
 // The record of <home>/server.json: where the daemon listens and how to talk to it; the token is a secret
+// Host is the address clients use; bind, when there is one, the address the daemon is bound to, every interface of a family
 export const ServerInfo = Schema.Struct({
   version: Schema.String,
   host: Schema.String,
@@ -555,6 +629,7 @@ export const ServerInfo = Schema.Struct({
   pid: Schema.Int,
   token: Schema.String,
   startedAt: Timestamp,
+  bind: Schema.optionalKey(Schema.String),
 }).annotate({ title: 'ServerInfo' })
 
 export type ServerInfo = typeof ServerInfo.Type
@@ -614,6 +689,13 @@ export const RPC_TAGS: readonly string[] = [...BureauRpcs.requests.keys()]
 
 Append to `packages/protocol/src/index.ts`:
 ```ts
+export * from './common.js'
+export * from './employee.js'
+export * from './ask.js'
+export * from './agent-event.js'
+export * from './events.js'
+export * from './config.js'
+export * from './json-schema.js'
 export * from './api/dto.js'
 export * from './api/requests.js'
 export * from './api/problem.js'
@@ -653,27 +735,278 @@ Semantics (as shipped, commits cecde20, 4a88625, 25bd844): recovery is **owner-a
 
 Append to `MIGRATIONS` in `packages/kernel/src/store/migrations.ts`:
 ```ts
+export interface Migration {
+  readonly id: string
+  readonly sql: string
+}
+
+// Spec §5.2; one statement per line group so SQLite executes them in order
+// The splitter cuts at every `;`, so no statement may hold one inside a literal or a trigger body
+export const MIGRATIONS: readonly Migration[] = [
   {
-    id: '0002_session_env',
-    // The BYTEBUREAU_* variables given at creation, read back when a later process resumes the session
-    sql: `ALTER TABLE sessions ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'`,
+    id: '0001_initial',
+    sql: `
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  default_branch TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE profiles (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('login', 'api_key')),
+  config_dir TEXT,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  title TEXT NOT NULL,
+  employee_json TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  profile_id TEXT REFERENCES profiles(id),
+  workspace_json TEXT NOT NULL,
+  external_ref TEXT,
+  status TEXT NOT NULL CHECK (status IN ('created', 'provisioning', 'ready', 'running', 'waiting_for_human', 'paused_usage_limit', 'completed', 'stopped', 'errored')),
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT,
+  parent_session_id TEXT REFERENCES sessions(id)
+);
+CREATE INDEX sessions_project ON sessions(project_id);
+CREATE INDEX sessions_profile ON sessions(profile_id);
+CREATE INDEX sessions_parent ON sessions(parent_session_id);
+CREATE TABLE turns (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  idx INTEGER NOT NULL,
+  prompt_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'errored')),
+  stop_reason TEXT,
+  usage_json TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  UNIQUE (session_id, idx)
+);
+CREATE TABLE messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  turn_id TEXT REFERENCES turns(id),
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX messages_session ON messages(session_id);
+CREATE INDEX messages_turn ON messages(turn_id);
+CREATE TABLE tool_calls (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  turn_id TEXT REFERENCES turns(id),
+  tool_name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('builtin', 'mcp', 'bash', 'subagent', 'skill')),
+  input_json TEXT NOT NULL,
+  output_summary TEXT,
+  input_bytes INTEGER NOT NULL DEFAULT 0,
+  output_bytes INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  error_type TEXT
+);
+CREATE INDEX tool_calls_session ON tool_calls(session_id);
+CREATE INDEX tool_calls_turn ON tool_calls(turn_id);
+CREATE TABLE asks (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  turn_id TEXT REFERENCES turns(id),
+  kind TEXT NOT NULL CHECK (kind IN ('question', 'permission')),
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'answered', 'expired', 'cancelled')),
+  answer_json TEXT,
+  recommendation_source TEXT NOT NULL CHECK (recommendation_source IN ('agent', 'policy', 'none')),
+  created_at TEXT NOT NULL,
+  deadline_at TEXT,
+  answered_at TEXT,
+  answered_via TEXT
+);
+CREATE INDEX asks_session ON asks(session_id);
+CREATE INDEX asks_turn ON asks(turn_id);
+CREATE TABLE events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  type TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT,
+  turn_id TEXT,
+  work_item_id TEXT,
+  trace_id TEXT,
+  span_id TEXT,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX events_session_seq ON events(session_id, seq);
+CREATE INDEX events_project_seq ON events(project_id, seq);
+CREATE TABLE usage_snapshots (
+  profile_id TEXT NOT NULL,
+  five_hour_pct REAL,
+  five_hour_resets_at TEXT,
+  seven_day_pct REAL,
+  seven_day_resets_at TEXT,
+  source TEXT NOT NULL,
+  observed_at TEXT NOT NULL
+);
+CREATE TABLE plugin_kv (
+  plugin_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  PRIMARY KEY (plugin_id, key)
+);
+`,
   },
+  {
+    id: '0002_session_env_owner',
+    // The BYTEBUREAU_* variables given at creation, read back when a later process resumes the session
+    // The process and the kernel that registered, resumed or prompted the session: the recovery of another kernel leaves a session alone while they live
+    sql: `
+ALTER TABLE sessions ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sessions ADD COLUMN owner_pid INTEGER;
+ALTER TABLE sessions ADD COLUMN owner_instance TEXT
+`,
+  },
+]
 ```
 
 In `packages/kernel/src/store/migrate.test.ts` add to the `Store` suite:
 ```ts
-  suite.effect('gives a session an empty environment unless one is stored', () =>
+import { assert, it } from '@effect/vitest'
+import { Effect, Result } from 'effect'
+import { SqlClient } from 'effect/sql'
+import { applyMigration, MIGRATIONS, runMigrations } from './migrate.js'
+import { StoreTest } from './store-test.js'
+
+const SP1_TABLES = [
+  'projects',
+  'profiles',
+  'sessions',
+  'turns',
+  'messages',
+  'tool_calls',
+  'asks',
+  'events',
+  'usage_snapshots',
+  'plugin_kv',
+]
+
+const PROJECT = `INSERT INTO projects (id, name, path, default_branch, config_json, created_at, updated_at) VALUES ('p', 'p', '/p', 'main', '{}', 't', 't')`
+const session = (id: string, project: string): string =>
+  `INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at) VALUES ('${id}', '${project}', 't', '{}', 'fake', NULL, '{}', 'created', '2026-10-02T00:00:00.000Z')`
+
+it.layer(StoreTest)('Store', (suite) => {
+  suite.effect('applies every migration once and records them', () =>
+    Effect.gen(function* recordsMigrations() {
+      const sql = yield* SqlClient.SqlClient
+      const applied = yield* sql<{ readonly id: string }>`SELECT id FROM bb_migrations ORDER BY id`
+      assert.deepStrictEqual(
+        applied.map((row) => row.id),
+        MIGRATIONS.map((migration) => migration.id),
+      )
+      yield* runMigrations
+      const again = yield* sql<{
+        readonly total: number
+      }>`SELECT count(*) AS total FROM bb_migrations`
+      assert.deepStrictEqual(
+        again.map((row) => row.total),
+        [MIGRATIONS.length],
+      )
+    }),
+  )
+
+  suite.effect('creates the SP1 tables with foreign keys on and synchronous NORMAL', () =>
+    Effect.gen(function* createsTables() {
+      const sql = yield* SqlClient.SqlClient
+      const tables = yield* sql<{
+        readonly name: string
+      }>`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`
+      const names = tables.map((row) => row.name)
+      for (const expected of SP1_TABLES) {
+        assert.include(names, expected)
+      }
+      const fk = yield* sql<{ readonly foreign_keys: number }>`PRAGMA foreign_keys`
+      const synchronous = yield* sql<{ readonly synchronous: number }>`PRAGMA synchronous`
+      assert.deepStrictEqual(
+        [...fk.map((row) => row.foreign_keys), ...synchronous.map((row) => row.synchronous)],
+        [1, 1],
+      )
+    }),
+  )
+
+  suite.effect('refuses a row whose foreign key points nowhere and takes one that does not', () =>
+    Effect.gen(function* enforcesForeignKeys() {
+      const sql = yield* SqlClient.SqlClient
+      const orphan = yield* Effect.result(sql.unsafe(session('orphan', 'missing')))
+      yield* sql.unsafe(PROJECT)
+      const owned = yield* Effect.result(sql.unsafe(session('owned', 'p')))
+      assert.deepStrictEqual([Result.isFailure(orphan), Result.isSuccess(owned)], [true, true])
+    }),
+  )
+})
+
+it.layer(StoreTest)('Store session environment and owner', (suite) => {
+  suite.effect('gives a session an empty environment and no owner unless they are stored', () =>
     Effect.gen(function* defaultsEnvironment() {
       const sql = yield* SqlClient.SqlClient
       yield* sql.unsafe(PROJECT)
       yield* sql.unsafe(session('s-env', 'p'))
-      const rows = yield* sql<{ readonly env_json: string }>`SELECT env_json FROM sessions WHERE id = 's-env'`
+      const rows = yield* sql<{
+        readonly env_json: string
+        readonly owner_pid: number | null
+        readonly owner_instance: string | null
+      }>`SELECT env_json, owner_pid, owner_instance FROM sessions WHERE id = 's-env'`
       assert.deepStrictEqual(
-        rows.map((row) => row.env_json),
-        ['{}'],
+        rows.map((row) => [row.env_json, row.owner_pid, row.owner_instance]),
+        [['{}', null, null]],
       )
     }),
   )
+})
+
+it.layer(StoreTest)('Store migration runner', (suite) => {
+  suite.effect(
+    'skips a migration that was recorded meanwhile, checking inside its transaction',
+    () =>
+      Effect.gen(function* skipsRecorded() {
+        const sql = yield* SqlClient.SqlClient
+        const initial = yield* Effect.fromNullishOr(MIGRATIONS[0])
+        yield* applyMigration(sql, initial)
+        const recorded = yield* sql<{
+          readonly total: number
+        }>`SELECT count(*) AS total FROM bb_migrations`
+        assert.deepStrictEqual(
+          recorded.map((row) => row.total),
+          [MIGRATIONS.length],
+        )
+      }),
+  )
+
+  suite.effect('names the migration that failed, and records nothing of it', () =>
+    Effect.gen(function* namesFailedMigration() {
+      const sql = yield* SqlClient.SqlClient
+      const broken = { id: '9999_broken', sql: 'CREATE TABLE broken (id TEXT);\nCREATE TABLE (' }
+      const failure = yield* Effect.flip(applyMigration(sql, broken))
+      assert.match(failure.message, /^migration 9999_broken failed: /u)
+      const leftovers = yield* sql<{
+        readonly name: string
+      }>`SELECT name FROM sqlite_master WHERE name = 'broken' UNION ALL SELECT id FROM bb_migrations WHERE id = '9999_broken'`
+      assert.deepStrictEqual(leftovers, [])
+    }),
+  )
+})
 ```
 
 `packages/kernel/src/sessions/session-records.ts`: add `env_json: Schema.String` to `Stored` (the environment is read by `loadEnvironment`, not carried on `Session`), change `insertSession` to take the environment and store its ByteBureau names only, and add `loadEnvironment`:
@@ -824,17 +1157,6 @@ export const insertSession = (
     Effect.mapError(toStoreError),
   )
 
-// The kernel that resumes a session, or attaches its agent, owns it from then on
-export const claimOwner = (
-  sql: SqlClient.SqlClient,
-  sessionId: string,
-  owner: KernelInstance,
-): Effect.Effect<void, StoreError> =>
-  sql`UPDATE sessions SET owner_pid = ${owner.pid}, owner_instance = ${owner.id} WHERE id = ${sessionId}`.pipe(
-    Effect.asVoid,
-    Effect.mapError(toStoreError),
-  )
-
 // A row read on its own: one that does not fit keeps its failure, so it does not hide the others
 export interface OwnedRead {
   readonly id: string
@@ -883,16 +1205,25 @@ const ENDED = new Set<string>(['completed', 'stopped', 'errored'])
 
 // The session moves only when it is still in the status the caller saw, so a stale decision claims nothing
 // A session starts when it first runs and ends when it completes, stops or fails; resuming clears the end
+// The kernel that resumes a session, or sets its agent to work, owns it from then on: named in the same statement, so a refused move names nobody
+export interface StatusClaim {
+  readonly next: SessionStatus
+  readonly owner?: KernelInstance | undefined
+}
+
 export const claimStatus = (
   sql: SqlClient.SqlClient,
   session: Session,
-  next: SessionStatus,
+  { next, owner }: StatusClaim,
 ): Effect.Effect<Session | undefined, StoreError> => {
   const now = nowIso()
   const startedAt = next === 'running' ? now : null
   const endedAt = ENDED.has(next) ? now : null
+  const ownerPid = owner === undefined ? null : owner.pid
+  const ownerInstance = owner === undefined ? null : owner.id
   return sql`
-    UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${startedAt}), ended_at = ${endedAt}
+    UPDATE sessions SET status = ${next}, started_at = COALESCE(started_at, ${startedAt}), ended_at = ${endedAt},
+      owner_pid = COALESCE(${ownerPid}, owner_pid), owner_instance = COALESCE(${ownerInstance}, owner_instance)
     WHERE id = ${session.id} AND status = ${session.status} RETURNING *`.pipe(
     Effect.mapError(toStoreError),
     Effect.flatMap((rows) => firstSession(rows)),
@@ -939,14 +1270,96 @@ If `requireProject`/`currentProject` fail with a type the resume shape does not 
 
 `packages/kernel/src/sessions/session-end.ts`, `makeResume`:
 ```ts
+import { Effect } from 'effect'
+import type { StoreError } from '../errors.js'
+import type { Live } from './live-sessions.js'
+import type { SessionDeps } from './session-deps.js'
+import { storedEnvironment } from './session-environment.js'
+import {
+  bestEffort,
+  cancelAsks,
+  dispose,
+  interruptAgent,
+  interruptPump,
+  rememberRef,
+  settle,
+} from './session-live.js'
+import { requireSession } from './session-records.js'
+import type { SessionManagerShape } from './session-shape.js'
+import { ensureAllowed, move, moveAndClaim } from './session-status.js'
+import type { Outcome } from './session-turns.js'
+
+// The commands that end or pause what an agent does, in one place for the manager
+export { makeInterrupt } from './session-interrupt.js'
+export { makeRecover } from './session-recover.js'
+
+// A turn that the caller stopped is interrupted, whatever the provider would have said about it
+const STOPPED: Outcome = { status: 'interrupted', stopReason: 'stopped', usage: null }
+
+// The provider session is let go for good: its reference is kept for a resume, nothing it says counts any more
+const release = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError> =>
+  Effect.gen(function* releasesLive() {
+    yield* rememberRef(deps, live)
+    yield* dispose(deps, live)
+    yield* interruptPump(live)
+  })
+
+// The agent is interrupted before it is closed, so it can end its turn; the worktree stays, and so does the record of the work
+const stopLive = (deps: SessionDeps, live: Live): Effect.Effect<void, StoreError> =>
+  Effect.gen(function* stopsLive() {
+    yield* bestEffort('interrupting the agent', live, interruptAgent)
+    yield* settle(deps, live.session, STOPPED)
+    live.turn = null
+    yield* release(deps, live)
+  })
+
+export const makeStop =
+  (deps: SessionDeps): SessionManagerShape['stop'] =>
+  (sessionId) =>
+    deps.live.exclusive(
+      sessionId,
+      Effect.gen(function* stopsSession() {
+        const session = yield* requireSession(deps.sql, sessionId)
+        yield* ensureAllowed(session, 'stop')
+        const live = deps.live.get(sessionId)
+        yield* live === undefined ? settle(deps, session, STOPPED) : stopLive(deps, live)
+        yield* move(deps, sessionId, 'stop')
+        deps.live.forget(sessionId)
+      }),
+    )
+
+export const makeComplete =
+  (deps: SessionDeps): SessionManagerShape['complete'] =>
+  (sessionId) =>
+    deps.live.exclusive(
+      sessionId,
+      Effect.gen(function* completesSession() {
+        const session = yield* requireSession(deps.sql, sessionId)
+        yield* ensureAllowed(session, 'complete')
+        const live = deps.live.get(sessionId)
+        yield* cancelAsks(deps, sessionId)
+        if (live !== undefined) {
+          yield* release(deps, live)
+        }
+        yield* deps.workspaces.unlock(sessionId)
+        yield* move(deps, sessionId, 'complete')
+        deps.live.forget(sessionId)
+      }),
+    )
+
+// The environment is read before the session moves, so a configuration that cannot be read leaves the session stopped
+// The kernel that resumes the session owns it from then on
 export const makeResume =
   (deps: SessionDeps): SessionManagerShape['resume'] =>
   (sessionId) =>
     deps.live.exclusive(
       sessionId,
       Effect.gen(function* resumesSession() {
-        const session = yield* move(deps, sessionId, 'resume')
-        yield* restoreEnvironment(deps, session)
+        const stopped = yield* requireSession(deps.sql, sessionId)
+        yield* ensureAllowed(stopped, 'resume')
+        const environment = yield* storedEnvironment(deps, stopped)
+        const session = yield* moveAndClaim(deps, sessionId, 'resume')
+        deps.live.setEnvironment(session.id, environment)
         return session
       }),
     )
@@ -1135,8 +1548,8 @@ import { Effect, Result } from 'effect'
 import type { SessionError, StoreError } from '../errors.js'
 import type { SessionDeps } from './session-deps.js'
 import { settle } from './session-live.js'
-import { logger } from './session-logger.js'
 import { isLeftBehind, RECOVERABLE } from './session-owner.js'
+import { tellNotRecovered } from './session-recover-warning.js'
 import { listOwned, loadOwned, type OwnedRead, type OwnedSession } from './session-records.js'
 import type { SessionManagerShape } from './session-shape.js'
 import { move } from './session-status.js'
@@ -1144,16 +1557,19 @@ import type { Outcome } from './session-turns.js'
 
 const DAEMON_RESTART: Outcome = { status: 'interrupted', stopReason: 'daemon_restart', usage: null }
 
-// A row that cannot be read is told and passed over; the next start finds it again
-const readable = ({ id, owned }: OwnedRead): readonly OwnedSession[] => {
+// A row that cannot be read is told and passed over; the next start finds it again, and tells it once only
+const readable = (
+  deps: SessionDeps,
+  { id, owned }: OwnedRead,
+): Effect.Effect<readonly OwnedSession[]> => {
   if (Result.isSuccess(owned)) {
-    return [owned.success]
+    return Effect.succeed([owned.success])
   }
-  logger.warn('a session left at work cannot be read and is not recovered', {
-    sessionId: id,
-    reason: owned.failure.message,
-  })
-  return []
+  const message = 'a session left at work cannot be read and is not recovered'
+  return Effect.as(
+    tellNotRecovered(deps.log, { sessionId: id, message, reason: owned.failure.message }),
+    [],
+  )
 }
 
 // The decision is taken again under the lock of the session, on its row as it stands now: one that moved or found an owner meanwhile is left alone
@@ -1175,17 +1591,18 @@ const recoverOne = (
     }),
   )
 
-// A session that cannot be recovered is told and passed over, so the others still are
-const attemptOne = (deps: SessionDeps, sessionId: string): Effect.Effect<readonly string[]> =>
-  Effect.match(recoverOne(deps, sessionId), {
+// A session that cannot be recovered is told and passed over, so the others still are; told once only, though every start tries again
+const attemptOne = (
+  deps: SessionDeps,
+  { id, projectId }: OwnedSession['session'],
+): Effect.Effect<readonly string[]> =>
+  Effect.matchEffect(recoverOne(deps, id), {
     onFailure: (failure) => {
-      logger.warn('a session left at work could not be recovered', {
-        sessionId,
-        reason: failure.message,
-      })
-      return []
+      const message = 'a session left at work could not be recovered'
+      const notRecovered = { sessionId: id, projectId, message, reason: failure.message }
+      return Effect.as(tellNotRecovered(deps.log, notRecovered), [])
     },
-    onSuccess: (stopped) => (stopped ? [sessionId] : []),
+    onSuccess: (stopped) => Effect.succeed(stopped ? [id] : []),
   })
 
 // Only the sessions in a status of work are read; the ids of those that were stopped are given back
@@ -1194,10 +1611,9 @@ export const makeRecover =
   () =>
     Effect.gen(function* recoversSessions() {
       const reads = yield* listOwned(deps.sql, RECOVERABLE)
-      const left = reads
-        .flatMap((read) => readable(read))
-        .filter((owned) => isLeftBehind(deps, owned))
-      const stopped = yield* Effect.all(left.map(({ session }) => attemptOne(deps, session.id)))
+      const owned = yield* Effect.all(reads.map((read) => readable(deps, read)))
+      const left = owned.flat().filter((session) => isLeftBehind(deps, session))
+      const stopped = yield* Effect.all(left.map(({ session }) => attemptOne(deps, session)))
       return stopped.flat()
     })
 ```
@@ -1211,6 +1627,7 @@ import { definePlugin } from '@bytebureau/plugin-api'
 import { assert, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import { SqlClient, SqlError } from 'effect/sql'
+import { TestClock } from 'effect/testing'
 import { hostOver } from '../plugins/plugin-fixtures.js'
 import { PluginHost } from '../plugins/plugin-host.js'
 import { sessionLayer, withPlugins } from '../sessions/session-layer-fixtures.js'
@@ -1232,19 +1649,23 @@ const damaged = new SqlError.SqlError({
   }),
 })
 
-// The in-memory store, except that its integrity check fails as a damaged database would
-const damagedStore = Layer.effect(
-  SqlClient.SqlClient,
-  Effect.gen(function* damagesStore() {
-    const sql = yield* SqlClient.SqlClient
-    return new Proxy(sql, {
-      apply: (target, self: unknown, args: unknown[]): unknown =>
-        String(args[0]).includes('quick_check')
-          ? Effect.fail(damaged)
-          : Reflect.apply(target, self, args),
-    })
-  }),
-).pipe(Layer.provide(StoreTest))
+// The in-memory store, except that its integrity check answers as the function says
+const storeWhoseCheck = (
+  answer: () => Effect.Effect<unknown, SqlError.SqlError>,
+): Layer.Layer<SqlClient.SqlClient> =>
+  Layer.effect(
+    SqlClient.SqlClient,
+    Effect.gen(function* answersCheck() {
+      const sql = yield* SqlClient.SqlClient
+      return new Proxy(sql, {
+        apply: (target, self: unknown, args: unknown[]): unknown =>
+          String(args[0]).includes('quick_check') ? answer() : Reflect.apply(target, self, args),
+      })
+    }),
+  ).pipe(Layer.provide(StoreTest))
+
+// A store whose integrity check fails as a damaged database would
+const damagedStore = storeWhoseCheck(() => Effect.fail(damaged))
 
 it.layer(sessionLayer())('Health over a sound kernel', (suite) => {
   suite.effect('is ok and counts the bundled plugins', () =>
@@ -1290,6 +1711,57 @@ it.layer(overDamagedStore)('Health over a store that fails its check', (suite) =
     }),
   )
 })
+
+// What SQLite answers for a database whose pages disagree: a row per problem, none of them ok
+const PROBLEMS = [
+  { quick_check: 'row 3 missing from index sessions_status' },
+  { quick_check: 'wrong # of entries in index sessions_status' },
+]
+
+const overDisagreeingStore = HealthLive.pipe(
+  Layer.provide(storeWhoseCheck(() => Effect.succeed(PROBLEMS))),
+  Layer.provideMerge(hostOver()),
+)
+
+it.layer(overDisagreeingStore)('Health over a store whose check finds problems', (suite) => {
+  suite.effect('is degraded and names the store, though the check itself answered', () =>
+    Effect.gen(function* checks() {
+      yield* PluginHost.use((host) => host.load())
+      const report = yield* Health.use((health) => health.check())
+      assert.deepStrictEqual(report.checks.store, 'failed')
+      assert.strictEqual(report.status, 'degraded')
+    }),
+  )
+})
+
+// The checks the store has run so far
+const ran = { checks: 0 }
+
+const overCountingStore = HealthLive.pipe(
+  Layer.provide(
+    storeWhoseCheck(() =>
+      Effect.sync(() => {
+        ran.checks += 1
+        return [{ quick_check: 'ok' }]
+      }),
+    ),
+  ),
+  Layer.provideMerge(hostOver()),
+)
+
+it.layer(overCountingStore)('Health and the cost of the integrity check', (suite) => {
+  suite.effect('runs the check of the store once in its time, whatever the number of probes', () =>
+    Effect.gen(function* checksOnce() {
+      const probe = Health.use((health) => health.check())
+      yield* Effect.all([probe, probe, probe], { concurrency: 'unbounded' })
+      yield* probe
+      const once = ran.checks
+      yield* TestClock.adjust('30 seconds')
+      const report = yield* probe
+      assert.deepStrictEqual([once, ran.checks, report.checks.store], [1, 2, 'ok'])
+    }),
+  )
+})
 ```
 `definePlugin`'s manifest shape is the one of `packages/plugin-api/src/plugin.ts` (Phase A); copy the fields the type requires from `fake-agent-plugin.ts` if the manifest above misses one.
 
@@ -1316,6 +1788,9 @@ export interface HealthShape {
 export class Health extends Context.Service<Health, HealthShape>()('bb/Health') {}
 
 // A sound database answers quick_check with one row that says ok; anything else, or a failure to ask, is a failed store
+// The check reads every page of the database, so it runs once in this time at most: every client probes the health, without a token
+const STORE_CHECK_TTL = '30 seconds'
+
 const storeCheck = (sql: SqlClient.SqlClient): Effect.Effect<Check> =>
   sql<{ readonly quick_check: string }>`PRAGMA quick_check`.pipe(
     Effect.match({
@@ -1330,15 +1805,19 @@ const storeCheck = (sql: SqlClient.SqlClient): Effect.Effect<Check> =>
 const make = Effect.gen(function* makeHealth() {
   const sql = yield* SqlClient.SqlClient
   const host = yield* PluginHost
+  // Concurrent probes share one check, and the plugins are counted afresh for each
+  const store = yield* Effect.cachedWithTTL(storeCheck(sql), STORE_CHECK_TTL)
   return Health.of({
     check: () =>
-      Effect.map(storeCheck(sql), (store): HealthReport => {
-        const statuses = host.plugins()
-        const failed = statuses.filter((plugin) => plugin.state === 'failed').length
-        const plugins = { loaded: statuses.length - failed, failed }
-        const status = store === 'ok' && failed === 0 ? 'ok' : 'degraded'
-        return { status, checks: { store, plugins } }
-      }),
+      store.pipe(
+        Effect.map((checked): HealthReport => {
+          const statuses = host.plugins()
+          const failed = statuses.filter((plugin) => plugin.state === 'failed').length
+          const plugins = { loaded: statuses.length - failed, failed }
+          const status = checked === 'ok' && failed === 0 ? 'ok' : 'degraded'
+          return { status, checks: { store: checked, plugins } }
+        }),
+      ),
   })
 })
 
@@ -1354,7 +1833,8 @@ export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | Plugin
 import { describe, expect, it } from 'vitest'
 import { redactValue } from './redact-value.js'
 
-const DEEP_SECRET = 'sk-ant-deep-secret-1234'
+const DEEP_SECRET = `sk-ant-deep-secret-${'1234'.repeat(8)}`
+const KEY = `sk-ant-api03-${'abcdefghij'.repeat(4)}`
 // Eleven levels of nesting with the secret at the bottom
 const PATH = [
   'one',
@@ -1394,8 +1874,8 @@ describe(redactValue, () => {
     expect(
       redactValue({
         input: { command: 'curl -H "Authorization: Bearer abc.def-ghi" https://x', api_key: 'k' },
-        text: 'use sk-ant-api03-abcdefghij and ghp_abcdefghijklmnop',
-        env: { ANTHROPIC_API_KEY: 'sk-ant-zzzzzzzzzz' },
+        text: `use ${KEY} and ghp_abcdefghijklmnop`,
+        env: { ANTHROPIC_API_KEY: KEY },
       }),
     ).toStrictEqual({
       input: {
@@ -1420,6 +1900,23 @@ describe(redactValue, () => {
   it('stops ten levels deep and keeps what lies deeper', () => {
     const redacted = redactValue(nested(PATH, DEEP_SECRET))
     expect(valueAt(redacted, PATH)).toBe(DEEP_SECRET)
+  })
+
+  it('still reaches a secret ten levels deep, the last level it walks', () => {
+    const tenLevels = PATH.slice(0, 10)
+    const redacted = redactValue(nested(tenLevels, DEEP_SECRET))
+    expect(valueAt(redacted, tenLevels)).toBe('[REDACTED]')
+  })
+
+  it('replaces a secret-named field down to the last record it walks, and none below', () => {
+    const walked = PATH.slice(0, 9)
+    const below = PATH.slice(0, 10)
+    const kept = redactValue(nested(below, { token: 'plain' }))
+    const replaced = redactValue(nested(walked, { token: 'plain' }))
+    expect([
+      valueAt(replaced, [...walked, 'token']),
+      valueAt(kept, [...below, 'token']),
+    ]).toStrictEqual(['[REDACTED]', 'plain'])
   })
 })
 ```
@@ -1518,7 +2015,13 @@ Add `import { Layer } from 'effect'` to it; `event-log.test.ts` is near the 300-
 
 `packages/kernel/src/facade/types.ts`: add to `Kernel`
 ```ts
-import type { AnsweredVia, Ask, AskAnswer, EventEnvelope, PromptInput } from '@bytebureau/protocol'
+import type {
+  AnsweredVia,
+  AskAnswer,
+  AskRecord,
+  EventEnvelope,
+  PromptInput,
+} from '@bytebureau/protocol'
 import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
 import type { EventFilter } from '../events/event-log.js'
 import type { HealthReport } from '../health/health.js'
@@ -1569,7 +2072,9 @@ export interface Kernel {
     readonly recover: () => Promise<readonly string[]>
   }
   readonly asks: {
-    readonly pending: (sessionId?: string) => Promise<readonly Ask[]>
+    readonly pending: (sessionId?: string) => Promise<readonly AskRecord[]>
+    // An ask pending or settled; nothing for an id nobody holds
+    readonly get: (id: string) => Promise<AskRecord | undefined>
     readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
   }
   readonly events: {
@@ -1601,26 +2106,36 @@ export interface Kernel {
 
 `packages/kernel/src/facade/sessions.ts`: `recover: promised(SessionManager, (sessions) => sessions.recover())`. `packages/kernel/src/facade/plugins.ts`:
 ```ts
-import { Context } from 'effect'
-import { PluginHost } from '../plugins/plugin-host.js'
-import type { Promised, Services } from './promised.js'
+import { Effect } from 'effect'
+import { AskService } from '../asks/ask-service.js'
+import { SessionManager } from '../sessions/session-manager.js'
+import { UsageService } from '../usage/usage-service.js'
+import type { Promised } from './promised.js'
 import type { Kernel } from './types.js'
 
-// A plugin that fails to load is reported by the host and does not stop the kernel
-export async function loadPlugins(promised: Promised): Promise<void> {
-  await promised(PluginHost, (host) => host.load())()
-}
-
-// What the host made of each plugin, read without a promise like the providers
-export const pluginsApi = (services: Context.Context<Services>): Kernel['plugins'] => ({
-  list: () => Context.get(services, PluginHost).plugins(),
+export const sessionsApi = (promised: Promised): Kernel['sessions'] => ({
+  create: promised(SessionManager, (sessions, input) => sessions.create(input)),
+  prompt: promised(SessionManager, (sessions, sessionId, input) =>
+    sessions.prompt(sessionId, input),
+  ),
+  interrupt: promised(SessionManager, (sessions, sessionId) => sessions.interrupt(sessionId)),
+  stop: promised(SessionManager, (sessions, sessionId) => sessions.stop(sessionId)),
+  complete: promised(SessionManager, (sessions, sessionId) => sessions.complete(sessionId)),
+  resume: promised(SessionManager, (sessions, sessionId) => sessions.resume(sessionId)),
+  list: promised(SessionManager, (sessions) => sessions.list()),
+  get: promised(SessionManager, (sessions, id) => sessions.get(id)),
+  recover: promised(SessionManager, (sessions) => sessions.recover()),
 })
 
-export const providersApi = (services: Context.Context<Services>): Kernel['providers'] => ({
-  list: () =>
-    Context.get(services, PluginHost)
-      .agentProviders()
-      .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
+export const asksApi = (promised: Promised): Kernel['asks'] => ({
+  pending: promised(AskService, (asks, sessionId) => asks.pending(sessionId)),
+  get: promised(AskService, (asks, id) => asks.get(id)),
+  // The record of the settled ask is not handed on
+  answer: promised(AskService, (asks, ...args) => Effect.asVoid(asks.answer(...args))),
+})
+
+export const usageApi = (promised: Promised): Kernel['usage'] => ({
+  session: promised(UsageService, (usage, sessionId) => usage.sessionUsage(sessionId)),
 })
 ```
 `packages/kernel/src/facade/health.ts`:
@@ -1635,10 +2150,55 @@ export const healthApi = (promised: Promised): Kernel['health'] => ({
 ```
 `packages/kernel/src/facade.ts`, `boot`: after `await loadPlugins(promised)`:
 ```ts
+import { Effect, ManagedRuntime, type Layer } from 'effect'
+import { apisOf } from './facade/apis.js'
+import { configureKernelLogging } from './facade/boot-logging.js'
+import { loadPlugins } from './facade/plugins.js'
+import { promisedBy, type Runtime, type Services } from './facade/promised.js'
+import type { Kernel, KernelOptions } from './facade/types.js'
+import { kernelLogger } from './logging/logging.js'
+import { SessionManager } from './sessions/session-manager.js'
+
+export type { Kernel, KernelOptions } from './facade/types.js'
+
+// The steps that can fail while a kernel starts; the sessions a previous process left at work are stopped once the plugins have loaded
+async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {
+  await configureKernelLogging(options)
+  const promised = promisedBy(runtime)
+  // Captured once, so that an event stream can run outside the runtime
+  const services = await runtime.runPromise(Effect.context<Services>())
+  await loadPlugins(promised)
   const recovered = await promised(SessionManager, (sessions) => sessions.recover())()
   if (recovered.length > 0) {
-    kernelLogger(['bb', 'core']).info('recovered sessions left by a previous process', { sessions: recovered })
+    kernelLogger(['bb', 'core']).info('recovered sessions left by a previous process', {
+      sessions: recovered,
+    })
   }
+  return {
+    ...apisOf(promised, services, options.env),
+    close: async () => {
+      await runtime.dispose()
+    },
+  }
+}
+
+/**
+ * A kernel over a layer that brings its own store, with its plugins loaded.
+ * The log level (logging.level, else the user file and BYTEBUREAU_LOG_LEVEL) configures LogTape only: Effect drops its own records below the logLevel the layer was built with, which createKernel sets from the same level.
+ * A kernel that fails to start is disposed before the failure is passed on, so no handle or fiber stays behind, and the failure of the start is what rejects even when disposing fails as well.
+ */
+export async function createKernelFrom(
+  layer: Layer.Layer<Services>,
+  options: KernelOptions,
+): Promise<Kernel> {
+  const runtime = ManagedRuntime.make(layer)
+  try {
+    return await boot(runtime, options)
+  } catch (error) {
+    await Promise.allSettled([runtime.dispose()])
+    throw error
+  }
+}
 ```
 and the returned object gains `plugins: pluginsApi(services)`, `health: healthApi(promised)`. (`facade.ts` has `import/max-dependencies` 10 to respect: if the count is exceeded, group the api constructors in `facade/apis.ts` and import that.)
 
@@ -1708,6 +2268,19 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
 `packages/kernel/src/kernel-test.ts` appends:
 ```ts
+import { Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+import type { UsageLayer } from './kernel-foundation.js'
+import { composeKernel, type KernelLayerOptions, type KernelServices } from './kernel-live.js'
+import { StoreTest } from './store/store-test.js'
+
+// The layers of the kernel over an in-memory store; a test may swap in its own usage service
+export const KernelTest = (
+  options: KernelLayerOptions,
+  usage?: UsageLayer,
+): Layer.Layer<KernelServices | SqlClient.SqlClient> =>
+  composeKernel(options, usage).pipe(Layer.provideMerge(StoreTest))
+
 export { createTempRepo, git, tempDir } from './testing/temp-repo.js'
 export { writeConfig } from './testing/repo-config.js'
 ```
@@ -1781,6 +2354,10 @@ Semantics (as shipped, commits 2d7290d, 0ffa99c, 16a75ab): a request without any
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./bun": {
+      "types": "./src/bun.ts",
+      "default": "./src/bun.ts"
+    },
     "./testing": {
       "types": "./src/testing.ts",
       "default": "./src/testing.ts"
@@ -1797,6 +2374,7 @@ Semantics (as shipped, commits 2d7290d, 0ffa99c, 16a75ab): a request without any
     "effect": "4.0.0"
   },
   "devDependencies": {
+    "@bytebureau/client": "workspace:*",
     "@bytebureau/tsconfig": "workspace:*",
     "@effect/platform-node": "4.0.0",
     "@effect/vitest": "4.0.0"
@@ -1864,7 +2442,7 @@ import {
 } from './problems.js'
 
 const NO_SESSION = 'no session 42'
-const API_KEY = 'sk-ant-api03-abcdefghij'
+const API_KEY = `sk-ant-api03-${'abcdefghij'.repeat(4)}`
 
 // The typed errors of the kernel with the status, the code and the detail each is told with
 const KERNEL_FAILURES: {
@@ -1950,10 +2528,45 @@ const KERNEL_FAILURES: {
     detail: 'x',
   },
   {
+    failure: new WorkspaceError({ code: 'not_found', reason: 'no project p' }),
+    status: 404,
+    code: 'workspace_not_found',
+    detail: 'no project p',
+  },
+  {
+    failure: new WorkspaceError({ code: 'git_failed', reason: 'x' }),
+    status: 502,
+    code: 'workspace_git_failed',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'fs_failed', reason: 'x' }),
+    status: 500,
+    code: 'workspace_fs_failed',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'constructor', reason: 'x' }),
+    status: 422,
+    code: 'workspace_constructor',
+    detail: 'x',
+  },
+  {
     failure: new ConfigError({ file: '/p/bytebureau.json', pointer: '/version', reason: 'bad' }),
     status: 422,
     code: 'config_invalid',
     detail: '/p/bytebureau.json/version: bad',
+  },
+  // The issues of a file name their places themselves: the first is not named twice
+  {
+    failure: new ConfigError({
+      file: '/p/bytebureau.json',
+      pointer: '/version',
+      reason: '/p/bytebureau.json/version: expected 1; /p/bytebureau.json/project: missing',
+    }),
+    status: 422,
+    code: 'config_invalid',
+    detail: '/p/bytebureau.json/version: expected 1; /p/bytebureau.json/project: missing',
   },
   {
     failure: new PluginError({ plugin: 'p', reason: 'x' }),
@@ -2053,35 +2666,28 @@ import { TokenBuckets } from './token-bucket.js'
 
 describe(TokenBuckets, () => {
   it('allows capacity calls at once, refuses the next and says when to retry', () => {
-    let now = 0
-    const buckets = new TokenBuckets({ capacity: 3, perMinute: 60, now: (): number => now })
-    expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
-    buckets.take('a')
-    buckets.take('a')
-    expect(buckets.take('a')).toStrictEqual({ allowed: false, retryAfterSec: 1 })
-    now = 1000
-    expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
+    const buckets = new TokenBuckets({ capacity: 3, perMinute: 60 })
+    expect(buckets.take('a', 0)).toStrictEqual({ allowed: true, retryAfterSec: 0 })
+    buckets.take('a', 0)
+    buckets.take('a', 0)
+    expect(buckets.take('a', 0)).toStrictEqual({ allowed: false, retryAfterSec: 1 })
+    expect(buckets.take('a', 1000)).toStrictEqual({ allowed: true, retryAfterSec: 0 })
   })
 
   it('keeps one bucket per key and forgets a key that is full again', () => {
-    let now = 0
-    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: (): number => now })
-    buckets.take('a')
-    expect(buckets.take('b')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
+    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60 })
+    buckets.take('a', 0)
+    expect(buckets.take('b', 0)).toStrictEqual({ allowed: true, retryAfterSec: 0 })
     expect(buckets.size()).toBe(2)
-    now = 60_000
-    buckets.take('a')
+    buckets.take('a', 60_000)
     expect(buckets.size()).toBe(1)
   })
 
   it('takes no tokens away and keeps refilling when the clock steps back', () => {
-    let now = 60_000
-    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: (): number => now })
-    buckets.take('a')
-    now = 0
-    expect(buckets.take('a')).toStrictEqual({ allowed: false, retryAfterSec: 1 })
-    now = 1000
-    expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
+    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60 })
+    buckets.take('a', 60_000)
+    expect(buckets.take('a', 0)).toStrictEqual({ allowed: false, retryAfterSec: 1 })
+    expect(buckets.take('a', 1000)).toStrictEqual({ allowed: true, retryAfterSec: 0 })
   })
 })
 ```
@@ -2098,6 +2704,7 @@ Expected: FAIL — the modules do not exist (the project itself must be picked u
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   PluginError,
   ProviderError,
   redactValue,
@@ -2105,7 +2712,7 @@ import {
   StoreError,
   WorkspaceError,
 } from '@bytebureau/kernel'
-import { problemType, type Problem } from '@bytebureau/protocol'
+import { problemType, type Problem, type ProblemCode } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import { HttpApiSchema } from 'effect/http-api'
 import { logApiError, logApiWarning } from './logging.js'
@@ -2200,10 +2807,13 @@ export const PROBLEM_SCHEMAS: readonly (typeof SCHEMAS)[KernelStatus][] = KERNEL
   (status) => SCHEMAS[status],
 )
 
+// The codes a problem carries: the well-known ones, and those of a workspace error, which a runtime of a plugin may name
+export type ApiCode = ProblemCode | `workspace_${string}`
+
 // The detail is told with every secret-shaped run of text replaced: it carries reasons from git, plugins and providers
 export const problem = <Status extends ProblemStatus>(
   status: Status,
-  code: string,
+  code: ApiCode,
   detail: string,
 ): ApiProblem<Status> => ({
   type: problemType(code),
@@ -2234,12 +2844,21 @@ const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], KernelStatus>> = {
   protocol: 502,
   missing: 422,
 }
-const CONFLICTS: ReadonlySet<string> = new Set(['locked', 'dirty', 'has_sessions'])
-const workspaceStatus = (code: string): KernelStatus => (CONFLICTS.has(code) ? 409 : 422)
+// A worktree in use or a project with sessions is a conflict, a project that is gone is not found, and git or the file system failing is the daemon's failure
+// Any other code, such as one a runtime names, is a request the workspace cannot take
+const WORKSPACE_STATUS: ReadonlyMap<string, KernelStatus> = new Map([
+  ['locked', 409],
+  ['dirty', 409],
+  ['has_sessions', 409],
+  ['not_found', 404],
+  ['git_failed', 502],
+  ['fs_failed', 500],
+])
+const workspaceStatus = (code: string): KernelStatus => WORKSPACE_STATUS.get(code) ?? 422
 
 const toProblemOfRest = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof ConfigError) {
-    return problem(422, 'config_invalid', `${error.file}${error.pointer}: ${error.reason}`)
+    return problem(422, 'config_invalid', configErrorLine(error))
   }
   if (error instanceof PluginError) {
     return problem(500, 'plugin_failed', `${error.plugin}: ${error.reason}`)
@@ -2316,17 +2935,29 @@ export const DEFAULT_API_OPTIONS: Omit<ApiOptions, 'version' | 'startedAt' | 'to
 `packages/api/src/auth.ts`:
 ```ts
 import { timingSafeEqual } from 'node:crypto'
-import { Effect, Layer, Redacted } from 'effect'
-import { HttpApiMiddleware, HttpApiSecurity } from 'effect/http-api'
+import { Effect, Layer, Redacted, Schema } from 'effect'
+import { HttpApiMiddleware, HttpApiSchema, HttpApiSecurity } from 'effect/http-api'
 import { Problem401, problem } from './problems.js'
+
+// RFC 7235: a 401 names the scheme it asks for
+const CHALLENGE = 'Bearer realm="bytebureau"'
+
+const Challenged401 = HttpApiSchema.WithHeaders(Problem401, {
+  'www-authenticate': Schema.String.annotate({ description: CHALLENGE }),
+})
 
 export class Authorization extends HttpApiMiddleware.Service<Authorization>()(
   'bb/api/Authorization',
-  { security: { bearer: HttpApiSecurity.bearer }, error: Problem401 },
+  { security: { bearer: HttpApiSecurity.bearer }, error: Challenged401 },
 ) {}
 
 // Worded so the redaction of details leaves it alone: it hides any "Bearer <word>"
-const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid API token is required')
+export const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid API token is required')
+
+const CHALLENGED = HttpApiSchema.withHeaders({
+  body: UNAUTHORIZED,
+  headers: { 'www-authenticate': CHALLENGE },
+})
 
 // An empty token matches nothing, since a request without the header arrives with an empty one
 // Otherwise lengths first, then a constant-time comparison: the daemon never tells how much of a token was right
@@ -2345,7 +2976,7 @@ export const AuthorizationLive = (token: Redacted.Redacted): Layer.Layer<Authori
     bearer: (httpEffect, { credential }) =>
       sameToken(Redacted.value(credential), Redacted.value(token))
         ? httpEffect
-        : Effect.fail(UNAUTHORIZED),
+        : Effect.fail(CHALLENGED),
   })
 }
 ```
@@ -2381,8 +3012,6 @@ export const RequestValidationLive: Layer.Layer<RequestValidation> =
 export interface TokenBucketOptions {
   readonly capacity: number
   readonly perMinute: number
-  // Milliseconds; injectable so tests move time by hand
-  readonly now: () => number
 }
 
 export interface Verdict {
@@ -2398,6 +3027,7 @@ interface Bucket {
 const MS_PER_MINUTE = 60_000
 
 // A token bucket per key: a call takes a token, tokens flow back at a steady rate, a full bucket is forgotten
+// The time of each call comes from the caller (milliseconds), so a test moves it by hand
 export class TokenBuckets {
   private readonly buckets = new Map<string, Bucket>()
   private readonly options: TokenBucketOptions
@@ -2406,8 +3036,7 @@ export class TokenBuckets {
     this.options = options
   }
 
-  public take(key: string): Verdict {
-    const now = this.options.now()
+  public take(key: string, now: number): Verdict {
     this.forgetFull(now)
     const known = this.buckets.get(key)
     const tokens = known === undefined ? this.options.capacity : this.refilled(known, now)
@@ -2445,35 +3074,40 @@ export class TokenBuckets {
 
 `packages/api/src/rate-limit.ts`:
 ```ts
-import { Effect, Layer, Option } from 'effect'
+import { Effect, Layer, Schema } from 'effect'
 import { HttpServerRequest } from 'effect/http'
-import { HttpApiMiddleware } from 'effect/http-api'
-import { ApiConfig } from './config.js'
-import { Problem429, problem } from './problems.js'
-import { TokenBuckets } from './token-bucket.js'
+import { HttpApiMiddleware, HttpApiSchema } from 'effect/http-api'
+import { clientKey, MutationBuckets, rateLimited, takeToken } from './mutation-buckets.js'
+import { Problem413, Problem429 } from './problems.js'
+
+// The 429 problem with the seconds to wait in Retry-After as well, which a client or a proxy reads without the body
+const Limited429 = HttpApiSchema.WithHeaders(Problem429, {
+  'retry-after': Schema.String.annotate({ description: 'Seconds to wait before a retry' }),
+})
 
 // Mutations are rate limited per client; a client that runs dry gets a 429 problem that says when to retry
+// Every mutation may also meet the 413 of the body limit, which answers before any route: declared here, so the document lists it
 export class MutationLimit extends HttpApiMiddleware.Service<MutationLimit>()(
   'bb/api/MutationLimit',
-  { error: Problem429 },
+  { error: [Limited429, Problem413] },
 ) {}
 
-const clientKey = (request: HttpServerRequest.HttpServerRequest): string =>
-  Option.getOrElse(request.remoteAddress, () => 'local')
+const limited = (seconds: number): typeof Limited429.Type =>
+  HttpApiSchema.withHeaders({
+    body: rateLimited(seconds),
+    headers: { 'retry-after': String(seconds) },
+  })
 
-export const MutationLimitLive: Layer.Layer<MutationLimit, never, ApiConfig> = Layer.effect(
+export const MutationLimitLive: Layer.Layer<MutationLimit, never, MutationBuckets> = Layer.effect(
   MutationLimit,
   Effect.gen(function* makeMutationLimit() {
-    const { mutationLimit } = yield* ApiConfig
-    const buckets = new TokenBuckets({ ...mutationLimit, now: Date.now })
+    const buckets = yield* MutationBuckets
     return (httpEffect) =>
       Effect.gen(function* limitsMutation() {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const verdict = buckets.take(clientKey(request))
+        const verdict = yield* takeToken(buckets, clientKey(request))
         if (!verdict.allowed) {
-          return yield* Effect.fail(
-            problem(429, 'rate_limited', `retry after ${verdict.retryAfterSec} s`),
-          )
+          return yield* Effect.fail(limited(verdict.retryAfterSec))
         }
         return yield* httpEffect
       })
@@ -2518,13 +3152,30 @@ export const SchemasGroup = HttpApiGroup.make('schemas')
 `packages/api/src/api.ts` (Tasks 4–6 add their groups to the `.add(...)` call):
 ```ts
 import { HttpApi, OpenApi } from 'effect/http-api'
+import { AsksGroup } from './groups/asks.js'
+import { EventsGroup } from './groups/events.js'
 import { HealthGroup } from './groups/health.js'
+import { PluginsGroup } from './groups/plugins.js'
+import { ProjectsGroup } from './groups/projects.js'
 import { SchemasGroup } from './groups/schemas.js'
+import { SessionsGroup } from './groups/sessions.js'
+import { UsageGroup } from './groups/usage.js'
+import { WorkspacesGroup } from './groups/workspaces.js'
 
 export const API_PREFIX = '/api/v1'
 
 export const BureauApi = HttpApi.make('bytebureau')
-  .add(HealthGroup, SchemasGroup)
+  .add(
+    HealthGroup,
+    SchemasGroup,
+    ProjectsGroup,
+    SessionsGroup,
+    AsksGroup,
+    UsageGroup,
+    WorkspacesGroup,
+    PluginsGroup,
+    EventsGroup,
+  )
   .prefix(API_PREFIX)
   .annotate(OpenApi.Title, 'ByteBureau API')
   .annotate(OpenApi.Version, 'v1')
@@ -2593,82 +3244,53 @@ writeFileSync(
 
 `packages/api/src/layer.ts`:
 ```ts
-import type { KernelServices } from '@bytebureau/kernel'
-import { ByteSize, Layer, type FileSystem, type Path } from 'effect'
-import {
-  HttpIncomingMessage,
-  HttpMiddleware,
-  HttpRouter,
-  type Etag,
-  type HttpPlatform,
-  type HttpServer,
-} from 'effect/http'
-import { HttpApiBuilder } from 'effect/http-api'
-import type { SqlClient } from 'effect/sql'
-import { API_PREFIX, BureauApi } from './api.js'
+import { ByteSize, Effect, Layer } from 'effect'
+import { HttpIncomingMessage, HttpMiddleware, HttpRouter } from 'effect/http'
+import { bodyLimit, MAX_BODY_BYTES } from './body-limit.js'
 import { ApiConfig, type ApiOptions } from './config.js'
-import { Handlers } from './handlers/all.js'
-import { Middlewares } from './middlewares.js'
+import { MutationBucketsLive } from './mutation-buckets.js'
+import type { ApiRequirements, ServeRequirements } from './requirements.js'
+import { Routes } from './routes.js'
+import { RpcRoute } from './rpc/route.js'
 
-export const OPENAPI_PATH = `${API_PREFIX}/openapi.json` as const
-const MAX_BODY = ByteSize.megabytes(10)
-
-// What the platform layer of the server provides (BunHttpServer.layer in the binary, NodeHttpServer.layer under Vitest)
-export type ServerPlatform =
-  | HttpPlatform.HttpPlatform
-  | FileSystem.FileSystem
-  | Path.Path
-  | Etag.Generator
-
-// A handler reads the kernel when a request comes (a requirement of the request) or when the routes are built
-export type ApiRequirements =
-  | HttpRouter.HttpRouter
-  | ServerPlatform
-  | KernelServices
-  | SqlClient.SqlClient
-  | HttpRouter.Request.From<'Requires', KernelServices>
-
-// The endpoints of the API with their handlers and middlewares
-// One configuration layer serves the middlewares, built with it, and the handlers, which read it with each request
-const Routes = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> => {
-  const config = Layer.succeed(ApiConfig, options)
-  const middlewares = Middlewares(options.token).pipe(Layer.provide(config))
-  return HttpApiBuilder.layer(BureauApi, { openapiPath: OPENAPI_PATH }).pipe(
-    Layer.provide(Handlers),
-    Layer.provide(middlewares),
-    HttpRouter.provideRequest(config),
-  )
-}
-
+// What every request passes before it is routed: CORS and the limit on the length of its body
 // Browsers may call the API only from the listed origins; with none listed there is no CORS at all (the embedded UI of SP2 is same-origin)
 // A predicate rather than the list: with a list of one, Effect would name that origin to every requester
-const Cors = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
-  origins.length === 0
-    ? Layer.empty
-    : HttpRouter.use((router) =>
-        router.addGlobalMiddleware(
+// The first middleware added is the outermost, so a refusal of the body limit carries the CORS headers too
+const Globals = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
+  HttpRouter.use((router) =>
+    Effect.gen(function* addsGlobals() {
+      if (origins.length > 0) {
+        yield* router.addGlobalMiddleware(
           HttpMiddleware.cors({
             allowedOrigins: (origin) => origins.includes(origin),
             allowedMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
             allowedHeaders: ['authorization', 'content-type', 'last-event-id'],
           }),
-        ),
-      )
+        )
+      }
+      yield* router.addGlobalMiddleware(bodyLimit)
+    }),
+  )
 
-const BodyLimit = Layer.succeed(HttpIncomingMessage.MaxBodySize, MAX_BODY)
+const BodyLimit = Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(MAX_BODY_BYTES))
 
-// The routes of the API on the router of the environment; the OpenAPI document is served next to them
-export const ApiLive = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> =>
-  Layer.mergeAll(Routes(options), Cors(options.corsOrigins)).pipe(Layer.provide(BodyLimit))
+// The routes of the API on the router of the environment; the OpenAPI document and the RPC socket are served next to them
+// One configuration layer serves the handlers and the mutation budgets, which the REST API and the socket share
+export const ApiLive = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> => {
+  const config = Layer.succeed(ApiConfig, options)
+  const buckets = MutationBucketsLive.pipe(Layer.provide(config))
+  return Layer.mergeAll(
+    Routes(options, config),
+    Globals(options.corsOrigins),
+    RpcRoute({ token: options.token, corsOrigins: options.corsOrigins }),
+  ).pipe(Layer.provide(BodyLimit), Layer.provide(buckets))
+}
 
 // The API served by the HttpServer of the environment; the router is private to it
-export const serveApi = (
-  options: ApiOptions,
-): Layer.Layer<
-  never,
-  never,
-  HttpServer.HttpServer | ServerPlatform | KernelServices | SqlClient.SqlClient
-> => HttpRouter.serve(ApiLive(options), { disableLogger: true })
+// Neither requests nor the address are logged by Effect: the daemon's stderr carries the kernel's records alone
+export const serveApi = (options: ApiOptions): Layer.Layer<never, never, ServeRequirements> =>
+  HttpRouter.serve(ApiLive(options), { disableLogger: true, disableListenLog: true })
 ```
 If the compiler names a service the alias misses (or one it does not need), adjust `ServerPlatform`; the shape of the layer is the point, not the exact alias. `Layer.empty` is the layer that provides nothing; if `effect@4.0.0` spells it differently (`Layer.succeedContext(Context.empty())`), use that. Body size: `MaxBodySize` bounds the bodies the Node server of the tests reads; on Bun the limit that counts is `maxRequestBodySize` of `BunHttpServer.layer` (fact sheet §1.8, §5), which Task 8 sets to the same 10 MB — Bun answers an oversized body with an empty `413`, a documented exception to the problem bodies.
 
@@ -2676,24 +3298,41 @@ If the compiler names a service the alias misses (or one it does not need), adju
 ```ts
 import { Layer, type Redacted } from 'effect'
 import { AuthorizationLive, type Authorization } from './auth.js'
-import type { ApiConfig } from './config.js'
+import type { MutationBuckets } from './mutation-buckets.js'
 import { MutationLimitLive, type MutationLimit } from './rate-limit.js'
 import { RequestValidationLive, type RequestValidation } from './validation.js'
 
 // The middlewares the groups declare: the bearer token, the validation of requests and the limit on mutations
 export const Middlewares = (
   token: Redacted.Redacted,
-): Layer.Layer<Authorization | RequestValidation | MutationLimit, never, ApiConfig> =>
+): Layer.Layer<Authorization | RequestValidation | MutationLimit, never, MutationBuckets> =>
   Layer.mergeAll(AuthorizationLive(token), RequestValidationLive, MutationLimitLive)
 ```
 `packages/api/src/handlers/all.ts` (added during execution):
 ```ts
 import { Layer } from 'effect'
+import { AsksHandlers } from './asks.js'
+import { EventsHandlers } from './events.js'
 import { HealthHandlers } from './health.js'
+import { PluginsHandlers } from './plugins.js'
+import { ProjectsHandlers } from './projects.js'
 import { SchemasHandlers } from './schemas.js'
+import { SessionsHandlers } from './sessions.js'
+import { UsageHandlers } from './usage.js'
+import { WorkspacesHandlers } from './workspaces.js'
 
-// The handler layers of every group; Tasks 4–6 add theirs here
-export const Handlers = Layer.mergeAll(HealthHandlers, SchemasHandlers)
+// The handler layers of every group
+export const Handlers = Layer.mergeAll(
+  HealthHandlers,
+  SchemasHandlers,
+  ProjectsHandlers,
+  SessionsHandlers,
+  AsksHandlers,
+  UsageHandlers,
+  WorkspacesHandlers,
+  PluginsHandlers,
+  EventsHandlers,
+)
 ```
 `packages/api/src/logging.ts` (added during execution):
 ```ts
@@ -2707,6 +3346,9 @@ export const logApiError = (...parts: readonly unknown[]): Effect.Effect<void> =
 
 export const logApiWarning = (...parts: readonly unknown[]): Effect.Effect<void> =>
   underApi(Effect.logWarning(...parts))
+
+export const logApiDebug = (...parts: readonly unknown[]): Effect.Effect<void> =>
+  underApi(Effect.logDebug(...parts))
 ```
 `packages/api/src/testing-kernel.ts` (added during execution):
 ```ts
@@ -2744,7 +3386,7 @@ export const BootedKernel: Layer.Layer<KernelServices | SqlClient.SqlClient> = L
 ```ts
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { ApiTestLayer, baseUrl, fetched } from './testing.js'
+import { ApiTestLayer, authorized, baseUrl, fetched } from './testing.js'
 
 const UI = 'http://ui.test'
 
@@ -2762,6 +3404,17 @@ it.layer(ApiTestLayer({ corsOrigins: [UI] }))('CORS for a configured origin', (s
       assert.strictEqual(response.status, 204)
       assert.strictEqual(response.headers.get('access-control-allow-origin'), UI)
       assert.include(response.headers.get('access-control-allow-headers'), 'authorization')
+    }),
+  )
+
+  suite.effect('lets the origin read the 413 problem of a body that is too large', () =>
+    Effect.gen(function* answersOversized() {
+      const base = yield* baseUrl
+      const headers = { origin: UI, 'content-type': 'application/json' }
+      const oversized = authorized({ method: 'POST', headers, body: 'x'.repeat(11 * 1024 * 1024) })
+      const response = yield* fetched(`${base}/api/v1/projects`, oversized)
+      assert.strictEqual(response.status, 413)
+      assert.strictEqual(response.headers.get('access-control-allow-origin'), UI)
     }),
   )
 
@@ -2874,14 +3527,12 @@ export {
   type ApiOptions,
   type MutationLimitOptions,
 } from './config.js'
-export {
-  ApiLive,
-  serveApi,
-  OPENAPI_PATH,
-  type ApiRequirements,
-  type ServerPlatform,
-} from './layer.js'
+export { ApiLive, serveApi } from './layer.js'
+export { OPENAPI_PATH } from './routes.js'
+export type { ApiRequirements, ServerPlatform } from './requirements.js'
 export { Authorization, AuthorizationLive, sameToken } from './auth.js'
+export { RpcAuthorization, RpcAuthorizationLive } from './rpc/auth.js'
+export { BureauRpcsWithAuth, WS_PATH } from './rpc/group.js'
 export { RequestValidation } from './validation.js'
 export { MutationLimit } from './rate-limit.js'
 export { openApiDocument } from './openapi.js'
@@ -2917,6 +3568,7 @@ import { NodeHttpServer } from '@effect/platform-node'
 import { Effect, Layer, Redacted } from 'effect'
 import { HttpServer, type HttpServerError } from 'effect/http'
 import type { SqlClient } from 'effect/sql'
+import { API_PREFIX } from './api.js'
 import { DEFAULT_API_OPTIONS, type ApiOptions } from './config.js'
 import { serveApi } from './layer.js'
 import { BootedKernel } from './testing-kernel.js'
@@ -2976,6 +3628,42 @@ export const bodyOf = (response: Response): Effect.Effect<unknown> =>
     const body: unknown = await response.json()
     return body
   })
+
+// What the server answered to a call: the status, the content type and the JSON of the body, when it has one
+export interface Reply {
+  readonly status: number
+  readonly type: string | null
+  readonly body: unknown
+}
+
+const call = (
+  path: string,
+  init: RequestInit,
+): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  Effect.gen(function* calls() {
+    const base = yield* baseUrl
+    const response = yield* fetched(`${base}${API_PREFIX}${path}`, init)
+    const text = yield* Effect.promise(async () => {
+      const whole = await response.text()
+      return whole
+    })
+    const body: unknown = text === '' ? undefined : JSON.parse(text)
+    return { status: response.status, type: response.headers.get('content-type'), body }
+  })
+
+// The calls a test makes under /api/v1, each with the token of the tests
+export const get = (path: string): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, authorized())
+
+// A body of JSON, or none for a command that takes none
+export const post = (
+  path: string,
+  body?: unknown,
+): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, body === undefined ? authorized({ method: 'POST' }) : json(body))
+
+export const remove = (path: string): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, authorized({ method: 'DELETE' }))
 ```
 `Layer.provideMerge(KernelTest(...))` exposes the kernel services too, so a test can call the kernel directly next to the HTTP calls; the declared type may need `HttpServer.HttpServer | KernelServices | SqlClient.SqlClient` — widen it if the compiler asks.
 
@@ -3025,9 +3713,13 @@ import { assert, it } from '@effect/vitest'
 import { Cause, Effect, Exit, Layer, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
 import { AuthorizationLive, sameToken } from './auth.js'
+import { openApiDocument } from './openapi.js'
 import { ApiTestLayer, authorized, baseUrl, bodyOf, fetched, json } from './testing.js'
 
 const EVENTS_SCHEMA = '/api/v1/schemas/events.json'
+
+// RFC 7235: every 401 names the scheme the API asks for
+const CHALLENGE = 'Bearer realm="bytebureau"'
 
 // What a refused request carries in its Authorization header: nothing, an empty bearer token, a wrong one
 const REFUSED: [string, Record<string, string>][] = [
@@ -3035,6 +3727,19 @@ const REFUSED: [string, Record<string, string>][] = [
   ['an empty bearer token', { authorization: 'Bearer ' }],
   ['a wrong token', { authorization: 'Bearer not-the-token' }],
 ]
+
+const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete'])
+
+// The method and the path of each operation of a path of the OpenAPI document, with an id where the path has one
+const operationsOf = ([path, item]: [string, object]): [string, string][] =>
+  Object.keys(item)
+    .filter((method) => METHODS.has(method))
+    .map((method) => [method.toUpperCase(), path.replace('{id}', 'x')])
+
+// Every operation the document lists but the health check
+const PROTECTED = Object.entries(openApiDocument().paths)
+  .filter(([path]) => path !== '/api/v1/health')
+  .flatMap((entry) => operationsOf(entry))
 
 // What building the layer dies with, or nothing when it builds
 const buildFailure = <Out>(layer: Layer.Layer<Out>): string => {
@@ -3067,6 +3772,7 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
       const response = yield* fetched(`${base}${EVENTS_SCHEMA}`, { headers })
       assert.strictEqual(response.status, 401)
       assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.strictEqual(response.headers.get('www-authenticate'), CHALLENGE)
       assert.deepStrictEqual(yield* bodyOf(response), {
         type: 'https://bytebureau.dev/problems/unauthorized',
         title: 'Unauthorized',
@@ -3077,13 +3783,14 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
     }),
   )
 
-  // POST /api/v1/projects arrives with Task 4, which un-skips this test
-  suite.effect.skip('refuses a body over 10 MB with 413 before any handler runs', () =>
+  suite.effect('refuses a body over 10 MB with the 413 problem before any handler runs', () =>
     Effect.gen(function* refusesBig() {
       const base = yield* baseUrl
       const oversized = json({ path: 'x'.repeat(11 * 1024 * 1024) })
       const response = yield* fetched(`${base}/api/v1/projects`, oversized)
       assert.strictEqual(response.status, 413)
+      assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.containSubset(yield* bodyOf(response), { status: 413, code: 'payload_too_large' })
     }),
   )
 
@@ -3098,16 +3805,56 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
     }),
   )
 })
+
+it.layer(ApiTestLayer())('the bearer token on every operation of the API', (suite) => {
+  suite.effect.each(PROTECTED)('refuses %s %s without it', ([method, path]) =>
+    Effect.gen(function* refuses() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}${path}`, { method })
+      assert.strictEqual(response.status, 401)
+      assert.strictEqual(response.headers.get('www-authenticate'), CHALLENGE)
+      assert.containSubset(yield* bodyOf(response), { code: 'unauthorized' })
+    }),
+  )
+})
 ```
 
 `packages/api/src/openapi.test.ts`:
 ```ts
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import type { OpenApi } from 'effect/http-api'
 import { describe, expect, it } from 'vitest'
 import { openApiDocument } from './openapi.js'
 
 const committed = fileURLToPath(new URL('../openapi.json', import.meta.url))
+
+// The paths of the groups with one method each, as the document names them
+const OPERATIONS: [string, string][] = [
+  ['/api/v1/projects', 'get'],
+  ['/api/v1/projects', 'post'],
+  ['/api/v1/projects/{id}', 'delete'],
+  ['/api/v1/sessions/{id}/prompt', 'post'],
+  ['/api/v1/asks/{id}/answer', 'post'],
+  ['/api/v1/usage/sessions/{id}', 'get'],
+  ['/api/v1/workspaces/prune', 'post'],
+  ['/api/v1/plugins', 'get'],
+  ['/api/v1/providers', 'get'],
+  ['/api/v1/events', 'get'],
+]
+
+const METHODS: readonly OpenApi.OpenAPISpecMethodName[] = ['get', 'post', 'put', 'patch', 'delete']
+
+// The method, the path and the status codes each operation of the document declares
+const operations = (): { method: string; path: string; statuses: string[] }[] =>
+  Object.entries(openApiDocument().paths).flatMap(([path, item]) =>
+    METHODS.flatMap((method) => {
+      const operation = item[method]
+      return operation === undefined
+        ? []
+        : [{ method, path, statuses: Object.keys(operation.responses) }]
+    }),
+  )
 
 describe('the OpenAPI document', () => {
   it('is OpenAPI 3.1 with the title and the bearer scheme, and openapi.json is up to date', () => {
@@ -3126,6 +3873,71 @@ describe('the OpenAPI document', () => {
     expect(paths).toHaveProperty(['/api/v1/schemas/config.json', 'get'])
     expect(paths).toHaveProperty(['/api/v1/schemas/events.json', 'get'])
   })
+})
+
+describe('the OpenAPI document of the resource groups', () => {
+  it.each(OPERATIONS)('lists %s with %s', (path, method) => {
+    expect(openApiDocument().paths).toHaveProperty([path, method])
+  })
+
+  it('declares the 201 response, the problems and the rate limit of registering a project', () => {
+    const { paths } = openApiDocument()
+    const responses = ['/api/v1/projects', 'post', 'responses']
+    expect(paths).toHaveProperty([...responses, '201', 'content', 'application/json'])
+    expect(paths).toHaveProperty(
+      [...responses, '422', 'content', 'application/problem+json', 'schema', '$ref'],
+      '#/components/schemas/Problem422',
+    )
+    expect(paths).toHaveProperty([...responses, '429'])
+    expect(paths).not.toHaveProperty(['/api/v1/projects', 'get', 'responses', '429'])
+  })
+
+  it('declares the 429 problem on every mutation and on nothing else', () => {
+    expect.hasAssertions()
+    for (const { method, path, statuses } of operations()) {
+      expect(statuses.includes('429'), `${method} ${path}`).toBe(method !== 'get')
+    }
+  })
+
+  it('declares the 413 problem of the body limit on every mutation, with the problem schema', () => {
+    expect.hasAssertions()
+    for (const { method, path, statuses } of operations()) {
+      expect(statuses.includes('413'), `${method} ${path}`).toBe(method !== 'get')
+    }
+    expect(openApiDocument().components.schemas).toHaveProperty('Problem413')
+  })
+
+  it('names the schemas of the DTOs and of the problems once each', () => {
+    const { schemas } = openApiDocument().components
+    expect(schemas).toHaveProperty('Session')
+    expect(schemas).toHaveProperty('Project')
+    expect(schemas).toHaveProperty('Problem404')
+    // A suffix would mean two schemas of one name: the generated client would name its types after it
+    expect(Object.keys(schemas).filter((name) => /_\d+$/u.test(name))).toStrictEqual([])
+  })
+})
+
+const EVENTS = ['/api/v1/events', 'get']
+
+describe('the OpenAPI document of the event stream', () => {
+  it('declares text/event-stream as its answer, and the problems the middlewares raise', () => {
+    const { paths } = openApiDocument()
+    const answers = [...EVENTS, 'responses']
+    expect(paths).toHaveProperty([...answers, '200', 'content', 'text/event-stream'])
+    expect(paths).not.toHaveProperty([...answers, '200', 'content', 'application/json'])
+    expect(paths).toHaveProperty([...answers, '401', 'content', 'application/problem+json'])
+  })
+
+  it.each(['last-event-id', 'since', 'session', 'project', 'types'])(
+    'takes %s as an input',
+    (name) => {
+      const { paths } = openApiDocument()
+      expect(paths).toHaveProperty(
+        [...EVENTS, 'parameters'],
+        expect.arrayContaining([expect.objectContaining({ name })]),
+      )
+    },
+  )
 })
 ```
 The `413` comes from `MaxBodySize` on the Node server (the request is refused while the body is read, so no handler runs); if the status surfaces as a different `4xx` on Node, assert on what `HttpServerError` renders and keep the Bun limit of Task 8 as the one that holds in the binary. The `/api/v1/projects` route exists from Task 4 on; until then the test may target `/api/v1/schemas/events.json` with a POST — a `405`/`404` would hide the point, so write this test in Task 3 and expect it to pass once Task 4 lands (mark it `it.effect.skip` until then, with a comment naming Task 4). If `securitySchemes` keys the scheme differently (for example by the middleware id), assert on the key the document shows after reading it once — the point is that a bearer scheme is declared.
@@ -3402,38 +4214,64 @@ export const PluginsGroup = HttpApiGroup.make('plugins')
 
 `packages/api/src/handlers/found.ts`:
 ```ts
+import path from 'node:path'
+import { ProjectRegistry, type Project } from '@bytebureau/kernel'
 import { Effect } from 'effect'
-import { problem, type ApiProblem } from '../problems.js'
+import {
+  orProblem,
+  problem,
+  type ApiCode,
+  type ApiProblem,
+  type KernelStatus,
+} from '../problems.js'
 
 // A lookup that found nothing is a 404 problem with the code of the resource
 export const found = <Entity>(
   entity: Entity | undefined,
-  code: string,
+  code: ApiCode,
   detail: string,
 ): Effect.Effect<Entity, ApiProblem<404>> =>
   entity === undefined ? Effect.fail(problem(404, code, detail)) : Effect.succeed(entity)
+
+// The daemon would resolve a relative path in its own working directory, which is no directory of the client's
+export const absolutePath = (directory: string): Effect.Effect<string, ApiProblem<422>> =>
+  path.isAbsolute(directory)
+    ? Effect.succeed(directory)
+    : Effect.fail(
+        problem(
+          422,
+          'project_path_not_absolute',
+          `${directory} is not an absolute path: the daemon cannot tell what it is relative to`,
+        ),
+      )
+
+// The project, or the 404 problem when nobody holds the id; the REST API and the RPC socket ask the same way
+export const projectOf = (
+  id: string,
+): Effect.Effect<Project, ApiProblem<KernelStatus>, ProjectRegistry> =>
+  orProblem(ProjectRegistry.use((registry) => registry.get(id))).pipe(
+    Effect.flatMap((project) => found(project, 'not_found', `no project ${id}`)),
+  )
 ```
 
 `packages/api/src/handlers/projects.ts`:
 ```ts
-import { ProjectRegistry, type Project } from '@bytebureau/kernel'
+import { ProjectRegistry } from '@bytebureau/kernel'
 import { Effect } from 'effect'
 import { HttpApiBuilder } from 'effect/http-api'
 import { BureauApi } from '../api.js'
-import { orProblem, type ApiProblem, type KernelStatus } from '../problems.js'
-import { found } from './found.js'
-
-// The project, or the 404 problem when nobody holds the id
-const projectOf = (id: string): Effect.Effect<Project, ApiProblem<KernelStatus>, ProjectRegistry> =>
-  orProblem(ProjectRegistry.use((registry) => registry.get(id))).pipe(
-    Effect.flatMap((project) => found(project, 'not_found', `no project ${id}`)),
-  )
+import { orProblem } from '../problems.js'
+import { absolutePath, projectOf } from './found.js'
 
 export const ProjectsHandlers = HttpApiBuilder.group(BureauApi, 'projects', (handlers) =>
   handlers
     .handle('list', () => orProblem(ProjectRegistry.use((registry) => registry.list())))
     .handle('register', ({ payload }) =>
-      orProblem(ProjectRegistry.use((registry) => registry.register(payload.path))),
+      absolutePath(payload.path).pipe(
+        Effect.flatMap((directory) =>
+          orProblem(ProjectRegistry.use((registry) => registry.register(directory))),
+        ),
+      ),
     )
     .handle('get', ({ params }) => projectOf(params.id))
     .handle('remove', ({ params }) =>
@@ -3510,14 +4348,20 @@ export const AsksHandlers = HttpApiBuilder.group(BureauApi, 'asks', (handlers) =
 
 `packages/api/src/handlers/usage.ts`:
 ```ts
-import { UsageService } from '@bytebureau/kernel'
+import { SessionManager, UsageService } from '@bytebureau/kernel'
+import { Effect } from 'effect'
 import { HttpApiBuilder } from 'effect/http-api'
 import { BureauApi } from '../api.js'
 import { orProblem } from '../problems.js'
+import { found } from './found.js'
 
+// The usage of a session that is not there is not found, not nothing used
 export const UsageHandlers = HttpApiBuilder.group(BureauApi, 'usage', (handlers) =>
   handlers.handle('session', ({ params }) =>
-    orProblem(UsageService.use((usage) => usage.sessionUsage(params.id))),
+    orProblem(SessionManager.use((sessions) => sessions.get(params.id))).pipe(
+      Effect.flatMap((session) => found(session, 'session_not_found', `no session ${params.id}`)),
+      Effect.flatMap(() => orProblem(UsageService.use((usage) => usage.sessionUsage(params.id)))),
+    ),
   ),
 )
 ```
@@ -3566,6 +4410,7 @@ export const PluginsHandlers = HttpApiBuilder.group(BureauApi, 'plugins', (handl
 
 `packages/api/src/testing-sessions.ts`:
 ```ts
+import { setTimeout as sleep } from 'node:timers/promises'
 import { EventLog, type StoreError } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
 import {
@@ -3627,8 +4472,19 @@ export const createdSession = Effect.gen(function* creates() {
   return { project, session: Schema.decodeUnknownSync(SessionDto)(body), status }
 })
 
+// How long a test waits for an event, on the wall clock: the clock of a suite is the test clock, which moves only when told
+const EVENT_WAIT_MS = 10_000
+
+// A wait that has run out ends the test with what it waited for, well before the timeout of the test would
+const waitedTooLong = (sessionId: string, type: string): Effect.Effect<never> => {
+  const missing = new Error(`no ${type} event of session ${sessionId} in ${EVENT_WAIT_MS} ms`)
+  const waited = Effect.promise(async (signal) => {
+    await sleep(EVENT_WAIT_MS, undefined, { signal })
+  })
+  return Effect.andThen(waited, Effect.die(missing))
+}
+
 // The first event of the type the session has had or will have, from the kernel behind the API
-// Only the timeout of the test bounds the wait: the clock of a suite is the test clock
 export const firstEvent = (
   sessionId: string,
   type: string,
@@ -3636,6 +4492,7 @@ export const firstEvent = (
   EventLog.use((log) =>
     Stream.runHead(log.subscribe({ sessionId, types: [type], since: 0 })).pipe(
       Effect.flatMap(Effect.fromOption),
+      Effect.raceFirst(waitedTooLong(sessionId, type)),
     ),
   )
 
@@ -3716,6 +4573,21 @@ it.layer(ApiTestLayer())('the refusals of POST /api/v1/projects over the test ke
       assert.containSubset(refused.body, { code: 'config_invalid' })
       assert.include(JSON.stringify(refused.body), `${repo}/bytebureau.json/version`)
     }),
+  )
+})
+
+it.layer(ApiTestLayer())('the refusals of the body of POST /api/v1/projects', (suite) => {
+  suite.effect(
+    'refuses a relative path with 422: the daemon cannot tell what it is relative to',
+    () =>
+      Effect.gen(function* refusesRelative() {
+        const refused = yield* post('/projects', { path: 'repo' })
+        assert.strictEqual(refused.status, 422)
+        assert.containSubset(refused.body, {
+          code: 'project_path_not_absolute',
+          detail: 'repo is not an absolute path: the daemon cannot tell what it is relative to',
+        })
+      }),
   )
 
   suite.effect('refuses a body the schema does not know with 400 request_invalid', () =>
@@ -3883,12 +4755,55 @@ it.layer(ApiTestLayer())('the commands on a session over the fake provider', (su
       yield* firstEvent(id, 'turn.started')
       assert.strictEqual((yield* post(`/sessions/${id}/interrupt`)).status, 204)
       yield* firstEvent(id, 'turn.interrupted')
+      assert.containSubset((yield* get(`/sessions/${id}`)).body, { status: 'ready' })
       assert.strictEqual((yield* post(`/sessions/${id}/complete`)).status, 204)
     }),
   )
 })
 
+it.layer(ApiTestLayer())('POST /api/v1/sessions/:id/interrupt without a turn at work', (suite) => {
+  suite.effect(
+    'refuses to interrupt a session with no turn at work with 409, an unknown one with 404',
+    () =>
+      Effect.gen(function* refusesInterrupt() {
+        const { session } = yield* createdSession
+        const idle = yield* post(`/sessions/${session.id}/interrupt`)
+        const missing = yield* post(`/sessions/${UNKNOWN_ID}/interrupt`)
+        assert.deepStrictEqual([idle.status, missing.status], [409, 404])
+        assert.containSubset(idle.body, {
+          code: 'session_invalid_transition',
+          detail: 'cannot interrupt a ready session: no turn of it is at work',
+        })
+        assert.containSubset(missing.body, { code: 'session_not_found' })
+      }),
+  )
+
+  suite.effect('refuses with 409 a session whose turn has ended, its agent still attached', () =>
+    Effect.gen(function* refusesBetweenTurns() {
+      const { session, ask } = yield* askedSession
+      const answer = { selected: [(yield* recommendedOption(ask)).id] }
+      assert.strictEqual((yield* post(`/asks/${ask.id}/answer`, answer)).status, 204)
+      // The end of the turn is told once the session is ready again, its agent kept for the next prompt
+      yield* firstEvent(session.id, 'turn.completed')
+      const idle = yield* post(`/sessions/${session.id}/interrupt`)
+      assert.strictEqual(idle.status, 409)
+      assert.containSubset(idle.body, {
+        code: 'session_invalid_transition',
+        detail: 'cannot interrupt a ready session: no turn of it is at work',
+      })
+    }),
+  )
+})
+
 it.layer(ApiTestLayer())('GET /api/v1/usage/sessions/:id over the fake provider', (suite) => {
+  suite.effect('answers 404 for the usage of a session that is not there', () =>
+    Effect.gen(function* refusesUnknown() {
+      const missing = yield* get(`/usage/sessions/${UNKNOWN_ID}`)
+      assert.strictEqual(missing.status, 404)
+      assert.containSubset(missing.body, { code: 'session_not_found' })
+    }),
+  )
+
   suite.effect('reads no usage of a session that has had no turn, the costs as null', () =>
     Effect.gen(function* readsNothing() {
       const { session } = yield* createdSession
@@ -4064,8 +4979,10 @@ it.layer(ApiTestLayer())('POST /api/v1/workspaces/prune after the retention', (s
 import { createTempRepo } from '@bytebureau/kernel/testing'
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { ApiTestLayer, baseUrl, fetched, get, post } from './testing.js'
+import { TestClock } from 'effect/testing'
+import { ApiTestLayer, baseUrl, fetched, get, json, post } from './testing.js'
 
+// The budget runs on the TestClock of the suite: no token flows back unless a test moves the clock
 const TWO_TOKENS = ApiTestLayer({ mutationLimit: { capacity: 2, perMinute: 60 } })
 
 it.layer(TWO_TOKENS)('the mutation rate limit with two tokens', (suite) => {
@@ -4088,6 +5005,24 @@ it.layer(TWO_TOKENS)('the mutation rate limit with two tokens', (suite) => {
         })
         assert.strictEqual((yield* get('/projects')).status, 200)
       }),
+  )
+
+  suite.effect('says when to retry in the Retry-After header as well', () =>
+    Effect.gen(function* retryAfter() {
+      const base = yield* baseUrl
+      const refused = yield* fetched(`${base}/api/v1/projects`, json({ path: createTempRepo() }))
+      assert.strictEqual(refused.status, 429)
+      assert.strictEqual(refused.headers.get('retry-after'), '1')
+    }),
+  )
+
+  suite.effect('serves a mutation again once the clock has let a token flow back', () =>
+    Effect.gen(function* refills() {
+      const refused = yield* post('/projects', { path: createTempRepo() })
+      yield* TestClock.adjust('1 second')
+      const served = yield* post('/projects', { path: createTempRepo() })
+      assert.deepStrictEqual([refused.status, served.status], [429, 201])
+    }),
   )
 })
 
@@ -4272,9 +5207,13 @@ const event = (seq: number, type: string): EventEnvelope => ({
 
 const ephemeral = (id: string): EventEnvelope => ({ ...event(0, 'delta'), id })
 
-// A buffer of the capacity that has been handed the events one after the other
-const filled = (capacity: number, events: readonly EventEnvelope[]): DeliveryBuffer => {
-  const buffer = new DeliveryBuffer(capacity)
+// A buffer of the capacity and the bound that has been handed the events one after the other
+const filled = (
+  capacity: number,
+  events: readonly EventEnvelope[],
+  durable = 1000,
+): DeliveryBuffer => {
+  const buffer = new DeliveryBuffer({ capacity, durable })
   for (const item of events) {
     buffer.push(item)
   }
@@ -4294,13 +5233,13 @@ describe(DeliveryBuffer, () => {
     const arrivals = [event(1, 'a'), ephemeral('d1'), ephemeral('d2'), event(2, 'b')]
     const buffer = filled(2, [...arrivals, ephemeral('d3'), event(3, 'c')])
     expect(idsOf(buffer)).toStrictEqual(['e1-a', 'd2', 'e2-b', 'd3', 'e3-c'])
-    expect(buffer.dropped).toBe(1)
+    expect(buffer.takeDropped()).toBe(1)
   })
 
   it('keeps no ephemeral event with a capacity of 0, and still every durable one', () => {
     const buffer = filled(0, [event(1, 'a'), event(0, 'delta'), event(2, 'b')])
     expect(idsOf(buffer)).toStrictEqual(['e1-a', 'e2-b'])
-    expect(buffer.dropped).toBe(1)
+    expect(buffer.takeDropped()).toBe(1)
   })
 
   it('makes room for ephemeral events again once the ones it holds are taken', () => {
@@ -4308,7 +5247,28 @@ describe(DeliveryBuffer, () => {
     buffer.drain()
     buffer.push(event(0, 'delta'))
     expect(buffer.drain()).toHaveLength(1)
-    expect(buffer.dropped).toBe(0)
+    expect(buffer.takeDropped()).toBe(0)
+  })
+
+  it('counts the dropped ephemeral events once: asked again, none were dropped since', () => {
+    const buffer = filled(1, [ephemeral('d1'), ephemeral('d2'), ephemeral('d3')])
+    expect([buffer.takeDropped(), buffer.takeDropped()]).toStrictEqual([2, 0])
+  })
+})
+
+describe('the delivery buffer and a reader that lags behind', () => {
+  it('says it has overflowed once more durable events wait than the bound, and keeps them all', () => {
+    const atTheBound = filled(4, [event(1, 'a'), event(2, 'b')], 2)
+    const beyond = filled(4, [event(1, 'a'), event(2, 'b'), event(3, 'c')], 2)
+    expect([atTheBound.overflowed, beyond.overflowed]).toStrictEqual([false, true])
+    expect(idsOf(beyond)).toStrictEqual(['e1-a', 'e2-b', 'e3-c'])
+  })
+
+  it('drops ephemeral events beside a long durable backlog in the order they came', () => {
+    const durable = Array.from({ length: 500 }, (_entry, index) => event(index + 1, 'a'))
+    const buffer = filled(1, [...durable, ephemeral('d1'), ephemeral('d2')])
+    const ids = idsOf(buffer)
+    expect([ids.length, ids.at(-1), buffer.takeDropped()]).toStrictEqual([501, 'd2', 1])
   })
 })
 ```
@@ -4324,39 +5284,70 @@ Expected: FAIL — the module does not exist.
 ```ts
 import type { EventEnvelope } from '@bytebureau/protocol'
 
-// What one client has not read yet: durable events are never dropped, ephemeral ones above the capacity push the oldest ephemeral out
-export class DeliveryBuffer {
-  public dropped = 0
-  private items: EventEnvelope[] = []
-  private ephemeral = 0
-  private readonly capacity: number
+// An event in the order it came: the durable and the ephemeral ones wait apart and are merged again when they are taken
+interface Arrival {
+  readonly order: number
+  readonly event: EventEnvelope
+}
 
-  public constructor(capacity: number) {
-    this.capacity = capacity
+// The arrivals of both kinds in the order they came
+const merged = (durable: readonly Arrival[], ephemeral: readonly Arrival[]): EventEnvelope[] =>
+  [...durable, ...ephemeral]
+    .toSorted((first, second) => first.order - second.order)
+    .map((arrival) => arrival.event)
+
+export interface DeliveryLimits {
+  // Ephemeral events kept for a reader that lags: above it the oldest goes
+  readonly capacity: number
+  // Durable events a reader may lag behind: above it the reader is too slow for the stream
+  readonly durable: number
+}
+
+/**
+ * What one client has not read yet. Durable events are never dropped, but once more of them wait than the bound
+ * allows the buffer says it has overflowed: the client's stream ends, and it resumes from its last id with a replay
+ * from the log. Ephemeral events above the capacity push the oldest ephemeral one out, at a cost the backlog of
+ * durable events does not change.
+ */
+export class DeliveryBuffer {
+  public overflowed = false
+  private dropped = 0
+  private arrivals = 0
+  private durable: Arrival[] = []
+  private ephemeral: Arrival[] = []
+  private readonly limits: DeliveryLimits
+
+  public constructor(limits: DeliveryLimits) {
+    this.limits = limits
   }
 
   public push(event: EventEnvelope): void {
-    this.items.push(event)
-    if (event.seq === 0) {
-      this.ephemeral += 1
-      if (this.ephemeral > this.capacity) {
-        this.evictOldestEphemeral()
-      }
+    const arrival = { order: this.arrivals, event }
+    this.arrivals += 1
+    if (event.seq !== 0) {
+      this.durable.push(arrival)
+      this.overflowed ||= this.durable.length > this.limits.durable
+      return
+    }
+    this.ephemeral.push(arrival)
+    if (this.ephemeral.length > this.limits.capacity) {
+      this.ephemeral.shift()
+      this.dropped += 1
     }
   }
 
   public drain(): readonly EventEnvelope[] {
-    const drained = this.items
-    this.items = []
-    this.ephemeral = 0
-    return drained
+    const events = merged(this.durable, this.ephemeral)
+    this.durable = []
+    this.ephemeral = []
+    return events
   }
 
-  private evictOldestEphemeral(): void {
-    const index = this.items.findIndex((item) => item.seq === 0)
-    this.items.splice(index, 1)
-    this.ephemeral -= 1
-    this.dropped += 1
+  // The ephemeral events dropped since this was last asked
+  public takeDropped(): number {
+    const { dropped } = this
+    this.dropped = 0
+    return dropped
   }
 }
 ```
@@ -4365,29 +5356,52 @@ export class DeliveryBuffer {
 ```ts
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { Effect, Queue, Stream, type Cause } from 'effect'
-import { logApiWarning } from '../logging.js'
-import { DeliveryBuffer } from './delivery-buffer.js'
+import { logApiDebug, logApiWarning } from '../logging.js'
+import { DeliveryBuffer, type DeliveryLimits } from './delivery-buffer.js'
 
-const EPHEMERAL_CAPACITY = 64
+const LIMITS: DeliveryLimits = { capacity: 64, durable: 10_000 }
+
+// The events of one take, and a line at debug level for ephemeral ones a slow reader lost meanwhile
+const taken = (buffer: DeliveryBuffer): Effect.Effect<readonly EventEnvelope[]> => {
+  const events = buffer.drain()
+  const lost = buffer.takeDropped()
+  return lost === 0
+    ? Effect.succeed(events)
+    : Effect.as(
+        logApiDebug('a reader too slow for the stream lost ephemeral events', { lost }),
+        events,
+      )
+}
+
+// A reader that lags too far behind is let go: its stream ends after what waits for it, and it resumes from its last id
+const letGoIfBehind = (buffer: DeliveryBuffer): Effect.Effect<void> =>
+  buffer.overflowed
+    ? logApiWarning(
+        'a reader fell too far behind the stream, which ends; it resumes from its last id',
+      )
+    : Effect.void
 
 // The source is read as fast as it comes into the buffer; the client takes what the buffer holds whenever it is ready
 // A failure of the source is logged and ends the stream: an SSE client resumes from its last id
 export const buffered = <Failure>(
   source: Stream.Stream<EventEnvelope, Failure>,
-  capacity: number = EPHEMERAL_CAPACITY,
+  limits: DeliveryLimits = LIMITS,
 ): Stream.Stream<EventEnvelope> =>
   Stream.unwrap(
     Effect.gen(function* startsBuffering() {
-      const buffer = new DeliveryBuffer(capacity)
+      const buffer = new DeliveryBuffer(limits)
       // One pending wake-up says there is something to take; a take empties the buffer, so more would only pile up
       const wake = yield* Queue.dropping<null, Cause.Done>(1)
       const fill = source.pipe(
-        Stream.runForEach((event) =>
+        Stream.tap((event) =>
           Effect.sync(() => {
             buffer.push(event)
             Queue.offerUnsafe(wake, null)
           }),
         ),
+        Stream.takeUntil(() => buffer.overflowed),
+        Stream.runDrain,
+        Effect.andThen(Effect.suspend(() => letGoIfBehind(buffer))),
         Effect.catchCause((cause) =>
           logApiWarning('an event subscription ended with a failure', cause),
         ),
@@ -4395,7 +5409,7 @@ export const buffered = <Failure>(
       )
       yield* Effect.forkScoped(fill)
       return Stream.fromQueue(wake).pipe(
-        Stream.map(() => buffer.drain()),
+        Stream.mapEffect(() => taken(buffer)),
         Stream.flattenIterable,
       )
     }),
@@ -4825,15 +5839,20 @@ it.layer(IDLE, LIVE)('GET /api/v1/events of a client that has nothing to replay'
 })
 
 it.layer(ApiTestLayer())('GET /api/v1/events refuses', (suite) => {
-  suite.effect('a missing token with 401, and a since that is no number with 400', () =>
+  suite.effect('a missing token with 401, and a since that is no seq with 400', () =>
     Effect.gen(function* refuses() {
       const base = yield* baseUrl
       const noToken = yield* fetched(`${base}${API_PREFIX}/events`)
       assert.strictEqual(noToken.status, 401)
       assert.containSubset(yield* bodyOf(noToken), { code: 'unauthorized' })
-      const badSince = yield* get('/events?since=soon')
-      assert.strictEqual(badSince.status, 400)
-      assert.containSubset(badSince.body, { code: 'request_invalid' })
+      const refused = yield* Effect.forEach(['soon', '-5', '1.5'], (since) =>
+        get(`/events?since=${since}`),
+      )
+      assert.deepStrictEqual(
+        refused.map((reply) => reply.status),
+        [400, 400, 400],
+      )
+      assert.containSubset(refused[1], { body: { code: 'request_invalid' } })
     }),
   )
 })
@@ -4874,7 +5893,9 @@ it.effect('drops the oldest ephemeral events a reader has not taken, and no dura
   Effect.gen(function* outruns() {
     // A source that gives all its events in one go is read to the end before the reader runs
     const events = [event(1, 'a'), event(0, 'd1'), event(0, 'd2'), event(0, 'd3'), event(2, 'b')]
-    const read = yield* Stream.runCollect(buffered(Stream.fromIterable(events), 2))
+    const read = yield* Stream.runCollect(
+      buffered(Stream.fromIterable(events), { capacity: 2, durable: 100 }),
+    )
     assert.deepStrictEqual(idsOf(read), ['a', 'd2', 'd3', 'b'])
   }),
 )
@@ -4906,6 +5927,44 @@ it.effect('stops reading its source once the reader is gone', () =>
     const read = yield* Stream.runCollect(firstOnly)
     assert.deepStrictEqual(idsOf(read), ['a'])
     assert.isTrue(Latch.isOpen(stopped))
+  }),
+)
+
+it.effect(
+  'lets go of a reader that lags too far behind: the stream ends after what waits, with a warning',
+  () =>
+    Effect.gen(function* letsGo() {
+      const lines: LogLine[] = []
+      const logger = Logger.make((options) => {
+        const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
+        lines.push({ level: options.logLevel, category })
+      })
+      // A source that never ends on its own: only the bound ends the stream
+      const events = [event(1, 'a'), event(2, 'b'), event(3, 'c'), event(4, 'd')]
+      const source = Stream.fromIterable(events).pipe(Stream.concat(Stream.never))
+      const read = yield* Stream.runCollect(buffered(source, { capacity: 2, durable: 2 })).pipe(
+        Effect.provide(Logger.layer([logger])),
+      )
+      assert.deepStrictEqual(idsOf(read), ['a', 'b', 'c'])
+      assert.deepStrictEqual(lines, [{ level: 'Warn', category: 'bb.api' }])
+    }),
+)
+
+it.effect('tells at debug level how many ephemeral events a slow reader lost', () =>
+  Effect.gen(function* tellsLost() {
+    const lines: LogLine[] = []
+    const logger = Logger.make((options) => {
+      const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
+      lines.push({ level: options.logLevel, category })
+    })
+    const events = [event(0, 'd1'), event(0, 'd2'), event(0, 'd3')]
+    yield* Stream.runCollect(
+      buffered(Stream.fromIterable(events), { capacity: 1, durable: 10 }),
+    ).pipe(
+      Effect.provide(Logger.layer([logger])),
+      Effect.provideService(References.MinimumLogLevel, 'Debug'),
+    )
+    assert.deepStrictEqual(lines, [{ level: 'Debug', category: 'bb.api' }])
   }),
 )
 ```
@@ -5266,7 +6325,7 @@ import {
 } from '@bytebureau/kernel'
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
-import { projectOf } from '../handlers/found.js'
+import { absolutePath, projectOf } from '../handlers/found.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
@@ -5275,7 +6334,11 @@ export const RpcHandlers = BureauRpcsWithAuth.toLayer({
   'events.subscribe': (filter) =>
     Stream.unwrap(EventLog.use((log) => Effect.succeed(buffered(log.subscribe(filter))))),
   'projects.register': ({ path }) =>
-    orProblem(ProjectRegistry.use((registry) => registry.register(path))),
+    absolutePath(path).pipe(
+      Effect.flatMap((directory) =>
+        orProblem(ProjectRegistry.use((registry) => registry.register(directory))),
+      ),
+    ),
   'projects.remove': ({ id }) =>
     projectOf(id).pipe(
       Effect.flatMap(() => orProblem(ProjectRegistry.use((registry) => registry.remove(id)))),
@@ -5604,7 +6667,7 @@ const refusedWith = (code: string): object => ({
 
 // The other procedures on a ready session, in an order the kernel accepts, and what each answers
 const lifecycle = (sessionId: string): [string, object, object][] => [
-  ['sessions.interrupt', { sessionId }, refusedWith('session_not_found')],
+  ['sessions.interrupt', { sessionId }, refusedWith('session_invalid_transition')],
   ['sessions.stop', { sessionId }, SUCCEEDED],
   ['sessions.resume', { sessionId }, { exit: { value: { id: sessionId, status: 'ready' } } }],
   ['sessions.complete', { sessionId }, SUCCEEDED],
@@ -5648,6 +6711,16 @@ it.layer(ApiTestLayer())('procedures over the WebSocket of /api/v1/ws', (suite) 
       const notFound = { _tag: 'Fail', error: { status: 404, code: 'not_found' } }
       const again = yield* called(client, { ...removal, id: '7' })
       assert.containSubset(again, { requestId: '7', exit: { _tag: 'Failure', cause: [notFound] } })
+    }),
+  )
+
+  suite.effect('refuses a relative project path as the REST API does', () =>
+    Effect.gen(function* refusesRelative() {
+      const client = yield* connected()
+      const payload = { path: 'repo' }
+      const register = { id: '8', tag: 'projects.register', payload, token: TEST_TOKEN }
+      const refused = yield* called(client, register)
+      assert.containSubset(refused, refusedWith('project_path_not_absolute'))
     }),
   )
 
@@ -5785,11 +6858,11 @@ export const RpcMutationLimitLive: Layer.Layer<RpcMutationLimit, never, Mutation
 ```
 `packages/api/src/mutation-buckets.ts` (added during execution):
 ```ts
-import { Context, Effect, Layer, Option } from 'effect'
+import { Clock, Context, Effect, Layer, Option } from 'effect'
 import type { HttpServerRequest } from 'effect/http'
 import { ApiConfig } from './config.js'
 import { problem, type ApiProblem } from './problems.js'
-import { TokenBuckets } from './token-bucket.js'
+import { TokenBuckets, type Verdict } from './token-bucket.js'
 
 // The mutation budgets of the clients: one per client, whichever door it comes through (the REST API or the RPC socket)
 export class MutationBuckets extends Context.Service<MutationBuckets, TokenBuckets>()(
@@ -5800,7 +6873,7 @@ export const MutationBucketsLive: Layer.Layer<MutationBuckets, never, ApiConfig>
   MutationBuckets,
   Effect.gen(function* makeMutationBuckets() {
     const { mutationLimit } = yield* ApiConfig
-    return new TokenBuckets({ ...mutationLimit, now: Date.now })
+    return new TokenBuckets(mutationLimit)
   }),
 )
 
@@ -5808,17 +6881,24 @@ export const MutationBucketsLive: Layer.Layer<MutationBuckets, never, ApiConfig>
 export const clientKey = (request: HttpServerRequest.HttpServerRequest): string =>
   Option.getOrElse(request.remoteAddress, () => 'local')
 
+// The verdict of the budget of the client at the time of the Clock of the request, so a test drives it with the TestClock instead of waiting
+export const takeToken = (buckets: TokenBuckets, key: string): Effect.Effect<Verdict> =>
+  Clock.currentTimeMillis.pipe(Effect.map((now) => buckets.take(key, now)))
+
+// The 429 problem, which says when to retry
+export const rateLimited = (retryAfterSec: number): ApiProblem<429> =>
+  problem(429, 'rate_limited', `retry after ${retryAfterSec} s`)
+
 // A token from the budget of the client, or the 429 problem that says when to retry
 export const drawToken = (
   buckets: TokenBuckets,
   key: string,
 ): Effect.Effect<void, ApiProblem<429>> =>
-  Effect.suspend(() => {
-    const verdict = buckets.take(key)
-    return verdict.allowed
-      ? Effect.void
-      : Effect.fail(problem(429, 'rate_limited', `retry after ${verdict.retryAfterSec} s`))
-  })
+  takeToken(buckets, key).pipe(
+    Effect.flatMap((verdict) =>
+      verdict.allowed ? Effect.void : Effect.fail(rateLimited(verdict.retryAfterSec)),
+    ),
+  )
 ```
 `packages/api/src/rpc/origin.ts` (added during execution):
 ```ts
@@ -6396,7 +7476,7 @@ Root `package.json` scripts: `"generate:client": "bun install --frozen-lockfile 
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.lib.json"
   },
   "dependencies": {
     "@bytebureau/protocol": "workspace:*",
@@ -6650,7 +7730,7 @@ The `as Data` is the one cast the lint will refuse; replace it with a guard (`if
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './errors.js'
-import { broken, frame, serve, status, stream } from './sse-fixture.js'
+import { broken, frame, page, serve, status, stream } from './sse-fixture.js'
 import { subscribeEvents, type SubscribeOptions } from './sse.js'
 
 // The seq of every event until the one that says enough, which is the last one taken
@@ -6742,6 +7822,41 @@ describe('the events of a subscription', () => {
     const events = subscribeEvents({ baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10 })
     await expect(seqNumbersUntil(events, () => true)).resolves.toStrictEqual([4])
     expect(served.requests).toHaveLength(2)
+  })
+})
+
+describe('where a subscription resumes', () => {
+  it('resumes after the last durable event, which a heartbeat after it does not move', async () => {
+    expect.hasAssertions()
+    const served = await serve([
+      stream(frame(1, 'a') + frame(2, 'b') + frame(0, 'heartbeat')),
+      stream(frame(3, 'c')),
+    ])
+    const options = { baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10 }
+    const numbers = seqNumbersUntil(subscribeEvents(options), (event) => event.seq === 3)
+    await expect(numbers).resolves.toStrictEqual([1, 2, 0, 3])
+    expect(served.requests.map((request) => request.lastEventId)).toStrictEqual([undefined, '2'])
+  })
+
+  it('counts an answer of 200 that is no event stream as a failed attempt', async () => {
+    expect.hasAssertions()
+    const proxied = await serve([page])
+    const options = { baseUrl: proxied.url, token: 'tok', filter: {}, backoffMs: 10, retryFor: 200 }
+    await expect(failureOf(options)).resolves.toMatchObject({ status: 0 })
+  })
+
+  it('starts the pauses and the time it may keep failing over once a connection opens', async () => {
+    expect.hasAssertions()
+    // Five failed attempts take about 300 ms, and so do four after the connection that opens between them
+    const served = await serve([
+      ...Array.from({ length: 5 }, () => broken),
+      stream(frame(1, 'a')),
+      ...Array.from({ length: 4 }, () => broken),
+      stream(frame(2, 'b')),
+    ])
+    const options = { baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10, retryFor: 400 }
+    const numbers = seqNumbersUntil(subscribeEvents(options), (event) => event.seq === 2)
+    await expect(numbers).resolves.toStrictEqual([1, 2])
   })
 })
 
@@ -6957,6 +8072,12 @@ const messagesOf = (
   }
 }
 
+// The stream and nothing else: a 2xx of another kind, such as the page of a proxy, is a failed attempt as well
+const isStream = (response: Response): boolean =>
+  response.ok &&
+  response.body !== null &&
+  (response.headers.get('content-type') ?? '').startsWith('text/event-stream')
+
 // What an answer that is not the stream fails the attempt with: an ApiError when asking again will not help
 const refusalOf = async (response: Response, url: string): Promise<Error> => {
   if (isFinal(response.status)) {
@@ -6965,7 +8086,7 @@ const refusalOf = async (response: Response, url: string): Promise<Error> => {
   if (response.body !== null) {
     await response.body.cancel()
   }
-  return new Error(`the daemon answered ${response.status}`)
+  return new Error(`the daemon answered ${response.status} without the event stream`)
 }
 
 // One connection, open: the daemon answered with the stream, so the next failure starts a new count
@@ -6976,7 +8097,7 @@ const opened = async (url: string, state: State): Promise<AsyncIterable<EventSou
     ...(signal === undefined ? {} : { signal }),
   }
   const response = await fetchImpl(url, init)
-  if (!response.ok || response.body === null) {
+  if (!isStream(response) || response.body === null) {
     throw await refusalOf(response, url)
   }
   state.backoff = undefined
@@ -7312,14 +8433,14 @@ export const errorOf = (cause: readonly CausePart[], url: string): Error => {
 ```ts
 import { ApiError } from '../errors.js'
 import { encodeAck, encodePing, errorOf, type ExitMessage } from './codec.js'
-import { Link, type Exchange, type RequestMessage, type Stop } from './link.js'
+import { Link, type Exchange, type RequestMessage, type SocketLike, type Stop } from './link.js'
 
 export interface RpcOptions {
   // The url of the socket: ws://<host>:<port>/api/v1/ws
   readonly url: string
   readonly token: string
   // The constructor to open the socket with; the global WebSocket by default
-  readonly WebSocket?: typeof WebSocket | undefined
+  readonly WebSocket?: (new (url: string) => SocketLike) | undefined
   readonly pingMs?: number | undefined
 }
 
@@ -7380,6 +8501,7 @@ function* untilAborted(values: readonly unknown[], signal: AbortSignal): Generat
 }
 
 // Each chunk is acknowledged once its values are taken, so the daemon sends the next one only as fast as they are read
+// A chunk the signal cut short is not acknowledged: the request is over
 async function* valuesOf(link: Link, exchange: Exchange, signal: AbortSignal): AsyncGenerator {
   for await (const message of exchange.inbox) {
     if (!('values' in message)) {
@@ -7387,11 +8509,14 @@ async function* valuesOf(link: Link, exchange: Exchange, signal: AbortSignal): A
       return
     }
     yield* untilAborted(message.values, signal)
+    if (signal.aborted) {
+      return
+    }
     link.send(encodeAck(exchange.id))
   }
 }
 
-// Leaving early, or an aborted signal, interrupts the request on the daemon
+// Leaving early, or an aborted signal, interrupts the request on the daemon; an abort does at once, whether or not the values are being read
 async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): AsyncGenerator {
   const watched = signal ?? new AbortController().signal
   if (watched.aborted) {
@@ -7399,6 +8524,7 @@ async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): A
   }
   const exchange = link.open(tag, payload)
   const stop = (): void => {
+    exchange.release()
     exchange.inbox.push(STOPPED)
   }
   watched.addEventListener('abort', stop, { once: true })
@@ -7411,7 +8537,7 @@ async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): A
 }
 
 // Resolves once the socket is open; a socket that fails or closes first is a daemon that cannot be reached
-const opened = async (socket: WebSocket, url: string): Promise<boolean> => {
+const opened = async (socket: SocketLike, url: string): Promise<boolean> => {
   const { promise, resolve, reject } = Promise.withResolvers<boolean>()
   const unreachable = (): void => {
     reject(new ApiError(0, undefined, url))
@@ -7435,7 +8561,8 @@ const opened = async (socket: WebSocket, url: string): Promise<boolean> => {
  * Rejects with an ApiError of status 0 when the socket does not open.
  */
 export async function connectRpc(options: RpcOptions): Promise<RpcConnection> {
-  const { url, token, WebSocket: Socket = WebSocket, pingMs = PING_MS } = options
+  const { url, token, pingMs = PING_MS } = options
+  const Socket: new (address: string) => SocketLike = options.WebSocket ?? WebSocket
   const socket = new Socket(url)
   const link = new Link(socket, url, token)
   await opened(socket, url)
@@ -7452,6 +8579,7 @@ export async function connectRpc(options: RpcOptions): Promise<RpcConnection> {
     },
     stream: (tag, payload, signal) => streamed(link, { tag, payload, signal }),
     close: () => {
+      clearInterval(ping)
       link.close(new Error('the connection is closed'))
     },
   }
@@ -7598,8 +8726,8 @@ it.layer(ApiTestLayer())('the sessions of the API through @bytebureau/client', (
     Effect.gen(function* stops() {
       const api = yield* client
       const { session } = yield* createdWith(api)
-      const notFound = { status: 404, problem: { code: 'session_not_found' } }
-      assert.containSubset(yield* refused(api.sessions.interrupt(session.id)), notFound)
+      const idle = { status: 409, problem: { code: 'session_invalid_transition' } }
+      assert.containSubset(yield* refused(api.sessions.interrupt(session.id)), idle)
       yield* awaited(api.sessions.stop(session.id))
       assert.containSubset(yield* awaited(api.sessions.get(session.id)), { status: 'stopped' })
       const resumed = yield* awaited(api.sessions.resume(session.id))
@@ -7702,6 +8830,17 @@ export interface Stop {
 
 export type RequestMessage = ChunkMessage | ExitMessage | Stop
 
+// What a connection needs of a WebSocket, which the global one of a browser, Node or Bun has
+export interface SocketLike {
+  readonly addEventListener: (
+    type: 'message' | 'open' | 'close' | 'error',
+    listener: (event: Event) => void,
+    options?: { readonly once?: boolean },
+  ) => void
+  readonly send: (data: string) => void
+  readonly close: () => void
+}
+
 // The messages of one request in the order they came: the link pushes, the request takes them one at a time
 export interface Inbox extends AsyncIterable<RequestMessage> {
   readonly push: (message: RequestMessage) => void
@@ -7750,7 +8889,7 @@ export interface Exchange {
 /** The socket as the requests of one connection see it: each request has an inbox its messages are routed to. */
 export class Link {
   public readonly url: string
-  private readonly socket: WebSocket
+  private readonly socket: SocketLike
   private readonly token: string
   // The requests the daemon has not ended yet, by id
   private readonly requests = new Map<string, Inbox>()
@@ -7762,12 +8901,12 @@ export class Link {
    * @param url The url of the socket, which the errors name.
    * @param token The bearer token every request carries in its headers.
    */
-  public constructor(socket: WebSocket, url: string, token: string) {
+  public constructor(socket: SocketLike, url: string, token: string) {
     this.socket = socket
     this.url = url
     this.token = token
     socket.addEventListener('message', (event) => {
-      this.receive(event.data)
+      this.receive(Reflect.get(event, 'data'))
     })
     socket.addEventListener('close', () => {
       this.end(new ApiError(0, undefined, url))
@@ -8046,6 +9185,12 @@ export const status =
 // A connection that breaks before any answer
 export const broken: Step = (response) => {
   response.destroy()
+}
+
+// A page that is no event stream, as a proxy in the way would answer
+export const page: Step = (response) => {
+  response.writeHead(200, { 'content-type': 'text/html' })
+  response.end('<html><body>sign in to the proxy</body></html>')
 }
 ```
 `packages/api/src/testing-client.ts` (added during execution):
@@ -8411,7 +9556,7 @@ describe(boundAddress, () => {
 import { Config, kernelLogger, nowIso, PluginHost, SessionManager } from '@bytebureau/kernel'
 import { kernelBunLayer, type KernelOptions } from '@bytebureau/kernel/bun'
 import { BunHttpServer } from '@effect/platform-bun'
-import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
+import { Cause, Effect, Exit, Layer, ManagedRuntime, Redacted } from 'effect'
 import { HttpServer } from 'effect/http'
 import { boundAddress, type BoundAddress } from './bun-address.js'
 import { DEFAULT_API_OPTIONS } from './config.js'
@@ -8548,6 +9693,15 @@ interface Built {
   readonly requested: Requested
 }
 
+// A socket still open when the daemon stops leaves only the interruption of its fiber behind: that is a clean close
+// Any other failure of the close is the daemon's own and goes on to the caller
+const disposed = async (runtime: DaemonRuntime): Promise<void> => {
+  const exit = await Effect.runPromiseExit(runtime.disposeEffect)
+  if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+    throw Cause.squash(exit.cause)
+  }
+}
+
 // The kernel, the boot, the Bun server and the API as one runtime, built in that order
 const buildRuntime = (options: DaemonOptions, kernel: KernelLayer, startedAt: string): Built => {
   const requested: Requested = {
@@ -8576,7 +9730,7 @@ export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon
       address,
       startedAt,
       close: async () => {
-        await runtime.dispose()
+        await disposed(runtime)
       },
     }
   } catch (error) {
@@ -8597,8 +9751,12 @@ import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
 import {
   isAlive,
+  lockHolder,
+  lockPath,
+  pidState,
   readServerInfo,
   removeServerInfo,
+  removeServerInfoIf,
   serverInfoPath,
   writeServerInfo,
 } from './server-info.js'
@@ -8616,6 +9774,9 @@ const info = {
 const DEAD_PID = 2_147_483_000
 
 const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+// Pid 1 is another user's to everyone but root, who may signal it
+const ROOT = typeof process.getuid === 'function' && process.getuid() === 0
 
 describe('server.json', () => {
   it('is written for the user alone and read back', () => {
@@ -8645,13 +9806,45 @@ describe('server.json', () => {
     writeFileSync(serverInfoPath(home), 'not json')
     expect(readServerInfo(home)).toStrictEqual({ state: 'stale' })
   })
+})
 
+describe('the pids and the lock of a home', () => {
   it('knows a live pid from a dead one', () => {
     expect(isAlive(process.pid)).toBe(true)
     expect(isAlive(DEAD_PID)).toBe(false)
     // Signal 0 to pid 0 or -1 would reach a whole group of processes: neither is a daemon
     expect(isAlive(0)).toBe(false)
     expect(isAlive(-1)).toBe(false)
+  })
+
+  it.skipIf(ROOT)('tells a live pid of another user, which counts as alive', () => {
+    expect([pidState(1), pidState(process.pid), pidState(DEAD_PID)]).toStrictEqual([
+      'foreign',
+      'alive',
+      'dead',
+    ])
+    expect(isAlive(1)).toBe(true)
+  })
+
+  it('removes a record only when the check passes on the record that is there', () => {
+    const home = tempDir('bb-home-')
+    writeServerInfo(home, info)
+    expect(removeServerInfoIf(home, (record) => record.state === 'stale')).toBe(false)
+    writeServerInfo(home, { ...info, pid: DEAD_PID })
+    expect(removeServerInfoIf(home, (record) => record.state === 'stale')).toBe(true)
+    expect([readServerInfo(home), removeServerInfoIf(home, () => true)]).toStrictEqual([
+      { state: 'absent' },
+      false,
+    ])
+  })
+
+  it('reads the pid the lock names, and none from a lock that names none', () => {
+    const home = tempDir('bb-home-')
+    expect(lockHolder(home)).toBeUndefined()
+    writeFileSync(lockPath(home), '4242\n')
+    expect(lockHolder(home)).toBe(4242)
+    writeFileSync(lockPath(home), 'not a pid')
+    expect(lockHolder(home)).toBeUndefined()
   })
 })
 ```
@@ -8731,22 +9924,17 @@ Expected: FAIL — the modules do not exist.
 
 `apps/bytebureau/src/daemon/server-info.ts`:
 ```ts
-import {
-  chmodSync,
-  linkSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
 import path from 'node:path'
 import { decodeServerInfo, type ServerInfo } from '@bytebureau/protocol'
+import { codeOf, pidIn, readIfThere, removeIfSame, removeIfThere, stampOf } from './files.js'
 import { writePrivateFile } from './private-file.js'
 
 export const serverInfoPath = (home: string): string => path.join(home, 'server.json')
 
 export const lockPath = (home: string): string => path.join(home, 'daemon.lock')
+
+// The pid the lock of the home names, if it names one
+export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
 
 export type ServerRecord =
   | { readonly state: 'absent' }
@@ -8754,47 +9942,23 @@ export type ServerRecord =
   // The daemon the file names is gone, or the file is no record at all
   | { readonly state: 'stale'; readonly info?: ServerInfo }
 
-export type LockOutcome =
-  | { readonly acquired: true }
-  | { readonly acquired: false; readonly pid: number }
+// What signal 0 tells of a pid: a dead one throws ESRCH, a live one of another user EPERM, which this user cannot look into
+export type PidState = 'dead' | 'alive' | 'foreign'
 
-const codeOf = (error: unknown): unknown =>
-  error instanceof Error && 'code' in error ? error.code : undefined
-
-// Signal 0 tests the pid: a dead one throws ESRCH, a live one of another user EPERM; 0 and below would name a group of processes
-export const isAlive = (pid: number): boolean => {
+// Pid 0 and below would name a group of processes
+export const pidState = (pid: number): PidState => {
   if (!Number.isInteger(pid) || pid <= 0) {
-    return false
+    return 'dead'
   }
   try {
     process.kill(pid, 0)
-    return true
+    return 'alive'
   } catch (error) {
-    return codeOf(error) === 'EPERM'
+    return codeOf(error) === 'EPERM' ? 'foreign' : 'dead'
   }
 }
 
-// The text of the file, or nothing when there is no file
-const readIfThere = (file: string): string | undefined => {
-  try {
-    return readFileSync(file, 'utf8')
-  } catch (error) {
-    if (codeOf(error) === 'ENOENT') {
-      return undefined
-    }
-    throw error
-  }
-}
-
-const removeIfThere = (file: string): void => {
-  try {
-    unlinkSync(file)
-  } catch (error) {
-    if (codeOf(error) !== 'ENOENT') {
-      throw error
-    }
-  }
-}
+export const isAlive = (pid: number): boolean => pidState(pid) !== 'dead'
 
 const decoded = (text: string): ServerInfo | undefined => {
   try {
@@ -8805,8 +9969,7 @@ const decoded = (text: string): ServerInfo | undefined => {
   }
 }
 
-export const readServerInfo = (home: string): ServerRecord => {
-  const text = readIfThere(serverInfoPath(home))
+const recordIn = (text: string | undefined): ServerRecord => {
   if (text === undefined) {
     return { state: 'absent' }
   }
@@ -8817,6 +9980,9 @@ export const readServerInfo = (home: string): ServerRecord => {
   return isAlive(info.pid) ? { state: 'alive', info } : { state: 'stale', info }
 }
 
+export const readServerInfo = (home: string): ServerRecord =>
+  recordIn(readIfThere(serverInfoPath(home)))
+
 export const writeServerInfo = (home: string, info: ServerInfo): void => {
   writePrivateFile(serverInfoPath(home), `${JSON.stringify(info, undefined, 2)}\n`)
 }
@@ -8825,109 +9991,20 @@ export const removeServerInfo = (home: string): void => {
   removeIfThere(serverInfoPath(home))
 }
 
-// The pid a lock file names, if it names one
-const pidIn = (file: string): number | undefined => {
-  const text = readIfThere(file)
-  const pid = Number(text === undefined ? undefined : text.trim())
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined
-}
-
-// The lock appears with the pid already in it: written aside, then linked into place, which fails when a lock is there
-const tryLock = (home: string): boolean => {
-  const draft = `${lockPath(home)}.${process.pid}`
-  writeFileSync(draft, String(process.pid), { mode: 0o600 })
-  chmodSync(draft, 0o600)
-  try {
-    linkSync(draft, lockPath(home))
-    return true
-  } catch (error) {
-    if (codeOf(error) === 'EEXIST') {
-      return false
-    }
-    throw error
-  } finally {
-    unlinkSync(draft)
-  }
-}
-
-// False when another taker moved the lock first
-const movedAside = (lock: string, aside: string): boolean => {
-  try {
-    renameSync(lock, aside)
-    return true
-  } catch (error) {
-    if (codeOf(error) === 'ENOENT') {
-      return false
-    }
-    throw error
-  }
-}
-
-// Back where its holder expects it, never over a lock made since
-const putBack = (aside: string, lock: string): void => {
-  try {
-    linkSync(aside, lock)
-  } catch (error) {
-    if (codeOf(error) !== 'EEXIST') {
-      throw error
-    }
-  } finally {
-    unlinkSync(aside)
-  }
-}
-
 /**
- * Takes a lock whose holder was seen gone out of the way, as one round of acquireLock.
- * A rename moves it, which only one taker can win, and only what was moved is judged: the lock of a holder that is gone is removed (undefined, the caller tries again); a lock a live process made since it was read is put back and names that process.
+ * Removes server.json if the record it holds now passes the check, and only that record: one a daemon has written since
+ * the file was read stays. Read, judged and removed as one file, by its inode.
  */
-export const takeOverLock = (home: string): LockOutcome | undefined => {
-  const aside = `${lockPath(home)}.${process.pid}.stale`
-  if (!movedAside(lockPath(home), aside)) {
-    return undefined
+export const removeServerInfoIf = (
+  home: string,
+  check: (record: ServerRecord) => boolean,
+): boolean => {
+  const file = serverInfoPath(home)
+  const stamp = stampOf(file)
+  if (stamp === undefined || !check(recordIn(readIfThere(file)))) {
+    return false
   }
-  const holder = pidIn(aside)
-  if (holder === undefined || !isAlive(holder)) {
-    unlinkSync(aside)
-    return undefined
-  }
-  putBack(aside, lockPath(home))
-  return { acquired: false, pid: holder }
-}
-
-// Rounds before a lock that keeps changing hands is given up on; racing takers settle within a round or two
-const ROUNDS = 5
-
-// Each round takes the lock, names its live holder, or moves the lock of a holder that is gone out of the way and goes again
-const lockOf = (home: string, rounds: number): LockOutcome => {
-  if (tryLock(home)) {
-    return { acquired: true }
-  }
-  const holder = pidIn(lockPath(home))
-  const refused: LockOutcome | undefined =
-    holder !== undefined && isAlive(holder) ? { acquired: false, pid: holder } : takeOverLock(home)
-  if (refused !== undefined) {
-    return refused
-  }
-  if (rounds <= 1) {
-    throw new Error(`the lock ${lockPath(home)} keeps changing hands; try again`)
-  }
-  return lockOf(home, rounds - 1)
-}
-
-// One daemon per home, decided atomically: a live holder is named, and a lock whose holder is gone, or that names none, is taken over
-export const acquireLock = (home: string): LockOutcome => {
-  mkdirSync(home, { recursive: true, mode: 0o700 })
-  return lockOf(home, ROUNDS)
-}
-
-// The pid the lock of the home names, if it names one
-export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
-
-// Only the lock of this process is released: a lock another daemon has taken over is that daemon's
-export const releaseLock = (home: string): void => {
-  if (lockHolder(home) === process.pid) {
-    removeIfThere(lockPath(home))
-  }
+  return removeIfSame(file, stamp)
 }
 ```
 Sort the `node:fs` import names as the lint wants (`sort-imports` is off, `import/order` may not be; follow oxfmt).
@@ -8993,12 +10070,27 @@ export const daemonExecArgs = (current: ProcessLike, extra: readonly string[]): 
 
 `apps/bytebureau/src/daemon/spawn.ts`:
 ```ts
-import { spawn } from 'node:child_process'
-import { closeSync, mkdirSync, openSync } from 'node:fs'
-import path from 'node:path'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { closeSync, openSync } from 'node:fs'
+import { daemonLogPath, rotateDaemonLog } from './daemon-log.js'
 import { daemonExecArgs } from './exec-args.js'
 
-export const daemonLogPath = (home: string): string => path.join(home, 'logs', 'daemon.log')
+// The process of a daemon started detached, as far as its starter follows it
+export interface DaemonChild {
+  // True once the process has ended, which a daemon that serves never does
+  readonly ended: () => boolean
+}
+
+// The end of the process, which this one does not wait for
+const followed = (child: ChildProcess): DaemonChild => {
+  const state = { ended: false }
+  const end = (): void => {
+    state.ended = true
+  }
+  child.once('exit', end).once('error', end)
+  child.unref()
+  return { ended: () => state.ended }
+}
 
 // The daemon starts in its own process group with nothing of this terminal: its output goes to the log of the home
 // The child holds its own copy of the log, so this process lets go of its own at once
@@ -9006,8 +10098,8 @@ export const spawnDaemon = (
   home: string,
   env: Readonly<Record<string, string | undefined>>,
   extra: readonly string[],
-): number | undefined => {
-  mkdirSync(path.dirname(daemonLogPath(home)), { recursive: true, mode: 0o700 })
+): DaemonChild => {
+  rotateDaemonLog(home)
   const log = openSync(daemonLogPath(home), 'a', 0o600)
   try {
     const { command, args } = daemonExecArgs(process, extra)
@@ -9020,8 +10112,7 @@ export const spawnDaemon = (
       // No console window of its own on Windows; ignored elsewhere
       windowsHide: true,
     })
-    child.unref()
-    return child.pid
+    return followed(child)
   } finally {
     closeSync(log)
   }
@@ -9030,7 +10121,6 @@ export const spawnDaemon = (
 
 `apps/bytebureau/src/daemon/wait.ts`:
 ```ts
-import { setTimeout as sleep } from 'node:timers/promises'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { readServerInfo } from './server-info.js'
 
@@ -9056,37 +10146,25 @@ export const runningDaemon = async (home: string): Promise<ServerInfo | undefine
   const record = readServerInfo(home)
   return record.state === 'alive' && (await daemonAnswers(record.info)) ? record.info : undefined
 }
-
-const poll = async (home: string, deadline: number): Promise<ServerInfo | undefined> => {
-  const running = await runningDaemon(home)
-  if (running !== undefined || Date.now() >= deadline) {
-    return running
-  }
-  await sleep(100)
-  return poll(home, deadline)
-}
-
-// The daemon is up once server.json names it and it answers; a daemon that takes longer than the limit is given up on
-export const waitForDaemon = async (
-  home: string,
-  timeoutMs = 10_000,
-): Promise<ServerInfo | undefined> => {
-  const running = await poll(home, Date.now() + timeoutMs)
-  return running
-}
 ```
 Note `BYTEBUREAU_HOME` of the child is the resolved home, so a relative `BYTEBUREAU_HOME` of the parent still means the same directory. `await` inside the loop is intended (`no-await-in-loop` is an oxlint rule: disable it for that line with a comment that says why, or write the loop with a recursive helper).
 
 `apps/bytebureau/src/daemon/stop.ts`:
 ```ts
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isAlive, readServerInfo, removeServerInfo } from './server-info.js'
-import { daemonAnswers } from './wait.js'
+import { JUDGING, type Judging } from './lock-holder.js'
+import { clearStaleLock } from './lock.js'
+import { isAlive, readServerInfo, removeServerInfoIf, type ServerRecord } from './server-info.js'
+import { daemonAnswers, runningDaemon } from './wait.js'
 
 export type StopOutcome =
   | { readonly outcome: 'stopped'; readonly pid: number }
   | { readonly outcome: 'not_running' }
   | { readonly outcome: 'still_running'; readonly pid: number }
+  // The lock of a process that is no daemon of the home, which kept every daemon out
+  | { readonly outcome: 'cleared'; readonly pid: number }
+  // A daemon of the home holds the lock but does not answer: stopped or busy, it is neither signalled nor cleared
+  | { readonly outcome: 'silent'; readonly pid: number }
 
 const ended = async (pid: number, deadline: number): Promise<boolean> => {
   const alive = isAlive(pid)
@@ -9108,12 +10186,15 @@ const terminate = (pid: number): void => {
   }
 }
 
+// A record whose pid is gone, or a file that is no record: one a daemon has written since it was read stays
+const isStale = (record: ServerRecord): boolean => record.state === 'stale'
+
 // The record of the daemon that ended, unless a daemon started since has written its own
 const forget = (home: string, pid: number): void => {
-  const record = readServerInfo(home)
-  if (record.state === 'stale' && (record.info === undefined || record.info.pid === pid)) {
-    removeServerInfo(home)
-  }
+  removeServerInfoIf(
+    home,
+    (record) => record.state === 'stale' && (record.info === undefined || record.info.pid === pid),
+  )
 }
 
 // SIGTERM, then the wait for the pid to end; the record goes once it has
@@ -9126,21 +10207,57 @@ const terminated = async (home: string, pid: number, timeoutMs: number): Promise
   return { outcome: 'stopped', pid }
 }
 
-// SIGTERM lets the daemon end its sessions and remove its record; it goes only to a daemon that answers as its record says
-// A record is removed only once its pid is gone: a live pid that does not answer is neither signalled nor forgotten
-// Such a pid is a daemon shutting down or stalled, or a process that took over the pid of a stale record
-export const stopDaemon = async (home: string, timeoutMs = 5000): Promise<StopOutcome> => {
-  const record = readServerInfo(home)
-  if (record.state !== 'alive') {
-    removeServerInfo(home)
+// The daemon that holds the lock, once it answers as its record says; one still on its way up is waited for within the limit
+const answering = async (home: string, pid: number, deadline: number): Promise<boolean> => {
+  const running = await runningDaemon(home)
+  if (running !== undefined && running.pid === pid) {
+    return true
+  }
+  if (Date.now() >= deadline) {
+    return false
+  }
+  await sleep(100)
+  return answering(home, pid, deadline)
+}
+
+interface Stopping {
+  readonly timeoutMs: number
+  readonly judging: Judging
+}
+
+// No daemon answers as its record says: the lock tells whether one is on its way up, or whether a process that is no daemon of the home keeps every daemon out
+const byTheLock = async (home: string, { timeoutMs, judging }: Stopping): Promise<StopOutcome> => {
+  const lock = await clearStaleLock(home, judging)
+  if (lock.kind === 'none') {
     return { outcome: 'not_running' }
   }
-  const { pid } = record.info
-  if (!(await daemonAnswers(record.info))) {
-    return { outcome: 'still_running', pid }
+  if (lock.kind === 'cleared') {
+    return { outcome: 'cleared', pid: lock.pid }
   }
-  const outcome = await terminated(home, pid, timeoutMs)
-  return outcome
+  if (lock.kind === 'silent' || !(await answering(home, lock.pid, Date.now() + timeoutMs))) {
+    return { outcome: 'silent', pid: lock.pid }
+  }
+  return terminated(home, lock.pid, timeoutMs)
+}
+
+/**
+ * SIGTERM lets the daemon end its sessions and remove its record; it goes only to a daemon that answers as its record says.
+ * A record is removed only once its pid is gone: a live pid that does not answer is never signalled.
+ * Without a daemon that answers, the lock decides: a daemon still on its way up is stopped once it answers, one that does
+ * not answer keeps its lock, and the lock of a process that is no daemon of the home (a pid taken over after a crash or a
+ * reboot) is cleared.
+ */
+export const stopDaemon = async (
+  home: string,
+  timeoutMs = 5000,
+  judging: Judging = JUDGING,
+): Promise<StopOutcome> => {
+  const record = readServerInfo(home)
+  if (record.state === 'alive' && (await daemonAnswers(record.info))) {
+    return terminated(home, record.info.pid, timeoutMs)
+  }
+  removeServerInfoIf(home, isStale)
+  return byTheLock(home, { timeoutMs, judging })
 }
 ```
 
@@ -9149,8 +10266,10 @@ export const stopDaemon = async (home: string, timeoutMs = 5000): Promise<StopOu
 import { PortInUseError, startDaemon, type RunningDaemon } from '@bytebureau/api/bun'
 import type { Context } from '../context.js'
 import { version } from '../version.js'
+import { keptBy } from './lock-lines.js'
+import { acquireLock, releaseLock } from './lock.js'
 import { publish } from './publish.js'
-import { acquireLock, releaseLock, removeServerInfo } from './server-info.js'
+import { removeServerInfoIf } from './server-info.js'
 import { tokenFor } from './token.js'
 
 export interface ForegroundOptions {
@@ -9195,11 +10314,16 @@ async function started(
   }
 }
 
+// Only the record of this daemon goes: one a daemon that took the lock over has written since is that daemon's
 async function closed(daemon: RunningDaemon, home: string): Promise<void> {
   try {
     await daemon.close()
   } finally {
-    removeServerInfo(home)
+    removeServerInfoIf(
+      home,
+      (record) =>
+        record.state !== 'absent' && record.info !== undefined && record.info.pid === process.pid,
+    )
   }
 }
 
@@ -9226,9 +10350,9 @@ export async function serveForeground(
   options: ForegroundOptions,
   context: Context,
 ): Promise<number> {
-  const lock = acquireLock(options.home)
+  const lock = await acquireLock(options.home)
   if (!lock.acquired) {
-    context.output.warn(`a daemon is already running (pid ${lock.pid})`)
+    context.output.warn(keptBy(lock.holder, options.home, lock.pid))
     return 1
   }
   try {
@@ -9247,11 +10371,12 @@ The lock is released on every way out (a failed `startDaemon` included — wrap 
 ```ts
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { globalArgs, processContext, type Context } from '../context.js'
+import { commonArgs, portOf, processContext, refuseBureauFlags, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
-import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
-import { stopDaemon } from '../daemon/stop.js'
-import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
+import { startDetached as started } from '../daemon/start.js'
+import { lockPath } from '../daemon/server-info.js'
+import { stopDaemon, type StopOutcome } from '../daemon/stop.js'
+import { runningDaemon } from '../daemon/wait.js'
 import { kernelHome } from '../kernel-home.js'
 
 interface ServeFlags {
@@ -9259,21 +10384,6 @@ interface ServeFlags {
   readonly port?: string | undefined
   readonly 'log-level'?: string | undefined
   readonly debug?: string | undefined
-}
-
-const usageError = (message: string): Error =>
-  Object.assign(new Error(message), { name: 'CLIError' })
-
-// A port is a whole number up to 65535; 0 asks for a free one
-const portOf = (text: string | undefined): number | undefined => {
-  if (text === undefined) {
-    return undefined
-  }
-  const port = Number(text)
-  if (!/^\d+$/u.test(text) || port > 65_535) {
-    throw usageError(`--port takes a whole number from 0 to 65535, not ${text}`)
-  }
-  return port
 }
 
 // What the detached daemon is started with: the address and the logging of this command
@@ -9285,29 +10395,44 @@ const flagsOf = (flags: ServeFlags): string[] => [
   ...(flags.debug === undefined ? [] : [`--debug=${flags.debug}`]),
 ]
 
-// A daemon that is not running is what was asked for; one that outlives the wait is a failure
+// What a stop that leaves the daemon running says: one that did not end in time, or one that does not answer
+const kept = (result: Extract<StopOutcome, { pid: number }>, home: string): string =>
+  result.outcome === 'silent'
+    ? m.serve_lock_silent({ lock: lockPath(home), pid: result.pid })
+    : m.serve_still_running({ pid: result.pid })
+
+const stopped = (
+  result: Exclude<StopOutcome, { outcome: 'still_running' } | { outcome: 'silent' }>,
+): string => {
+  if (result.outcome === 'stopped') {
+    return m.serve_stopped({ pid: result.pid })
+  }
+  return result.outcome === 'cleared'
+    ? m.serve_lock_cleared({ pid: result.pid })
+    : m.serve_not_running()
+}
+
+// A daemon that is not running is what was asked for, and so is a lock cleared that no daemon of the home held
+// One that outlives the wait, or that holds the lock without answering, is a failure: it goes on running
 async function stop(home: string, context: Context): Promise<number> {
   const result = await stopDaemon(home)
   context.output.emit({ command: 'serve.stop', ...result })
-  if (result.outcome === 'still_running') {
-    context.output.warn(m.serve_still_running({ pid: result.pid }))
+  if (result.outcome === 'still_running' || result.outcome === 'silent') {
+    context.output.warn(kept(result, home))
     return 1
   }
-  context.output.print(
-    result.outcome === 'stopped' ? m.serve_stopped({ pid: result.pid }) : m.serve_not_running(),
-  )
+  context.output.print(stopped(result))
   return 0
 }
 
+// A start that fails says why at once, naming the log or the lock
 async function startDetached(home: string, flags: ServeFlags, context: Context): Promise<number> {
-  spawnDaemon(home, process.env, flagsOf(flags))
-  const info = await waitForDaemon(home)
-  if (info === undefined) {
-    context.output.warn(m.serve_timeout({ log: daemonLogPath(home) }))
+  const start = await started(home, process.env, flagsOf(flags))
+  if (!start.up) {
+    context.output.warn(start.reason)
     return 1
   }
-  // The record names the host clients use; a wildcard bind is known here by the flag alone
-  announce(info, context, flags.host ?? info.host)
+  announce(start.info, context)
   return 0
 }
 
@@ -9344,7 +10469,7 @@ export const serveCommand = defineCommand({
     description: 'Start the ByteBureau daemon (detached unless --no-daemonize)',
   },
   args: {
-    ...globalArgs,
+    ...commonArgs,
     host: {
       type: 'string',
       description: 'Address to listen on (default: 127.0.0.1 or server.host)',
@@ -9360,7 +10485,9 @@ export const serveCommand = defineCommand({
     },
     stop: { type: 'boolean', description: 'Stop the running daemon of this home', default: false },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
+    // The daemon itself: --host and --port say where it listens, and no other daemon is talked to
+    refuseBureauFlags('serve', rawArgs, ['--host', '--port'])
     const context = processContext(args)
     const home = kernelHome(process.env)
     process.exitCode = args.stop ? await stop(home, context) : await serve(home, args, context)
@@ -9374,12 +10501,14 @@ New messages (`en.json` / `cs.json`): `serve_started` = "Daemon listening on {ur
 `apps/bytebureau/src/testing/daemon.ts`:
 ```ts
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
 import { isAlive, lockHolder, readServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
+import { listening } from './listening.js'
 import { childEnv } from './run-cli.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
@@ -9431,7 +10560,58 @@ const recordOf = async (
   return recordOf(home, child, deadline)
 }
 
+const ended = async (pid: number, deadline: number): Promise<boolean> => {
+  const alive = isAlive(pid)
+  if (!alive || Date.now() >= deadline) {
+    return !alive
+  }
+  await sleep(100)
+  return ended(pid, deadline)
+}
+
+// A pid that ended meanwhile has nothing left to signal
+const signal = (pid: number, name: NodeJS.Signals): void => {
+  try {
+    process.kill(pid, name)
+  } catch {
+    // Gone already
+  }
+}
+
+// Processes a lock that a test wrote names, standing in for one that got the pid of a daemon: never signalled
+const UNTOUCHABLE: ReadonlySet<number> = new Set([1, process.pid, process.ppid])
+
+// The daemon of the home ends with the test: as --stop ends it, else through the pid of its lock, which a daemon holds from its start on
+// One that does not end within the wait is killed; the waits together stay within the 10 s a test hook is given
+export async function stopDaemonOf(home: string): Promise<void> {
+  await stopDaemon(home, 3000, { graceMs: 500, bootMs: 30_000 })
+  const holder = lockHolder(home)
+  if (holder === undefined || UNTOUCHABLE.has(holder) || !isAlive(holder)) {
+    return
+  }
+  signal(holder, 'SIGTERM')
+  if (!(await ended(holder, Date.now() + 3000))) {
+    signal(holder, 'SIGKILL')
+  }
+}
+
+// A daemon that a command starts on demand ends with the test, should an assertion fail before the test stops it
+export function stoppedWithTheTest(home: string): void {
+  onTestFinished(async () => {
+    await stopDaemonOf(home)
+  })
+}
+
+// The child is killed when the test ends, and a daemon that a command started on demand once the child was gone is stopped
+function endedWithTheTest(child: ChildProcess, home: string): void {
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  stoppedWithTheTest(home)
+}
+
 // A foreground daemon of the home, run from source; killed when the test ends if it is still there
+// A command that finds it gone starts another on demand, which ends with the test as well
 // The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
 export async function startDaemonProcess(
   home: string,
@@ -9442,9 +10622,7 @@ export async function startDaemonProcess(
     env: childEnv({ BYTEBUREAU_HOME: home }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  onTestFinished(() => {
-    child.kill('SIGKILL')
-  })
+  endedWithTheTest(child, home)
   const output = captured(child)
   const { promise: exited, resolve } = Promise.withResolvers<number | null>()
   child.once('close', (code) => {
@@ -9469,36 +10647,29 @@ export async function startDaemonProcess(
   }
 }
 
-const ended = async (pid: number, deadline: number): Promise<boolean> => {
-  const alive = isAlive(pid)
-  if (!alive || Date.now() >= deadline) {
-    return !alive
-  }
-  await sleep(100)
-  return ended(pid, deadline)
+// A loopback port nothing listens on now, for daemons that must come and go on the same one
+export async function freePort(): Promise<number> {
+  const { port, close } = await listening(createServer())
+  await close()
+  return port
 }
 
-// A pid that ended meanwhile has nothing left to signal
-const signal = (pid: number, name: NodeJS.Signals): void => {
-  try {
-    process.kill(pid, name)
-  } catch {
-    // Gone already
-  }
+export interface WatchedPort {
+  readonly port: number
+  // The connections made to the port so far
+  readonly connections: () => number
 }
 
-// The daemon of the home ends with the test: as --stop ends it, else through the pid of its lock, which a daemon holds from its start on
-// One that does not end within the wait is killed; both waits together stay within the 10 s a test hook is given
-export async function stopDaemonOf(home: string): Promise<void> {
-  await stopDaemon(home, 4000)
-  const holder = lockHolder(home)
-  if (holder === undefined || !isAlive(holder)) {
-    return
-  }
-  signal(holder, 'SIGTERM')
-  if (!(await ended(holder, Date.now() + 4000))) {
-    signal(holder, 'SIGKILL')
-  }
+// A loopback port that counts every connection made to it and answers none, closed when the test ends
+export async function watchedPort(): Promise<WatchedPort> {
+  const seen = { connections: 0 }
+  const server = createServer((socket) => {
+    seen.connections += 1
+    socket.destroy()
+  })
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return { port, connections: () => seen.connections }
 }
 ```
 
@@ -9509,7 +10680,7 @@ import path from 'node:path'
 import { serverUrl } from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
-import { daemonLogPath } from '../daemon/spawn.js'
+import { daemonLogPath } from '../daemon/daemon-log.js'
 import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
@@ -9659,14 +10830,19 @@ describe('bytebureau serve (detached) and serve --stop', () => {
 })
 
 describe('bytebureau serve (detached) that cannot start', () => {
-  it('gives up on a daemon that does not come up, naming the log that says why', async () => {
+  it('tells at once that the daemon failed to start, naming the log that says why', async () => {
     expect.hasAssertions()
     const daemon = await startDaemonProcess(tempDir('bb-home-'))
     const home = tempDir('bb-home-')
     const port = String(daemon.info.port)
+    const since = Date.now()
     const started = await runCli(['serve', '--port', port], stoppedWithTheTest(home))
-    const gaveUp = `The daemon did not come up in time; see ${daemonLogPath(home)}`
-    expect([started.code, started.stderr.trim()]).toStrictEqual([1, gaveUp])
+    // Well within the 30 s a start that does not come up is given
+    expect([started.code, started.stderr.trim(), Date.now() - since < 15_000]).toStrictEqual([
+      1,
+      `The daemon failed to start; see ${daemonLogPath(home)}`,
+      true,
+    ])
     expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(cannotListen(port))
     await expect(daemon.stop()).resolves.toBe(0)
   })
@@ -9703,6 +10879,7 @@ The detached daemon of the last test is stopped by `--stop`; should an assertion
 `packages/api/src/daemon-errors.ts` (added during execution):
 ```ts
 import { Cause, ErrorReporter, type Layer } from 'effect'
+import { HttpServerError } from 'effect/http'
 import type { BoundAddress } from './bun-address.js'
 
 export class PortInUseError extends Error {
@@ -9725,12 +10902,23 @@ export const portInUse = (error: unknown, address: BoundAddress): PortInUseError
 
 export type DefectLog = (message: string, properties: Readonly<Record<string, unknown>>) => void
 
-// Every failure behind either door is reported, the problems the API answers on purpose too, so only a cause with a defect is logged
+// A body the server could not read, such as one over Bun's size limit that came without a length, is the client's fault: Bun answers it 413
+const isClientFault = (defect: unknown): boolean =>
+  HttpServerError.isHttpServerError(defect) &&
+  defect.reason instanceof HttpServerError.RequestParseError
+
+const daemonDefects = (cause: Cause.Cause<unknown>): readonly unknown[] =>
+  cause.reasons
+    .filter(Cause.isDieReason)
+    .map((reason) => reason.defect)
+    .filter((defect) => !isClientFault(defect))
+
+// Every failure behind either door is reported, the problems the API answers on purpose too, so only a cause with a defect of the daemon is logged
 // Such a defect is otherwise silent: a REST handler answers an empty 500, an RPC procedure an Exit with a Die
 export const DefectReporter = (log: DefectLog): Layer.Layer<never> =>
   ErrorReporter.layer([
     ErrorReporter.make(({ cause, error }) => {
-      if (Cause.hasDies(cause)) {
+      if (daemonDefects(cause).length > 0) {
         log('a handler failed with a defect', { error: error.message, cause: Cause.pretty(cause) })
       }
     }),
@@ -9879,9 +11067,23 @@ export const writePrivateFile = (file: string, text: string): void => {
 ```
 `apps/bytebureau/src/daemon/hosts.ts` (added during execution):
 ```ts
-// The loopback names, and every address of 127.0.0.0/8
-export const isLoopback = (host: string): boolean =>
-  host === 'localhost' || host === '::1' || host.startsWith('127.')
+import { isIPv4, isIPv6 } from 'node:net'
+
+// The one spelling a URL gives an IPv6 address: 0:0:0:0:0:0:0:1 is ::1, ::ffff:127.0.0.1 is ::ffff:7f00:1
+const canonicalV6 = (address: string): string =>
+  new URL(`http://[${address}]`).hostname.slice(1, -1)
+
+// ::1, or an address of 127.0.0.0/8 written as an IPv4-mapped IPv6 one
+const LOOPBACK_V6 = /^(?:::1|::ffff:7f[\da-f]{2}:[\da-f]{1,4})$/u
+
+// The loopback name, and every address of 127.0.0.0/8 and of ::1, however written
+export const isLoopback = (host: string): boolean => {
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+  if (isIPv6(bare)) {
+    return LOOPBACK_V6.test(canonicalV6(bare))
+  }
+  return bare.toLowerCase() === 'localhost' || (isIPv4(bare) && bare.startsWith('127.'))
+}
 
 const WILDCARDS: Readonly<Record<string, string>> = { '0.0.0.0': '127.0.0.1', '::': '::1' }
 
@@ -9896,8 +11098,21 @@ import { clientHost, isLoopback } from './hosts.js'
 
 describe(isLoopback, () => {
   it('tells the loopback names and addresses from those the network reaches', () => {
-    const loopback = ['127.0.0.1', '127.0.0.2', 'localhost', '::1']
-    const network = ['0.0.0.0', '::', '192.168.1.5', '10.0.0.5', 'example.com']
+    const loopback = ['127.0.0.1', '127.0.0.2', 'localhost', 'LocalHost', '::1', '[::1]']
+    const network = ['0.0.0.0', '::', '192.168.1.5', '10.0.0.5', 'example.com', '127.example.com']
+    expect(loopback.filter((host) => !isLoopback(host))).toStrictEqual([])
+    expect(network.filter((host) => isLoopback(host))).toStrictEqual([])
+  })
+
+  it('knows the loopback in every way IPv6 writes it', () => {
+    const loopback = [
+      '0:0:0:0:0:0:0:1',
+      '::0:1',
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '::FFFF:127.1.2.3',
+    ]
+    const network = ['::2', '::ffff:192.168.1.5', 'fe80::1', '::ffff:10.0.0.1']
     expect(loopback.filter((host) => !isLoopback(host))).toStrictEqual([])
     expect(network.filter((host) => isLoopback(host))).toStrictEqual([])
   })
@@ -9931,20 +11146,26 @@ export interface Published {
 }
 
 // What server.json says of the daemon of this process: the host clients use, which for a wildcard bind is the loopback
-const recordOf = ({ daemon, token }: Published): ServerInfo => ({
-  version,
-  host: clientHost(daemon.address.host),
-  port: daemon.address.port,
-  pid: process.pid,
-  token,
-  startedAt: daemon.startedAt,
-})
+// The wildcard itself is kept as well, so the command that started the daemon can warn of it as the daemon does
+const recordOf = ({ daemon, token }: Published): ServerInfo => {
+  const bound = daemon.address.host
+  const host = clientHost(bound)
+  return {
+    version,
+    host,
+    port: daemon.address.port,
+    pid: process.pid,
+    token,
+    startedAt: daemon.startedAt,
+    ...(bound === host ? {} : { bind: bound }),
+  }
+}
 
 // From here on clients find the daemon; the warning for a daemon the network can reach names the address it is bound to
 export const publish = (home: string, published: Published, context: Context): void => {
   const info = recordOf(published)
   writeServerInfo(home, info)
-  announce(info, context, published.daemon.address.host)
+  announce(info, context)
 }
 ```
 `apps/bytebureau/src/daemon/publish.test.ts` (added during execution):
@@ -9978,7 +11199,7 @@ describe(publish, () => {
     )
     expect(readServerInfo(home)).toMatchObject({
       state: 'alive',
-      info: { host: '127.0.0.1', port: 4747, pid: process.pid, token: TOKEN },
+      info: { host: '127.0.0.1', port: 4747, pid: process.pid, token: TOKEN, bind: '0.0.0.0' },
     })
     expect(error.mock.calls).toStrictEqual([
       ['Listening on 0.0.0.0: anyone on the network with the token can use this daemon'],
@@ -9995,6 +11216,7 @@ describe(publish, () => {
       createContext({ json: false, color: false, yes: false }, {}, false),
     )
     expect(readServerInfo(home)).toMatchObject({ state: 'alive', info: { host: '::1' } })
+    expect(readServerInfo(home)).not.toHaveProperty(['info', 'bind'])
     expect([log.mock.calls, error.mock.calls]).toStrictEqual([
       [['Daemon listening on http://[::1]:4747']],
       [],
@@ -10016,13 +11238,19 @@ const emitted = (info: ServerInfo, context: Context): string => {
   return url
 }
 
-// Where the daemon listens; one the network can reach is announced with the warning of spec §11.1, naming the address it is bound to
+// The warning of spec §11.1 for a daemon the network can reach, naming the address it is bound to
 // That address is the recorded host unless the daemon is bound to every interface, which clients reach through the loopback
-export const announce = (info: ServerInfo, context: Context, bound: string = info.host): void => {
-  context.output.print(m.serve_started({ url: emitted(info, context) }))
+export const warnIfReachable = (info: ServerInfo, context: Context): void => {
+  const bound = info.bind ?? info.host
   if (!isLoopback(bound)) {
     context.output.warn(m.serve_lan_warning({ host: bound }))
   }
+}
+
+// Where the daemon listens, and the warning when the network can reach it
+export const announce = (info: ServerInfo, context: Context): void => {
+  context.output.print(m.serve_started({ url: emitted(info, context) }))
+  warnIfReachable(info, context)
 }
 
 // A daemon already serving the home is what was asked for
@@ -10046,8 +11274,8 @@ describe(announce, () => {
     const context = createContext(TEXT, {}, false)
     announce(recordOn(4747), context)
     announce({ ...recordOn(4747), host: '192.168.1.5' }, context)
-    // Bound to every interface, the daemon is recorded with the loopback clients use
-    announce(recordOn(4747), context, '0.0.0.0')
+    // Bound to every interface, the daemon is recorded with the loopback clients use, and with the address it is bound to
+    announce({ ...recordOn(4747), bind: '0.0.0.0' }, context)
     expect(log.mock.calls).toStrictEqual([
       ['Daemon listening on http://127.0.0.1:4747'],
       ['Daemon listening on http://192.168.1.5:4747'],
@@ -10212,11 +11440,23 @@ describe(takeOverLock, () => {
 ```ts
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
+import { oldLock, unknownStart } from '../testing/old-lock.js'
 import { tempDir } from '../testing/temp-repo.js'
-import { readServerInfo, writeServerInfo } from './server-info.js'
+import { lockPath, readServerInfo, writeServerInfo } from './server-info.js'
 import { stopDaemon } from './stop.js'
+
+// No process has this pid: the highest a system hands out is far below it
+const DEAD_PID = 2_147_483_000
+
+// A short grace, so that a holder that never answers is judged within the test
+const QUICK = { graceMs: 200, bootMs: 30_000 }
+
+// Pid 1 is another user's to everyone but root, who may signal it
+const ROOT = typeof process.getuid === 'function' && process.getuid() === 0
 
 // A process that stands in for the daemon of a record, killed when the test ends; one that ignores SIGTERM outlives a stop
 async function standIn(ignoresSigterm: boolean): Promise<number> {
@@ -10244,11 +11484,9 @@ describe(stopDaemon, () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
     // The record names this very process, on a port where no daemon answers: a SIGTERM would end the test run
+    // No lock names it, and a daemon of the home holds its lock from its start on
     writeServerInfo(home, recordOn(1, process.pid))
-    await expect(stopDaemon(home)).resolves.toStrictEqual({
-      outcome: 'still_running',
-      pid: process.pid,
-    })
+    await expect(stopDaemon(home, 300, QUICK)).resolves.toStrictEqual({ outcome: 'not_running' })
     expect(readServerInfo(home)).toStrictEqual({ state: 'alive', info: recordOn(1, process.pid) })
   })
 
@@ -10270,31 +11508,87 @@ describe(stopDaemon, () => {
     expect(readServerInfo(home).state).toBe('alive')
   })
 })
+
+describe('stopDaemon and the lock of the home', () => {
+  it('clears the old lock of a live process that is no daemon of the home, and names it', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    // This test's own pid stands for the process that got the pid of a daemon after a crash or a reboot: it is never signalled
+    await oldLock(home, process.pid)
+    await expect(stopDaemon(home, 300, QUICK)).resolves.toStrictEqual({
+      outcome: 'cleared',
+      pid: process.pid,
+    })
+    expect(existsSync(lockPath(home))).toBe(false)
+  })
+
+  it('removes the lock of a holder that is gone without a word', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    await oldLock(home, DEAD_PID)
+    await expect(stopDaemon(home, 300, QUICK)).resolves.toStrictEqual({ outcome: 'not_running' })
+    expect(existsSync(lockPath(home))).toBe(false)
+  })
+
+  it('stops a daemon on its way up once it answers', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const pid = await standIn(false)
+    // A fresh lock, and the record the daemon writes once it has bound its port
+    writeFileSync(lockPath(home), String(pid))
+    const port = await healthStub()
+    const stopped = stopDaemon(home, 3000, QUICK)
+    await sleep(300)
+    writeServerInfo(home, recordOn(port, pid))
+    await expect(stopped).resolves.toStrictEqual({ outcome: 'stopped', pid })
+  })
+})
+
+describe('stopDaemon and a lock it cannot take from its holder', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lock of the process that wrote it, which does not answer, and signals nothing',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      // Written by this test's own process, which started before it: a daemon stopped or busy, past its start
+      writeFileSync(lockPath(home), String(process.pid))
+      const judging = { graceMs: 200, bootMs: 0 }
+      await expect(stopDaemon(home, 300, judging)).resolves.toStrictEqual({
+        outcome: 'silent',
+        pid: process.pid,
+      })
+      expect(readFileSync(lockPath(home), 'utf8')).toBe(String(process.pid))
+    },
+  )
+
+  it.skipIf(ROOT)(
+    'clears on request the lock of a process of another user whose start the platform cannot tell',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      writeFileSync(lockPath(home), '1')
+      const judging = { ...QUICK, startOf: unknownStart }
+      await expect(stopDaemon(home, 300, judging)).resolves.toStrictEqual({
+        outcome: 'cleared',
+        pid: 1,
+      })
+      expect(existsSync(lockPath(home))).toBe(false)
+    },
+  )
+})
 ```
 `apps/bytebureau/src/daemon/wait.test.ts` (added during execution):
 ```ts
-import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { writeServerInfo } from './server-info.js'
-import { daemonAnswers, runningDaemon, waitForDaemon } from './wait.js'
+import { daemonAnswers, runningDaemon } from './wait.js'
 
 // Nothing listens on port 1 of the loopback: a connection there is refused at once
 const NOBODY = 1
 
-describe(waitForDaemon, () => {
-  it('gives the record once its daemon has written it and answers, and nothing when none comes up in time', async () => {
-    expect.hasAssertions()
-    const home = tempDir('bb-home-')
-    const port = await healthStub()
-    await expect(waitForDaemon(home, 300)).resolves.toBeUndefined()
-    const waited = waitForDaemon(home, 5000)
-    await sleep(200)
-    writeServerInfo(home, recordOn(port))
-    await expect(waited).resolves.toStrictEqual(recordOn(port))
-  })
-
+describe(daemonAnswers, () => {
   it('takes no answer from another start, or from a port without a daemon, for the daemon of the record', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
@@ -10302,7 +11596,7 @@ describe(waitForDaemon, () => {
     writeServerInfo(home, recordOn(port))
     await expect(daemonAnswers(recordOn(port))).resolves.toBe(false)
     await expect(daemonAnswers(recordOn(NOBODY))).resolves.toBe(false)
-    await expect(waitForDaemon(home, 300)).resolves.toBeUndefined()
+    await expect(runningDaemon(home)).resolves.toBeUndefined()
   })
 })
 
@@ -10323,10 +11617,10 @@ describe(runningDaemon, () => {
 ```
 `apps/bytebureau/src/testing/health-stub.ts` (added during execution):
 ```ts
-import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
+import { listening } from './listening.js'
 
 const STARTED_AT = '2026-10-04T10:00:00.000Z'
 
@@ -10337,13 +11631,45 @@ export async function healthStub(startedAt: string = STARTED_AT): Promise<number
     response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ status: 'ok', startedAt }))
   })
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  onTestFinished(() => {
-    server.close()
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return port
+}
+
+export interface ProjectsStub {
+  readonly port: number
+  // The authorization header of every request for the projects, in order
+  readonly authorizations: () => readonly (string | undefined)[]
+}
+
+// A daemon of this test on a free loopback port that knows no projects; it keeps the token of every request for them
+// Its health answers with the start time of recordOn, as the daemon of such a record does
+export async function projectsStub(): Promise<ProjectsStub> {
+  const seen: (string | undefined)[] = []
+  const server = createServer((request, response) => {
+    const health = request.url === '/api/v1/health'
+    if (!health) {
+      seen.push(request.headers.authorization)
+    }
+    const found = health || request.url === '/api/v1/projects'
+    response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
+    response.end(health ? JSON.stringify({ status: 'ok', startedAt: STARTED_AT }) : '[]')
   })
-  const address = server.address()
-  return typeof address === 'object' && address !== null ? address.port : 0
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return { port, authorizations: () => seen }
+}
+
+// A daemon of this test on a free loopback port that refuses every request with a problem of the status, the code and the detail
+export async function refusingStub(status: number, code: string, detail: string): Promise<number> {
+  const server = createServer((_request, response) => {
+    const type = `https://bytebureau.dev/problems/${code}`
+    response.writeHead(status, { 'content-type': 'application/problem+json' })
+    response.end(JSON.stringify({ type, title: 'Refused', status, detail, code }))
+  })
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return port
 }
 
 // The record of a daemon of this test on the port, as server.json holds it
@@ -10787,7 +12113,8 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { writeServerInfo } from '../daemon/server-info.js'
 import { tokenPath } from '../daemon/token.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { tempDir, tokenFile } from '../testing/temp-repo.js'
+import { usageError } from '../usage-error.js'
 import { resolveServer } from './resolve.js'
 
 const info = {
@@ -10815,36 +12142,52 @@ describe(resolveServer, () => {
 
   it('prefers --host and --port, with the token of --token-file, and never starts a daemon for them', () => {
     const home = tempDir('bb-home-')
-    const tokenFile = path.join(home, 'token')
-    writeFileSync(tokenFile, 'abc\n')
-    expect(resolveServer({ host: '10.0.0.5', port: 4800, tokenFile }, home)).toStrictEqual({
+    const file = path.join(home, 'token')
+    writeFileSync(file, 'abc\n')
+    expect(resolveServer({ host: '10.0.0.5', port: 4800, tokenFile: file }, home)).toStrictEqual({
       kind: 'explicit',
       url: 'http://10.0.0.5:4800',
       token: 'abc',
     })
   })
 
-  it('takes the token of the home for --host and --port without a token file', () => {
+  it('takes the token of the home for the daemon its record names, and only for that one', () => {
     const home = tempDir('bb-home-')
     writeServerInfo(home, info)
-    expect(resolveServer({ host: '127.0.0.1', port: 5000 }, home)).toStrictEqual({
+    expect(resolveServer({ host: '127.0.0.1', port: 4747 }, home)).toStrictEqual({
       kind: 'explicit',
-      url: 'http://127.0.0.1:5000',
+      url: 'http://127.0.0.1:4747',
       token: info.token,
     })
+    expect(resolveServer({ port: 4747 }, home)).toMatchObject({ token: info.token })
   })
 })
 
+// The usage error a daemon named on the command line that the record of the home does not name is refused with
+const refusal = (url: string): Error =>
+  usageError(
+    `no daemon of this home listens on ${url}: pass the token of the daemon there with --token-file`,
+  )
+
 describe('resolveServer for a daemon named on the command line', () => {
-  it('takes the token the home keeps when its daemon is not running, and none when it keeps none', () => {
+  it('refuses another host or port without --token-file, as a usage error: the token of the home goes nowhere else', () => {
+    const home = tempDir('bb-home-')
+    writeServerInfo(home, info)
+    expect(() => resolveServer({ host: '10.0.0.5', port: 4747 }, home)).toThrow(
+      refusal('http://10.0.0.5:4747'),
+    )
+    expect(() => resolveServer({ port: 5000 }, home)).toThrow(refusal('http://127.0.0.1:5000'))
+    // Another name of the same address is no record of this home: its token needs the file too
+    expect(() => resolveServer({ host: 'localhost', port: 4747 }, home)).toThrow(
+      refusal('http://localhost:4747'),
+    )
+  })
+
+  it('refuses without --token-file when the daemon of the home is not running, whatever token it keeps', () => {
     const home = tempDir('bb-home-')
     writeFileSync(tokenPath(home), `${'k'.repeat(64)}\n`)
-    expect(resolveServer({ port: 5000 }, home)).toStrictEqual({
-      kind: 'explicit',
-      url: 'http://127.0.0.1:5000',
-      token: 'k'.repeat(64),
-    })
-    expect(resolveServer({ port: 5000 }, tempDir('bb-home-'))).toMatchObject({ token: '' })
+    writeServerInfo(home, { ...info, pid: DEAD_PID })
+    expect(() => resolveServer({ port: 4747 }, home)).toThrow(refusal('http://127.0.0.1:4747'))
   })
 
   it('names a token file it cannot read, rather than what the system says of it', () => {
@@ -10856,8 +12199,13 @@ describe('resolveServer for a daemon named on the command line', () => {
 
   it('fills in the loopback for --port alone and the default port for --host alone', () => {
     const home = tempDir('bb-home-')
-    expect(resolveServer({ port: 5000 }, home)).toMatchObject({ url: 'http://127.0.0.1:5000' })
-    expect(resolveServer({ host: '::1' }, home)).toMatchObject({ url: 'http://[::1]:4747' })
+    const file = tokenFile()
+    expect(resolveServer({ port: 5000, tokenFile: file }, home)).toMatchObject({
+      url: 'http://127.0.0.1:5000',
+    })
+    expect(resolveServer({ host: '::1', tokenFile: file }, home)).toMatchObject({
+      url: 'http://[::1]:4747',
+    })
   })
 })
 ```
@@ -10870,7 +12218,7 @@ import { readFileSync } from 'node:fs'
 import { m } from '@bytebureau/i18n'
 import { serverUrl } from '@bytebureau/protocol'
 import { readServerInfo } from '../daemon/server-info.js'
-import { tokenPath } from '../daemon/token.js'
+import { usageError } from '../usage-error.js'
 
 // A daemon named on the command line, and the file of its token
 export interface ServerFlags {
@@ -10890,15 +12238,6 @@ type ResolvedServer =
   // None named: the daemon of the home is the one that answers, or one started on demand
   | { readonly kind: 'none' }
 
-// The token the home keeps in daemon.token, read as it is: tokenFor would make one for a home that has none
-const keptToken = (home: string): string => {
-  try {
-    return readFileSync(tokenPath(home), 'utf8').trim()
-  } catch {
-    return ''
-  }
-}
-
 // The token a --token-file holds; a file that cannot be read is named, which the error of the system does in its own words
 const tokenIn = (file: string): string => {
   try {
@@ -10908,12 +12247,18 @@ const tokenIn = (file: string): string => {
   }
 }
 
-const tokenOf = (flags: ServerFlags, home: string): string => {
+// The token of --token-file, else that of this home, which goes only to the daemon its record names: any other host would receive it with every request
+const tokenOf = (flags: ServerFlags, home: string, url: string): string => {
   if (flags.tokenFile !== undefined) {
     return tokenIn(flags.tokenFile)
   }
   const record = readServerInfo(home)
-  return record.state === 'alive' ? record.info.token : keptToken(home)
+  if (record.state === 'alive' && serverUrl(record.info) === url) {
+    return record.info.token
+  }
+  throw usageError(
+    `no daemon of this home listens on ${url}: pass the token of the daemon there with --token-file`,
+  )
 }
 
 // The daemon --host and --port name; server.json names none, as only an answer of its daemon tells that a record holds
@@ -10921,41 +12266,41 @@ export const resolveServer = (flags: ServerFlags, home: string): ResolvedServer 
   if (flags.host === undefined && flags.port === undefined) {
     return { kind: 'none' }
   }
-  const host = flags.host ?? '127.0.0.1'
-  const port = flags.port ?? 4747
-  return { kind: 'explicit', url: serverUrl({ host, port }), token: tokenOf(flags, home) }
+  const url = serverUrl({ host: flags.host ?? '127.0.0.1', port: flags.port ?? 4747 })
+  return { kind: 'explicit', url, token: tokenOf(flags, home, url) }
 }
 ```
 
 `apps/bytebureau/src/bureau/ensure-daemon.ts`:
 ```ts
-import { m } from '@bytebureau/i18n'
 import type { ServerInfo } from '@bytebureau/protocol'
-import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
-import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
+import type { Context } from '../context.js'
+import { warnIfReachable } from '../daemon/announce.js'
+import { startDetached } from '../daemon/start.js'
+import { runningDaemon } from '../daemon/wait.js'
+import { kernelHome } from '../kernel-home.js'
 import { daemonEnv } from './session-env.js'
 
 class DaemonUnavailableError extends Error {
   public override readonly name = 'DaemonUnavailableError'
 }
 
-// The daemon of the home, started detached as serve starts it when none answers; a start that does not come up in time names the log that says why
+// The daemon of the home, started detached as serve starts it when none answers; a start that fails says why, naming the log or the lock
 // Only a daemon whose health answers with the start time of server.json counts, never a process that took over its pid
 // It gets the environment of the command without the choices of that run, which would be its defaults for every later one
-export const ensureDaemon = async (
-  home: string,
-  env: Readonly<Record<string, string | undefined>>,
-): Promise<ServerInfo> => {
+// The command that starts it warns, as serve does, when the configuration of the home binds it where the network can reach it
+export const ensureDaemon = async (context: Context): Promise<ServerInfo> => {
+  const home = kernelHome(context.env)
   const running = await runningDaemon(home)
   if (running !== undefined) {
     return running
   }
-  spawnDaemon(home, daemonEnv(env), [])
-  const started = await waitForDaemon(home)
-  if (started === undefined) {
-    throw new DaemonUnavailableError(m.serve_timeout({ log: daemonLogPath(home) }))
+  const started = await startDetached(home, daemonEnv(context.env), [])
+  if (!started.up) {
+    throw new DaemonUnavailableError(started.reason)
   }
-  return started
+  warnIfReachable(started.info, context)
+  return started.info
 }
 ```
 
@@ -11002,17 +12347,14 @@ import { openLocal } from './open-local.js'
 import { remoteBureau } from './remote.js'
 import { resolveServer, type BureauFlags, type ServerFlags } from './resolve.js'
 
-type Env = Readonly<Record<string, string | undefined>>
-
 // The daemon the flags name, else the daemon of the home that answers, else one started on demand
 // A record whose daemon does not answer (its pid taken over after a crash, a daemon on its way out) leads to a start, never to a failure
-const openRemote = async (flags: ServerFlags, env: Env): Promise<Bureau> => {
-  const home = kernelHome(env)
-  const named = resolveServer(flags, home)
+const openRemote = async (flags: ServerFlags, context: Context): Promise<Bureau> => {
+  const named = resolveServer(flags, kernelHome(context.env))
   if (named.kind === 'explicit') {
     return remoteBureau(createBureauClient({ baseUrl: named.url, token: named.token }), named.url)
   }
-  const info = await ensureDaemon(home, env)
+  const info = await ensureDaemon(context)
   const url = serverUrl(info)
   return remoteBureau(createBureauClient({ baseUrl: url, token: info.token }), url)
 }
@@ -11024,7 +12366,7 @@ export const withBureau = async <Result>(
   work: (bureau: Bureau) => Promise<Result>,
 ): Promise<Result> => {
   const open = async (): Promise<Bureau> => {
-    const bureau = flags.daemon ? await openRemote(flags, context.env) : await openLocal(context)
+    const bureau = flags.daemon ? await openRemote(flags, context) : await openLocal(context)
     return bureau
   }
   const result = await withResource(open, work)
@@ -11040,8 +12382,10 @@ import { m, setLocale } from '@bytebureau/i18n'
 import type { BureauFlags } from './bureau/resolve.js'
 import { resolveLocale } from './locale.js'
 import { colorEnabled, createOutput, type Output } from './output.js'
+import { usageError } from './usage-error.js'
 
-export const globalArgs = {
+// The flags of every command
+export const commonArgs = {
   lang: { type: 'string', description: 'UI language: en or cs' },
   json: { type: 'boolean', description: 'Machine-readable JSON output', default: false },
   color: {
@@ -11060,6 +12404,10 @@ export const globalArgs = {
       'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
   },
   'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
+} as const
+
+// The flags that choose the daemon a command talks to; a command that talks to none does not take them
+const bureauArgs = {
   daemon: {
     type: 'boolean',
     description:
@@ -11070,6 +12418,8 @@ export const globalArgs = {
   port: { type: 'string', description: 'Port of that daemon' },
   'token-file': { type: 'string', description: 'File holding the bearer token of that daemon' },
 } as const
+
+export const globalArgs = { ...commonArgs, ...bureauArgs } as const
 
 export interface GlobalArgs {
   readonly lang?: string | undefined
@@ -11123,9 +12473,6 @@ export function processContext(args: GlobalArgs): Context {
   return createContext(args, process.env, isatty(process.stdout.fd))
 }
 
-const usageError = (message: string): Error =>
-  Object.assign(new Error(message), { name: 'CLIError' })
-
 // A port is a whole number up to 65535; 0 asks for a free one
 export const portOf = (text: string | undefined): number | undefined => {
   if (text === undefined) {
@@ -11152,6 +12499,31 @@ export function bureauFlags(args: GlobalArgs): BureauFlags {
     tokenFile: args['token-file'],
   }
 }
+
+const BUREAU_FLAGS: ReadonlySet<string> = new Set([
+  '--daemon',
+  '--no-daemon',
+  '--host',
+  '--port',
+  '--token-file',
+])
+
+// A command that talks to no daemon refuses the flags that choose one, which it would otherwise ignore; those it takes in a sense of its own are kept
+// What follows -- is no flag
+export function refuseBureauFlags(
+  command: string,
+  rawArgs: readonly string[],
+  kept: readonly string[] = [],
+): void {
+  const end = rawArgs.indexOf('--')
+  const flags = (end === -1 ? rawArgs : rawArgs.slice(0, end)).map(
+    (arg) => arg.split('=')[0] ?? arg,
+  )
+  const refused = flags.find((flag) => BUREAU_FLAGS.has(flag) && !kept.includes(flag))
+  if (refused !== undefined) {
+    throw usageError(`${command} talks to no daemon: it takes no ${refused}`)
+  }
+}
 ```
 and `GlobalArgs` the matching fields; `bureauFlags(args): BureauFlags` (a helper in `context.ts`) turns them into `{ daemon, host, port: Number | undefined, tokenFile }`. The `run` command drops its own `no-daemon` argument (the global one replaces it; `--no-daemon` keeps working because citty's boolean `daemon` accepts `--no-daemon`).
 
@@ -11162,31 +12534,24 @@ and `GlobalArgs` the matching fields; `bureauFlags(args): BureauFlags` (a helper
 import { ApiError } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
 import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
-import {
-  decodeEventPayload,
-  type Ask,
-  type CreateSessionBody,
-  type EventEnvelope,
-} from '@bytebureau/protocol'
+import type { CreateSessionBody } from '@bytebureau/protocol'
 import type { Bureau } from '../bureau/bureau.js'
 import type { Context } from '../context.js'
-import { promptAsk } from '../render/ask-prompt.js'
-import { completionLine, readOrSkip, summarizeRun, titleOf } from '../render/transcript.js'
 import { describeError } from '../errors.js'
-import { closeFrame, EXIT_REFUSED, open, refuse, report, show, type Outcome } from './run-output.js'
+import { titleOf } from '../render/transcript.js'
+import { conclude, promptAndFollow, type Ends } from './run-follow.js'
+import { closeFrame, open, refuse } from './run-output.js'
 
-const EXIT_COMPLETED = 0
-const EXIT_STOPPED = 3
-
-const TERMINAL = new Set(['session.completed', 'session.stopped', 'session.errored'])
-
-// The first of them stops the session, and one of another kind after it does nothing; the second of a kind ends the process as it would without the run
-const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+// A run is one turn: its end is the end of its session, which the CLI completes once the turn is over
+// A turn that is interrupted ends the run where the session says what became of it: ready again, stopped or errored
+const RUN_ENDS: Ends = {
+  terminal: new Set(['session.completed', 'session.stopped', 'session.errored']),
+  completes: true,
+  turnOnly: false,
+}
 
 // Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
 const REMOTE_REFUSALS = /^(?:workspace_|provider_|session_provider_missing$)/u
-
-type Output = Context['output']
 
 export interface RunOptions {
   readonly prompt: string
@@ -11198,13 +12563,6 @@ export interface RunOptions {
   // The BYTEBUREAU_* variables of the command, for the agent: a daemon does not read the environment of the command
   readonly env: Readonly<Record<string, string>>
   readonly yes: boolean
-}
-
-interface Run {
-  readonly bureau: Bureau
-  readonly session: { readonly id: string }
-  readonly options: RunOptions
-  readonly context: Context
 }
 
 // Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
@@ -11236,128 +12594,6 @@ async function unknownProvider(
     : m.run_provider_missing({ provider, available: available.join(', ') })
 }
 
-// An ask nobody can answer is left to the kernel policy; the person is told the session waits
-async function answerAsk({ bureau, options, context }: Run, ask: Ask): Promise<void> {
-  const answer = await promptAsk(ask, { yes: options.yes, interactive: context.interactive })
-  if (answer === undefined) {
-    context.output.warn(m.run_ask_waiting({ title: ask.title }))
-    return
-  }
-  await bureau.asks.answer(ask.id, answer)
-}
-
-// The ask of an ask.requested event, if its payload fits
-function askOf(event: EventEnvelope, output: Output): Ask | undefined {
-  return readOrSkip(event, output, () => decodeEventPayload('ask.requested', event.payload).ask)
-}
-
-// Besides showing an event the CLI answers an ask, and completes the session once its turn is over
-async function react(run: Run, event: EventEnvelope): Promise<void> {
-  const ask = event.type === 'ask.requested' ? askOf(event, run.context.output) : undefined
-  if (ask !== undefined) {
-    await answerAsk(run, ask)
-  }
-  if (event.type === 'turn.completed') {
-    await run.bureau.sessions.complete(run.session.id)
-  }
-}
-
-// The events up to the end of the session, which is the last one returned
-async function follow(run: Run, events: AsyncIterable<EventEnvelope>): Promise<EventEnvelope[]> {
-  const seen: EventEnvelope[] = []
-  for await (const event of events) {
-    seen.push(event)
-    show(event, run.context)
-    await react(run, event)
-    if (TERMINAL.has(event.type)) {
-      break
-    }
-  }
-  return seen
-}
-
-// A stop that fails is only reported; the same signal again ends the process
-async function stopSession({ bureau, session, context }: Run): Promise<void> {
-  try {
-    await bureau.sessions.stop(session.id)
-  } catch (error) {
-    context.output.warn(describeError(error))
-  }
-}
-
-// Ctrl-C, SIGTERM and SIGHUP stop the session alike, once; the result is a release that removes the listeners and waits for the stop
-function stopOnSignals(run: Run): () => Promise<void> {
-  let stopping = Promise.resolve()
-  let stopped = false
-  const stop = (): void => {
-    if (!stopped) {
-      stopped = true
-      stopping = stopSession(run)
-    }
-  }
-  for (const signal of STOP_SIGNALS) {
-    process.once(signal, stop)
-  }
-  return async () => {
-    for (const signal of STOP_SIGNALS) {
-      process.off(signal, stop)
-    }
-    await stopping
-  }
-}
-
-// A signal stops the session; the events then say so and the run ends with the exit code of a stopped one
-// The children of the kernel run detached, so the terminal does not reach them: only the stop does
-async function followSession(run: Run): Promise<EventEnvelope[]> {
-  const { bureau, session, options } = run
-  const subscription = new AbortController()
-  const release = stopOnSignals(run)
-  try {
-    // The ephemeral events (text deltas) carry no seq of their own and no transcript line
-    const filter = { sessionId: session.id, since: 0, ephemeral: false }
-    const events = bureau.events.subscribe(filter, subscription.signal)
-    await bureau.sessions.prompt(session.id, { text: options.prompt })
-    return await follow(run, events)
-  } finally {
-    subscription.abort()
-    await release()
-  }
-}
-
-// The reason of an errored session; the type of the event stands in for a payload that cannot be read
-function reasonOf(last: EventEnvelope, output: Output): string {
-  const reason = readOrSkip(last, output, () => decodeEventPayload('session.errored', last.payload))
-  return reason === undefined ? last.type : reason.message
-}
-
-// The summary is built only for the words that are printed: JSON output has none
-function outcomeOf(last: EventEnvelope, seen: readonly EventEnvelope[], output: Output): Outcome {
-  switch (last.type) {
-    case 'session.stopped': {
-      return { code: EXIT_STOPPED, text: m.run_stopped() }
-    }
-    case 'session.errored': {
-      return { code: EXIT_REFUSED, text: m.run_errored({ message: reasonOf(last, output) }) }
-    }
-    default: {
-      return {
-        code: EXIT_COMPLETED,
-        text: output.json ? '' : completionLine(summarizeRun(seen, output)),
-      }
-    }
-  }
-}
-
-function conclude(seen: readonly EventEnvelope[], context: Context): number {
-  const last = seen.at(-1)
-  if (last === undefined || !TERMINAL.has(last.type)) {
-    throw new Error('the events ended before the session did')
-  }
-  const outcome = outcomeOf(last, seen, context.output)
-  report(outcome, context)
-  return outcome.code
-}
-
 // The session as the person asked for it: what is not named is left to the kernel
 function sessionBody(projectId: string, options: RunOptions): CreateSessionBody {
   return {
@@ -11377,8 +12613,9 @@ async function startAndFollow(
 ): Promise<number> {
   const project = await bureau.projects.register(options.project)
   const session = await bureau.sessions.create(sessionBody(project.id, options))
-  const seen = await followSession({ bureau, session, options, context })
-  return conclude(seen, context)
+  const run = { bureau, session, context, yes: options.yes, ends: RUN_ENDS }
+  const followed = await promptAndFollow(run, options.prompt)
+  return conclude(followed, context)
 }
 
 // A named provider is refused before anything is registered or created
@@ -11422,17 +12659,14 @@ New messages: `bureau_daemon_running` = "A daemon is running on {url} (pid {pid}
 ```ts
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { readServerInfo, writeServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { freePort, startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
+import { freePort, startDaemonProcess, stoppedWithTheTest, watchedPort } from '../testing/daemon.js'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
-import { createTempRepo, testHome } from '../testing/temp-repo.js'
-import { PROMPT, projectIdIn, workbench, worktreesOf } from '../testing/workbench.js'
-
-// The fake provider read like a script: events as JSON, every ask answered; no --no-daemon here
-const SCRIPTED = ['--provider', 'fake', '--json', '--yes']
+import { createTempRepo, tempDir, testHome, tokenFile } from '../testing/temp-repo.js'
+import { PROMPT, projectIdIn, SCRIPTED, workbench, worktreesOf } from '../testing/workbench.js'
 
 // Without --yes and off a terminal the run waits on the question of the fake provider
 const WAITING = ['--provider', 'fake', '--json']
@@ -11443,13 +12677,6 @@ async function runOn(repo: string, home: string, flags = SCRIPTED): Promise<CliR
     BYTEBUREAU_HOME: home,
   })
   return result
-}
-
-// A daemon the CLI starts on demand ends with the test, should an assertion fail before the test stops it
-function stoppedWithTheTest(home: string): void {
-  onTestFinished(async () => {
-    await stopDaemonOf(home)
-  })
 }
 
 describe('bytebureau run through the daemon', () => {
@@ -11480,6 +12707,31 @@ describe('bytebureau run through the daemon', () => {
       1,
       `project ${path.basename(repo)} still has 1 session`,
     ])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau projects through the daemon', () => {
+  it('refuses a path that is no git repository, with exit code 1 and the detail of the problem', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
+    const plain = tempDir('bb-plain-')
+    const added = await runCli(['projects', 'add', plain], { BYTEBUREAU_HOME: home })
+    expect([added.code, added.stderr.trim()]).toStrictEqual([
+      1,
+      `${plain} is not inside a git repository`,
+    ])
+    await daemon.stop()
+  })
+
+  it('refuses a project that is not there as a refusal, with exit code 1 and the detail of the problem', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
+    const missing = '0192f0a0-0000-7000-8000-000000000009'
+    const removed = await runCli(['projects', 'rm', missing], { BYTEBUREAU_HOME: home })
+    expect([removed.code, removed.stderr.trim()]).toStrictEqual([1, `no project ${missing}`])
     await daemon.stop()
   })
 })
@@ -11546,12 +12798,26 @@ describe('bytebureau commands and a record whose daemon does not answer', () => 
 })
 
 describe('bytebureau commands and a daemon named on the command line', () => {
+  it('refuse a daemon the home does not run without --token-file: exit 1, and no request leaves', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    // Were the flags dropped, the command would start a daemon of its own on demand
+    stoppedWithTheTest(home)
+    const elsewhere = await watchedPort()
+    const named = ['--host', '127.0.0.1', '--port', String(elsewhere.port)]
+    const result = await runCli(['projects', 'ls', ...named], { BYTEBUREAU_HOME: home })
+    expect([result.code, elsewhere.connections()]).toStrictEqual([1, 0])
+    expect(result.stderr).toContain(
+      `no daemon of this home listens on http://127.0.0.1:${elsewhere.port}: pass the token of the daemon there with --token-file`,
+    )
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+
   it('fail with exit 2 and the url when --host and --port name a daemon that is not there', async () => {
     expect.hasAssertions()
     const home = testHome()
-    const result = await runCli(['projects', 'ls', '--host', '127.0.0.1', '--port', '9'], {
-      BYTEBUREAU_HOME: home,
-    })
+    const named = ['--host', '127.0.0.1', '--port', '9', '--token-file', tokenFile()]
+    const result = await runCli(['projects', 'ls', ...named], { BYTEBUREAU_HOME: home })
     expect(result.code).toBe(2)
     expect(result.stderr.trim()).toBe(
       'cannot reach the daemon at http://127.0.0.1:9/api/v1/projects',
@@ -12210,17 +13476,28 @@ export async function listening(server: Server): Promise<Listening> {
 ```ts
 // What a stream offers to tell that it has taken in what was written to it
 interface Sink {
+  readonly isTTY?: boolean | undefined
   readonly write: (chunk: string, taken: () => void) => boolean
+  readonly end: (taken: () => void) => unknown
 }
 
-// Bun writes to a pipe asynchronously: an exit that does not wait for the writes would lose the last lines of NDJSON
-// Without a limit the wait lasts as long as the reader takes, a pager too; with one it ends then, so an exit that must happen does
+/**
+ * Bun writes to a pipe asynchronously: an exit that does not wait for the writes would lose the last lines of NDJSON.
+ * A pipe or a file is ended, which waits for every write before it: Bun calls an empty write back at once, whatever is
+ * still on its way. A terminal takes what is written as it comes, and is never ended.
+ * Without a limit the wait lasts as long as the reader takes, a pager too; with one it ends then, so an exit that must happen does.
+ */
 export async function drained(stream: Sink, limitMs?: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<boolean>()
   const timer = limitMs === undefined ? undefined : setTimeout(resolve, limitMs, false)
-  stream.write('', () => {
+  const taken = (): void => {
     resolve(true)
-  })
+  }
+  if (stream.isTTY === true) {
+    stream.write('', taken)
+  } else {
+    stream.end(taken)
+  }
   await promise
   clearTimeout(timer)
 }
@@ -12232,27 +13509,73 @@ export async function drained(stream: Sink, limitMs?: number): Promise<void> {
 import { describe, expect, it } from 'vitest'
 import { drained } from './drain.js'
 
+// A pipe as Bun writes to it: a write is taken in a while later, an empty one is called back at once
+const pipe = (
+  order: string[],
+): Parameters<typeof drained>[0] & { readonly pending: Set<string> } => {
+  const pending = new Set<string>()
+  const ended: (() => void)[] = []
+  const take = (chunk: string, taken: () => void): void => {
+    pending.delete(chunk)
+    order.push(`taken ${chunk}`)
+    taken()
+    if (pending.size === 0) {
+      for (const done of ended.splice(0)) {
+        done()
+      }
+    }
+  }
+  return {
+    pending,
+    write: (chunk, taken) => {
+      if (chunk === '') {
+        taken()
+        return true
+      }
+      pending.add(chunk)
+      setTimeout(take, 20, chunk, taken)
+      return false
+    },
+    end: (taken) => {
+      ended.push(taken)
+    },
+  }
+}
+
 describe(drained, () => {
-  it('waits until the stream has taken in what was written to it before', async () => {
+  it('waits until a pipe has taken in every write before, which an empty write does not tell', async () => {
     expect.hasAssertions()
     const order: string[] = []
-    const stream = {
-      write: (chunk: string, taken: () => void): boolean => {
-        setTimeout(() => {
-          order.push(`taken ${JSON.stringify(chunk)}`)
-          taken()
-        }, 20)
-        return false
-      },
-    }
+    const stream = pipe(order)
+    stream.write('the last line', () => {
+      // Taken
+    })
     await drained(stream)
     order.push('drained')
-    expect(order).toStrictEqual(['taken ""', 'drained'])
+    expect(order).toStrictEqual(['taken the last line', 'drained'])
+  })
+
+  it('never ends a terminal, which takes what is written as it comes', async () => {
+    expect.hasAssertions()
+    const calls: string[] = []
+    const terminal = {
+      isTTY: true,
+      write: (chunk: string, taken: () => void): boolean => {
+        calls.push(`write ${JSON.stringify(chunk)}`)
+        taken()
+        return true
+      },
+      end: (): void => {
+        calls.push('end')
+      },
+    }
+    await drained(terminal)
+    expect(calls).toStrictEqual(['write ""'])
   })
 
   it('waits no longer than the limit for a stream that never takes anything in', async () => {
     expect.hasAssertions()
-    const stream = { write: (): boolean => false }
+    const stream = { write: (): boolean => false, end: (): void => undefined }
     const started = performance.now()
     await drained(stream, 50)
     expect(performance.now() - started).toBeGreaterThanOrEqual(45)
@@ -12807,7 +14130,10 @@ describe('bytebureau sessions steering through the daemon', () => {
     const { env, id, daemon } = await completedSession()
     const interrupt = refusal(['sessions', 'interrupt', id], env)
     const stop = refusal(['sessions', 'stop', MISSING], env)
-    await expect(interrupt).resolves.toStrictEqual([1, `session ${id} is not running`])
+    await expect(interrupt).resolves.toStrictEqual([
+      1,
+      'cannot interrupt a completed session: no turn of it is at work',
+    ])
     await expect(stop).resolves.toStrictEqual([1, `session ${MISSING} does not exist`])
     await daemon.stop()
   })
@@ -13403,9 +14729,11 @@ export const subCommands = {
 
 ```ts
 import { ApiError } from '@bytebureau/client'
+import { m } from '@bytebureau/i18n'
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   ProviderError,
   SessionError,
   WorkspaceError,
@@ -13416,41 +14744,52 @@ import { withBureau } from '../bureau/with-bureau.js'
 import type { Context } from '../context.js'
 import { oneLine } from './run-output.js'
 
+// The detail of a 4xx problem; a daemon named on the command line that refuses the token is told where its token goes
+function problemRefusal(error: ApiError, named: boolean): string | undefined {
+  const { problem } = error
+  if (problem === undefined || error.status >= 500) {
+    return undefined
+  }
+  return named && error.status === 401
+    ? m.bureau_token_hint({ detail: problem.detail })
+    : problem.detail
+}
+
+// Git or the file system failing is the daemon's failure, which the API answers with a 5xx problem: no refusal
+const DAEMON_FAILURES: ReadonlySet<string> = new Set(['git_failed', 'fs_failed'])
+
 // What a refusal says: the detail of the problem the daemon answered with, or the reason of the kernel's own error
 // The errors of the kernel that the API answers with a 4xx problem are the refusals in-process, told as the API tells them
 // A failure that is no refusal has none
-function refusalOf(error: unknown): string | undefined {
+function refusalOf(error: unknown, named: boolean): string | undefined {
   if (error instanceof ApiError) {
-    const { problem } = error
-    return problem !== undefined && error.status < 500 ? problem.detail : undefined
+    return problemRefusal(error, named)
   }
   if (error instanceof ConfigError) {
-    return `${error.file}${error.pointer}: ${error.reason}`
+    return configErrorLine(error)
   }
   if (error instanceof ProviderError) {
     return error.kind === 'missing' ? error.reason : undefined
   }
-  if (
-    error instanceof SessionError ||
-    error instanceof AskError ||
-    error instanceof WorkspaceError
-  ) {
-    return error.reason
+  if (error instanceof WorkspaceError) {
+    return DAEMON_FAILURES.has(error.code) ? undefined : error.reason
   }
-  return undefined
+  return error instanceof SessionError || error instanceof AskError ? error.reason : undefined
 }
 
 // A request that is refused, by the daemon with a 4xx problem or by the kernel in-process, ends the command with exit code 1 and its reason in one line
 // Any other failure goes on to the runner; nothing comes back for a refusal, so the command prints no success
+// Named: the daemon is one --host or --port names
 export async function refusable<Result>(
   context: Context,
   work: () => Promise<Result>,
+  named = false,
 ): Promise<Result | undefined> {
   try {
     const result = await work()
     return result
   } catch (error) {
-    const refusal = refusalOf(error)
+    const refusal = refusalOf(error, named)
     if (refusal === undefined) {
       throw error
     }
@@ -13466,10 +14805,15 @@ export async function withBureauRefusable<Result>(
   flags: BureauFlags,
   work: (bureau: Bureau) => Promise<Result>,
 ): Promise<Result | undefined> {
-  const result = await refusable(context, async () => {
-    const done = await withBureau(context, flags, work)
-    return done
-  })
+  const named = flags.host !== undefined || flags.port !== undefined
+  const result = await refusable(
+    context,
+    async () => {
+      const done = await withBureau(context, flags, work)
+      return done
+    },
+    named,
+  )
   return result
 }
 ```
@@ -14686,7 +16030,7 @@ import { createContext, type Context } from '../context.js'
 import { projectsStub, refusingStub } from '../testing/health-stub.js'
 import { problemError } from '../testing/records.js'
 import { captureConsole, contextOf, keepExitCode, rejecting } from '../testing/scripted-kernel.js'
-import { testHome } from '../testing/temp-repo.js'
+import { testHome, tokenFile } from '../testing/temp-repo.js'
 import { refusable, withBureauRefusable } from './refusable.js'
 
 const succeeding = async (): Promise<string> => {
@@ -14773,16 +16117,26 @@ describe('refusable and what the kernel says in its own way', () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it('names the place of an invalid configuration once when the reason names it already', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const reason = 'bytebureau.json/version: expected 1; bytebureau.json/project: missing'
+    const invalid = new ConfigError({ file: 'bytebureau.json', pointer: '/version', reason })
+    await refusable(contextOf(), rejecting(invalid))
+    expect([printed.err(), process.exitCode]).toStrictEqual([[reason], 1])
+  })
+
   it('tells a reason that spans lines as one line', async () => {
     expect.hasAssertions()
     keepExitCode()
     const printed = captureConsole()
-    const git = new WorkspaceError({
-      code: 'git_failed',
-      reason: 'git failed\nhint: commit first\n',
+    const dirty = new WorkspaceError({
+      code: 'dirty',
+      reason: 'uncommitted changes\nhint: commit first\n',
     })
-    await refusable(contextOf(), rejecting(git))
-    expect(printed.err()).toStrictEqual(['git failed; hint: commit first'])
+    await refusable(contextOf(), rejecting(dirty))
+    expect(printed.err()).toStrictEqual(['uncommitted changes; hint: commit first'])
   })
 })
 
@@ -14807,6 +16161,11 @@ describe('refusable and the failures that are no refusal', () => {
       new ProviderError({ kind: 'auth', reason: 'it', retryable: false }),
     ],
     ['the store of the kernel', new StoreError({ cause: new Error('disk full') })],
+    ['git failing under the kernel', new WorkspaceError({ code: 'git_failed', reason: 'it' })],
+    [
+      'the file system failing under the kernel',
+      new WorkspaceError({ code: 'fs_failed', reason: 'it' }),
+    ],
     ['any other error', new Error('boom')],
   ])('passes %s on and leaves the exit code alone', async (_what, failure) => {
     expect.hasAssertions()
@@ -14830,7 +16189,7 @@ describe(withBureauRefusable, () => {
   it('opens the Bureau of the flags for the work, and gives what the work gives', async () => {
     expect.hasAssertions()
     const stub = await projectsStub()
-    const flags = { daemon: true, host: '127.0.0.1', port: stub.port }
+    const flags = { daemon: true, host: '127.0.0.1', port: stub.port, tokenFile: tokenFile() }
     const context = contextIn(testHome())
     await expect(withBureauRefusable(context, flags, projectsOf)).resolves.toStrictEqual([])
   })
@@ -14840,13 +16199,24 @@ describe(withBureauRefusable, () => {
     keepExitCode()
     const port = await refusingStub(409, 'project_locked', 'the project is locked')
     const printed = captureConsole()
-    const flags = { daemon: true, host: '127.0.0.1', port }
+    const flags = { daemon: true, host: '127.0.0.1', port, tokenFile: tokenFile() }
     const result = await withBureauRefusable(contextIn(testHome()), flags, projectsOf)
     expect([result, printed.err(), process.exitCode]).toStrictEqual([
       undefined,
       ['the project is locked'],
       1,
     ])
+  })
+
+  it('tells a daemon named on the command line that refuses the token where its token goes', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const port = await refusingStub(401, 'unauthorized', 'a valid API token is required')
+    const printed = captureConsole()
+    const flags = { daemon: true, host: '127.0.0.1', port, tokenFile: tokenFile('wrong') }
+    await withBureauRefusable(contextIn(testHome()), flags, projectsOf)
+    const hint = 'a valid API token is required (pass the token of that daemon with --token-file)'
+    expect([printed.err(), process.exitCode]).toStrictEqual([[hint], 1])
   })
 })
 ```
@@ -14857,7 +16227,7 @@ describe(withBureauRefusable, () => {
 import { describe, expect, it } from 'vitest'
 import { refusingStub } from '../testing/health-stub.js'
 import { runCli } from '../testing/run-cli.js'
-import { testHome } from '../testing/temp-repo.js'
+import { testHome, tokenFile } from '../testing/temp-repo.js'
 
 // Every command that talks to a daemon, run aside: it has exit codes of its own
 const COMMANDS: readonly (readonly [string, readonly string[]])[] = [
@@ -14884,7 +16254,7 @@ describe('a request that the daemon refuses with a 4xx problem', () => {
     async (_name, command) => {
       expect.hasAssertions()
       const port = await refusingStub(409, 'locked', 'the daemon says no')
-      const daemon = ['--host', '127.0.0.1', '--port', String(port)]
+      const daemon = ['--host', '127.0.0.1', '--port', String(port), '--token-file', tokenFile()]
       const refused = await runCli([...command, ...daemon], { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, 'the daemon says no'])
     },
@@ -14913,6 +16283,8 @@ describe('a request that the daemon refuses with a problem that a run ends with 
         '127.0.0.1',
         '--port',
         String(port),
+        '--token-file',
+        tokenFile(),
       ]
       const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([1, detail])
@@ -14933,6 +16305,8 @@ describe('a request that the daemon refuses with a problem that a run ends with 
         '127.0.0.1',
         '--port',
         String(port),
+        '--token-file',
+        tokenFile(),
       ]
       const refused = await runCli(command, { BYTEBUREAU_HOME: testHome() })
       expect([refused.code, refused.stderr.trim()]).toStrictEqual([4, `${detail} (${code})`])
@@ -15268,11 +16642,14 @@ describe('run with a -- or a bare --debug among the arguments', () => {
     ])
   })
 
-  it('reads no sub-command behind a --, so none runs', async () => {
+  it('reads no sub-command behind a --, and refuses a name there as a usage error', async () => {
     expect.hasAssertions()
-    const { command, given } = tree()
-    await expect(run(command, ['--json', '--', 'projects', 'ls'])).resolves.toBe(0)
-    expect(given).toStrictEqual([])
+    const error = vi.spyOn(console, 'error').mockReturnValue()
+    vi.spyOn(console, 'log').mockReturnValue()
+    const { command, given, rooted } = tree()
+    await expect(run(command, ['--json', '--', 'projects', 'ls'])).resolves.toBe(1)
+    expect([given, rooted]).toStrictEqual([[], []])
+    expect(error).toHaveBeenCalledWith('No command specified: a command name goes before --')
   })
 
   it('takes a bare --debug before the sub-command for a flag with no value', async () => {
@@ -15309,6 +16686,7 @@ describe('run and the usage of a command named after a flag with a value', () =>
     ['--lang', 'cs', 'projects', '--help'],
     ['--debug', 'projects', '--help'],
     ['projects', '--lang', 'cs', '--help'],
+    ['projects', '--lang', 'ls', '--help'],
   ])('prints the usage of the group, not of what the value names: %j', async (...argv) => {
     expect.hasAssertions()
     const log = vi.spyOn(console, 'log').mockReturnValue()
@@ -15334,6 +16712,36 @@ describe('run and the usage of a command named after a flag with a value', () =>
     ).resolves.toBe(0)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('PROMPT'))
   })
+})
+
+describe('run and the value of a flag that names a leaf of the group before it', () => {
+  it.each([[['projects', '--lang', 'ls']], [['projects', '--host', 'ls']]])(
+    'takes it for the value, and refuses the group named without its leaf: %j',
+    async (argv) => {
+      expect.hasAssertions()
+      const error = vi.spyOn(console, 'error').mockReturnValue()
+      vi.spyOn(console, 'log').mockReturnValue()
+      const { command, given } = tree()
+      await expect(run(command, argv)).resolves.toBe(1)
+      expect(given).toStrictEqual([])
+      expect(error).toHaveBeenCalledWith('No command specified.')
+    },
+  )
+})
+
+describe('run and a name only the prototype of an object has', () => {
+  it.each([[['constructor']], [['projects', 'constructor']], [['--json', 'toString']]])(
+    'refuses %j as an unknown command, where citty would find the prototype',
+    async (argv) => {
+      expect.hasAssertions()
+      const error = vi.spyOn(console, 'error').mockReturnValue()
+      vi.spyOn(console, 'log').mockReturnValue()
+      const { command, given, rooted } = tree()
+      await expect(run(command, argv)).resolves.toBe(1)
+      expect([given, rooted]).toStrictEqual([[], []])
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('Unknown command'))
+    },
+  )
 })
 ```
 
@@ -15551,3 +16959,14 @@ git add .github apps/docs CONTRIBUTING.md README.md README.cs.md docs
 git commit -m "docs(repo): describe the daemon, the API and the client; run the daemon in the CI smoke"
 ```
 
+## Final fix wave (as shipped, 47 commits `7095d81..9f83ff0`, then rounds 2 to 4 in 19 commits `9f83ff0..945388c`)
+
+The whole-branch review (fable) returned "ready to merge with fixes": no Critical, two Important findings and fourteen minors; one dispatch then closed them together with every minor the task reviews had deferred (the ledger's digest `final-wave-b.md`), area by area, and a scoped re-review confirmed the wave. What changed, by area:
+
+- **Daemon and CLI.** The home's token is used only for the alive record's own URL: `--host` naming any other daemon without `--token-file` is a usage error that names the flag, and the 401 line hints at `--token-file` when `--host` was given. A lock holder is live only if its pid is alive and it is a daemon of this home — `server.json` names it and its health answers, a record appears within a 2 s grace, or the lock is younger than 30 s and held by a live process of this user (a daemon still booting writes its record only once its port is bound); otherwise the lock is stale and taken over, `serve --stop` clears such a lock and says so, and a lock that cannot be judged (another user's pid, EPERM) is named with `daemon.lock` and `serve --stop` as the way out instead of "did not come up in time"; `ensureDaemon` fails fast when the child died and waits while the holder is alive and no record has appeared yet; a takeover mutex closes the three-way and crash windows and leftover draft and `.stale` files are cleaned at start. `daemon.log` is rotated at each daemon start (the previous run kept as `daemon.log.1`). A wildcard bind is warned about by the command that starts the daemon too (`ServerInfo` gained an optional `bind`). `config validate`/`config schema` validate and describe the configuration without opening a kernel, so they run beside a live daemon; `serve --help` no longer lists the daemon flags and the commands that talk to no daemon refuse them. The argument walk refuses a group named without its leaf ("No command specified."), a name that is no own sub-command (`constructor`) and a name after `--` at the root. `refusable` treats git and file-system failures as failures (exit 2), not refusals, and tells a configuration error's place once; `isLoopback` knows the IPv6 spellings of loopback; the drain is robust to Bun's write-callback order. Tests: the RPC socket of a Bun daemon is driven through the client (call, refusal, stream, token); a per-run `globalSetup` teardown sweeps the scratch homes of a run and ends a daemon a timed-out test left.
+- **Kernel.** The owner columns are written in the statement that moves a resumed or prompted session (no stale owner claim across processes); the store's integrity check runs once in 30 seconds however often health is asked; the daemon-own names (`BYTEBUREAU_HOME`, `BYTEBUREAU_LOG_LEVEL`, `BYTEBUREAU_WORKSPACE_RUNTIME`) are dropped from the environment a caller sends; `projects.remove` of a project nobody holds fails `not_found` as the API does; a subscription whose `since` lies past the log head starts with nothing to replay; the `sk-` redaction matches keys of real length only and leaves the realm of a `Bearer` challenge alone; a session the recovery cannot settle is told once; interrupting a session with no turn at work is an invalid transition (409 through the API); `WorkspaceInfoDto.sessionStatus` is decoded as `SessionStatus` from the row.
+- **API.** Every 401 carries `WWW-Authenticate: Bearer realm="bytebureau"` and a REST 429 carries `Retry-After`; a request body the server could not read (Bun's `RequestParseError` on an oversized chunked body) is kept out of the defect log; `POST /projects` refuses a relative path and a project that is gone has its own problem; what a slow SSE reader lags behind is bounded — its deltas are dropped without a scan and the loss is logged; the 429 test drives the limiter's clock instead of sleeping.
+- **Client and protocol.** `close()` clears the ping interval, an abort releases the exchange and skips the ack, a 2xx that is not an event stream counts as a failed attempt (tests: a heartbeat does not move the resume position, the backoff resets on open, pings are sent); the library sources get a second typecheck pass against the DOM library without Bun or Node globals; `since` is a non-negative integer on both doors (the decoder enforces it; no generated artefact changed); the RPC stream and error schemas, the DTO literal sets, nulls and a project round trip are pinned.
+- **Docs.** `daemon-and-api.md` tells the token scoping, the lock rules and the way out, the exit codes of `sessions prompt`, the exit 2 of an unknown employee or an invalid configuration, the whole-log replay of a subscription without `since`, the two headers, the problem changes and citty's `--no-x` over `--x`; the architecture page's deferrals gained the SP2 items of the wave (a Host allowlist on the two unauthenticated routes, Effect's empty 404/500 bodies, a latest-seq hint for `sessions prompt`); the spec's §11 line on the 413 was amended.
+
+Left as ruled: the RPC `Die` before authentication on loopback (ADR-0013); the `redis` peers in the lockfile (Bun 1.4.2 offers only global peer switches); the Phase C/D deferrals. Round 2 then closed what the wave's re-review and the wave itself found: the liveness of a lock holder is judged in order — a holder whose health answers with the record's `startedAt` is the daemon whatever its start time; a record naming the pid within the grace, or a lock inside the 30 s boot allowance held by a live process of this user, is a daemon coming up; only then the process start time (POSIX `ps -o lstart=` under `LC_ALL=C`/`TZ=UTC`, Windows best effort, else the earlier rule) decides, with a 5 s tolerance: a process that started more than 5 s after the lock was written is a stranger and its lock is stale, while a holder that started before the lock and does not answer is silent (busy or stopped) and keeps its lock — `serve --stop` then says so, names the way out (delete the lock file if the process is not a daemon of this home) and exits 1 without clearing, and a start refuses with the same line (a zero boot allowance, as the tests use, never counts a lock as coming up, so a lock judged in the millisecond it was written is judged by its answer and its start); interrupting a session with no turn at work is refused as an invalid transition even while the agent is attached; the log rotation ignores ENOENT when two starts race; the docs say an RPC stream does not resume (resubscribe with `since`) and carry the `since` bound; `run` against a 401 hints at `--token-file` when `--host`/`--port` were given; a foreground daemon stopped with an RPC socket open exits 0 (an interrupt-only dispose is a clean close); the CLI tells a configuration error's place once (`configErrorLine`); an `EPIPE` on stdout or stderr when a pipe reader goes away first is ignored.
