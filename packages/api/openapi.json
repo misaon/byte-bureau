@@ -88,40 +88,17 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "number",
-                      "enum": [
-                        400
-                      ]
-                    },
-                    "detail": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "instance": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "detail",
-                    "code"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Problem400",
-                  "description": "RFC 9457 problem details"
+                  "$ref": "#/components/schemas/Problem400"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem500"
                 }
               }
             }
@@ -158,40 +135,7 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "number",
-                      "enum": [
-                        400
-                      ]
-                    },
-                    "detail": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "instance": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "detail",
-                    "code"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Problem400",
-                  "description": "RFC 9457 problem details"
+                  "$ref": "#/components/schemas/Problem400"
                 }
               }
             }
@@ -201,40 +145,17 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "number",
-                      "enum": [
-                        401
-                      ]
-                    },
-                    "detail": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "instance": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "detail",
-                    "code"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Problem401",
-                  "description": "RFC 9457 problem details"
+                  "$ref": "#/components/schemas/Problem401"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem500"
                 }
               }
             }
@@ -271,40 +192,7 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "number",
-                      "enum": [
-                        400
-                      ]
-                    },
-                    "detail": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "instance": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "detail",
-                    "code"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Problem400",
-                  "description": "RFC 9457 problem details"
+                  "$ref": "#/components/schemas/Problem400"
                 }
               }
             }
@@ -314,40 +202,17 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string"
-                    },
-                    "title": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "number",
-                      "enum": [
-                        401
-                      ]
-                    },
-                    "detail": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "instance": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "detail",
-                    "code"
-                  ],
-                  "additionalProperties": false,
-                  "title": "Problem401",
-                  "description": "RFC 9457 problem details"
+                  "$ref": "#/components/schemas/Problem401"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "RFC 9457 problem details",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem500"
                 }
               }
             }
@@ -357,7 +222,116 @@
     }
   },
   "components": {
-    "schemas": {},
+    "schemas": {
+      "Problem500": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "number",
+            "enum": [
+              500
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "additionalProperties": false,
+        "title": "Problem500",
+        "description": "RFC 9457 problem details"
+      },
+      "Problem400": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "number",
+            "enum": [
+              400
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "additionalProperties": false,
+        "title": "Problem400",
+        "description": "RFC 9457 problem details"
+      },
+      "Problem401": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "number",
+            "enum": [
+              401
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "additionalProperties": false,
+        "title": "Problem401",
+        "description": "RFC 9457 problem details"
+      }
+    },
     "securitySchemes": {
       "bearer": {
         "type": "http",

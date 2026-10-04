@@ -1,43 +1,55 @@
 import { configJsonSchema, eventsJsonSchema } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Cause, Effect, Exit, Layer, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
-import { sameToken } from './auth.js'
+import { AuthorizationLive, sameToken } from './auth.js'
 import { ApiTestLayer, authorized, baseUrl, bodyOf, fetched, json } from './testing.js'
 
 const EVENTS_SCHEMA = '/api/v1/schemas/events.json'
 
+// What a refused request carries in its Authorization header: nothing, an empty bearer token, a wrong one
+const REFUSED: [string, Record<string, string>][] = [
+  ['no Authorization header', {}],
+  ['an empty bearer token', { authorization: 'Bearer ' }],
+  ['a wrong token', { authorization: 'Bearer not-the-token' }],
+]
+
+// What building the layer dies with, or nothing when it builds
+const buildFailure = <Out>(layer: Layer.Layer<Out>): string => {
+  const built = Effect.runSyncExit(Effect.scoped(Layer.build(layer)))
+  return Exit.match(built, { onFailure: (cause) => Cause.pretty(cause), onSuccess: () => '' })
+}
+
 describe(sameToken, () => {
-  it('is true only for the same token, whatever the length of the other', () => {
+  it('is true only for the same token, whatever the length of the other, and never for an empty one', () => {
     expect(sameToken('abc', 'abc')).toBe(true)
     expect(sameToken('abc', 'abd')).toBe(false)
     expect(sameToken('ab', 'abc')).toBe(false)
-    expect(sameToken('', '')).toBe(true)
+    expect(sameToken('', '')).toBe(false)
+  })
+})
+
+describe(AuthorizationLive, () => {
+  it('refuses to build without a token, which would let every request in', () => {
+    const withoutToken = AuthorizationLive(Redacted.make(''))
+    expect(buildFailure(withoutToken)).toContain('the API token must not be empty')
+    const withToken = AuthorizationLive(Redacted.make('token'))
+    expect(buildFailure(withToken)).toBe('')
   })
 })
 
 it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => {
-  suite.effect('is required: a request without the header gets the 401 problem', () =>
-    Effect.gen(function* refusesMissing() {
+  suite.effect.each(REFUSED)('refuses %s with the 401 problem', ([, headers]) =>
+    Effect.gen(function* refuses() {
       const base = yield* baseUrl
-      const response = yield* fetched(`${base}${EVENTS_SCHEMA}`)
-      assert.strictEqual(response.status, 401)
-      assert.containSubset(yield* bodyOf(response), { code: 'unauthorized' })
-    }),
-  )
-
-  suite.effect('is checked: a wrong token is a 401 problem', () =>
-    Effect.gen(function* refusesWrong() {
-      const base = yield* baseUrl
-      const wrong = { headers: { authorization: 'Bearer not-the-token' } }
-      const response = yield* fetched(`${base}${EVENTS_SCHEMA}`, wrong)
+      const response = yield* fetched(`${base}${EVENTS_SCHEMA}`, { headers })
       assert.strictEqual(response.status, 401)
       assert.include(response.headers.get('content-type'), 'application/problem+json')
       assert.deepStrictEqual(yield* bodyOf(response), {
         type: 'https://bytebureau.dev/problems/unauthorized',
         title: 'Unauthorized',
         status: 401,
-        detail: 'a valid bearer token is required',
+        detail: 'a valid API token is required',
         code: 'unauthorized',
       })
     }),

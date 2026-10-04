@@ -31,8 +31,10 @@ export class TokenBuckets {
     this.forgetFull(now)
     const known = this.buckets.get(key)
     const tokens = known === undefined ? this.options.capacity : this.refilled(known, now)
-    if (tokens >= 1) {
-      this.buckets.set(key, { tokens: tokens - 1, updatedAt: now })
+    const allowed = tokens >= 1
+    // Stored with the time of this call even when refused, so after a clock that stepped back tokens flow from there
+    this.buckets.set(key, { tokens: allowed ? tokens - 1 : tokens, updatedAt: now })
+    if (allowed) {
       return { allowed: true, retryAfterSec: 0 }
     }
     const perMs = this.options.perMinute / MS_PER_MINUTE
@@ -43,9 +45,10 @@ export class TokenBuckets {
     return this.buckets.size
   }
 
-  // The tokens of a bucket with what flowed back since it was last taken from, at most the capacity
+  // The tokens of a bucket with what flowed back since it was last seen, at most the capacity; a clock that stepped back takes none away
   private refilled(bucket: Bucket, now: number): number {
-    const flowed = ((now - bucket.updatedAt) * this.options.perMinute) / MS_PER_MINUTE
+    const elapsed = Math.max(0, now - bucket.updatedAt)
+    const flowed = (elapsed * this.options.perMinute) / MS_PER_MINUTE
     return Math.min(this.options.capacity, bucket.tokens + flowed)
   }
 

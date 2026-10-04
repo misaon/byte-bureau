@@ -22,6 +22,7 @@ export {
   orProblem,
   PROBLEM_SCHEMAS,
   PROBLEM_STATUSES,
+  KERNEL_STATUSES,
   Problem400,
   Problem401,
   Problem403,
@@ -34,5 +35,6 @@ export {
   Problem502,
   Problem503,
   type ApiProblem,
+  type KernelStatus,
   type ProblemStatus,
 } from './problems.js'

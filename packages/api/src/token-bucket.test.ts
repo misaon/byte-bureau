@@ -23,4 +23,14 @@ describe(TokenBuckets, () => {
     buckets.take('a')
     expect(buckets.size()).toBe(1)
   })
+
+  it('takes no tokens away and keeps refilling when the clock steps back', () => {
+    let now = 60_000
+    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: (): number => now })
+    buckets.take('a')
+    now = 0
+    expect(buckets.take('a')).toStrictEqual({ allowed: false, retryAfterSec: 1 })
+    now = 1000
+    expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
+  })
 })

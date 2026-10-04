@@ -3,6 +3,7 @@ import {
   ConfigError,
   PluginError,
   ProviderError,
+  redactValue,
   SessionError,
   StoreError,
   WorkspaceError,
@@ -10,9 +11,14 @@ import {
 import { problemType, type Problem } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import { HttpApiSchema } from 'effect/http-api'
+import { logApiError, logApiWarning } from './logging.js'
 
 export const PROBLEM_STATUSES = [400, 401, 403, 404, 409, 413, 422, 429, 500, 502, 503] as const
 export type ProblemStatus = (typeof PROBLEM_STATUSES)[number]
+
+// Every status a kernel failure can turn into; the endpoints that call the kernel declare them all
+export const KERNEL_STATUSES = [403, 404, 409, 422, 500, 502, 503] as const
+export type KernelStatus = (typeof KERNEL_STATUSES)[number]
 
 const TITLES: Readonly<Record<ProblemStatus, string>> = {
   400: 'Bad Request',
@@ -45,6 +51,7 @@ type ProblemSchema<Status extends ProblemStatus> = Schema.Struct<{
 }>
 
 // One schema per status, told apart by the literal status, so the API encodes a problem with the status it carries
+// The identifier names it under components.schemas of the OpenAPI document
 const problemSchema = <Status extends ProblemStatus>(status: Status): ProblemSchema<Status> =>
   Schema.Struct({
     type: Schema.String,
@@ -54,7 +61,11 @@ const problemSchema = <Status extends ProblemStatus>(status: Status): ProblemSch
     code: Schema.String,
     instance: Schema.optionalKey(Schema.String),
   })
-    .annotate({ title: `Problem${status}`, description: 'RFC 9457 problem details' })
+    .annotate({
+      identifier: `Problem${status}`,
+      title: `Problem${status}`,
+      description: 'RFC 9457 problem details',
+    })
     .pipe(
       HttpApiSchema.status(status),
       HttpApiSchema.asJson({ contentType: 'application/problem+json' }),
@@ -72,36 +83,54 @@ export const Problem500 = problemSchema(500)
 export const Problem502 = problemSchema(502)
 export const Problem503 = problemSchema(503)
 
-// Every status a kernel failure can turn into; the endpoints that call the kernel declare them all
-export const PROBLEM_SCHEMAS = [
-  Problem403,
-  Problem404,
-  Problem409,
-  Problem422,
-  Problem500,
-  Problem502,
-  Problem503,
-] as const
+// The schema of each status; the endpoints and the middlewares that declare a status share its one instance
+const SCHEMAS: { readonly [Status in ProblemStatus]: ProblemSchema<Status> } = {
+  400: Problem400,
+  401: Problem401,
+  403: Problem403,
+  404: Problem404,
+  409: Problem409,
+  413: Problem413,
+  422: Problem422,
+  429: Problem429,
+  500: Problem500,
+  502: Problem502,
+  503: Problem503,
+}
 
+// The error schemas of an endpoint that calls the kernel: one per status of KERNEL_STATUSES
+export const PROBLEM_SCHEMAS: readonly (typeof SCHEMAS)[KernelStatus][] = KERNEL_STATUSES.map(
+  (status) => SCHEMAS[status],
+)
+
+// The detail is told with every secret-shaped run of text replaced: it carries reasons from git, plugins and providers
 export const problem = <Status extends ProblemStatus>(
   status: Status,
   code: string,
   detail: string,
-): ApiProblem<Status> => ({ type: problemType(code), title: TITLES[status], status, detail, code })
+): ApiProblem<Status> => ({
+  type: problemType(code),
+  title: TITLES[status],
+  status,
+  detail: String(redactValue(detail)),
+  code,
+})
 
-const SESSION_STATUS: Readonly<Record<SessionError['code'], ProblemStatus>> = {
+export const UNEXPECTED_FAILURE = problem(500, 'internal', 'unexpected failure')
+
+const SESSION_STATUS: Readonly<Record<SessionError['code'], KernelStatus>> = {
   not_found: 404,
   invalid_transition: 409,
   provider_missing: 422,
   yolo_refused: 403,
   employee_missing: 422,
 }
-const ASK_STATUS: Readonly<Record<AskError['code'], ProblemStatus>> = {
+const ASK_STATUS: Readonly<Record<AskError['code'], KernelStatus>> = {
   not_found: 404,
   not_pending: 409,
   invalid_answer: 422,
 }
-const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], ProblemStatus>> = {
+const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], KernelStatus>> = {
   auth: 502,
   ratelimit: 502,
   crash: 502,
@@ -109,9 +138,9 @@ const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], ProblemStatus>> = 
   missing: 422,
 }
 const CONFLICTS: ReadonlySet<string> = new Set(['locked', 'dirty', 'has_sessions'])
-const workspaceStatus = (code: string): ProblemStatus => (CONFLICTS.has(code) ? 409 : 422)
+const workspaceStatus = (code: string): KernelStatus => (CONFLICTS.has(code) ? 409 : 422)
 
-const toProblemOfRest = (error: unknown): ApiProblem => {
+const toProblemOfRest = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof ConfigError) {
     return problem(422, 'config_invalid', `${error.file}${error.pointer}: ${error.reason}`)
   }
@@ -121,11 +150,11 @@ const toProblemOfRest = (error: unknown): ApiProblem => {
   if (error instanceof StoreError) {
     return problem(503, 'store_unavailable', 'the store is unavailable')
   }
-  return problem(500, 'internal', 'unexpected failure')
+  return UNEXPECTED_FAILURE
 }
 
 // The problem a kernel failure is told as; an unknown failure is not described, only logged by the caller
-export const toProblem = (error: unknown): ApiProblem => {
+export const toProblem = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof SessionError) {
     return problem(SESSION_STATUS[error.code], `session_${error.code}`, error.reason)
   }
@@ -141,15 +170,18 @@ export const toProblem = (error: unknown): ApiProblem => {
   return toProblemOfRest(error)
 }
 
-// A kernel call inside a handler: its typed failure becomes a problem, and what is unexpected is logged before it does
+// What the client is not told is logged: the cause behind an unavailable store, and a failure the API did not expect
+const logUntold = (failure: unknown): Effect.Effect<void> => {
+  if (failure instanceof StoreError) {
+    return logApiWarning('the store failed under an API call', failure.cause)
+  }
+  return toProblem(failure).code === 'internal'
+    ? logApiError('unexpected failure in an API handler', failure)
+    : Effect.void
+}
+
+// A kernel call inside a handler: its failure becomes a problem with a status the endpoint declares
 export const orProblem = <Value, Failure, Requirements>(
   effect: Effect.Effect<Value, Failure, Requirements>,
-): Effect.Effect<Value, ApiProblem, Requirements> =>
-  effect.pipe(
-    Effect.tapError((failure) =>
-      toProblem(failure).code === 'internal'
-        ? Effect.logError('unexpected failure in an API handler', failure)
-        : Effect.void,
-    ),
-    Effect.mapError(toProblem),
-  )
+): Effect.Effect<Value, ApiProblem<KernelStatus>, Requirements> =>
+  effect.pipe(Effect.tapError(logUntold), Effect.mapError(toProblem))

@@ -10,12 +10,12 @@ import {
 } from 'effect/http'
 import { HttpApiBuilder } from 'effect/http-api'
 import type { SqlClient } from 'effect/sql'
-import { BureauApi } from './api.js'
+import { API_PREFIX, BureauApi } from './api.js'
 import { ApiConfig, type ApiOptions } from './config.js'
 import { Handlers } from './handlers/all.js'
 import { Middlewares } from './middlewares.js'
 
-export const OPENAPI_PATH = '/api/v1/openapi.json'
+export const OPENAPI_PATH = `${API_PREFIX}/openapi.json` as const
 const MAX_BODY = ByteSize.megabytes(10)
 
 // What the platform layer of the server provides (BunHttpServer.layer in the binary, NodeHttpServer.layer under Vitest)
@@ -33,24 +33,27 @@ export type ApiRequirements =
   | SqlClient.SqlClient
   | HttpRouter.Request.From<'Requires', KernelServices>
 
-// The endpoints of the API with their handlers and middlewares; the configuration reaches the handlers with each request
+// The endpoints of the API with their handlers and middlewares
+// One configuration layer serves the middlewares, built with it, and the handlers, which read it with each request
 const Routes = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> => {
   const config = Layer.succeed(ApiConfig, options)
+  const middlewares = Middlewares(options.token).pipe(Layer.provide(config))
   return HttpApiBuilder.layer(BureauApi, { openapiPath: OPENAPI_PATH }).pipe(
     Layer.provide(Handlers),
-    Layer.provide(Middlewares(options)),
+    Layer.provide(middlewares),
     HttpRouter.provideRequest(config),
   )
 }
 
 // Browsers may call the API only from the listed origins; with none listed there is no CORS at all (the embedded UI of SP2 is same-origin)
+// A predicate rather than the list: with a list of one, Effect would name that origin to every requester
 const Cors = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
   origins.length === 0
     ? Layer.empty
     : HttpRouter.use((router) =>
         router.addGlobalMiddleware(
           HttpMiddleware.cors({
-            allowedOrigins: origins,
+            allowedOrigins: (origin) => origins.includes(origin),
             allowedMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
             allowedHeaders: ['authorization', 'content-type', 'last-event-id'],
           }),
