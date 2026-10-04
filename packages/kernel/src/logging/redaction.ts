@@ -20,8 +20,8 @@ interface SecretPattern extends RedactionPattern {
 
 const replacement = '[REDACTED]'
 export const SECRET_PATTERNS: readonly SecretPattern[] = [
-  { pattern: /sk-ant-[A-Za-z0-9_-]{8,}/gu, replacement },
-  { pattern: /\bsk-[A-Za-z0-9_-]{8,}/gu, replacement },
+  // The keys of OpenAI and Anthropic run 32 characters and more past sk-: a name such as sk-learn-demo, or a path through it, is no key
+  { pattern: /\bsk-[A-Za-z0-9_-]{32,}/gu, replacement },
   { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/gu, replacement },
   { pattern: /\bgithub_pat_[A-Za-z0-9_]{4,}/gu, replacement },
   { pattern: /\bxox[abp]-[A-Za-z0-9-]{4,}/gu, replacement },
@@ -31,7 +31,11 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
     replacement,
   },
-  { pattern: /\bBearer [A-Za-z0-9._~+/-]+=*/giu, replacement: `Bearer ${replacement}` },
+  // A token, never the parameter of a challenge such as git's Bearer realm="GitHub"
+  {
+    pattern: /\bBearer (?![A-Za-z][A-Za-z0-9_-]*=[^=\s,])[A-Za-z0-9._~+/-]+=*/giu,
+    replacement: `Bearer ${replacement}`,
+  },
   // Any scheme, any case: https, ftp, postgres; userinfo stops at quotes and backslashes, so a JSON line stays valid
   {
     pattern: /(?<scheme>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:"'\\]+:[^\s/@"'\\]+@/giu,

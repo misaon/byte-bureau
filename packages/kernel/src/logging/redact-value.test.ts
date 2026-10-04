@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { redactValue } from './redact-value.js'
 
-const DEEP_SECRET = 'sk-ant-deep-secret-1234'
+const DEEP_SECRET = `sk-ant-deep-secret-${'1234'.repeat(8)}`
+const KEY = `sk-ant-api03-${'abcdefghij'.repeat(4)}`
 // Eleven levels of nesting with the secret at the bottom
 const PATH = [
   'one',
@@ -41,8 +42,8 @@ describe(redactValue, () => {
     expect(
       redactValue({
         input: { command: 'curl -H "Authorization: Bearer abc.def-ghi" https://x', api_key: 'k' },
-        text: 'use sk-ant-api03-abcdefghij and ghp_abcdefghijklmnop',
-        env: { ANTHROPIC_API_KEY: 'sk-ant-zzzzzzzzzz' },
+        text: `use ${KEY} and ghp_abcdefghijklmnop`,
+        env: { ANTHROPIC_API_KEY: KEY },
       }),
     ).toStrictEqual({
       input: {

@@ -36,7 +36,7 @@ const lineOf = (output: string): Record<string, unknown> => {
 }
 
 const logSecrets = (): void => {
-  logger.info('key sk-ant-api03-canary', { apiKey: 'field-only-value', keep: 1 })
+  logger.info(`key sk-ant-api03-${'canary'.repeat(6)}`, { apiKey: 'field-only-value', keep: 1 })
 }
 
 // A sink that throws once, the records it was given before LogTape reset it, and what went to stderr

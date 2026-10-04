@@ -28,9 +28,13 @@ const SECRET_NAMES = [
 ]
 const ORDINARY_NAMES = ['sessionId', 'category', 'status', 'durationMs']
 
+// Keys as long as the real ones: sk- and 32 characters at least
+const ANTHROPIC_KEY = `sk-ant-api03-${'canary'.repeat(6)}`
+const OPENAI_KEY = `sk-proj-${'canary12'.repeat(5)}`
+
 const SECRET_SAMPLES = [
-  'sk-ant-api03-canary',
-  'sk-proj-canary1234',
+  ANTHROPIC_KEY,
+  OPENAI_KEY,
   'ghp_canary1234',
   'github_pat_canary',
   'xoxb-1-canary',
@@ -41,7 +45,7 @@ const SECRET_SAMPLES = [
   'https://user:pw@example.com/x',
 ]
 const ORDINARY_TEXT =
-  '2026-10-02T12:00:00.000Z bb.store session 0199c2f1-7a3b-7c11-8f3e-2b1d4c5e6f70 task-12345678 risk-assessment /src/index.ts'
+  '2026-10-02T12:00:00.000Z bb.store session 0199c2f1-7a3b-7c11-8f3e-2b1d4c5e6f70 task-12345678 risk-assessment /src/index.ts sk-learn-demo /home/me/sk-tools/repo WWW-Authenticate: Bearer realm="GitHub", error="invalid_token"'
 
 describe(redactFields, () => {
   it('drops secret-looking property names at any depth', () => {
@@ -51,7 +55,7 @@ describe(redactFields, () => {
     })
     sink(
       record({
-        apiKey: 'sk-ant-canary',
+        apiKey: ANTHROPIC_KEY,
         nested: { authorization: 'Bearer x', keep: 1 },
         ANTHROPIC_API_KEY: 'y',
       }),
@@ -69,11 +73,11 @@ describe(redactText, () => {
     const text = format(
       record(
         {},
-        'sk-ant-api03-canary ghp_canary1234 github_pat_canary xoxb-1-canary AKIAIOSFODNN7CANARY eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc https://user:pw@example.com/x -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+        `${ANTHROPIC_KEY} ghp_canary1234 github_pat_canary xoxb-1-canary AKIAIOSFODNN7CANARY eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc https://user:pw@example.com/x -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----`,
       ),
     )
     for (const canary of [
-      'sk-ant-api03-canary',
+      ANTHROPIC_KEY,
       'ghp_canary1234',
       'github_pat_canary',
       'xoxb-1-canary',
@@ -170,5 +174,30 @@ describe('the secret pattern list', () => {
       expect(SECRET_SAMPLES.some((sample) => sample.search(pattern) !== -1)).toBe(true)
       expect(ORDINARY_TEXT.search(pattern)).toBe(-1)
     }
+  })
+})
+
+describe('the secret patterns and the text that only looks like a secret', () => {
+  it.each([
+    ['a project named with an sk- word', 'project sk-learn-experiments-2024 registered'],
+    ['a path through such a project', '/home/me/code/sk-tools/src/index.ts'],
+    ["git's challenge", 'WWW-Authenticate: Bearer realm="GitHub"'],
+    ['a challenge with a bare realm', 'Bearer realm=example, scope=repo'],
+  ])('leaves %s as it is', (_what, text) => {
+    const line = redactText(jsonLinesFormatter)(record({}, text))
+    expect(JSON.parse(line)).toMatchObject({ message: text })
+  })
+
+  it.each([
+    ['an OpenAI key', `key ${OPENAI_KEY}`, 'key [REDACTED]'],
+    ['a legacy OpenAI key', `key sk-${'A1b2C3d4'.repeat(6)}`, 'key [REDACTED]'],
+    [
+      'a bearer token with padding',
+      'Authorization: Bearer YWJjZGVm==',
+      'Authorization: Bearer [REDACTED]',
+    ],
+  ])('redacts %s', (_what, text, redacted) => {
+    const line = redactText(jsonLinesFormatter)(record({}, text))
+    expect(JSON.parse(line)).toMatchObject({ message: redacted })
   })
 })

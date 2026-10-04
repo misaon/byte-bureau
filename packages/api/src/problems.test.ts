@@ -20,7 +20,7 @@ import {
 } from './problems.js'
 
 const NO_SESSION = 'no session 42'
-const API_KEY = 'sk-ant-api03-abcdefghij'
+const API_KEY = `sk-ant-api03-${'abcdefghij'.repeat(4)}`
 
 // The typed errors of the kernel with the status, the code and the detail each is told with
 const KERNEL_FAILURES: {
