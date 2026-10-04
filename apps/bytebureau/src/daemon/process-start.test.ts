@@ -39,7 +39,8 @@ describe.skipIf(process.platform === 'win32')(processStartedAt, () => {
     await once(child, 'spawn')
     const after = Date.now()
     const started = await processStartedAt(pidOf(child))
-    expect(started).toBeGreaterThanOrEqual(before)
+    // Linux derives a start from the boot time in whole seconds and the ticks since, so it may read a second early
+    expect(started).toBeGreaterThanOrEqual(before - 1000)
     expect(started).toBeLessThanOrEqual(after)
   })
 
