@@ -3765,8 +3765,8 @@ git commit -m "feat(kernel): keep named auth profiles per provider, and run a se
 ### Task 4: The API's `profiles` group, the per-profile usage snapshot, the problems, the client
 
 **Files:**
-- Create: `packages/api/src/groups/profiles.ts`, `packages/api/src/handlers/profiles.ts`, `packages/api/src/profiles.test.ts`
-- Modify: `packages/protocol/src/events.ts` (`profile.added|removed|status` and `ratelimit.updated` carry `profileId` as `Schema.String` — a profile id is `<provider>/<name>`, not a UUIDv7 — ruled after Task 3), `packages/api/src/api.ts` (the group), `packages/api/src/handlers/all.ts`, `packages/api/src/groups/usage.ts` and `handlers/usage.ts` (`GET /usage/profiles/:id`), `packages/api/src/handlers/plugins.ts` (`supportsApiKey`), `packages/api/src/problems.ts` (`ProfileError` → statuses and `profile_*` codes), `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` (regenerated), `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`), `packages/client/src/http.test.ts`, `packages/api/src/rpc.test.ts` (every procedure reached), `packages/api/src/workspaces-plugins.test.ts` (`supportsApiKey` is pinned there already by Task 1)
+- Create: `packages/api/src/groups/profiles.ts`, `packages/api/src/handlers/profiles.ts`, `packages/api/src/profiles.test.ts`, `packages/api/src/groups/resources.ts` and `packages/api/src/handlers/resources.ts` (the six resource groups and their layers gathered, as `api.ts` and `handlers/all.ts` were at the 10-dependency cap)
+- Modify: `packages/protocol/src/events.ts` (`profile.added|removed|status` carry `profileId` as `Schema.String`, `ratelimit.updated` as `Schema.NullOr(Schema.String)`) with `packages/protocol/schemas/events.json` regenerated, `packages/protocol/src/api/rpc.ts` (`profiles.list|add|remove|setDefault|status`, `usage.profile`), `packages/api/src/api.ts` and `packages/api/src/handlers/all.ts` (through the resources files), `packages/api/src/groups/usage.ts` and `packages/api/src/handlers/usage.ts` (`GET /usage/profiles/:id`, `profileUsageOf`), `packages/api/src/problems.ts` (`PROFILE_STATUS`, the `ProfileError` branch in `toProblemOfRest`), `packages/api/src/rpc/handlers.ts`, `packages/api/openapi.json` and `packages/client/src/gen/**` (regenerated), `packages/client/src/index.ts` (`profiles` area, `usage.profile`, `RemoveProfileOptions`), `packages/client/src/sse-fixture.ts` (records method, raw target and body), `apps/bytebureau/src/testing/{recording-client,records}.ts` (stubs for the new client calls), `cspell.json` (percent escapes are no words); tests `packages/api/src/{sessions,rpc,problems,openapi,client}.test.ts`, `packages/client/src/http.test.ts`, `packages/protocol/src/{events,json-schema}.test.ts`, `packages/protocol/src/api/rpc.test.ts`
 - Test: the new `profiles.test.ts` over `ApiTestLayer`
 
 **Interfaces:**
@@ -3780,60 +3780,274 @@ Heads-up from Task 3 (as shipped): `ProfileService` has `get(id)` too; `list()` 
 `packages/api/src/profiles.test.ts` (style of `sessions.test.ts`; the fake provider takes API-key profiles):
 
 ```ts
-describe('the profiles of the API', () => {
-  it.layer(ApiTestLayer())('profiles', (it) => {
-    it.effect('adds a login profile, lists it as the default of its provider, and never echoes a key', () =>
-      Effect.gen(function* () {
-        const created = yield* post('/profiles', { providerId: 'fake', name: 'work', kind: 'login' })
-        expect(created.status).toBe(201)
-        const keyed = yield* post('/profiles', { providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'sk-canary-api' })
-        expect(keyed.status).toBe(201)
-        expect(yield* bodyOf(keyed)).not.toContain('sk-canary-api')
-        const listed = yield* json<readonly ProfileDto[]>(get('/profiles'))
-        expect(listed.map((profile) => [profile.id, profile.isDefault])).toStrictEqual([['fake/work', true], ['fake/key', false]])
-      }),
-    )
+import { existsSync } from 'node:fs'
+import { UsageService } from '@bytebureau/kernel'
+import { ProfileDto, SessionDto, UsageSnapshotDto } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect, Schema, type Cause } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { ApiTestLayer, get, post, remove, type Reply } from './testing.js'
+import { registeredProject } from './testing-sessions.js'
 
-    it.effect('refuses a duplicate with 409, a key for a login profile with 422, and an unknown provider with 422', () =>
-      Effect.gen(function* () {
-        const twice = yield* post('/profiles', { providerId: 'fake', name: 'work', kind: 'login' })
-        expect([twice.status, (yield* problemOf(twice)).code]).toStrictEqual([409, 'profile_exists'])
-        const keyedLogin = yield* post('/profiles', { providerId: 'fake', name: 'l', kind: 'login', apiKey: 'x' })
-        expect([keyedLogin.status, (yield* problemOf(keyedLogin)).code]).toStrictEqual([422, 'profile_invalid'])
-        const ghost = yield* post('/profiles', { providerId: 'ghost', name: 'g', kind: 'login' })
-        expect([ghost.status, (yield* problemOf(ghost)).code]).toStrictEqual([422, 'session_provider_missing'])
-      }),
-    )
+// A key no answer, problem or listing may repeat
+const CANARY = 'sk-canary-api'
 
-    it.effect('moves the default, tells the status, and removes a profile that no session runs under', () =>
-      Effect.gen(function* () {
-        expect((yield* post('/profiles/fake%2Fkey/default')).status).toBe(204)
-        const status = yield* json<ProfileStatusDto>(get('/profiles/fake%2Fwork/status'))
-        expect(status.state).toBe('loggedIn')
-        expect((yield* remove('/profiles/fake%2Fkey')).status).toBe(204)
-        const gone = yield* get('/profiles/fake%2Fkey/status')
-        expect([gone.status, (yield* problemOf(gone)).code]).toStrictEqual([404, 'profile_not_found'])
-      }),
-    )
+const LOGIN = { providerId: 'fake', name: 'work', kind: 'login' } as const
+const KEYED = { providerId: 'fake', name: 'key', kind: 'api_key', apiKey: CANARY } as const
 
-    it.effect('refuses to remove the profile of a session that has not ended, with 409', () =>
-      Effect.gen(function* () {
-        const project = yield* registeredProject()
-        const session = yield* createdSession(project.id, { profileId: 'fake/work' })
-        expect(session.profileId).toBe('fake/work')
-        const busy = yield* remove('/profiles/fake%2Fwork')
-        expect([busy.status, (yield* problemOf(busy)).code]).toStrictEqual([409, 'profile_in_use'])
-      }),
-    )
+const profilesOf = (reply: Reply): readonly ProfileDto[] =>
+  Schema.decodeUnknownSync(Schema.Array(ProfileDto))(reply.body)
 
-    it.effect('answers the usage snapshot of a profile, empty before any rate limit was seen, and 404 for an unknown one', () =>
-      Effect.gen(function* () {
-        const snapshot = yield* json<UsageSnapshotDto>(get('/usage/profiles/fake%2Fwork'))
-        expect(snapshot).toStrictEqual({ profileId: 'fake/work', rateLimit: {}, observedAt: null })
-        expect((yield* get('/usage/profiles/fake%2Fnope')).status).toBe(404)
-      }),
-    )
+// Which profile is the default of its provider, in the order the API lists them
+const defaultsOf = (reply: Reply): [string, boolean][] =>
+  profilesOf(reply).map((profile) => [profile.id, profile.isDefault])
+
+// The profiles added through the API in turn, each of which has to be created
+const added = (...bodies: readonly object[]): Effect.Effect<void, never, HttpServer.HttpServer> =>
+  Effect.gen(function* addsAll() {
+    for (const body of bodies) {
+      const created = yield* post('/profiles', body)
+      assert.strictEqual(created.status, 201, JSON.stringify(created.body))
+    }
   })
+
+// The login directory of a profile of a listing
+const directoryOf = (listed: Reply, id: string): Effect.Effect<string, Cause.NoSuchElementError> =>
+  Effect.fromNullishOr(profilesOf(listed).find((profile) => profile.id === id)).pipe(
+    Effect.flatMap((profile) => Effect.fromNullishOr(profile.configDir)),
+  )
+
+// A session of the fake provider created under the profile
+const sessionUnder = (profileId: string): Effect.Effect<SessionDto, never, HttpServer.HttpServer> =>
+  Effect.gen(function* creates() {
+    const { project } = yield* registeredProject
+    const body = { projectId: project.id, title: 'Under a profile', profileId }
+    const created = yield* post('/sessions', body)
+    assert.strictEqual(created.status, 201, JSON.stringify(created.body))
+    return Schema.decodeUnknownSync(SessionDto)(created.body)
+  })
+
+interface Refusal {
+  readonly title: string
+  readonly body: Record<string, unknown>
+  readonly status: number
+  readonly code: string
+}
+
+// What the profiles of the API refuse to add, with the status and the code each is told with
+const REFUSALS: Refusal[] = [
+  { title: 'a duplicate', body: LOGIN, status: 409, code: 'profile_exists' },
+  {
+    title: 'a key for a login profile',
+    body: { ...LOGIN, name: 'l', apiKey: CANARY },
+    status: 422,
+    code: 'profile_invalid',
+  },
+  {
+    title: 'an API-key profile with an empty key',
+    body: { ...KEYED, name: 'e', apiKey: '' },
+    status: 422,
+    code: 'profile_invalid',
+  },
+  {
+    title: 'a provider nobody offers',
+    body: { providerId: 'ghost', name: 'g', kind: 'login' },
+    status: 422,
+    code: 'session_provider_missing',
+  },
+  {
+    title: 'a name that is no profile name, with a key',
+    body: { ...KEYED, name: 'Not A Name' },
+    status: 400,
+    code: 'request_invalid',
+  },
+  {
+    title: 'a kind that is no kind, with a key',
+    body: { ...KEYED, name: 'k', kind: 'oauth' },
+    status: 400,
+    code: 'request_invalid',
+  },
+]
+
+it.layer(ApiTestLayer())('POST and GET /api/v1/profiles', (suite) => {
+  suite.effect(
+    'adds a login and an API-key profile, lists them in the order they were added, and never echoes a key',
+    () =>
+      Effect.gen(function* adds() {
+        const login = yield* post('/profiles', LOGIN)
+        assert.include(login.type, 'application/json')
+        const created = { id: 'fake/work', kind: 'login', isDefault: true }
+        assert.containSubset(login, { status: 201, body: created })
+        const keyed = yield* post('/profiles', KEYED)
+        const expected = { id: 'fake/key', kind: 'api_key', configDir: null, isDefault: false }
+        assert.containSubset(keyed, { status: 201, body: expected })
+        const listed = yield* get('/profiles')
+        assert.deepStrictEqual(defaultsOf(listed), [
+          ['fake/work', true],
+          ['fake/key', false],
+        ])
+        assert.notInclude(JSON.stringify([keyed.body, listed.body]), CANARY)
+      }),
+  )
+})
+
+it.layer(ApiTestLayer())('the refusals of POST /api/v1/profiles', (suite) => {
+  suite.effect.each(REFUSALS)('refuses $title with $status $code and keeps nothing', (refusal) =>
+    Effect.gen(function* refuses() {
+      yield* post('/profiles', LOGIN)
+      const refused = yield* post('/profiles', refusal.body)
+      assert.strictEqual(refused.status, refusal.status)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, { code: refusal.code })
+      assert.notInclude(JSON.stringify(refused.body), CANARY)
+      const listed = yield* get('/profiles')
+      assert.deepStrictEqual(defaultsOf(listed), [['fake/work', true]])
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('POST /api/v1/profiles/:id/default', (suite) => {
+  suite.effect('moves the default of the provider to a profile named by its encoded id', () =>
+    Effect.gen(function* movesDefault() {
+      yield* added(LOGIN, KEYED)
+      const moved = yield* post('/profiles/fake%2Fkey/default')
+      assert.strictEqual(moved.status, 204)
+      assert.deepStrictEqual(defaultsOf(yield* get('/profiles')), [
+        ['fake/work', false],
+        ['fake/key', true],
+      ])
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('GET /api/v1/profiles/:id/status', (suite) => {
+  suite.effect('tells the status of a login profile and of an API-key profile', () =>
+    Effect.gen(function* tellsStatus() {
+      yield* added(LOGIN, KEYED)
+      const login = yield* get('/profiles/fake%2Fwork/status')
+      assert.strictEqual(login.status, 200)
+      assert.containSubset(login.body, { profileId: 'fake/work', state: 'loggedIn' })
+      const keyed = yield* get('/profiles/fake%2Fkey/status')
+      assert.containSubset(keyed.body, { profileId: 'fake/key', state: 'loggedIn' })
+      assert.notInclude(JSON.stringify([login.body, keyed.body]), CANARY)
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('the endpoints of a profile nobody holds', (suite) => {
+  suite.effect('answer 404 profile_not_found, whatever is asked of the profile', () =>
+    Effect.gen(function* refusesUnknown() {
+      const replies = yield* Effect.all([
+        post('/profiles/fake%2Fnope/default'),
+        get('/profiles/fake%2Fnope/status'),
+        remove('/profiles/fake%2Fnope'),
+      ])
+      assert.deepStrictEqual(
+        replies.map((reply) => reply.status),
+        [404, 404, 404],
+      )
+      const decoded = { code: 'profile_not_found', detail: 'no profile "fake/nope"' }
+      for (const reply of replies) {
+        assert.include(reply.type, 'application/problem+json')
+        assert.containSubset(reply.body, decoded)
+      }
+      const acp = yield* get('/profiles/acp%3Agemini%2Fwork/status')
+      assert.containSubset(acp.body, { detail: 'no profile "acp:gemini/work"' })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('DELETE /api/v1/profiles/:id', (suite) => {
+  suite.effect('removes a profile no session runs under, and the default passes to the next', () =>
+    Effect.gen(function* removes() {
+      yield* added(LOGIN, KEYED)
+      assert.strictEqual((yield* remove('/profiles/fake%2Fwork')).status, 204)
+      assert.deepStrictEqual(defaultsOf(yield* get('/profiles')), [['fake/key', true]])
+      const gone = yield* get('/profiles/fake%2Fwork/status')
+      assert.strictEqual(gone.status, 404)
+      assert.containSubset(gone.body, { code: 'profile_not_found' })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('DELETE /api/v1/profiles/:id with a purge', (suite) => {
+  suite.effect('takes the login directory of a profile only when asked to purge it', () =>
+    Effect.gen(function* purges() {
+      yield* added({ ...LOGIN, name: 'kept' }, { ...LOGIN, name: 'purged' })
+      const listed = yield* get('/profiles')
+      const kept = yield* directoryOf(listed, 'fake/kept')
+      const purged = yield* directoryOf(listed, 'fake/purged')
+      assert.deepStrictEqual([existsSync(kept), existsSync(purged)], [true, true])
+      assert.strictEqual((yield* remove('/profiles/fake%2Fkept?purge=false')).status, 204)
+      assert.strictEqual((yield* remove('/profiles/fake%2Fpurged?purge=true')).status, 204)
+      assert.deepStrictEqual([existsSync(kept), existsSync(purged)], [true, false])
+    }),
+  )
+
+  suite.effect('refuses a purge that is neither true nor false with 400, and removes nothing', () =>
+    Effect.gen(function* refusesPurge() {
+      yield* added({ ...LOGIN, name: 'stays' })
+      const refused = yield* remove('/profiles/fake%2Fstays?purge=maybe')
+      assert.strictEqual(refused.status, 400)
+      assert.containSubset(refused.body, { code: 'request_invalid' })
+      const listed = yield* get('/profiles')
+      assert.include(
+        profilesOf(listed).map((profile) => profile.id),
+        'fake/stays',
+      )
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('DELETE /api/v1/profiles/:id under a session', (suite) => {
+  suite.effect('refuses to remove the profile of a session that has not ended, with 409', () =>
+    Effect.gen(function* refusesBusy() {
+      yield* added(LOGIN)
+      const session = yield* sessionUnder('fake/work')
+      assert.strictEqual(session.profileId, 'fake/work')
+      const busy = yield* remove('/profiles/fake%2Fwork')
+      assert.strictEqual(busy.status, 409)
+      assert.containSubset(busy.body, { code: 'profile_in_use' })
+      assert.strictEqual((yield* post(`/sessions/${session.id}/complete`)).status, 204)
+      assert.strictEqual((yield* remove('/profiles/fake%2Fwork')).status, 204)
+      const ended = yield* get(`/sessions/${session.id}`)
+      assert.containSubset(ended.body, { status: 'completed', profileId: null })
+    }),
+  )
+})
+
+const SEEN = { fiveHourPct: 80, sevenDayPct: 12 }
+
+it.layer(ApiTestLayer())('GET /api/v1/usage/profiles/:id', (suite) => {
+  suite.effect(
+    'answers an empty snapshot before any rate limit was seen, and 404 for an unknown profile',
+    () =>
+      Effect.gen(function* readsEmpty() {
+        yield* added(LOGIN)
+        const empty = yield* get('/usage/profiles/fake%2Fwork')
+        assert.strictEqual(empty.status, 200)
+        assert.deepStrictEqual(empty.body, {
+          profileId: 'fake/work',
+          rateLimit: {},
+          observedAt: null,
+        })
+        const missing = yield* get('/usage/profiles/fake%2Fnope')
+        assert.strictEqual(missing.status, 404)
+        assert.containSubset(missing.body, { code: 'profile_not_found' })
+      }),
+  )
+
+  suite.effect('answers the newest rate limit the kernel recorded under the profile', () =>
+    Effect.gen(function* readsRecorded() {
+      yield* added({ ...LOGIN, name: 'seen' })
+      yield* UsageService.use((usage) => usage.record('fake/seen', { fiveHourPct: 40 }))
+      yield* UsageService.use((usage) => usage.record('fake/seen', SEEN))
+      const snapshot = yield* get('/usage/profiles/fake%2Fseen')
+      const decoded = Schema.decodeUnknownSync(UsageSnapshotDto)(snapshot.body)
+      assert.deepStrictEqual([decoded.profileId, decoded.rateLimit], ['fake/seen', SEEN])
+      assert.isString(decoded.observedAt)
+    }),
+  )
 })
 ```
 
@@ -3851,36 +4065,50 @@ Expected: FAIL — 404 on `/profiles`; the drift test fails after the contract c
 `packages/api/src/groups/profiles.ts`:
 
 ```ts
-import { AddProfileBody, ProfileDto, ProfileIdParam, ProfileStatusDto, RemoveProfileQuery } from '@bytebureau/protocol'
+import {
+  AddProfileBody,
+  ProfileDto,
+  ProfileIdParam,
+  ProfileStatusDto,
+  RemoveProfileQuery,
+} from '@bytebureau/protocol'
 import { Schema } from 'effect'
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from 'effect/http-api'
 import { Authorization } from '../auth.js'
-import { Problem404, Problem409, Problem422 } from '../problems.js'
+import { PROBLEM_SCHEMAS } from '../problems.js'
+import { MutationLimit } from '../rate-limit.js'
 import { RequestValidation } from '../validation.js'
 
+// The status is an annotation, and an annotated schema is a copy of its own; a suspended one keeps naming the one component of the OpenAPI document
+const Created = Schema.suspend(() => ProfileDto).pipe(HttpApiSchema.status(201))
+
+// A profile id is <provider>/<name>: it travels as one path segment, percent-encoded
 export const ProfilesGroup = HttpApiGroup.make('profiles')
   .add(
-    HttpApiEndpoint.get('list', '/profiles', { success: Schema.Array(ProfileDto) }),
+    HttpApiEndpoint.get('list', '/profiles', {
+      success: Schema.Array(ProfileDto),
+      error: PROBLEM_SCHEMAS,
+    }),
     HttpApiEndpoint.post('add', '/profiles', {
       payload: AddProfileBody,
-      success: HttpApiSchema.status(ProfileDto, 201),
-      error: [Problem409, Problem422],
-    }),
-    HttpApiEndpoint.del('remove', '/profiles/:id', {
+      success: Created,
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
+    HttpApiEndpoint.delete('remove', '/profiles/:id', {
       params: ProfileIdParam,
       query: RemoveProfileQuery,
       success: HttpApiSchema.NoContent,
-      error: [Problem404, Problem409],
-    }),
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
     HttpApiEndpoint.post('setDefault', '/profiles/:id/default', {
       params: ProfileIdParam,
       success: HttpApiSchema.NoContent,
-      error: [Problem404],
-    }),
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
     HttpApiEndpoint.get('status', '/profiles/:id/status', {
       params: ProfileIdParam,
       success: ProfileStatusDto,
-      error: [Problem404],
+      error: PROBLEM_SCHEMAS,
     }),
   )
   .middleware(Authorization)
@@ -3900,12 +4128,22 @@ import { orProblem } from '../problems.js'
 export const ProfilesHandlers = HttpApiBuilder.group(BureauApi, 'profiles', (handlers) =>
   handlers
     .handle('list', () => orProblem(ProfileService.use((profiles) => profiles.list())))
-    .handle('add', ({ payload }) => orProblem(ProfileService.use((profiles) => profiles.add(payload))))
-    .handle('remove', ({ params, query }) =>
-      orProblem(ProfileService.use((profiles) => profiles.remove(params.id, { purge: query.purge === 'true' }))),
+    .handle('add', ({ payload }) =>
+      orProblem(ProfileService.use((profiles) => profiles.add(payload))),
     )
-    .handle('setDefault', ({ params }) => orProblem(ProfileService.use((profiles) => profiles.setDefault(params.id))))
-    .handle('status', ({ params }) => orProblem(ProfileService.use((profiles) => profiles.status(params.id)))),
+    .handle('remove', ({ params, query }) =>
+      orProblem(
+        ProfileService.use((profiles) =>
+          profiles.remove(params.id, { purge: query.purge === 'true' }),
+        ),
+      ),
+    )
+    .handle('setDefault', ({ params }) =>
+      orProblem(ProfileService.use((profiles) => profiles.setDefault(params.id))),
+    )
+    .handle('status', ({ params }) =>
+      orProblem(ProfileService.use((profiles) => profiles.status(params.id))),
+    ),
 )
 ```
 
@@ -3917,6 +4155,53 @@ Run: `bun run --cwd packages/api build && bun run generate:client && git status 
 Expected: `packages/api/openapi.json` and `packages/client/src/gen/*` changed; no untracked file left behind (the drift step of CI checks both).
 
 `packages/client/src/index.ts`: `profiles: { list, add, remove(id, options?: { purge?: boolean }), setDefault, status }` through the generated `profilesList`, `profilesAdd`, `profilesRemove`, `profilesSetDefault`, `profilesStatus`, and `usage.profile(id)` through `usageProfile` (the generated names follow the operation ids — read `sdk.gen.ts` for the exact ones). `http.test.ts` gains one test that `profiles.add` posts the body and `profiles.remove(id, { purge: true })` sends `?purge=true` with the id percent-encoded.
+
+**Added files (as shipped):**
+
+`packages/api/src/groups/resources.ts` (as shipped):
+
+```ts
+import { AsksGroup } from './asks.js'
+import { ProfilesGroup } from './profiles.js'
+import { ProjectsGroup } from './projects.js'
+import { SessionsGroup } from './sessions.js'
+import { UsageGroup } from './usage.js'
+import { WorkspacesGroup } from './workspaces.js'
+
+// The groups of what the daemon keeps: projects, profiles, sessions, asks, their usage and their worktrees
+export const RESOURCE_GROUPS = [
+  ProjectsGroup,
+  ProfilesGroup,
+  SessionsGroup,
+  AsksGroup,
+  UsageGroup,
+  WorkspacesGroup,
+] as const
+```
+
+`packages/api/src/handlers/resources.ts` (as shipped):
+
+```ts
+import { Layer } from 'effect'
+import { AsksHandlers } from './asks.js'
+import { ProfilesHandlers } from './profiles.js'
+import { ProjectsHandlers } from './projects.js'
+import { SessionsHandlers } from './sessions.js'
+import { UsageHandlers } from './usage.js'
+import { WorkspacesHandlers } from './workspaces.js'
+
+// The handler layers of the groups in RESOURCE_GROUPS
+export const ResourceHandlers = Layer.mergeAll(
+  ProjectsHandlers,
+  ProfilesHandlers,
+  SessionsHandlers,
+  AsksHandlers,
+  UsageHandlers,
+  WorkspacesHandlers,
+)
+```
+
+**Semantics (as shipped, commits be3ca90, 596dcf1, 1c7adfc):** The protocol's `profile.added|removed|status` payloads carry `profileId` as `Schema.String` and `ratelimit.updated` as `Schema.NullOr(Schema.String)` — a profile id is `<provider>/<name>` — and the regenerated `events.json` no longer calls them `UUIDv7` (nothing decodes differently; the pin is on the published schema). REST: `groups/profiles.ts` serves `GET /profiles` (creation order per provider), `POST /profiles` (201 `ProfileDto`; `AddProfileBody.apiKey` stays a plain string, an empty key being the kernel's 422 `profile_invalid`), `DELETE /profiles/:id?purge=true|false` (`query.purge === 'true'`; `?purge=maybe` is 400), `POST /profiles/:id/default` and `GET /profiles/:id/status`; `GET /usage/profiles/:id` answers `UsageSnapshotDto` through `profileUsageOf(id)` in `handlers/usage.ts` (`ProfileService.get` → 404 `profile_not_found`; an unseen profile is `{ profileId, rateLimit: {}, observedAt: null }`), which RPC shares. Every endpoint declares `PROBLEM_SCHEMAS` as Phase B's groups do, the three mutations carry `MutationLimit`, the 201 uses the `Schema.suspend` form; the six resource groups are gathered in `groups/resources.ts` (`RESOURCE_GROUPS`, a `const` tuple in path order) and their layers in `handlers/resources.ts`. Problems: `PROFILE_STATUS` (`not_found` 404, `exists` 409, `in_use` 409, `invalid` 422 — an exhaustive record, so a new kernel code fails the type-check instead of answering 500) in a `toProblemOfRest` branch, the kernel's reason as the detail through the redacting `problem()`; so `POST /sessions` with an unknown profile answers 404 and with another provider's 422. RPC: `profiles.list` (no payload — `null` on the wire; `undefined` fails with "Expected null"), `profiles.add`, `profiles.remove { id, purge? }`, `profiles.setDefault`, `profiles.status`, `usage.profile`; reads over RPC keep drawing from the shared budget, as `daemon-and-api.md` says. Client: `profiles.{list, add(body), remove(id, { purge? }), setDefault(id), status(id)}`, `usage.profile(id)`, `RemoveProfileOptions`; `status` and `usage.profile` throw the problem as an `ApiError`, `remove` and `setDefault` are `done`; hey-api's generated runtime percent-encodes path parameters, so the area does not (`fake/work` travels as `fake%2Fwork` — proven on the raw request target in `http.test.ts` — and reaches the handler decoded, `acp%3Agemini%2Fwork` as `acp:gemini/work`). `cspell.json` ignores percent escapes (`/%[0-9A-Fa-f]{2}/g`); the CLI's `recording-client.ts` and `records.ts` hold stubs for the new client calls, which Task 5 extends. Tests over `ApiTestLayer` (in-memory secrets, never the keychain): `profiles.test.ts` (16 tests, one layer each — creation with the canary out of every answer, six refusals leaving the list untouched, `fake%2Fkey/default`, purge checked on disk, `in_use` 409 then `POST /sessions/:id/complete` then 204 with the session's `profileId` null, the usage snapshot empty, 404 and newest), `sessions.test.ts` (404 and 422), `rpc.test.ts` (every procedure over the socket, a kernel and a schema refusal without the key), `problems.test.ts`, `openapi.test.ts`, `client.test.ts`, the protocol tests; by hand once, a Bun daemon on a scratch home with the file backend served every route with `fake%2Fwork` (the automated runs are on Node; Task 5's CLI tests over a Bun daemon are the first automated Bun coverage). Deferred to the final wave: `payload ?? null` in the client's RPC connection; `profile.status` as an ephemeral event type (a status probe must not grow the durable log); `GET /usage/profiles/default` for the nameless login's snapshot; `profileUsageOf` into `handlers/found.ts`; the `usage.profile` unknown-id refusal over RPC in a new `rpc-profiles.test.ts`; `client.test.ts` asserting the directory gone and the canary absent. For Task 5: `Bureau.profiles.*` maps one to one onto the client; 404, 409 and 422 arrive as `ApiError` with `problem.code` (`profile_not_found`, `profile_in_use` with the kernel's text naming completion as the way out, `profile_exists`, `profile_invalid`); the key travels only in the body of `profiles.add`.
 
 - [ ] **Step 5: Run the api and client suites and the gates**
 
