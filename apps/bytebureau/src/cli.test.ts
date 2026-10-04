@@ -142,7 +142,10 @@ describe('bytebureau global flags before the sub-command', () => {
 describe('bytebureau global flags before a sub-command that has sub-commands', () => {
   it('hands them on to the sub-command of the sub-command, which parses its flags', async () => {
     expect.hasAssertions()
-    const env = { BYTEBUREAU_HOME: testHome() }
+    const home = testHome()
+    // Were the flags dropped, the command would start a daemon of its own on demand
+    stoppedWithTheTest(home)
+    const env = { BYTEBUREAU_HOME: home }
     const empty = await runCli(['--json', '--no-daemon', 'sessions', 'ls'], env)
     const czech = await runCli(['--lang', 'cs', '--no-daemon', 'sessions', 'ls'], env)
     expect(JSON.parse(empty.stdout)).toStrictEqual({ command: 'sessions.ls', sessions: [] })
