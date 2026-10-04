@@ -1,7 +1,7 @@
 import { Config, kernelLogger, nowIso, PluginHost, SessionManager } from '@bytebureau/kernel'
 import { kernelBunLayer, type KernelOptions } from '@bytebureau/kernel/bun'
 import { BunHttpServer } from '@effect/platform-bun'
-import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
+import { Cause, Effect, Exit, Layer, ManagedRuntime, Redacted } from 'effect'
 import { HttpServer } from 'effect/http'
 import { boundAddress, type BoundAddress } from './bun-address.js'
 import { DEFAULT_API_OPTIONS } from './config.js'
@@ -138,6 +138,15 @@ interface Built {
   readonly requested: Requested
 }
 
+// A socket still open when the daemon stops leaves only the interruption of its fiber behind: that is a clean close
+// Any other failure of the close is the daemon's own and goes on to the caller
+const disposed = async (runtime: DaemonRuntime): Promise<void> => {
+  const exit = await Effect.runPromiseExit(runtime.disposeEffect)
+  if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+    throw Cause.squash(exit.cause)
+  }
+}
+
 // The kernel, the boot, the Bun server and the API as one runtime, built in that order
 const buildRuntime = (options: DaemonOptions, kernel: KernelLayer, startedAt: string): Built => {
   const requested: Requested = {
@@ -166,7 +175,7 @@ export async function startDaemon(options: DaemonOptions): Promise<RunningDaemon
       address,
       startedAt,
       close: async () => {
-        await runtime.dispose()
+        await disposed(runtime)
       },
     }
   } catch (error) {

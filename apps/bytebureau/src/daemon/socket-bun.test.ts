@@ -47,8 +47,8 @@ describe('the RPC socket of a daemon on Bun', () => {
     })
     // The socket still serves a procedure after a stream it left early
     await expect(socket.call('projects.remove', { id })).resolves.toBeNull()
-    socket.close()
-    await daemon.stop()
+    // A socket still open when the daemon stops is no failure of the daemon
+    await expect(daemon.stop()).resolves.toBe(0)
   })
 
   it('refuses a procedure whose token is not the one of the daemon', async () => {
@@ -58,7 +58,6 @@ describe('the RPC socket of a daemon on Bun', () => {
     const refused = socket.call('projects.register', { path: createTempRepo() })
     await expect(refused).rejects.toBeInstanceOf(ApiError)
     await expect(refused).rejects.toMatchObject({ status: 401, problem: { code: 'unauthorized' } })
-    socket.close()
-    await daemon.stop()
+    await expect(daemon.stop()).resolves.toBe(0)
   })
 })
