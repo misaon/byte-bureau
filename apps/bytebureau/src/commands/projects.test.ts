@@ -48,10 +48,8 @@ describe('bytebureau projects when it cannot do what it is asked', () => {
     const env = { BYTEBUREAU_HOME: tempDir('bb-home-') }
     const plain = tempDir('bb-plain-')
     const added = await runCli(['projects', 'add', plain, NO_DAEMON], env)
-    expect(added.code).toBe(2)
-    expect(added.stderr.trim()).toBe(
-      `WorkspaceError: ${plain} is not inside a git repository (not_a_repository)`,
-    )
+    expect(added.code).toBe(1)
+    expect(added.stderr.trim()).toBe(`${plain} is not inside a git repository`)
     const listed = await runCli(['projects', 'ls', NO_DAEMON], env)
     expect(listed.stdout.trim()).toBe('No projects registered')
   })

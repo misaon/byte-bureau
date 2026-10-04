@@ -1,17 +1,20 @@
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { withBureau } from '../bureau/with-bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
+import { withBureauRefusable } from './refusable.js'
 
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List session worktrees' },
   args: { ...globalArgs, project: { type: 'string', description: 'Project id' } },
   async run({ args }) {
     const context = processContext(args)
-    const workspaces = await withBureau(context, bureauFlags(args), async (bureau) => {
+    const workspaces = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       const listed = await bureau.workspaces.list(args.project)
       return listed
     })
+    if (workspaces === undefined) {
+      return
+    }
     context.output.emit({ command: 'workspaces.ls', workspaces })
     if (workspaces.length === 0) {
       context.output.print(m.workspaces_none())
@@ -34,10 +37,13 @@ const prune = defineCommand({
   args: { ...globalArgs, project: { type: 'string', description: 'Project id' } },
   async run({ args }) {
     const context = processContext(args)
-    const report = await withBureau(context, bureauFlags(args), async (bureau) => {
+    const report = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       const pruned = await bureau.workspaces.prune(args.project)
       return pruned
     })
+    if (report === undefined) {
+      return
+    }
     context.output.emit({ command: 'workspaces.prune', ...report })
     for (const kept of report.retained) {
       context.output.print(`${kept.path}: ${kept.reason}`)

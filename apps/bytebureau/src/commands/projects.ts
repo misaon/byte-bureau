@@ -1,7 +1,6 @@
 import path from 'node:path'
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { withBureau } from '../bureau/with-bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
 import { withBureauRefusable } from './refusable.js'
 
@@ -10,10 +9,13 @@ const ls = defineCommand({
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const projects = await withBureau(context, bureauFlags(args), async (bureau) => {
+    const projects = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       const listed = await bureau.projects.list()
       return listed
     })
+    if (projects === undefined) {
+      return
+    }
     context.output.emit({ command: 'projects.ls', projects })
     if (projects.length === 0) {
       context.output.print(m.projects_none())
@@ -37,12 +39,14 @@ const add = defineCommand({
     const context = processContext(args)
     // The daemon would resolve a relative path in its own working directory
     const directory = path.resolve(args.path ?? process.cwd())
-    const project = await withBureau(context, bureauFlags(args), async (bureau) => {
+    const project = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       const registered = await bureau.projects.register(directory)
       return registered
     })
-    context.output.emit({ command: 'projects.add', project })
-    context.output.print(m.projects_added({ name: project.name, path: project.path }))
+    if (project !== undefined) {
+      context.output.emit({ command: 'projects.add', project })
+      context.output.print(m.projects_added({ name: project.name, path: project.path }))
+    }
   },
 })
 

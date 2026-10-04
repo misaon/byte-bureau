@@ -6,7 +6,7 @@ import { stopDaemon } from '../daemon/stop.js'
 import { freePort, startDaemonProcess, stoppedWithTheTest } from '../testing/daemon.js'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
-import { createTempRepo, testHome } from '../testing/temp-repo.js'
+import { createTempRepo, tempDir, testHome } from '../testing/temp-repo.js'
 import { PROMPT, projectIdIn, SCRIPTED, workbench, worktreesOf } from '../testing/workbench.js'
 
 // Without --yes and off a terminal the run waits on the question of the fake provider
@@ -52,7 +52,20 @@ describe('bytebureau run through the daemon', () => {
   })
 })
 
-describe('bytebureau projects rm through the daemon', () => {
+describe('bytebureau projects through the daemon', () => {
+  it('refuses a path that is no git repository, with exit code 1 and the detail of the problem', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
+    const plain = tempDir('bb-plain-')
+    const added = await runCli(['projects', 'add', plain], { BYTEBUREAU_HOME: home })
+    expect([added.code, added.stderr.trim()]).toStrictEqual([
+      1,
+      `${plain} is not inside a git repository`,
+    ])
+    await daemon.stop()
+  })
+
   it('refuses a project that is not there as a refusal, with exit code 1 and the detail of the problem', async () => {
     expect.hasAssertions()
     const home = testHome()
