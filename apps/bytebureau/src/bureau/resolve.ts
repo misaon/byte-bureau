@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { m } from '@bytebureau/i18n'
 import { serverUrl } from '@bytebureau/protocol'
 import { readServerInfo } from '../daemon/server-info.js'
 import { tokenPath } from '../daemon/token.js'
@@ -30,9 +31,18 @@ const keptToken = (home: string): string => {
   }
 }
 
+// The token a --token-file holds; a file that cannot be read is named, which the error of the system does in its own words
+const tokenIn = (file: string): string => {
+  try {
+    return readFileSync(file, 'utf8').trim()
+  } catch (error) {
+    throw new Error(m.bureau_token_file_unreadable({ file }), { cause: error })
+  }
+}
+
 const tokenOf = (flags: ServerFlags, home: string): string => {
   if (flags.tokenFile !== undefined) {
-    return readFileSync(flags.tokenFile, 'utf8').trim()
+    return tokenIn(flags.tokenFile)
   }
   const record = readServerInfo(home)
   return record.state === 'alive' ? record.info.token : keptToken(home)

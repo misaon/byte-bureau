@@ -63,6 +63,13 @@ describe('resolveServer for a daemon named on the command line', () => {
     expect(resolveServer({ port: 5000 }, tempDir('bb-home-'))).toMatchObject({ token: '' })
   })
 
+  it('names a token file it cannot read, rather than what the system says of it', () => {
+    const file = path.join(tempDir('bb-home-'), 'no-such-token')
+    expect(() => resolveServer({ port: 5000, tokenFile: file }, tempDir('bb-home-'))).toThrow(
+      new Error(`Cannot read the token file ${file}`),
+    )
+  })
+
   it('fills in the loopback for --port alone and the default port for --host alone', () => {
     const home = tempDir('bb-home-')
     expect(resolveServer({ port: 5000 }, home)).toMatchObject({ url: 'http://127.0.0.1:5000' })

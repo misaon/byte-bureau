@@ -103,6 +103,11 @@ export const portOf = (text: string | undefined): number | undefined => {
 
 // The Bureau the global flags ask for: the daemon of the home, the one --host and --port name, or the kernel in-process
 export function bureauFlags(args: GlobalArgs): BureauFlags {
+  if (args['token-file'] !== undefined && args.host === undefined && args.port === undefined) {
+    throw usageError(
+      '--token-file goes with --host or --port: it holds the token of the daemon they name',
+    )
+  }
   return {
     daemon: args.daemon !== false,
     host: args.host,

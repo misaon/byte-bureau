@@ -55,6 +55,16 @@ describe(bureauFlags, () => {
     })
   })
 
+  it('refuses --token-file without --host or --port, as a usage error', () => {
+    expect(() => bureauFlags({ ...QUIET, 'token-file': 't' })).toThrow(
+      expect.objectContaining({
+        name: 'CLIError',
+        message:
+          '--token-file goes with --host or --port: it holds the token of the daemon they name',
+      }),
+    )
+  })
+
   it.each(['80a', '-1', '65536', ''])('refuses %j as a port, as a usage error', (port) => {
     expect(() => bureauFlags({ ...QUIET, port })).toThrow(
       expect.objectContaining({
