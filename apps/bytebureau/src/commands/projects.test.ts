@@ -54,6 +54,17 @@ describe('bytebureau projects when it cannot do what it is asked', () => {
     expect(listed.stdout.trim()).toBe('No projects registered')
   })
 
+  it('refuses to remove a project nobody registered, as the daemon does, with exit 1', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: tempDir('bb-home-') }
+    const removed = await runCli(['projects', 'rm', 'p-unknown', NO_DAEMON], env)
+    expect([removed.code, removed.stderr.trim(), removed.stdout]).toStrictEqual([
+      1,
+      'no project p-unknown',
+      '',
+    ])
+  })
+
   it('does not remove a project that has sessions, says why in one line and exits 1', async () => {
     expect.hasAssertions()
     const bench = workbench()
