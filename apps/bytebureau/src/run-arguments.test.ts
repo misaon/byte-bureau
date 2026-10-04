@@ -137,4 +137,12 @@ describe('run and the usage of a sub-command that follows a flag with a value', 
     await expect(run(command, ['--lang', 'cs', 'projects', '--help'])).resolves.toBe(0)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('List the projects of the bureau'))
   })
+
+  it('prints it after a bare --debug as well, which takes nothing from the argument after it', async () => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const { command } = tree()
+    await expect(run(command, ['--debug', 'projects', '--help'])).resolves.toBe(0)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('List the projects of the bureau'))
+  })
 })

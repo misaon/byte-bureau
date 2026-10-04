@@ -103,7 +103,7 @@ async function execute(command: CommandDef, argv: readonly string[]): Promise<vo
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    const rawArgs = await flagsAfterSubCommand(command, withBareDebug(argv))
+    const rawArgs = await flagsAfterSubCommand(command, argv)
     await runCommand(command, { rawArgs })
   }
 }
@@ -128,12 +128,14 @@ async function failed(
 }
 
 // Exit codes: 0 success, 1 usage error (citty's CLIError) or a refused --no-daemon, 2 anything else
+// A bare --debug is told from a flag with a value before the arguments are read for the usage as for the run
 export async function run(command: CommandDef, argv: readonly string[]): Promise<number> {
+  const args = withBareDebug(argv)
   try {
-    await execute(command, argv)
+    await execute(command, args)
     return 0
   } catch (error) {
-    const code = await failed(command, argv, error)
+    const code = await failed(command, args, error)
     return code
   }
 }
