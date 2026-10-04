@@ -4,7 +4,8 @@ import type { ServerInfo } from '@bytebureau/protocol'
 import { JUDGING, judgeHolder, type Judging } from './lock-holder.js'
 import { heldLock } from './lock.js'
 import { lockPath } from './server-info.js'
-import { daemonLogPath, spawnDaemon, type DaemonChild } from './spawn.js'
+import { daemonLogPath } from './daemon-log.js'
+import { spawnDaemon, type DaemonChild } from './spawn.js'
 import { runningDaemon } from './wait.js'
 
 export type Started =

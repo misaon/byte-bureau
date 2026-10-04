@@ -1,9 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, mkdirSync, openSync } from 'node:fs'
-import path from 'node:path'
+import { closeSync, openSync } from 'node:fs'
+import { daemonLogPath, rotateDaemonLog } from './daemon-log.js'
 import { daemonExecArgs } from './exec-args.js'
-
-export const daemonLogPath = (home: string): string => path.join(home, 'logs', 'daemon.log')
 
 // The process of a daemon started detached, as far as its starter follows it
 export interface DaemonChild {
@@ -29,7 +27,7 @@ export const spawnDaemon = (
   env: Readonly<Record<string, string | undefined>>,
   extra: readonly string[],
 ): DaemonChild => {
-  mkdirSync(path.dirname(daemonLogPath(home)), { recursive: true, mode: 0o700 })
+  rotateDaemonLog(home)
   const log = openSync(daemonLogPath(home), 'a', 0o600)
   try {
     const { command, args } = daemonExecArgs(process, extra)

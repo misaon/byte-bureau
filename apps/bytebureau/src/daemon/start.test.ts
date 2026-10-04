@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { lockPath, writeServerInfo } from './server-info.js'
-import { daemonLogPath, type DaemonChild } from './spawn.js'
+import { daemonLogPath } from './daemon-log.js'
+import type { DaemonChild } from './spawn.js'
 import { awaitStart } from './start.js'
 
 // The process of a start, as its starter sees it: still running, or ended
