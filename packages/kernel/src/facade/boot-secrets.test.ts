@@ -2,11 +2,13 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { withoutBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { bootSecrets } from './boot-secrets.js'
 
-// A home whose user file holds the text given
+// A home whose user file holds the text given; Bun is taken away, so no test can reach a real keychain
 const homeWith = (config: string): string => {
+  withoutBun()
   const home = tempDir('bb-home-')
   writeFileSync(path.join(home, 'config.json'), config)
   return home
