@@ -998,8 +998,8 @@ git commit -m "feat(plugin-api): let a provider declare the variable of an API k
 ### Task 2: The kernel's `Secrets` service — keychain through `Bun.secrets`, a 0600 file fallback, `auto`
 
 **Files:**
-- Create: `packages/kernel/src/secrets/secrets.ts` (the `Secrets` service and `SecretBackend`), `packages/kernel/src/secrets/bun-secret-store.ts`, `packages/kernel/src/secrets/file-secret-store.ts`, `packages/kernel/src/secrets/secret-store-for.ts`, `packages/kernel/src/secrets/file-secret-store.test.ts`, `packages/kernel/src/secrets/secret-store-for.test.ts`
-- Modify: `packages/kernel/src/kernel-live.ts` (`Secrets` provided from the options), `packages/kernel/src/kernel-foundation.ts` or `plugins/plugin-host.ts` (the host takes `Secrets` from the service), `packages/kernel/src/bun.ts` (`secretStoreFor(home, backend)` from the user configuration), `packages/kernel/src/index.ts` (exports), `packages/kernel/src/health/health.ts` (`secrets: SecretBackend` in the report — the API's `HealthDto` stays as it is; the field is for `doctor` later), `apps/bytebureau/src/testing/temp-repo.ts` (`testHome()` writes `secrets: { backend: 'file' }` too), `packages/api/src/bun.ts` (passes the store), `packages/api/src/testing-kernel.ts` (`ApiTestLayer` gets an `InMemorySecretStore` as today)
+- Create: `packages/kernel/src/secrets/secrets.ts` (the `Secrets` service and `SecretBackend`), `packages/kernel/src/secrets/bun-secret-store.ts`, `packages/kernel/src/secrets/file-secret-store.ts`, `packages/kernel/src/secrets/secret-store-for.ts`, `packages/kernel/src/facade/boot-secrets.ts` (the lenient read of `secrets.backend` from the user file before the layer exists), `packages/kernel/src/secrets/file-secret-store.test.ts`, `packages/kernel/src/secrets/secret-store-for.test.ts`, `packages/kernel/src/facade/boot-secrets.test.ts`, `packages/kernel/src/secrets/keychain-probe.ts` (the 3 s bounded probe with its cleanup), `packages/kernel/src/secrets/backend-record.ts` (the sticky record of `auto`), `packages/kernel/src/secrets/private-file.ts` (the exclusive 0600 draft written and renamed into place), `packages/kernel/src/testing/fake-bun-secrets.ts`, `packages/kernel/src/testing/captured-logs.ts`, `packages/kernel/src/secrets/keychain-probe.test.ts`, `packages/kernel/src/secrets/private-file.test.ts`, `packages/kernel/src/secrets/secret-store-auto.test.ts`
+- Modify: `packages/kernel/src/kernel-live.ts` and `packages/kernel/src/kernel-foundation.ts` (`Secrets` provided from the options, in-memory by default), `packages/kernel/src/plugins/plugin-host.ts` (the host takes `Secrets` from the service; `PluginHostOptions.secrets` is gone) and its fixtures and tests, `packages/kernel/src/bun.ts` and `packages/kernel/src/facade.ts` (`KernelOptions.secrets`; `kernelBunLayer` builds the store from `boot-secrets.ts` unless given one), `packages/kernel/src/index.ts` (exports), `packages/kernel/src/health/health.ts` (`secrets: SecretBackend` in the report — `HealthDto` and `/api/v1/health` unchanged), `packages/kernel/src/secrets/in-memory-secret-store.ts` (`backend: 'memory'`), `packages/api/src/bun.ts` (passes `secrets` through), `apps/bytebureau/src/bureau/local.ts` (maps the four `HealthDto` fields explicitly), `apps/bytebureau/src/testing/temp-repo.ts` (`testHome()` writes `secrets: { backend: 'file' }`; `configureHome(home, config)` for a test that writes its own `config.json`), the CLI tests that started kernels on bare homes (`serve`, `run`, `projects`, `workspaces`, `daemon-lock`, `run-logging`, `run-cli`, `local`) now on `testHome()`/`configureHome()`, `cspell-words.txt`
 - Test: the two new test files; the existing plugin-host tests keep passing (`InMemorySecretStore` default)
 
 **Interfaces:**
@@ -1011,40 +1011,78 @@ git commit -m "feat(plugin-api): let a provider declare the variable of an API k
 `packages/kernel/src/secrets/file-secret-store.test.ts`:
 
 ```ts
-import { readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
 import { FileSecretStore } from './file-secret-store.js'
 
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+const REFUSED = /secrets\.json does not hold a secret store/u
+
+// The secrets file in a fresh directory removed after the test, or in a subdirectory of it that is not there yet
+const fileIn = (directory = ''): string =>
+  path.join(tempDir('bb-secrets-'), directory, 'secrets.json')
+
 describe(FileSecretStore, () => {
   it('keeps a value across stores of the same file, in a file only the user can read', async () => {
     expect.hasAssertions()
-    const file = path.join(tempDir('bb-secrets-'), 'secrets.json')
+    const file = fileIn()
     const first = new FileSecretStore(file)
     await first.set('profiles/claude/work/api_key', 'sk-test-1')
     const second = new FileSecretStore(file)
     await expect(second.get('profiles/claude/work/api_key')).resolves.toBe('sk-test-1')
-    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(modeOf(file)).toBe(0o600)
     expect(readFileSync(file, 'utf8')).toContain('sk-test-1')
   })
 
   it('answers nothing for a key it does not hold, and forgets a deleted one', async () => {
     expect.hasAssertions()
-    const store = new FileSecretStore(path.join(tempDir('bb-secrets-'), 'secrets.json'))
+    const store = new FileSecretStore(fileIn())
     await expect(store.get('missing')).resolves.toBeUndefined()
     await store.set('k', 'v')
+    await expect(store.get('toString')).resolves.toBeUndefined()
     await store.delete('k')
     await expect(store.get('k')).resolves.toBeUndefined()
     expect(store.backend).toBe('file')
   })
 
-  it('refuses a file whose content is not the store, instead of overwriting it', async () => {
+  it('writes no file to delete a key it does not hold', async () => {
     expect.hasAssertions()
-    const file = path.join(tempDir('bb-secrets-'), 'secrets.json')
+    const file = fileIn()
+    await new FileSecretStore(file).delete('missing')
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('creates its directory for the user alone', async () => {
+    expect.hasAssertions()
+    const file = fileIn('home')
+    await new FileSecretStore(file).set('k', 'v')
+    expect(modeOf(path.dirname(file))).toBe(0o700)
+  })
+})
+
+describe('a FileSecretStore over a file that holds something else', () => {
+  it('refuses a file that holds no JSON, and leaves it as it is', async () => {
+    expect.hasAssertions()
+    const file = fileIn()
     writeFileSync(file, 'not json')
     const store = new FileSecretStore(file)
-    await expect(store.set('k', 'v')).rejects.toThrow(/secrets\.json/u)
+    await expect(store.set('k', 'v')).rejects.toThrow(REFUSED)
+    expect(readFileSync(file, 'utf8')).toBe('not json')
+    await expect(store.delete('k')).rejects.toThrow(REFUSED)
+    expect(readFileSync(file, 'utf8')).toBe('not json')
+  })
+
+  it('refuses JSON that is no map of strings, and leaves it as it is', async () => {
+    expect.hasAssertions()
+    const file = fileIn()
+    writeFileSync(file, '{ "k": 1 }')
+    const store = new FileSecretStore(file)
+    await expect(store.get('k')).rejects.toThrow(REFUSED)
+    await expect(store.set('j', 'v')).rejects.toThrow(REFUSED)
+    expect(readFileSync(file, 'utf8')).toBe('{ "k": 1 }')
   })
 })
 ```
@@ -1052,26 +1090,58 @@ describe(FileSecretStore, () => {
 `packages/kernel/src/secrets/secret-store-for.test.ts` (runs under Node, where `Bun` is undefined):
 
 ```ts
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { fakeBun, withoutBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { secretStoreFor } from './secret-store-for.js'
 
 describe(secretStoreFor, () => {
   it('gives the file store for file, and for auto where there is no Bun', async () => {
     expect.hasAssertions()
+    withoutBun()
     const home = tempDir('bb-home-')
     const file = await secretStoreFor(home, 'file')
     const auto = await secretStoreFor(home, 'auto')
     expect([file.backend, auto.backend]).toStrictEqual(['file', 'file'])
     await file.set('k', 'v')
     await expect(auto.get('k')).resolves.toBe('v')
-    expect(path.dirname(home)).toBe(path.dirname(tempDir('bb-home-')))
+    expect(existsSync(path.join(home, 'secrets.json'))).toBe(true)
   })
 
   it('refuses the keychain where it is not available instead of falling back silently', async () => {
     expect.hasAssertions()
-    await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).rejects.toThrow(/keychain/u)
+    withoutBun()
+    await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).rejects.toThrow(
+      /keychain.*secrets\.backend/u,
+    )
+  })
+})
+
+describe('secretStoreFor where Bun offers its secrets', () => {
+  it('takes the keychain for auto and keychain once the probe went in and out, leaving nothing of it', async () => {
+    expect.hasAssertions()
+    const { entries } = fakeBun('answers')
+    const home = tempDir('bb-home-')
+    const auto = await secretStoreFor(home, 'auto')
+    const keychain = await secretStoreFor(home, 'keychain')
+    expect([auto.backend, keychain.backend, entries.size]).toStrictEqual([
+      'keychain',
+      'keychain',
+      0,
+    ])
+    await auto.set('k', 'v')
+    expect([...entries]).toStrictEqual([['bytebureau/k', 'v']])
+    expect(existsSync(path.join(home, 'secrets.json'))).toBe(false)
+  })
+
+  it('falls back to the file for auto, and refuses keychain, when the keychain refuses the probe', async () => {
+    expect.hasAssertions()
+    fakeBun('refuses')
+    const home = tempDir('bb-home-')
+    await expect(secretStoreFor(home, 'auto')).resolves.toHaveProperty('backend', 'file')
+    await expect(secretStoreFor(home, 'keychain')).rejects.toThrow(/keychain/u)
   })
 })
 ```
@@ -1104,44 +1174,43 @@ export class Secrets extends Context.Service<Secrets, SecretsShape>()('bb/Secret
 `packages/kernel/src/secrets/file-secret-store.ts`:
 
 ```ts
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { readIfPresent, writePrivate } from './private-file.js'
 import type { SecretsShape } from './secrets.js'
 
-type Values = Record<string, string>
-
-const isMissing = (error: unknown): boolean =>
-  error instanceof Error && 'code' in error && error.code === 'ENOENT'
+type Values = Readonly<Record<string, string>>
 
 const isValues = (value: unknown): value is Values =>
   typeof value === 'object' &&
   value !== null &&
+  !Array.isArray(value) &&
   Object.values(value).every((entry) => typeof entry === 'string')
 
-// The file as a map of keys to values; a missing file is empty; anything else in the file is refused, never overwritten
-const read = (file: string): Values => {
-  let text: string
+// What the text holds; nothing for text that is no JSON
+const parsed = (text: string): unknown => {
   try {
-    text = readFileSync(file, 'utf8')
-  } catch (error) {
-    if (isMissing(error)) {
-      return {}
-    }
-    throw error
+    const value: unknown = JSON.parse(text)
+    return value
+  } catch {
+    return undefined
   }
-  const parsed: unknown = JSON.parse(text)
-  if (!isValues(parsed)) {
-    throw new Error(`${path.basename(file)} does not hold a secret store`)
-  }
-  return parsed
 }
 
-// Written beside the file with the user's mode and moved into place, so a reader never sees half a file
+// The file as a map of keys to values, empty while there is no file; anything else in it is refused, never overwritten
+const read = (file: string): Values => {
+  const text = readIfPresent(file)
+  if (text === undefined) {
+    return {}
+  }
+  const values = parsed(text)
+  if (!isValues(values)) {
+    throw new Error(`${path.basename(file)} does not hold a secret store`)
+  }
+  return values
+}
+
 const write = (file: string, values: Values): void => {
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  const draft = `${file}.tmp`
-  writeFileSync(draft, `${JSON.stringify(values, null, 2)}\n`, { mode: 0o600 })
-  renameSync(draft, file)
+  writePrivate(file, `${JSON.stringify(values, null, 2)}\n`)
 }
 
 // Secrets in one JSON file under the home, for the user alone: the fallback where no keychain serves the daemon
@@ -1155,7 +1224,8 @@ export class FileSecretStore implements SecretsShape {
 
   public async get(key: string): Promise<string | undefined> {
     await Promise.resolve()
-    return read(this.file)[key]
+    const values = read(this.file)
+    return Object.hasOwn(values, key) ? values[key] : undefined
   }
 
   public async set(key: string, value: string): Promise<void> {
@@ -1163,10 +1233,13 @@ export class FileSecretStore implements SecretsShape {
     write(this.file, { ...read(this.file), [key]: value })
   }
 
+  // A key the file does not hold leaves it as it is, or absent
   public async delete(key: string): Promise<void> {
     await Promise.resolve()
-    const { [key]: _removed, ...rest } = read(this.file)
-    write(this.file, rest)
+    const values = read(this.file)
+    if (Object.hasOwn(values, key)) {
+      write(this.file, Object.fromEntries(Object.entries(values).filter(([name]) => name !== key)))
+    }
   }
 }
 ```
@@ -1178,23 +1251,35 @@ export class FileSecretStore implements SecretsShape {
 ```ts
 import type { SecretsShape } from './secrets.js'
 
-interface BunSecrets {
-  get(options: { service: string; name: string }): Promise<string | null>
-  set(options: { service: string; name: string; value: string }): Promise<void>
-  delete(options: { service: string; name: string }): Promise<boolean>
+interface Entry {
+  readonly service: string
+  readonly name: string
 }
 
-// Bun.secrets as the runtime offers it; undefined under Node, which the tests run on
+interface BunSecrets {
+  readonly get: (entry: Entry) => Promise<string | null>
+  readonly set: (entry: Entry & { readonly value: string }) => Promise<void>
+  readonly delete: (entry: Entry) => Promise<boolean>
+}
+
+const METHODS = ['get', 'set', 'delete'] as const
+
+const isBunSecrets = (value: unknown): value is BunSecrets =>
+  typeof value === 'object' &&
+  value !== null &&
+  METHODS.every((method) => typeof Reflect.get(value, method) === 'function')
+
+// Bun.secrets as the runtime offers it; nothing under Node, which the tests run on
 export const bunSecrets = (): BunSecrets | undefined => {
   const runtime: unknown = Reflect.get(globalThis, 'Bun')
   if (typeof runtime !== 'object' || runtime === null) {
     return undefined
   }
   const secrets: unknown = Reflect.get(runtime, 'secrets')
-  return typeof secrets === 'object' && secrets !== null ? (secrets as BunSecrets) : undefined
+  return isBunSecrets(secrets) ? secrets : undefined
 }
 
-// The OS keychain through Bun.secrets: Keychain Services on macOS, libsecret on Linux, the Credential Manager on Windows
+// The keychain of the system through Bun.secrets: Keychain Services on macOS, the Secret Service on Linux, the Credential Manager on Windows
 export class BunSecretStore implements SecretsShape {
   public readonly backend = 'keychain' as const
   private readonly secrets: BunSecrets
@@ -1207,7 +1292,7 @@ export class BunSecretStore implements SecretsShape {
 
   public async get(key: string): Promise<string | undefined> {
     const value = await this.secrets.get({ service: this.service, name: key })
-    return value === null ? undefined : value
+    return value ?? undefined
   }
 
   public async set(key: string, value: string): Promise<void> {
@@ -1227,51 +1312,762 @@ export class BunSecretStore implements SecretsShape {
 ```ts
 import path from 'node:path'
 import type { SecretsBackend } from '@bytebureau/protocol'
-import { BunSecretStore, bunSecrets } from './bun-secret-store.js'
+import { kernelLogger } from '../logging/logging.js'
+import { recordBackend, recordedBackend, type ChosenBackend } from './backend-record.js'
 import { FileSecretStore } from './file-secret-store.js'
+import { probeKeychain } from './keychain-probe.js'
 import type { SecretsShape } from './secrets.js'
 
-// A probe that goes in and comes out again; a keychain that refuses it is not available (locked, headless, no secret service)
-const probed = async (store: BunSecretStore): Promise<boolean> => {
-  const key = `probe/${process.pid}`
-  try {
-    await store.set(key, 'probe')
-    const value = await store.get(key)
-    await store.delete(key)
-    return value === 'probe'
-  } catch {
-    return false
-  }
+const logger = kernelLogger(['bb', 'secrets'])
+
+interface Choice {
+  readonly store: SecretsShape
+  // Why it is this store, for the line the start logs
+  readonly reason: string
 }
 
-const keychain = async (): Promise<BunSecretStore | undefined> => {
-  const secrets = bunSecrets()
-  if (secrets === undefined) {
-    return undefined
+const fileOf = (home: string): string => path.join(home, 'secrets.json')
+
+const fileChoice = (home: string, reason: string): Choice => ({
+  store: new FileSecretStore(fileOf(home)),
+  reason,
+})
+
+// The keychain backend demands the keychain: one that is not available refuses the start, with the reason
+async function demanded(): Promise<Choice> {
+  const probed = await probeKeychain()
+  if (typeof probed !== 'string') {
+    return { store: probed, reason: 'secrets.backend is keychain' }
   }
-  const store = new BunSecretStore(secrets)
-  return (await probed(store)) ? store : undefined
+  throw new Error(
+    `the keychain is not available to this daemon (${probed}); set secrets.backend to file or auto`,
+  )
 }
 
-// The store the backend names: the keychain when asked for and available, the file under the home otherwise; auto takes the keychain where it works
-export const secretStoreFor = async (home: string, backend: SecretsBackend): Promise<SecretsShape> => {
+// Auto at the first start of a home takes the keychain where it answers the probe, else the file, and keeps to it from then on
+async function chosen(home: string): Promise<Choice> {
+  const probed = await probeKeychain()
+  if (typeof probed !== 'string') {
+    recordBackend(home, 'keychain')
+    return { store: probed, reason: 'auto: the keychain answered' }
+  }
+  recordBackend(home, 'file')
+  logger.warn(`${probed}: the secrets are kept in ${fileOf(home)} from now on`)
+  return fileChoice(home, `auto: ${probed}`)
+}
+
+// Auto after that keeps what it chose: the file even where the keychain answers now, the keychain while it answers
+async function kept(home: string, recorded: ChosenBackend): Promise<Choice> {
+  if (recorded === 'file') {
+    return fileChoice(home, 'auto, as recorded in secrets.backend')
+  }
+  const probed = await probeKeychain()
+  if (typeof probed !== 'string') {
+    return { store: probed, reason: 'auto, as recorded in secrets.backend' }
+  }
+  logger.warn(
+    `the secrets kept in the keychain are not available (${probed}); new ones go to ${fileOf(home)} until it answers`,
+  )
+  return fileChoice(home, 'auto: the keychain it chose before is not available')
+}
+
+// File and keychain go by the configuration alone; auto goes by the record of what it chose, once there is one
+const choiceFor = async (home: string, backend: SecretsBackend): Promise<Choice> => {
   if (backend === 'file') {
-    return new FileSecretStore(path.join(home, 'secrets.json'))
-  }
-  const store = await keychain()
-  if (store !== undefined) {
-    return store
+    return fileChoice(home, 'secrets.backend is file')
   }
   if (backend === 'keychain') {
-    throw new Error('the keychain is not available to this daemon; set secrets.backend to file or auto')
+    const demand = await demanded()
+    return demand
   }
-  return new FileSecretStore(path.join(home, 'secrets.json'))
+  const recorded = recordedBackend(home)
+  const choice = recorded === undefined ? await chosen(home) : await kept(home, recorded)
+  return choice
+}
+
+// The store the backend names: the file under the home, or the keychain, which auto takes where it answers and keychain demands
+// The choice is logged once, at debug: a start that goes as configured says nothing on stderr, a fallback warns
+export const secretStoreFor = async (
+  home: string,
+  backend: SecretsBackend,
+): Promise<SecretsShape> => {
+  const { store, reason } = await choiceFor(home, backend)
+  logger.debug(`secrets backend: ${store.backend} (${reason})`)
+  return store
 }
 ```
 
 - [ ] **Step 4: Wire the service**
 
 `packages/kernel/src/kernel-live.ts`: `KernelLayerOptions` gains `readonly secrets?: SecretsShape | undefined`; `composeKernel` provides `Layer.succeed(Secrets, options.secrets ?? new InMemorySecretStore())` into the foundation (merge it into `FoundationLive`'s output or `Layer.provideMerge` before `PluginHostLive`), and `PluginHostLive` reads `Secrets` from the context instead of `options.secrets` (`plugin-host.ts`: `const secrets = yield* Secrets` in its layer; drop `PluginHostOptions.secrets`). `KernelServices` gains `Secrets`. `packages/kernel/src/facade.ts` `KernelOptions` gains `secrets?: SecretsShape`, passed through to the layer. `packages/kernel/src/bun.ts` `kernelBunLayer`: read the user configuration's `secrets.backend` the way `bootLevel` reads the level (`configReader`/the user file under `home`), default `'auto'`, and `options.secrets ?? await secretStoreFor(home.root, backend)`; `createKernel` passes the same. `packages/api/src/bun.ts` `kernelOptionsOf` passes `secrets` from `DaemonOptions` (the daemon lets the kernel choose; `DaemonOptions.secrets?` for tests). `packages/kernel/src/health/health.ts`: the report gains `secrets: SecretBackend` (read from `Secrets`); `HealthDto` unchanged (the API's handler picks the fields it serves). `apps/bytebureau/src/testing/temp-repo.ts` `testHome()` writes `{ server: { port: 0 }, secrets: { backend: 'file' } }`. `packages/kernel/src/index.ts` exports `Secrets`, `type SecretsShape`, `type SecretBackend`, `FileSecretStore`, `BunSecretStore`, `secretStoreFor`.
+
+**Added files (as shipped):**
+
+`packages/kernel/src/facade/boot-secrets.ts` (as shipped):
+
+```ts
+import { SecretsBackend } from '@bytebureau/protocol'
+import { Effect, Schema } from 'effect'
+import { readLayer, type LoadedFile } from '../config/files.js'
+import { isPlain } from '../config/merge.js'
+import { ConfigError } from '../errors.js'
+import { kernelLogger } from '../logging/logging.js'
+import { secretStoreFor } from '../secrets/secret-store-for.js'
+import type { SecretsShape } from '../secrets/secrets.js'
+import type { KernelOptions } from './types.js'
+
+const logger = kernelLogger(['bb', 'secrets'])
+
+const isBackend = Schema.is(SecretsBackend)
+
+// The backend the secrets section names, auto where it names none; anything else refuses the start, which auto would hide
+const backendIn = ({ file, config }: LoadedFile): SecretsBackend => {
+  const section = config['secrets']
+  if (section === undefined) {
+    return 'auto'
+  }
+  if (!isPlain(section)) {
+    throw new ConfigError({ file, pointer: '/secrets', reason: 'expected an object' })
+  }
+  const { backend } = section
+  if (backend === undefined || isBackend(backend)) {
+    return backend ?? 'auto'
+  }
+  const reason = `expected "auto", "keychain" or "file", not ${JSON.stringify(backend)}`
+  throw new ConfigError({ file, pointer: '/secrets/backend', reason })
+}
+
+type UserFile = { readonly loaded: LoadedFile | null } | { readonly failure: ConfigError }
+
+const userFile = async (home: string): Promise<UserFile> => {
+  const read = readLayer(home, 'config').pipe(
+    Effect.match({
+      onFailure: (failure): UserFile => ({ failure }),
+      onSuccess: (loaded): UserFile => ({ loaded }),
+    }),
+  )
+  const file = await Effect.runPromise(read)
+  return file
+}
+
+// The secrets section of the user file on its own, so that a mistake in another section does not move the secrets elsewhere
+// A file that cannot be parsed leaves the choice to auto, and says so, as the daemon does for its server section
+async function configuredBackend(home: string): Promise<SecretsBackend> {
+  const read = await userFile(home)
+  if ('failure' in read) {
+    const { file, reason } = read.failure
+    logger.warn('the user configuration cannot be read: its secrets section is not applied', {
+      file,
+      reason,
+    })
+    return 'auto'
+  }
+  return read.loaded === null ? 'auto' : backendIn(read.loaded)
+}
+
+// The store the options give, else the one the user configuration names
+export async function bootSecrets(options: KernelOptions): Promise<SecretsShape> {
+  if (options.secrets !== undefined) {
+    return options.secrets
+  }
+  return secretStoreFor(options.home, await configuredBackend(options.home))
+}
+```
+
+`packages/kernel/src/facade/boot-secrets.test.ts` (as shipped):
+
+```ts
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { ConfigError } from '../errors.js'
+import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { capturedLogs, linesOf } from '../testing/captured-logs.js'
+import { withoutBun } from '../testing/fake-bun-secrets.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { bootSecrets } from './boot-secrets.js'
+
+// A home whose user file holds the text given; Bun is taken away, so no test can reach a real keychain
+const homeWith = (config: string): string => {
+  withoutBun()
+  const home = tempDir('bb-home-')
+  writeFileSync(path.join(home, 'config.json'), config)
+  return home
+}
+
+const KEYCHAIN = '{ "secrets": { "backend": "keychain" } }'
+
+describe(bootSecrets, () => {
+  it('takes the store the options give over the one the user file names', async () => {
+    expect.hasAssertions()
+    const given = new InMemorySecretStore()
+    await expect(bootSecrets({ home: homeWith(KEYCHAIN), env: {}, secrets: given })).resolves.toBe(
+      given,
+    )
+  })
+
+  it('takes the backend the user file names, and auto where it names none', async () => {
+    expect.hasAssertions()
+    await expect(bootSecrets({ home: homeWith(KEYCHAIN), env: {} })).rejects.toThrow(/keychain/u)
+    const none = await bootSecrets({ home: tempDir('bb-home-'), env: {} })
+    const unnamed = await bootSecrets({ home: homeWith('{ "server": { "port": 0 } }'), env: {} })
+    expect([none.backend, unnamed.backend]).toStrictEqual(['file', 'file'])
+  })
+
+  it('reads the secrets section even where another section of the user file cannot be read', async () => {
+    expect.hasAssertions()
+    const home = homeWith(
+      '{ "server": { "port": "not a port" }, "secrets": { "backend": "keychain" } }',
+    )
+    await expect(bootSecrets({ home, env: {} })).rejects.toThrow(/keychain/u)
+  })
+})
+
+describe('bootSecrets and a secrets section it cannot go by', () => {
+  it('refuses a backend that is none of the three, naming its place and the three', async () => {
+    expect.hasAssertions()
+    const refused = bootSecrets({
+      home: homeWith('{ "secrets": { "backend": "vault" } }'),
+      env: {},
+    })
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('pointer', '/secrets/backend')
+    await expect(refused).rejects.toThrow(/^expected "auto", "keychain" or "file", not "vault"$/u)
+  })
+
+  it('refuses a secrets section that is no object', async () => {
+    expect.hasAssertions()
+    const refused = bootSecrets({ home: homeWith('{ "secrets": "file" }'), env: {} })
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('pointer', '/secrets')
+  })
+
+  it('leaves the choice to auto where the user file cannot be parsed, and says so', async () => {
+    expect.hasAssertions()
+    const home = homeWith('{ "secrets": ')
+    const logs = await capturedLogs()
+    await expect(bootSecrets({ home, env: {} })).resolves.toHaveProperty('backend', 'file')
+    expect(linesOf(logs, 'bb.secrets')[0]).toStrictEqual([
+      'warning',
+      'the user configuration cannot be read: its secrets section is not applied',
+    ])
+  })
+})
+```
+
+`packages/kernel/src/secrets/keychain-probe.ts` (as shipped):
+
+```ts
+import { BunSecretStore, bunSecrets } from './bun-secret-store.js'
+
+// A keychain that is locked or waits on a prompt would hold the start of the daemon; this is all it is given
+const PROBE_TIMEOUT_MS = 3000
+
+const PROBE = `probe/${process.pid}`
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
+async function forget(store: BunSecretStore): Promise<void> {
+  try {
+    await store.delete(PROBE)
+  } catch {
+    // Best effort: the probe stays behind only where the keychain refuses its delete as well
+  }
+}
+
+// The probe goes in and comes out again: nothing when it did, else why not
+// It is deleted whatever came of it, a write the keychain lets in after the time included
+async function roundTrip(store: BunSecretStore): Promise<string | undefined> {
+  try {
+    await store.set(PROBE, 'probe')
+    const value = await store.get(PROBE)
+    return value === 'probe' ? undefined : 'the keychain did not give the probe back'
+  } catch (error) {
+    return `the keychain refused the probe: ${messageOf(error)}`
+  } finally {
+    await forget(store)
+  }
+}
+
+// What the probe came to, or why it came to nothing in time
+async function withinTime(probing: Promise<string | undefined>): Promise<string | undefined> {
+  const { promise: late, resolve } = Promise.withResolvers<string>()
+  const timer = setTimeout(() => {
+    resolve(`the keychain did not answer within ${PROBE_TIMEOUT_MS / 1000} s`)
+  }, PROBE_TIMEOUT_MS)
+  try {
+    return await Promise.race([probing, late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// The keychain where it answers the probe in time, else why it is not available
+export async function probeKeychain(): Promise<BunSecretStore | string> {
+  const secrets = bunSecrets()
+  if (secrets === undefined) {
+    return 'Bun.secrets is not available to this process'
+  }
+  const store = new BunSecretStore(secrets)
+  const reason = await withinTime(roundTrip(store))
+  return reason ?? store
+}
+```
+
+`packages/kernel/src/secrets/backend-record.ts` (as shipped):
+
+```ts
+import path from 'node:path'
+import { readIfPresent, writePrivate } from './private-file.js'
+import type { SecretBackend } from './secrets.js'
+
+// What auto chooses between
+export type ChosenBackend = Exclude<SecretBackend, 'memory'>
+
+const recordOf = (home: string): string => path.join(home, 'secrets.backend')
+
+// The backend auto chose at an earlier start of the home; nothing before the first
+// A record that names neither is refused: choosing again could put the secrets out of reach unnoticed
+export function recordedBackend(home: string): ChosenBackend | undefined {
+  const text = readIfPresent(recordOf(home))
+  if (text === undefined) {
+    return undefined
+  }
+  const recorded = text.trim()
+  if (recorded === 'keychain' || recorded === 'file') {
+    return recorded
+  }
+  throw new Error(
+    `${recordOf(home)} names neither keychain nor file; remove it to let auto choose again`,
+  )
+}
+
+// One word, for the user alone, as the token of the daemon is
+export const recordBackend = (home: string, backend: ChosenBackend): void => {
+  writePrivate(recordOf(home), `${backend}\n`)
+}
+```
+
+`packages/kernel/src/secrets/private-file.ts` (as shipped):
+
+```ts
+import {
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import path from 'node:path'
+
+const isMissing = (error: unknown): boolean =>
+  error instanceof Error && 'code' in error && error.code === 'ENOENT'
+
+// The text of the file; nothing while there is no file
+export const readIfPresent = (file: string): string | undefined => {
+  try {
+    return readFileSync(file, 'utf8')
+  } catch (error) {
+    if (isMissing(error)) {
+      return undefined
+    }
+    throw error
+  }
+}
+
+// The failure that came first is the one passed on
+const discard = (draft: string): void => {
+  try {
+    rmSync(draft, { force: true })
+  } catch {
+    // Left behind: the next write of this process removes it before it begins
+  }
+}
+
+// Created afresh, so neither a stale draft nor a link planted in its place receives the text, and narrowed to the user before it holds any
+const writeDraft = (draft: string, text: string): void => {
+  rmSync(draft, { force: true })
+  const fd = openSync(draft, 'wx', 0o600)
+  try {
+    fchmodSync(fd, 0o600)
+    writeFileSync(fd, text)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+// Written beside the file in a draft of this process, flushed and moved into place, so a reader never sees half of it
+// Two processes writing the same file never share a draft; a write that fails removes its draft and passes the failure on
+export const writePrivate = (file: string, text: string): void => {
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const draft = `${file}.${process.pid}.tmp`
+  try {
+    writeDraft(draft, text)
+    renameSync(draft, file)
+  } catch (error) {
+    discard(draft)
+    throw error
+  }
+}
+```
+
+`packages/kernel/src/testing/fake-bun-secrets.ts` (as shipped):
+
+```ts
+import { onTestFinished, vi } from 'vitest'
+
+interface Entry {
+  readonly service: string
+  readonly name: string
+  readonly value?: string
+}
+
+// How the keychain of a test behaves: it answers, refuses every write as a locked one does, or holds every write until released
+export type FakeKeychain = 'answers' | 'refuses' | 'holds'
+
+export interface FakeBun {
+  // What the keychain holds now, by service/name
+  readonly entries: Map<string, string>
+  // Every service/name written so far, a held write included once it went through
+  readonly written: readonly string[]
+  // Lets the writes a holding keychain held go through
+  readonly release: () => void
+}
+
+const keyOf = ({ service, name }: Entry): string => `${service}/${name}`
+
+const restoredWithTheTest = (): void => {
+  onTestFinished(() => {
+    vi.unstubAllGlobals()
+  })
+}
+
+// No Bun at all, as under Node, even when Vitest itself runs on Bun: nothing can reach a real keychain
+export function withoutBun(): void {
+  vi.stubGlobal('Bun', null)
+  restoredWithTheTest()
+}
+
+// Bun.secrets as a map in place of the global Bun until the test ends; nothing of it reaches a real keychain
+export function fakeBun(keychain: FakeKeychain): FakeBun {
+  const entries = new Map<string, string>()
+  const written: string[] = []
+  const held = Promise.withResolvers<boolean>()
+  const secrets = {
+    get: async (entry: Entry): Promise<string | null> => {
+      await Promise.resolve()
+      return entries.get(keyOf(entry)) ?? null
+    },
+    set: async (entry: Entry): Promise<void> => {
+      await (keychain === 'holds' ? held.promise : Promise.resolve())
+      if (keychain === 'refuses') {
+        throw new Error('the keychain is locked')
+      }
+      entries.set(keyOf(entry), entry.value ?? '')
+      written.push(keyOf(entry))
+    },
+    delete: async (entry: Entry): Promise<boolean> => {
+      await Promise.resolve()
+      return entries.delete(keyOf(entry))
+    },
+  }
+  vi.stubGlobal('Bun', { secrets })
+  restoredWithTheTest()
+  return {
+    entries,
+    written,
+    release: () => {
+      held.resolve(true)
+    },
+  }
+}
+```
+
+`packages/kernel/src/testing/captured-logs.ts` (as shipped):
+
+```ts
+import type { LogRecord } from '@logtape/logtape'
+import { onTestFinished, vi } from 'vitest'
+import { configureLogging, resetLogging } from '../logging/logging.js'
+
+// The level and the text of each record a category of the kernel logged
+export const linesOf = (
+  records: readonly LogRecord[],
+  category: string,
+): readonly (readonly [string, string])[] =>
+  records
+    .filter((record) => record.category.join('.') === category)
+    .map((record) => [record.level, String(record.message[0])] as const)
+
+// What the kernel logs from debug up while the test runs, kept off stderr; LogTape is reset when the test ends
+export async function capturedLogs(): Promise<readonly LogRecord[]> {
+  const records: LogRecord[] = []
+  const quiet = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+  await configureLogging({
+    level: 'debug',
+    json: true,
+    capture: (record) => {
+      records.push(record)
+    },
+  })
+  onTestFinished(async () => {
+    await resetLogging()
+    quiet.mockRestore()
+  })
+  return records
+}
+```
+
+`packages/kernel/src/secrets/keychain-probe.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { capturedLogs, linesOf } from '../testing/captured-logs.js'
+import { fakeBun } from '../testing/fake-bun-secrets.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { secretStoreFor } from './secret-store-for.js'
+
+// What became of a call: the error it was refused with, else that it went through
+const told = (outcome: PromiseSettledResult<unknown>): string =>
+  outcome.status === 'rejected' ? String(outcome.reason) : 'fulfilled'
+
+// Timers the test moves on itself, real again when it ends
+const movedByTheTest = (): void => {
+  vi.useFakeTimers()
+  onTestFinished(() => {
+    vi.useRealTimers()
+  })
+}
+
+describe('secretStoreFor and a keychain that does not answer the probe', () => {
+  it('takes the file for auto after 3 s, warning once with the keychain and the time it was given', async () => {
+    expect.hasAssertions()
+    fakeBun('holds')
+    const logs = await capturedLogs()
+    movedByTheTest()
+    const chosen = secretStoreFor(tempDir('bb-home-'), 'auto')
+    await vi.advanceTimersByTimeAsync(3000)
+    await expect(chosen).resolves.toHaveProperty('backend', 'file')
+    expect(linesOf(logs, 'bb.secrets')).toStrictEqual([
+      ['warning', expect.stringMatching(/^the keychain did not answer within 3 s: /u)],
+      ['debug', 'secrets backend: file (auto: the keychain did not answer within 3 s)'],
+    ])
+  })
+
+  it('refuses keychain after 3 s, naming the time it gave the keychain', async () => {
+    expect.hasAssertions()
+    fakeBun('holds')
+    movedByTheTest()
+    const home = tempDir('bb-home-')
+    const refusing = Promise.allSettled([secretStoreFor(home, 'keychain')])
+    const [settled] = await Promise.all([refusing, vi.advanceTimersByTimeAsync(3000)])
+    expect(settled.map((outcome) => told(outcome))).toStrictEqual([
+      expect.stringMatching(/did not answer within 3 s.*secrets\.backend/u),
+    ])
+  })
+
+  it('deletes the probe of a keychain that lets it in after the time', async () => {
+    expect.hasAssertions()
+    const keychain = fakeBun('holds')
+    movedByTheTest()
+    const chosen = secretStoreFor(tempDir('bb-home-'), 'auto')
+    await vi.advanceTimersByTimeAsync(3000)
+    await chosen
+    keychain.release()
+    await vi.waitFor(() => {
+      expect([keychain.written, keychain.entries.size]).toStrictEqual([
+        [`bytebureau/probe/${process.pid}`],
+        0,
+      ])
+    })
+  })
+})
+
+describe('secretStoreFor and a keychain that refuses the probe', () => {
+  it('carries the error of the keychain into the refusal of keychain', async () => {
+    expect.hasAssertions()
+    fakeBun('refuses')
+    await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).rejects.toThrow(
+      /the keychain is locked.*secrets\.backend/u,
+    )
+  })
+})
+```
+
+`packages/kernel/src/secrets/private-file.test.ts` (as shipped):
+
+```ts
+import {
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { tempDir } from '../testing/temp-repo.js'
+import { readIfPresent, writePrivate } from './private-file.js'
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+// A file of a fresh directory that the test removes when it is over
+const fileIn = (name: string): string => path.join(tempDir('bb-private-'), name)
+
+describe(writePrivate, () => {
+  it('writes the text for the user alone and leaves no draft behind', () => {
+    const file = fileIn('secrets.json')
+    writePrivate(file, 'text')
+    expect([readFileSync(file, 'utf8'), modeOf(file)]).toStrictEqual(['text', 0o600])
+    expect(readdirSync(path.dirname(file))).toStrictEqual(['secrets.json'])
+  })
+
+  it('leaves the draft of another writer alone, and writes through no link planted at its own', () => {
+    const file = fileIn('secrets.json')
+    const target = path.join(path.dirname(file), 'target')
+    writeFileSync(target, 'untouched')
+    writeFileSync(`${file}.tmp`, 'theirs')
+    symlinkSync(target, `${file}.${process.pid}.tmp`)
+    writePrivate(file, 'secret')
+    expect([readFileSync(target, 'utf8'), readFileSync(`${file}.tmp`, 'utf8')]).toStrictEqual([
+      'untouched',
+      'theirs',
+    ])
+    expect([lstatSync(file).isFile(), readFileSync(file, 'utf8'), modeOf(file)]).toStrictEqual([
+      true,
+      'secret',
+      0o600,
+    ])
+  })
+
+  it('removes its draft when the file cannot be replaced, and passes the failure on', () => {
+    const file = fileIn('taken')
+    mkdirSync(path.join(file, 'inside'), { recursive: true })
+    expect(() => {
+      writePrivate(file, 'text')
+    }).toThrow(/EISDIR|ENOTEMPTY|EEXIST/u)
+    expect(readdirSync(path.dirname(file))).toStrictEqual(['taken'])
+  })
+})
+
+describe(readIfPresent, () => {
+  it('reads the text of a file, and nothing where there is none', () => {
+    const file = fileIn('record')
+    expect(readIfPresent(file)).toBeUndefined()
+    writeFileSync(file, 'file\n')
+    expect(readIfPresent(file)).toBe('file\n')
+  })
+
+  it('passes on a failure other than a missing file', () => {
+    const directory = path.dirname(fileIn('record'))
+    expect(() => readIfPresent(directory)).toThrow(/EISDIR/u)
+  })
+})
+```
+
+`packages/kernel/src/secrets/secret-store-auto.test.ts` (as shipped):
+
+```ts
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { capturedLogs, linesOf } from '../testing/captured-logs.js'
+import { fakeBun } from '../testing/fake-bun-secrets.js'
+import { tempDir } from '../testing/temp-repo.js'
+import { secretStoreFor } from './secret-store-for.js'
+
+const recordIn = (home: string): string => path.join(home, 'secrets.backend')
+
+const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+describe('secretStoreFor and the backend auto chose', () => {
+  it('records the choice of the first start for the user alone, and keeps the file where the keychain answers later', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    fakeBun('refuses')
+    const first = await secretStoreFor(home, 'auto')
+    const record = recordIn(home)
+    expect([first.backend, readFileSync(record, 'utf8'), modeOf(record)]).toStrictEqual([
+      'file',
+      'file\n',
+      0o600,
+    ])
+    fakeBun('answers')
+    await expect(secretStoreFor(home, 'auto')).resolves.toHaveProperty('backend', 'file')
+  })
+
+  it('takes the keychain it recorded again while the keychain answers', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    const home = tempDir('bb-home-')
+    writeFileSync(recordIn(home), 'keychain\n')
+    await expect(secretStoreFor(home, 'auto')).resolves.toHaveProperty('backend', 'keychain')
+  })
+
+  it('keeps a recorded keychain, taking the file with a warning while it does not answer', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    fakeBun('answers')
+    const first = await secretStoreFor(home, 'auto')
+    const logs = await capturedLogs()
+    fakeBun('refuses')
+    const meanwhile = await secretStoreFor(home, 'auto')
+    expect([first.backend, meanwhile.backend, readFileSync(recordIn(home), 'utf8')]).toStrictEqual([
+      'keychain',
+      'file',
+      'keychain\n',
+    ])
+    expect(linesOf(logs, 'bb.secrets')).toStrictEqual([
+      [
+        'warning',
+        expect.stringMatching(
+          /^the secrets kept in the keychain are not available \(the keychain refused the probe: the keychain is locked\)/u,
+        ),
+      ],
+      ['debug', 'secrets backend: file (auto: the keychain it chose before is not available)'],
+    ])
+  })
+})
+
+describe('secretStoreFor and a record of the backend it does not go by', () => {
+  it('lets file and keychain ignore the record, and write none', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    const home = tempDir('bb-home-')
+    writeFileSync(recordIn(home), 'keychain\n')
+    const file = await secretStoreFor(home, 'file')
+    writeFileSync(recordIn(home), 'file\n')
+    const keychain = await secretStoreFor(home, 'keychain')
+    const fresh = tempDir('bb-home-')
+    await Promise.all([secretStoreFor(fresh, 'file'), secretStoreFor(fresh, 'keychain')])
+    expect([file.backend, keychain.backend, existsSync(recordIn(fresh))]).toStrictEqual([
+      'file',
+      'keychain',
+      false,
+    ])
+  })
+
+  it('refuses a record that names neither backend instead of choosing again', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    const home = tempDir('bb-home-')
+    writeFileSync(recordIn(home), 'vault\n')
+    await expect(secretStoreFor(home, 'auto')).rejects.toThrow(
+      /secrets\.backend names neither keychain nor file/u,
+    )
+  })
+})
+```
+
+**Semantics (as shipped, commits d1d3113, e447132, 2c03ac3, 6a4938f, d52f594, b64632c, 9d13d63, 7f7753f):** `Secrets` (`bb/Secrets`) is a `SecretStore` that tells its `backend` (`keychain | file | memory`); `composeKernel` provides it from `KernelLayerOptions.secrets`, in-memory by default, and `PluginHostLive` takes it from the service (plugins still see it namespaced by their name). `BunSecretStore` wraps `Bun.secrets` under the service name `bytebureau` (the runtime object is narrowed by a type guard); `FileSecretStore` keeps a JSON map in `<home>/secrets.json`, written to a draft of its own per process (`<file>.<pid>.tmp`, opened exclusively after any stale draft is removed, narrowed to 0600 before the secrets land, fsynced) and renamed into place, the draft removed on a failed write, the directory created 0700, a file that does not hold a store refused and never overwritten; `secretStoreFor(home, backend)`: `file` → the file store, `keychain` → the Bun store when `Bun` exists and a probe (`set`, `get`, `delete` of `probe/<pid>`, the entry deleted in a finally, the whole probe bounded by 3 s) succeeds, else an error naming the keychain, `secrets.backend` and the probe's own failure or timeout, `auto` → the Bun store where the probe succeeds, the file store otherwise with one warning line saying why (under Node there is no `Bun`, so every test gets the file); `auto` is sticky per home: the backend it chose is recorded in `<home>/secrets.backend` (one word, 0600) and kept on later starts — a recorded `keychain` whose probe now fails warns that the stored secrets are unavailable and continues with the file store, a recorded `file` stays `file` — and an explicit setting ignores the record; the chosen backend is logged once at start. `facade/boot-secrets.ts` reads `secrets.backend` from the user file alone, leniently — a user configuration broken elsewhere still yields its backend, a missing section yields `auto`, and an unknown value refuses the start with an error naming `/secrets/backend` and the three allowed values (the daemon logs it and exits, `--no-daemon` prints it) — so a daemon started on a broken configuration never falls back to probing the real keychain and a typo never puts secrets where the user did not say; `kernelBunLayer` builds the store from it unless `KernelOptions.secrets` was given, `createKernel` and the daemon (`api/src/bun.ts`) pass it through. `HealthReport.secrets` names the backend; `HealthDto` is unchanged and both the API handler and the CLI's in-process Bureau map the DTO's four fields explicitly. Tests: the file store (persistence across instances, 0600, a missing key, a deleted key, a corrupt file refused), `secretStoreFor` under Node (`file` and `auto` give the file store, `keychain` is refused), `boot-secrets` (the lenient read), the in-memory store's `backend`, a fake `Bun.secrets` object pinning the Bun store's mapping, the probe's cleanup, the 3 s bound and the sticky record (no real keychain; the two Node-only suites stub the `Bun` global away; the one hand probe ran under `bytebureau-test-<pid>` and deleted its entry); `testHome()` puts every CLI test home on the file backend and about twenty kernel starts in the CLI tests moved onto `testHome()` or `configureHome()`, so an instrumented `keychain()` showed no test reaching it. Noted: `Bun.secrets.set(key, '')` deletes the entry while the file and memory stores keep `''` — moot since an empty key is refused by `ProfileService` (ruled after Task 1).
 
 - [ ] **Step 5: Run everything that touches the wiring**
 
