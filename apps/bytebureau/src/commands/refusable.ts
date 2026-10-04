@@ -3,6 +3,7 @@ import { m } from '@bytebureau/i18n'
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   ProviderError,
   SessionError,
   WorkspaceError,
@@ -24,6 +25,9 @@ function problemRefusal(error: ApiError, named: boolean): string | undefined {
     : problem.detail
 }
 
+// Git or the file system failing is the daemon's failure, which the API answers with a 5xx problem: no refusal
+const DAEMON_FAILURES: ReadonlySet<string> = new Set(['git_failed', 'fs_failed'])
+
 // What a refusal says: the detail of the problem the daemon answered with, or the reason of the kernel's own error
 // The errors of the kernel that the API answers with a 4xx problem are the refusals in-process, told as the API tells them
 // A failure that is no refusal has none
@@ -32,19 +36,15 @@ function refusalOf(error: unknown, named: boolean): string | undefined {
     return problemRefusal(error, named)
   }
   if (error instanceof ConfigError) {
-    return `${error.file}${error.pointer}: ${error.reason}`
+    return configErrorLine(error)
   }
   if (error instanceof ProviderError) {
     return error.kind === 'missing' ? error.reason : undefined
   }
-  if (
-    error instanceof SessionError ||
-    error instanceof AskError ||
-    error instanceof WorkspaceError
-  ) {
-    return error.reason
+  if (error instanceof WorkspaceError) {
+    return DAEMON_FAILURES.has(error.code) ? undefined : error.reason
   }
-  return undefined
+  return error instanceof SessionError || error instanceof AskError ? error.reason : undefined
 }
 
 // A request that is refused, by the daemon with a 4xx problem or by the kernel in-process, ends the command with exit code 1 and its reason in one line

@@ -100,16 +100,26 @@ describe('refusable and what the kernel says in its own way', () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it('names the place of an invalid configuration once when the reason names it already', async () => {
+    expect.hasAssertions()
+    keepExitCode()
+    const printed = captureConsole()
+    const reason = 'bytebureau.json/version: expected 1; bytebureau.json/project: missing'
+    const invalid = new ConfigError({ file: 'bytebureau.json', pointer: '/version', reason })
+    await refusable(contextOf(), rejecting(invalid))
+    expect([printed.err(), process.exitCode]).toStrictEqual([[reason], 1])
+  })
+
   it('tells a reason that spans lines as one line', async () => {
     expect.hasAssertions()
     keepExitCode()
     const printed = captureConsole()
-    const git = new WorkspaceError({
-      code: 'git_failed',
-      reason: 'git failed\nhint: commit first\n',
+    const dirty = new WorkspaceError({
+      code: 'dirty',
+      reason: 'uncommitted changes\nhint: commit first\n',
     })
-    await refusable(contextOf(), rejecting(git))
-    expect(printed.err()).toStrictEqual(['git failed; hint: commit first'])
+    await refusable(contextOf(), rejecting(dirty))
+    expect(printed.err()).toStrictEqual(['uncommitted changes; hint: commit first'])
   })
 })
 
@@ -134,6 +144,11 @@ describe('refusable and the failures that are no refusal', () => {
       new ProviderError({ kind: 'auth', reason: 'it', retryable: false }),
     ],
     ['the store of the kernel', new StoreError({ cause: new Error('disk full') })],
+    ['git failing under the kernel', new WorkspaceError({ code: 'git_failed', reason: 'it' })],
+    [
+      'the file system failing under the kernel',
+      new WorkspaceError({ code: 'fs_failed', reason: 'it' }),
+    ],
     ['any other error', new Error('boom')],
   ])('passes %s on and leaves the exit code alone', async (_what, failure) => {
     expect.hasAssertions()
