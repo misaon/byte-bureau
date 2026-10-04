@@ -35,5 +35,6 @@
   "serve_still_running": "Démon (pid {pid}) se včas nezastavil",
   "serve_timeout": "Démon se včas nespustil; viz {log}",
   "serve_lan_warning": "Naslouchá na {host}: kdokoli v síti s tokenem může tohoto démona používat",
-  "bureau_daemon_running": "Běží démon na {url} (pid {pid}); vynechte --no-daemon nebo ho zastavte přes bytebureau serve --stop"
+  "bureau_daemon_running": "Běží démon na {url} (pid {pid}); vynechte --no-daemon nebo ho zastavte přes bytebureau serve --stop",
+  "bureau_token_file_unreadable": "Soubor s tokenem {file} nelze přečíst"
 }

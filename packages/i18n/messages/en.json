@@ -35,5 +35,6 @@
   "serve_still_running": "Daemon (pid {pid}) did not stop in time",
   "serve_timeout": "The daemon did not come up in time; see {log}",
   "serve_lan_warning": "Listening on {host}: anyone on the network with the token can use this daemon",
-  "bureau_daemon_running": "A daemon is running on {url} (pid {pid}); drop --no-daemon or stop it with bytebureau serve --stop"
+  "bureau_daemon_running": "A daemon is running on {url} (pid {pid}); drop --no-daemon or stop it with bytebureau serve --stop",
+  "bureau_token_file_unreadable": "Cannot read the token file {file}"
 }
