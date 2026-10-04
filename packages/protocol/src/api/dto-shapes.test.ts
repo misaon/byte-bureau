@@ -59,7 +59,7 @@ const health = {
 
 interface ClosedSet {
   readonly what: string
-  readonly schema: Schema.Top
+  readonly schema: typeof SessionDto | typeof TurnDto | typeof PluginStatusDto | typeof HealthDto
   // A value the schema takes, and the same value with one field outside its closed set
   readonly taken: object
   readonly refused: object
