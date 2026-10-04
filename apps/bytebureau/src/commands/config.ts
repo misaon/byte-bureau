@@ -1,11 +1,10 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { m } from '@bytebureau/i18n'
-import { defaultProjectConfigText, type Kernel } from '@bytebureau/kernel'
+import { configReader, defaultProjectConfigText, type ConfigReader } from '@bytebureau/kernel'
 import { defineCommand } from 'citty'
 import { globalArgs, processContext, type Context } from '../context.js'
-import { openKernel } from '../kernel.js'
-import { withResource } from '../resource.js'
+import { kernelHome } from '../kernel-home.js'
 
 const PROJECT_ARG = {
   type: 'string',
@@ -33,18 +32,9 @@ function createConfig(file: string): boolean {
   }
 }
 
-// The configuration is files the kernel of this process reads: config never talks to a daemon
-async function withLocalKernel<Result>(
-  context: Context,
-  work: (kernel: Kernel) => Promise<Result>,
-): Promise<Result> {
-  const open = async (): Promise<Kernel> => {
-    const kernel = await openKernel(context)
-    return kernel
-  }
-  const result = await withResource(open, work)
-  return result
-}
+// The configuration is files this process reads: config never talks to a daemon, and opens no store beside one
+const readerOf = (context: Context): ConfigReader =>
+  configReader(kernelHome(context.env), context.env)
 
 const init = defineCommand({
   meta: {
@@ -72,10 +62,7 @@ const validate = defineCommand({
   args: { ...globalArgs, project: PROJECT_ARG },
   async run({ args }) {
     const context = processContext(args)
-    const issues = await withLocalKernel(context, async (kernel) => {
-      const found = await kernel.config.validate(args.project ?? process.cwd())
-      return found
-    })
+    const issues = await readerOf(context).validate(args.project ?? process.cwd())
     context.output.emit({ command: 'config.validate', issues })
     if (issues.length === 0) {
       context.output.print(m.config_valid())
@@ -92,13 +79,9 @@ const validate = defineCommand({
 const schema = defineCommand({
   meta: { name: 'schema', description: 'Print the JSON Schema of bytebureau.json' },
   args: { ...globalArgs },
-  async run({ args }) {
+  run({ args }) {
     const context = processContext(args)
-    const document = await withLocalKernel(context, async (kernel) => {
-      await Promise.resolve()
-      return kernel.config.schema()
-    })
-    console.log(JSON.stringify(document, undefined, 2))
+    console.log(JSON.stringify(readerOf(context).schema(), undefined, 2))
   },
 })
 

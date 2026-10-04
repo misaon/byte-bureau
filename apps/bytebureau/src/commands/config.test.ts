@@ -121,6 +121,23 @@ describe('bytebureau config validate', () => {
   })
 })
 
+describe('bytebureau config validate and the store of the home', () => {
+  it('opens no store, which a daemon of the home may be writing: it works where no store could open', async () => {
+    expect.hasAssertions()
+    const { project, home, env } = inFreshProject()
+    await runCli(['config', 'init', '--project', project], env)
+    // The data of the home is a file: a store there could not be opened, nor the sessions in it recovered
+    writeFileSync(path.join(home, 'data'), '')
+    const validated = await runCli(['config', 'validate', '--project', project], env)
+    const schema = await runCli(['config', 'schema'], env)
+    expect([validated.code, validated.stdout.trim(), schema.code]).toStrictEqual([
+      0,
+      'Configuration is valid',
+      0,
+    ])
+  })
+})
+
 describe('bytebureau config validate and the environment', () => {
   it('validates the environment as run reads it, naming the variable of a bad value', async () => {
     expect.hasAssertions()
