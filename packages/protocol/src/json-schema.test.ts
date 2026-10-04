@@ -42,6 +42,14 @@ describe('generated JSON Schema files', () => {
     }
   })
 
+  it.each(['profile.added', 'profile.removed', 'profile.status', 'ratelimit.updated'])(
+    'publishes the profile of %s as text: its id is <provider>/<name>, no UUID',
+    (type) => {
+      const definitions = definitionsOf(eventsJsonSchema())
+      expect(JSON.stringify(definitions[type])).not.toContain('UUIDv7')
+    },
+  )
+
   it('publishes the ask timeout as a duration and the passEnv list of a provider beside its own keys', () => {
     const text = JSON.stringify(configJsonSchema())
     expect(text).toContain(String.raw`"pattern":"^\\d+\\s*(?:ms|s|m|h)$"`)

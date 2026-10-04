@@ -38,6 +38,22 @@ describe(decodeEventPayload, () => {
   })
 })
 
+describe('the events of a profile', () => {
+  it('decodes the events of a profile with its id as <provider>/<name>', () => {
+    const added = { profileId: 'fake/work', providerId: 'fake' }
+    expect(decodeEventPayload('profile.added', added)).toStrictEqual(added)
+    expect(decodeEventPayload('profile.removed', { profileId: 'fake/work' })).toStrictEqual({
+      profileId: 'fake/work',
+    })
+    const status = { profileId: 'fake/work', state: 'loggedIn' }
+    expect(decodeEventPayload('profile.status', status)).toStrictEqual(status)
+    const limited = { profileId: 'fake/work', rateLimit: { fiveHourPct: 80 } }
+    expect(decodeEventPayload('ratelimit.updated', limited)).toStrictEqual(limited)
+    const nameless = { profileId: null, rateLimit: {} }
+    expect(decodeEventPayload('ratelimit.updated', nameless)).toStrictEqual(nameless)
+  })
+})
+
 describe('decodeEventPayload when the payload does not fit', () => {
   it('rejects a type outside the catalogue by name', () => {
     expect(() => decodeEventPayload('tool.exploded', {})).toThrow(

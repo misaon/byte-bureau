@@ -36,9 +36,9 @@ export const KernelEventSchemas = {
   'project.registered': project,
   'project.updated': project,
   'project.removed': Schema.Struct({ id: Id }),
-  'profile.added': Schema.Struct({ profileId: Id, providerId: Schema.String }),
-  'profile.removed': Schema.Struct({ profileId: Id }),
-  'profile.status': Schema.Struct({ profileId: Id, state: Schema.String }),
+  'profile.added': Schema.Struct({ profileId: Schema.String, providerId: Schema.String }),
+  'profile.removed': Schema.Struct({ profileId: Schema.String }),
+  'profile.status': Schema.Struct({ profileId: Schema.String, state: Schema.String }),
   'session.created': Schema.Struct({
     ...sessionRef.fields,
     title: Schema.String,
@@ -91,7 +91,10 @@ export const KernelEventSchemas = {
   'ask.expired': Schema.Struct({ askId: Id, fallback: Schema.String }),
   'ask.cancelled': Schema.Struct({ askId: Id }),
   'usage.updated': Schema.Struct({ usage: Usage }),
-  'ratelimit.updated': Schema.Struct({ profileId: Schema.NullOr(Id), rateLimit: RateLimit }),
+  'ratelimit.updated': Schema.Struct({
+    profileId: Schema.NullOr(Schema.String),
+    rateLimit: RateLimit,
+  }),
   'compaction.started': emptyPayload,
   'compaction.completed': emptyPayload,
   'workspace.provisioned': Schema.Struct({

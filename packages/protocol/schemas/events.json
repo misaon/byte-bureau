@@ -129,9 +129,7 @@
       "type": "object",
       "properties": {
         "profileId": {
-          "type": "string",
-          "title": "UUIDv7",
-          "description": "Time-ordered UUID (v7)"
+          "type": "string"
         },
         "providerId": {
           "type": "string"
@@ -147,9 +145,7 @@
       "type": "object",
       "properties": {
         "profileId": {
-          "type": "string",
-          "title": "UUIDv7",
-          "description": "Time-ordered UUID (v7)"
+          "type": "string"
         }
       },
       "required": [
@@ -161,9 +157,7 @@
       "type": "object",
       "properties": {
         "profileId": {
-          "type": "string",
-          "title": "UUIDv7",
-          "description": "Time-ordered UUID (v7)"
+          "type": "string"
         },
         "state": {
           "type": "string"
@@ -1075,9 +1069,7 @@
         "profileId": {
           "anyOf": [
             {
-              "type": "string",
-              "title": "UUIDv7",
-              "description": "Time-ordered UUID (v7)"
+              "type": "string"
             },
             {
               "type": "null"
