@@ -1,6 +1,8 @@
 import { utimesSync, writeFileSync } from 'node:fs'
 import { processStartedAt } from '../daemon/process-start.js'
 import { lockPath } from '../daemon/server-info.js'
+import { startDaemonProcess, type DaemonProcess } from './daemon.js'
+import { testHome } from './temp-repo.js'
 
 const AN_HOUR = 3_600_000
 
@@ -18,6 +20,17 @@ export async function lockReadBefore(home: string, pid: number, beforeMs: number
 export async function oldLock(home: string, pid: number): Promise<void> {
   writeFileSync(lockPath(home), String(pid))
   await lockReadBefore(home, pid, AN_HOUR)
+}
+
+// A daemon of a home of its own whose lock reads two seconds older than its start, as a clock stepped since shows it
+export async function daemonOfSkewedLock(): Promise<{
+  readonly home: string
+  readonly daemon: DaemonProcess
+}> {
+  const home = testHome()
+  const daemon = await startDaemonProcess(home)
+  await lockReadBefore(home, daemon.info.pid, 2000)
+  return { home, daemon }
 }
 
 // When a process started, for a judgement on a platform that cannot tell

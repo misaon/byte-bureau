@@ -3,13 +3,8 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { lockPath, readServerInfo } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/daemon-log.js'
-import {
-  startDaemonProcess,
-  stoppedWithTheTest,
-  watchedPort,
-  type DaemonProcess,
-} from '../testing/daemon.js'
-import { lockReadBefore, oldLock, silentLine } from '../testing/old-lock.js'
+import { stoppedWithTheTest, watchedPort } from '../testing/daemon.js'
+import { daemonOfSkewedLock, oldLock, silentLine } from '../testing/old-lock.js'
 import { runCli } from '../testing/run-cli.js'
 import { testHome } from '../testing/temp-repo.js'
 
@@ -104,25 +99,12 @@ describe('bytebureau serve and a lock whose pid lives on after a crash or a rebo
 // A second daemon of the home in the foreground: it starts only if it takes the lock, and says why it does not
 const SECOND = ['serve', '--no-daemonize', '--port', '0']
 
-// A daemon of a home of its own whose lock reads two seconds older than its start
-async function daemonOfSkewedLock(): Promise<{
-  readonly home: string
-  readonly daemon: DaemonProcess
-}> {
-  const home = testHome()
-  const daemon = await startDaemonProcess(home)
-  await lockReadBefore(home, daemon.info.pid, 2000)
-  return { home, daemon }
-}
-
 describe('bytebureau serve and a daemon whose lock reads older than its start, as a clock stepped since shows it', () => {
   it.skipIf(!POSIX)(
     'keeps the lock with the daemon that answers: a second one does not start',
     async () => {
       expect.hasAssertions()
-      const home = testHome()
-      const daemon = await startDaemonProcess(home)
-      await lockReadBefore(home, daemon.info.pid, 2000)
+      const { home, daemon } = await daemonOfSkewedLock()
       const second = await runCli(SECOND, { BYTEBUREAU_HOME: home })
       expect([second.code, second.stderr.trim()]).toStrictEqual([
         1,

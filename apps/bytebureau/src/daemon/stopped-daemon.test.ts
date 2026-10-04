@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { startDaemonProcess, type DaemonProcess } from '../testing/daemon.js'
-import { lockReadBefore, silentLine } from '../testing/old-lock.js'
-import { testHome } from '../testing/temp-repo.js'
+import type { DaemonProcess } from '../testing/daemon.js'
+import { daemonOfSkewedLock, silentLine } from '../testing/old-lock.js'
 import { acquireLock } from './lock.js'
 import { lockPath } from './server-info.js'
 import type { DaemonChild } from './spawn.js'
@@ -14,17 +13,6 @@ const PAST_START = { graceMs: 500, bootMs: 0 }
 
 // The process of a start that has ended, as its starter sees it
 const ENDED: DaemonChild = { ended: () => true }
-
-// A daemon of a home of its own whose lock reads two seconds older than its start, as a clock stepped since shows it
-async function daemonOfSkewedLock(): Promise<{
-  readonly home: string
-  readonly daemon: DaemonProcess
-}> {
-  const home = testHome()
-  const daemon = await startDaemonProcess(home)
-  await lockReadBefore(home, daemon.info.pid, 2000)
-  return { home, daemon }
-}
 
 // The same daemon, stopped with SIGSTOP as Ctrl-Z or a debugger stops it
 async function stoppedDaemon(): Promise<{ readonly home: string; readonly daemon: DaemonProcess }> {
