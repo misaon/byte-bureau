@@ -17,6 +17,7 @@ const OPERATIONS: [string, string][] = [
   ['/api/v1/workspaces/prune', 'post'],
   ['/api/v1/plugins', 'get'],
   ['/api/v1/providers', 'get'],
+  ['/api/v1/events', 'get'],
 ]
 
 const METHODS: readonly OpenApi.OpenAPISpecMethodName[] = ['get', 'post', 'put', 'patch', 'delete']
@@ -83,4 +84,27 @@ describe('the OpenAPI document of the resource groups', () => {
     // A suffix would mean two schemas of one name: the generated client would name its types after it
     expect(Object.keys(schemas).filter((name) => /_\d+$/u.test(name))).toStrictEqual([])
   })
+})
+
+const EVENTS = ['/api/v1/events', 'get']
+
+describe('the OpenAPI document of the event stream', () => {
+  it('declares text/event-stream as its answer, and the problems the middlewares raise', () => {
+    const { paths } = openApiDocument()
+    const answers = [...EVENTS, 'responses']
+    expect(paths).toHaveProperty([...answers, '200', 'content', 'text/event-stream'])
+    expect(paths).not.toHaveProperty([...answers, '200', 'content', 'application/json'])
+    expect(paths).toHaveProperty([...answers, '401', 'content', 'application/problem+json'])
+  })
+
+  it.each(['last-event-id', 'since', 'session', 'project', 'types'])(
+    'takes %s as an input',
+    (name) => {
+      const { paths } = openApiDocument()
+      expect(paths).toHaveProperty(
+        [...EVENTS, 'parameters'],
+        expect.arrayContaining([expect.objectContaining({ name })]),
+      )
+    },
+  )
 })

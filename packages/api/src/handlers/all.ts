@@ -1,5 +1,6 @@
 import { Layer } from 'effect'
 import { AsksHandlers } from './asks.js'
+import { EventsHandlers } from './events.js'
 import { HealthHandlers } from './health.js'
 import { PluginsHandlers } from './plugins.js'
 import { ProjectsHandlers } from './projects.js'
@@ -18,4 +19,5 @@ export const Handlers = Layer.mergeAll(
   UsageHandlers,
   WorkspacesHandlers,
   PluginsHandlers,
+  EventsHandlers,
 )

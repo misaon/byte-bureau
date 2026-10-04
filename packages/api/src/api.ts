@@ -1,5 +1,6 @@
 import { HttpApi, OpenApi } from 'effect/http-api'
 import { AsksGroup } from './groups/asks.js'
+import { EventsGroup } from './groups/events.js'
 import { HealthGroup } from './groups/health.js'
 import { PluginsGroup } from './groups/plugins.js'
 import { ProjectsGroup } from './groups/projects.js'
@@ -20,6 +21,7 @@ export const BureauApi = HttpApi.make('bytebureau')
     UsageGroup,
     WorkspacesGroup,
     PluginsGroup,
+    EventsGroup,
   )
   .prefix(API_PREFIX)
   .annotate(OpenApi.Title, 'ByteBureau API')
