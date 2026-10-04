@@ -26,6 +26,14 @@ describe('secretStoreFor and the backend auto chose', () => {
     await expect(secretStoreFor(home, 'auto')).resolves.toHaveProperty('backend', 'file')
   })
 
+  it('takes the keychain it recorded again while the keychain answers', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    const home = tempDir('bb-home-')
+    writeFileSync(recordIn(home), 'keychain\n')
+    await expect(secretStoreFor(home, 'auto')).resolves.toHaveProperty('backend', 'keychain')
+  })
+
   it('keeps a recorded keychain, taking the file with a warning while it does not answer', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')

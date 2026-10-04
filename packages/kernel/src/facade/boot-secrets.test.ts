@@ -31,7 +31,8 @@ describe(bootSecrets, () => {
     expect.hasAssertions()
     await expect(bootSecrets({ home: homeWith(KEYCHAIN), env: {} })).rejects.toThrow(/keychain/u)
     const none = await bootSecrets({ home: tempDir('bb-home-'), env: {} })
-    expect(none.backend).toBe('file')
+    const unnamed = await bootSecrets({ home: homeWith('{ "server": { "port": 0 } }'), env: {} })
+    expect([none.backend, unnamed.backend]).toStrictEqual(['file', 'file'])
   })
 
   it('reads the secrets section even where another section of the user file cannot be read', async () => {
