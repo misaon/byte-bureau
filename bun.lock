@@ -68,6 +68,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
+        "@bytebureau/client": "workspace:*",
         "@bytebureau/tsconfig": "workspace:*",
         "@effect/platform-node": "4.0.0",
         "@effect/vitest": "4.0.0",
