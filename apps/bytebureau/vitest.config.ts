@@ -8,5 +8,7 @@ export default defineProject({
     execArgv: ['--disable-warning=ExperimentalWarning'],
     testTimeout: 20_000,
     restoreMocks: true,
+    // Ends a daemon a test that timed out started after its cleanup, and removes the scratch homes of the run
+    globalSetup: ['./src/testing/sweep.ts'],
   },
 })
