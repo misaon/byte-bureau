@@ -100,3 +100,23 @@ it.layer(world.layer)('SessionManager start under a profile', (suite) => {
     () => refusesLostKey,
   )
 })
+
+const NAMELESS = { id: 'default', providerId: 'scripted', kind: 'login' }
+const fixed = driven()
+
+const staysNameless = Effect.gen(function* staysNameless() {
+  const sessions = yield* SessionManager
+  const session = yield* startSession(SCRIPTED)
+  yield* (yield* loadedProfiles).add({ ...SCRIPTED, name: 'later', kind: 'login' })
+  const first = (yield* prompted(fixed, session)).agent.request.profile
+  yield* Effect.andThen(sessions.stop(session.id), sessions.resume(session.id))
+  const second = (yield* prompted(fixed, session, { text: 'again' })).agent.request.profile
+  assert.deepStrictEqual([session.profileId, first, second], [null, NAMELESS, NAMELESS])
+})
+
+it.layer(fixed.layer)('SessionManager start of a session created without a profile', (suite) => {
+  suite.effect(
+    'keeps it on the nameless login once its provider has a default, resumed or not',
+    () => staysNameless,
+  )
+})

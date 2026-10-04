@@ -1,19 +1,12 @@
-import type { ProfileRef } from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
 import { ProfileError, type StoreError } from '../errors.js'
-import { NAMELESS_PROFILE_ID } from './profile-ids.js'
+import { namelessRefOf } from './profile-ids.js'
 import { readKey } from './profile-keys.js'
 import { defaultProfileOf, requireProfile } from './profile-records.js'
 import { refOf } from './profile-status.js'
 import type { Profile, ProfileDeps, ResolvedProfile } from './profile-types.js'
 
 const invalid = (reason: string): ProfileError => new ProfileError({ code: 'invalid', reason })
-
-const namelessRef = (providerId: string): ProfileRef => ({
-  id: NAMELESS_PROFILE_ID,
-  providerId,
-  kind: 'login',
-})
 
 // The variable the provider of the profile takes a key in; a provider that is gone, or took it back, takes none
 const keyEnvOf = (deps: ProfileDeps, profile: Profile): Effect.Effect<string, ProfileError> => {
@@ -60,7 +53,7 @@ export const resolveProfile = (
     if (profileId === null || profileId === undefined) {
       const fallback = yield* defaultProfileOf(deps.sql, providerId)
       return fallback === undefined
-        ? { ref: namelessRef(providerId) }
+        ? { ref: namelessRefOf(providerId) }
         : yield* resolved(deps, fallback)
     }
     const profile = yield* requireProfile(deps.sql, profileId)
