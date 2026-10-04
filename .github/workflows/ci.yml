@@ -44,9 +44,12 @@ jobs:
       - name: generated contracts are up to date
         run: |
           set -euo pipefail
-          bun run build
+          bun run --cwd packages/protocol build
+          bun run --cwd packages/api build
           bun run generate:client
           git diff --exit-code -- packages/protocol/schemas packages/api/openapi.json packages/client/src/gen
+          untracked=$(git ls-files --others --exclude-standard -- packages/protocol/schemas packages/api/openapi.json packages/client/src/gen)
+          [ -z "$untracked" ] || { printf 'untracked generated files:\n%s\n' "$untracked"; exit 1; }
       - run: bun run lint:long-tail
       - name: actionlint
         run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
@@ -118,6 +121,7 @@ jobs:
           [ "${#BIN[@]}" -eq 1 ]
           REPO=$(mktemp -d)
           HOME_DIR=$(mktemp -d)
+          trap 'cat "$HOME_DIR"/logs/daemon.log 2>/dev/null || true' ERR
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
           export BYTEBUREAU_HOME="$HOME_DIR"
@@ -177,6 +181,7 @@ jobs:
           chmod +x "${BIN[0]}"
           REPO=$(mktemp -d)
           HOME_DIR=$(mktemp -d)
+          trap 'cat "$HOME_DIR"/logs/daemon.log 2>/dev/null || true' ERR
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
           export BYTEBUREAU_HOME="$HOME_DIR"
@@ -227,6 +232,7 @@ jobs:
           [ "${#BIN[@]}" -eq 1 ]
           REPO=$(mktemp -d)
           HOME_DIR=$(mktemp -d)
+          trap 'cat "$HOME_DIR"/logs/daemon.log 2>/dev/null || true' ERR
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
           export BYTEBUREAU_HOME="$HOME_DIR"
