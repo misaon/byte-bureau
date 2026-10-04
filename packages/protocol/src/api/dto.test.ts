@@ -1,7 +1,7 @@
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { HealthDto, PluginStatusDto, SessionDto, TurnDto } from './dto.js'
-import { CreateSessionBody, EventsQuery } from './requests.js'
+import { CreateSessionBody, EventsFilter, EventsQuery } from './requests.js'
 
 const employee = {
   id: 'developer',
@@ -96,5 +96,17 @@ describe('the API request schemas', () => {
     }
     expect(Schema.decodeUnknownSync(EventsQuery)(full)).toStrictEqual(full)
     expect(Schema.decodeUnknownSync(EventsQuery)({})).toStrictEqual({})
+  })
+
+  it.each([-1, 1.5])(
+    'refuses a since of %d, in the query and in the filter of the socket',
+    (since) => {
+      expect(() => Schema.decodeUnknownSync(EventsQuery)({ since })).toThrow(/since/u)
+      expect(() => Schema.decodeUnknownSync(EventsFilter)({ since })).toThrow(/since/u)
+    },
+  )
+
+  it('takes a since of 0, the start of the log', () => {
+    expect(Schema.decodeUnknownSync(EventsFilter)({ since: 0 })).toStrictEqual({ since: 0 })
   })
 })

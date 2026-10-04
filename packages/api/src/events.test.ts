@@ -195,15 +195,20 @@ it.layer(IDLE, LIVE)('GET /api/v1/events of a client that has nothing to replay'
 })
 
 it.layer(ApiTestLayer())('GET /api/v1/events refuses', (suite) => {
-  suite.effect('a missing token with 401, and a since that is no number with 400', () =>
+  suite.effect('a missing token with 401, and a since that is no seq with 400', () =>
     Effect.gen(function* refuses() {
       const base = yield* baseUrl
       const noToken = yield* fetched(`${base}${API_PREFIX}/events`)
       assert.strictEqual(noToken.status, 401)
       assert.containSubset(yield* bodyOf(noToken), { code: 'unauthorized' })
-      const badSince = yield* get('/events?since=soon')
-      assert.strictEqual(badSince.status, 400)
-      assert.containSubset(badSince.body, { code: 'request_invalid' })
+      const refused = yield* Effect.forEach(['soon', '-5', '1.5'], (since) =>
+        get(`/events?since=${since}`),
+      )
+      assert.deepStrictEqual(
+        refused.map((reply) => reply.status),
+        [400, 400, 400],
+      )
+      assert.containSubset(refused[1], { body: { code: 'request_invalid' } })
     }),
   )
 })

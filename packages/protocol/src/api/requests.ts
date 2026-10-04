@@ -8,7 +8,7 @@ export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annota
   identifier: 'RegisterProject',
 })
 
-// The same fields as the kernel's CreateSessionInput; env carries BYTEBUREAU_* names only, the kernel drops the rest
+// The same fields as the kernel's CreateSessionInput; env carries BYTEBUREAU_* names only, the kernel drops the rest and its own (home, log level, workspace runtime)
 export const CreateSessionBody = Schema.Struct({
   projectId: Id,
   title: Schema.String,
@@ -27,10 +27,10 @@ export const SessionRef = Schema.Struct({ sessionId: Id }).annotate({
   identifier: 'SessionRef',
 })
 
-// The query string of GET /events: types is comma-separated, since is the last seq the client has seen
-// HttpApiEndpoint decodes a query through a string-tree codec, so Schema.Int reads ?since=12
+// The query string of GET /events: types is comma-separated, since is the last seq the client has seen (0 or more)
+// HttpApiEndpoint decodes a query through a string-tree codec, so Schema.Natural reads ?since=12
 export const EventsQuery = Schema.Struct({
-  since: Schema.optionalKey(Schema.Int),
+  since: Schema.optionalKey(Schema.Natural),
   session: Schema.optionalKey(Id),
   project: Schema.optionalKey(Id),
   types: Schema.optionalKey(Schema.String),
@@ -38,7 +38,7 @@ export const EventsQuery = Schema.Struct({
 
 // The filter of the RPC subscription, the shape of the kernel's EventFilter
 export const EventsFilter = Schema.Struct({
-  since: Schema.optionalKey(Schema.Int),
+  since: Schema.optionalKey(Schema.Natural),
   sessionId: Schema.optionalKey(Id),
   projectId: Schema.optionalKey(Id),
   types: Schema.optionalKey(Schema.Array(Schema.String)),
