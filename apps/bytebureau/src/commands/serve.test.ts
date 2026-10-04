@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { serverUrl } from '@bytebureau/protocol'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/spawn.js'
 import { stopDaemon } from '../daemon/stop.js'
@@ -42,7 +42,10 @@ describe('bytebureau serve --no-daemonize', () => {
     expect(modeOf(serverInfoPath(home))).toBe(0o600)
     expect(daemon.info.token).toMatch(/^[0-9a-f]{64}$/u)
     expect(daemon.info.host).toBe('127.0.0.1')
-    expect(daemon.stdout()).toBe(`Daemon listening on ${daemon.url}\n`)
+    // The line follows the record, so it may still be on its way through the pipe
+    await vi.waitFor(() => {
+      expect(daemon.stdout()).toBe(`Daemon listening on ${daemon.url}\n`)
+    })
     expect([await daemon.stop(), existsSync(serverInfoPath(home))]).toStrictEqual([0, false])
   })
 
