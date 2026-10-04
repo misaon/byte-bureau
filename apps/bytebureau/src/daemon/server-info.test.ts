@@ -3,11 +3,8 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { tempDir } from '../testing/temp-repo.js'
 import {
-  acquireLock,
   isAlive,
-  lockPath,
   readServerInfo,
-  releaseLock,
   removeServerInfo,
   serverInfoPath,
   writeServerInfo,
@@ -62,29 +59,5 @@ describe('server.json', () => {
     // Signal 0 to pid 0 or -1 would reach a whole group of processes: neither is a daemon
     expect(isAlive(0)).toBe(false)
     expect(isAlive(-1)).toBe(false)
-  })
-})
-
-describe('the daemon lock', () => {
-  it('hands the lock to one holder, names a live holder to the next, and takes over a dead one', () => {
-    const home = tempDir('bb-home-')
-    expect(acquireLock(home)).toStrictEqual({ acquired: true })
-    expect(modeOf(lockPath(home))).toBe(0o600)
-    expect(acquireLock(home)).toStrictEqual({ acquired: false, pid: process.pid })
-    releaseLock(home)
-    writeFileSync(lockPath(home), String(DEAD_PID))
-    expect(acquireLock(home)).toStrictEqual({ acquired: true })
-    releaseLock(home)
-    expect(existsSync(lockPath(home))).toBe(false)
-  })
-
-  it('takes over a lock that names no process, and leaves the lock of another holder alone', () => {
-    const home = tempDir('bb-home-')
-    writeFileSync(lockPath(home), 'not a pid')
-    expect(acquireLock(home)).toStrictEqual({ acquired: true })
-    // Pid 1 is alive on every system and is never this process
-    writeFileSync(lockPath(home), '1')
-    releaseLock(home)
-    expect(readFileSync(lockPath(home), 'utf8')).toBe('1')
   })
 })

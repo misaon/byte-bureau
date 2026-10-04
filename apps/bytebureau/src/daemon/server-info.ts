@@ -1,4 +1,12 @@
-import { chmodSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { decodeServerInfo, type ServerInfo } from '@bytebureau/protocol'
 import { writePrivateFile } from './private-file.js'
@@ -84,9 +92,9 @@ export const removeServerInfo = (home: string): void => {
   removeIfThere(serverInfoPath(home))
 }
 
-// The pid a lock names, if it names one
-const holderOf = (home: string): number | undefined => {
-  const text = readIfThere(lockPath(home))
+// The pid a lock file names, if it names one
+const pidIn = (file: string): number | undefined => {
+  const text = readIfThere(file)
   const pid = Number(text === undefined ? undefined : text.trim())
   return Number.isInteger(pid) && pid > 0 ? pid : undefined
 }
@@ -109,23 +117,82 @@ const tryLock = (home: string): boolean => {
   }
 }
 
-// One daemon per home, decided atomically: a live holder is named, and a lock whose holder is gone, or that names none, is taken over
-export const acquireLock = (home: string): LockOutcome => {
-  mkdirSync(home, { recursive: true, mode: 0o700 })
+// False when another taker moved the lock first
+const movedAside = (lock: string, aside: string): boolean => {
+  try {
+    renameSync(lock, aside)
+    return true
+  } catch (error) {
+    if (codeOf(error) === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
+}
+
+// Back where its holder expects it, never over a lock made since
+const putBack = (aside: string, lock: string): void => {
+  try {
+    linkSync(aside, lock)
+  } catch (error) {
+    if (codeOf(error) !== 'EEXIST') {
+      throw error
+    }
+  } finally {
+    unlinkSync(aside)
+  }
+}
+
+/**
+ * Takes a lock whose holder was seen gone out of the way, as one round of acquireLock.
+ * A rename moves it, which only one taker can win, and only what was moved is judged: the lock of a holder that is gone is removed (undefined, the caller tries again); a lock a live process made since it was read is put back and names that process.
+ */
+export const takeOverLock = (home: string): LockOutcome | undefined => {
+  const aside = `${lockPath(home)}.${process.pid}.stale`
+  if (!movedAside(lockPath(home), aside)) {
+    return undefined
+  }
+  const holder = pidIn(aside)
+  if (holder === undefined || !isAlive(holder)) {
+    unlinkSync(aside)
+    return undefined
+  }
+  putBack(aside, lockPath(home))
+  return { acquired: false, pid: holder }
+}
+
+// Rounds before a lock that keeps changing hands is given up on; racing takers settle within a round or two
+const ROUNDS = 5
+
+// Each round takes the lock, names its live holder, or moves the lock of a holder that is gone out of the way and goes again
+const lockOf = (home: string, rounds: number): LockOutcome => {
   if (tryLock(home)) {
     return { acquired: true }
   }
-  const holder = holderOf(home)
-  if (holder !== undefined && isAlive(holder)) {
-    return { acquired: false, pid: holder }
+  const holder = pidIn(lockPath(home))
+  const refused: LockOutcome | undefined =
+    holder !== undefined && isAlive(holder) ? { acquired: false, pid: holder } : takeOverLock(home)
+  if (refused !== undefined) {
+    return refused
   }
-  removeIfThere(lockPath(home))
-  return tryLock(home) ? { acquired: true } : { acquired: false, pid: holderOf(home) ?? 0 }
+  if (rounds <= 1) {
+    throw new Error(`the lock ${lockPath(home)} keeps changing hands; try again`)
+  }
+  return lockOf(home, rounds - 1)
 }
+
+// One daemon per home, decided atomically: a live holder is named, and a lock whose holder is gone, or that names none, is taken over
+export const acquireLock = (home: string): LockOutcome => {
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  return lockOf(home, ROUNDS)
+}
+
+// The pid the lock of the home names, if it names one
+export const lockHolder = (home: string): number | undefined => pidIn(lockPath(home))
 
 // Only the lock of this process is released: a lock another daemon has taken over is that daemon's
 export const releaseLock = (home: string): void => {
-  if (holderOf(home) === process.pid) {
+  if (lockHolder(home) === process.pid) {
     removeIfThere(lockPath(home))
   }
 }
