@@ -31,7 +31,7 @@ const main: CommandDef = {
     version,
     description: 'ByteBureau — the AI office: a bureau of coding agents.',
   },
-  // The global flags are the status's: they come before a sub-command as well, where citty needs to know which of them take a value
+  // The global flags are the status's, and they may come before a sub-command: the runner needs to know which take a value, to find it, and moves them behind it
   args: { ...globalArgs },
   subCommands,
   // Citty runs this after a sub-command too; the status is what bytebureau tells when it is called with none

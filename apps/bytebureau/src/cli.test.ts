@@ -1,6 +1,10 @@
 import { stripVTControlCharacters } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import { readServerInfo } from './daemon/server-info.js'
+import { freePort, stoppedWithTheTest } from './testing/daemon.js'
 import { runCli } from './testing/run-cli.js'
+import { testHome } from './testing/temp-repo.js'
+import { PROMPT, SCRIPTED, workbench } from './testing/workbench.js'
 
 const ESCAPE = '\u001B'
 
@@ -100,5 +104,57 @@ describe('bytebureau global flags', () => {
       command: 'hello',
       message: 'Hello! ByteBureau is ready.',
     })
+  })
+})
+
+describe('bytebureau global flags before the sub-command', () => {
+  it('hands --lang to the sub-command: it greets in Czech', async () => {
+    expect.hasAssertions()
+    const { stdout, code } = await runCli(['--lang', 'cs', 'hello'])
+    expect([code, stdout.trim()]).toStrictEqual([0, 'Ahoj! ByteBureau je připraveno.'])
+  })
+
+  it('takes the flags on both sides of the sub-command', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['--json', 'hello', '--lang', 'cs'])
+    expect(JSON.parse(stdout)).toStrictEqual({
+      command: 'hello',
+      message: 'Ahoj! ByteBureau je připraveno.',
+    })
+  })
+
+  it('keeps --host and --port a daemon that is never started: exit 2 and the url, and no daemon', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    // Were the flags dropped, the command would start a daemon of its own on demand
+    stoppedWithTheTest(home)
+    const port = await freePort()
+    const flags = ['--host', '127.0.0.1', '--port', String(port)]
+    const result = await runCli([...flags, 'projects', 'ls'], { BYTEBUREAU_HOME: home })
+    expect([result.code, result.stderr.trim()]).toStrictEqual([
+      2,
+      `cannot reach the daemon at http://127.0.0.1:${port}/api/v1/projects`,
+    ])
+    expect(readServerInfo(home).state).toBe('absent')
+  })
+})
+
+describe('bytebureau global flags before a sub-command that has sub-commands', () => {
+  it('hands them on to the sub-command of the sub-command, which parses its flags', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const empty = await runCli(['--json', '--no-daemon', 'sessions', 'ls'], env)
+    const czech = await runCli(['--lang', 'cs', '--no-daemon', 'sessions', 'ls'], env)
+    expect(JSON.parse(empty.stdout)).toStrictEqual({ command: 'sessions.ls', sessions: [] })
+    expect(czech.stdout.trim()).toBe('Žádné relace')
+  })
+
+  it('runs the kernel in the process of the command with --no-daemon before the sub-command', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    stoppedWithTheTest(home)
+    const run = ['--no-daemon', 'run', PROMPT, '--project', repo, ...SCRIPTED]
+    const result = await runCli(run, { BYTEBUREAU_HOME: home })
+    expect([result.code, readServerInfo(home).state]).toStrictEqual([0, 'absent'])
   })
 })

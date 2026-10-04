@@ -1,4 +1,4 @@
-import { runCommand, showUsage, type CommandDef, type Resolvable } from 'citty'
+import { runCommand, showUsage, type ArgsDef, type CommandDef, type Resolvable } from 'citty'
 import { DaemonRunningError } from './bureau/open-local.js'
 import { describeError } from './errors.js'
 
@@ -15,6 +15,54 @@ function isUsageError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'CLIError'
 }
 
+// The camelCase of a flag or of the name of an argument, as citty compares them: log-level and logLevel are one
+function camel(name: string): string {
+  return name.replaceAll(/-+(?<letter>[a-z])/gu, (_match, letter: string) => letter.toUpperCase())
+}
+
+// Whether the argument after a flag is its value, as citty tells: the flag is a string one, and is not spelled with =
+function takesValue(flag: string, args: ArgsDef): boolean {
+  if (flag.includes('=')) {
+    return false
+  }
+  const name = flag.replace(/^-{1,2}/u, '')
+  return Object.entries(args).some(([key, definition]) => {
+    if (definition.type !== 'string' && definition.type !== 'enum') {
+      return false
+    }
+    const aliases = typeof definition.alias === 'string' ? [definition.alias] : definition.alias
+    return camel(key) === camel(name) || (aliases ?? []).includes(name)
+  })
+}
+
+// Where the sub-command is in the arguments, as citty finds it: the first argument that is no flag and no value of a flag that takes one
+export function subCommandIndex(argv: readonly string[], args: ArgsDef, from = 0): number {
+  const arg = argv[from]
+  if (arg === undefined || arg === '--') {
+    return -1
+  }
+  if (!arg.startsWith('-')) {
+    return from
+  }
+  return subCommandIndex(argv, args, from + (takesValue(arg, args) ? 2 : 1))
+}
+
+// Citty hands a sub-command only the arguments after its name, and it parses its flags
+// The flags before it move behind it, to the end of the arguments, which a nested command parses too; a -- keeps what follows it
+async function flagsAfterSubCommand(
+  command: CommandDef,
+  argv: readonly string[],
+): Promise<string[]> {
+  const args = command.args === undefined ? {} : await resolved(command.args)
+  const index = subCommandIndex(argv, args)
+  if (index <= 0) {
+    return [...argv]
+  }
+  const rest = argv.slice(index)
+  const end = rest.includes('--') ? rest.indexOf('--') : rest.length
+  return [...rest.slice(0, end), ...argv.slice(0, index), ...rest.slice(end)]
+}
+
 // Usage of the deepest subcommand named in argv, as citty's runMain prints it
 async function printUsage(
   command: CommandDef,
@@ -22,7 +70,8 @@ async function printUsage(
   parent?: CommandDef,
 ): Promise<void> {
   const subCommands = command.subCommands === undefined ? {} : await resolved(command.subCommands)
-  const index = argv.findIndex((arg) => !arg.startsWith('-'))
+  const args = command.args === undefined ? {} : await resolved(command.args)
+  const index = subCommandIndex(argv, args)
   const subCommand = index === -1 ? undefined : subCommands[argv[index] ?? '']
   if (subCommand === undefined) {
     await showUsage(command, parent)
@@ -54,7 +103,8 @@ async function execute(command: CommandDef, argv: readonly string[]): Promise<vo
   } else if (argv.length === 1 && VERSION_FLAGS.has(argv[0] ?? '')) {
     await printVersion(command)
   } else {
-    await runCommand(command, { rawArgs: withBareDebug(argv) })
+    const rawArgs = await flagsAfterSubCommand(command, withBareDebug(argv))
+    await runCommand(command, { rawArgs })
   }
 }
 
