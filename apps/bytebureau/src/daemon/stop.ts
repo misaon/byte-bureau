@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isAlive, readServerInfo, removeServerInfo } from './server-info.js'
-import { runningDaemon } from './wait.js'
+import { daemonAnswers } from './wait.js'
 
 export type StopOutcome =
   | { readonly outcome: 'stopped'; readonly pid: number }
@@ -35,18 +35,29 @@ const forget = (home: string, pid: number): void => {
   }
 }
 
+// SIGTERM, then the wait for the pid to end; the record goes once it has
+const terminated = async (home: string, pid: number, timeoutMs: number): Promise<StopOutcome> => {
+  terminate(pid)
+  if (!(await ended(pid, Date.now() + timeoutMs))) {
+    return { outcome: 'still_running', pid }
+  }
+  forget(home, pid)
+  return { outcome: 'stopped', pid }
+}
+
 // SIGTERM lets the daemon end its sessions and remove its record; it goes only to a daemon that answers as its record says
-// A process that took over the pid of a stale record is never signalled: the record is removed instead
+// A record is removed only once its pid is gone: a live pid that does not answer is neither signalled nor forgotten
+// Such a pid is a daemon shutting down or stalled, or a process that took over the pid of a stale record
 export const stopDaemon = async (home: string, timeoutMs = 5000): Promise<StopOutcome> => {
-  const daemon = await runningDaemon(home)
-  if (daemon === undefined) {
+  const record = readServerInfo(home)
+  if (record.state !== 'alive') {
     removeServerInfo(home)
     return { outcome: 'not_running' }
   }
-  terminate(daemon.pid)
-  if (!(await ended(daemon.pid, Date.now() + timeoutMs))) {
-    return { outcome: 'still_running', pid: daemon.pid }
+  const { pid } = record.info
+  if (!(await daemonAnswers(record.info))) {
+    return { outcome: 'still_running', pid }
   }
-  forget(home, daemon.pid)
-  return { outcome: 'stopped', pid: daemon.pid }
+  const outcome = await terminated(home, pid, timeoutMs)
+  return outcome
 }

@@ -2,7 +2,6 @@ import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
 import { globalArgs, processContext, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
-import { serveForeground } from '../daemon/foreground.js'
 import { daemonLogPath, spawnDaemon } from '../daemon/spawn.js'
 import { stopDaemon } from '../daemon/stop.js'
 import { runningDaemon, waitForDaemon } from '../daemon/wait.js'
@@ -60,7 +59,8 @@ async function startDetached(home: string, flags: ServeFlags, context: Context):
     context.output.warn(m.serve_timeout({ log: daemonLogPath(home) }))
     return 1
   }
-  announce(info, context)
+  // The record names the host clients use; a wildcard bind is known here by the flag alone
+  announce(info, context, flags.host ?? info.host)
   return 0
 }
 
@@ -72,6 +72,22 @@ async function detach(home: string, flags: ServeFlags, context: Context): Promis
     return 0
   }
   const code = await startDetached(home, flags, context)
+  return code
+}
+
+interface ServeArgs extends ServeFlags {
+  readonly daemonize: boolean
+}
+
+// Detached unless --no-daemonize; only the daemon itself loads the API and its server, so every other command stays clear of them
+async function serve(home: string, args: ServeArgs, context: Context): Promise<number> {
+  const port = portOf(args.port)
+  if (args.daemonize) {
+    const code = await detach(home, args, context)
+    return code
+  }
+  const { serveForeground } = await import('../daemon/foreground.js')
+  const code = await serveForeground({ home, env: process.env, host: args.host, port }, context)
   return code
 }
 
@@ -100,13 +116,6 @@ export const serveCommand = defineCommand({
   async run({ args }) {
     const context = processContext(args)
     const home = kernelHome(process.env)
-    if (args.stop) {
-      process.exitCode = await stop(home, context)
-      return
-    }
-    const port = portOf(args.port)
-    process.exitCode = args.daemonize
-      ? await detach(home, args, context)
-      : await serveForeground({ home, env: process.env, host: args.host, port }, context)
+    process.exitCode = args.stop ? await stop(home, context) : await serve(home, args, context)
   },
 })

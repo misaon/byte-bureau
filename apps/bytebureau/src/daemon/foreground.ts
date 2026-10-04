@@ -1,9 +1,8 @@
 import { PortInUseError, startDaemon, type RunningDaemon } from '@bytebureau/api/bun'
-import type { ServerInfo } from '@bytebureau/protocol'
 import type { Context } from '../context.js'
 import { version } from '../version.js'
-import { announce } from './announce.js'
-import { acquireLock, releaseLock, removeServerInfo, writeServerInfo } from './server-info.js'
+import { publish } from './publish.js'
+import { acquireLock, releaseLock, removeServerInfo } from './server-info.js'
 import { tokenFor } from './token.js'
 
 export interface ForegroundOptions {
@@ -48,22 +47,6 @@ async function started(
   }
 }
 
-// What server.json says of the daemon of this process
-const recordOf = (daemon: RunningDaemon, token: string): ServerInfo => ({
-  version,
-  host: daemon.address.host,
-  port: daemon.address.port,
-  pid: process.pid,
-  token,
-  startedAt: daemon.startedAt,
-})
-
-// From here on clients find the daemon
-const publish = (home: string, info: ServerInfo, context: Context): void => {
-  writeServerInfo(home, info)
-  announce(info, context)
-}
-
 async function closed(daemon: RunningDaemon, home: string): Promise<void> {
   try {
     await daemon.close()
@@ -82,7 +65,7 @@ async function serveLocked(options: ForegroundOptions, context: Context): Promis
     return 1
   }
   try {
-    publish(options.home, recordOf(daemon, token), context)
+    publish(options.home, { daemon, token }, context)
     await stopped
   } finally {
     await closed(daemon, options.home)

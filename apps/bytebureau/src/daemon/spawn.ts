@@ -22,6 +22,8 @@ export const spawnDaemon = (
       cwd: home,
       stdio: ['ignore', log, log],
       env: { ...env, BYTEBUREAU_HOME: home },
+      // No console window of its own on Windows; ignored elsewhere
+      windowsHide: true,
     })
     child.unref()
     return child.pid

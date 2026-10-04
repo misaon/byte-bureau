@@ -28,13 +28,16 @@ describe(stopDaemon, () => {
     expect(readServerInfo(home)).toStrictEqual({ state: 'absent' })
   })
 
-  it('signals no live process that does not answer as the daemon of the record', async () => {
+  it('neither signals nor forgets a live pid that does not answer as the daemon of the record', async () => {
     expect.hasAssertions()
     const home = tempDir('bb-home-')
     // The record names this very process, on a port where no daemon answers: a SIGTERM would end the test run
     writeServerInfo(home, recordOn(1, process.pid))
-    await expect(stopDaemon(home)).resolves.toStrictEqual({ outcome: 'not_running' })
-    expect(readServerInfo(home)).toStrictEqual({ state: 'absent' })
+    await expect(stopDaemon(home)).resolves.toStrictEqual({
+      outcome: 'still_running',
+      pid: process.pid,
+    })
+    expect(readServerInfo(home)).toStrictEqual({ state: 'alive', info: recordOn(1, process.pid) })
   })
 
   it('ends the daemon that answers and removes its record', async () => {

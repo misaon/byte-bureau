@@ -1,18 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createContext, type GlobalArgs } from '../context.js'
 import { recordOn } from '../testing/health-stub.js'
-import { alreadyRunning, announce, isLoopback } from './announce.js'
+import { alreadyRunning, announce } from './announce.js'
 
 const TEXT: GlobalArgs = { json: false, color: false, yes: false }
-
-describe(isLoopback, () => {
-  it('tells the loopback names and addresses from those the network reaches', () => {
-    const loopback = ['127.0.0.1', '127.0.0.2', 'localhost', '::1']
-    const network = ['0.0.0.0', '::', '192.168.1.5', '10.0.0.5', 'example.com']
-    expect(loopback.filter((host) => !isLoopback(host))).toStrictEqual([])
-    expect(network.filter((host) => isLoopback(host))).toStrictEqual([])
-  })
-})
 
 describe(announce, () => {
   it('prints where the daemon listens, and warns when the network can reach it', () => {
@@ -20,12 +11,16 @@ describe(announce, () => {
     const error = vi.spyOn(console, 'error').mockReturnValue()
     const context = createContext(TEXT, {}, false)
     announce(recordOn(4747), context)
-    announce({ ...recordOn(4747), host: '0.0.0.0' }, context)
+    announce({ ...recordOn(4747), host: '192.168.1.5' }, context)
+    // Bound to every interface, the daemon is recorded with the loopback clients use
+    announce(recordOn(4747), context, '0.0.0.0')
     expect(log.mock.calls).toStrictEqual([
       ['Daemon listening on http://127.0.0.1:4747'],
-      ['Daemon listening on http://0.0.0.0:4747'],
+      ['Daemon listening on http://192.168.1.5:4747'],
+      ['Daemon listening on http://127.0.0.1:4747'],
     ])
     expect(error.mock.calls).toStrictEqual([
+      ['Listening on 192.168.1.5: anyone on the network with the token can use this daemon'],
       ['Listening on 0.0.0.0: anyone on the network with the token can use this daemon'],
     ])
   })
