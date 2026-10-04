@@ -13,8 +13,13 @@ export const REDACTED_FIELDS: readonly RegExp[] = [
   /^(?:anthropic|openai|github|slack)_.*(?:key|token)$/iu,
 ]
 
+// Every pattern of the kernel replaces with text, so redactValue can apply it with String.prototype.replace as well
+interface SecretPattern extends RedactionPattern {
+  readonly replacement: string
+}
+
 const replacement = '[REDACTED]'
-export const SECRET_PATTERNS: readonly RedactionPattern[] = [
+export const SECRET_PATTERNS: readonly SecretPattern[] = [
   { pattern: /sk-ant-[A-Za-z0-9_-]{8,}/gu, replacement },
   { pattern: /\bsk-[A-Za-z0-9_-]{8,}/gu, replacement },
   { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/gu, replacement },

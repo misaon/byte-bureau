@@ -79,7 +79,7 @@ export class LiveSessions {
     return this.environments.get(sessionId) ?? NO_ENVIRONMENT
   }
 
-  // The session has ended: its environment goes; a resumed session starts its agent without it, as after a restart
+  // The session has ended: its environment goes; a resume reads it back from the record of the session
   public forget(sessionId: string): void {
     this.environments.delete(sessionId)
   }

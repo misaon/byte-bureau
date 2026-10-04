@@ -132,4 +132,9 @@ CREATE TABLE plugin_kv (
 );
 `,
   },
+  {
+    id: '0002_session_env',
+    // The BYTEBUREAU_* variables given at creation, read back when a later process resumes the session
+    sql: `ALTER TABLE sessions ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'`,
+  },
 ]

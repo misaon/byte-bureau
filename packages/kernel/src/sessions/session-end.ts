@@ -2,6 +2,7 @@ import { Effect } from 'effect'
 import type { StoreError } from '../errors.js'
 import type { Live } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
+import { storedEnvironment } from './session-environment.js'
 import {
   bestEffort,
   cancelAsks,
@@ -18,6 +19,7 @@ import type { Outcome } from './session-turns.js'
 
 // The commands that end or pause what an agent does, in one place for the manager
 export { makeInterrupt } from './session-interrupt.js'
+export { makeRecover } from './session-recover.js'
 
 // A turn that the caller stopped is interrupted, whatever the provider would have said about it
 const STOPPED: Outcome = { status: 'interrupted', stopReason: 'stopped', usage: null }
@@ -73,7 +75,18 @@ export const makeComplete =
       }),
     )
 
+// The environment is read before the session moves, so a configuration that cannot be read leaves the session stopped
 export const makeResume =
   (deps: SessionDeps): SessionManagerShape['resume'] =>
   (sessionId) =>
-    deps.live.exclusive(sessionId, move(deps, sessionId, 'resume'))
+    deps.live.exclusive(
+      sessionId,
+      Effect.gen(function* resumesSession() {
+        const stopped = yield* requireSession(deps.sql, sessionId)
+        yield* ensureAllowed(stopped, 'resume')
+        const environment = yield* storedEnvironment(deps, stopped)
+        const session = yield* move(deps, sessionId, 'resume')
+        deps.live.setEnvironment(session.id, environment)
+        return session
+      }),
+    )

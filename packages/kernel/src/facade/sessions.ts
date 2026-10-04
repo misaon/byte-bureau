@@ -16,6 +16,7 @@ export const sessionsApi = (promised: Promised): Kernel['sessions'] => ({
   resume: promised(SessionManager, (sessions, sessionId) => sessions.resume(sessionId)),
   list: promised(SessionManager, (sessions) => sessions.list()),
   get: promised(SessionManager, (sessions, id) => sessions.get(id)),
+  recover: promised(SessionManager, (sessions) => sessions.recover()),
 })
 
 // The record of the settled ask is not handed on

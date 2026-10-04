@@ -1,6 +1,7 @@
 import { Layer } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { AskServiceLive, type AskService } from './asks/ask-service.js'
+import { HealthLive, type Health } from './health/health.js'
 import {
   FoundationLive,
   type FoundationOptions,
@@ -27,6 +28,7 @@ export type KernelServices =
   | WorkspaceManager
   | AskService
   | SessionManager
+  | Health
 
 // The layers of the kernel; KernelTest is the only caller that passes the usage service
 export const composeKernel = (
@@ -38,9 +40,12 @@ export const composeKernel = (
     extraPlugins: options.extraPlugins,
     pluginConfig: options.pluginConfig,
   }).pipe(Layer.provideMerge(foundation))
-  const registry = Layer.mergeAll(ProjectRegistryLive, WorkspaceManagerLive, AskServiceLive).pipe(
-    Layer.provideMerge(plugins),
-  )
+  const registry = Layer.mergeAll(
+    ProjectRegistryLive,
+    WorkspaceManagerLive,
+    AskServiceLive,
+    HealthLive,
+  ).pipe(Layer.provideMerge(plugins))
   return SessionManagerLive({ env: options.env }).pipe(Layer.provideMerge(registry))
 }
 

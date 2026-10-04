@@ -91,3 +91,5 @@ export { KernelLayer, type KernelLayerOptions, type KernelServices } from './ker
 export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 export { FakeAgentProvider } from './testing/fake-agent-provider.js'
 export { fakeAgentPlugin } from './testing/fake-agent-plugin.js'
+export { Health, HealthLive, type HealthReport, type HealthShape } from './health/health.js'
+export { redactValue } from './logging/redact-value.js'

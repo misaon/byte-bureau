@@ -64,4 +64,16 @@ describe('starting the kernel', () => {
     const ids = kernel.providers.list().map((provider) => provider.id)
     expect(ids).toStrictEqual(['fake', 'offered'])
   })
+
+  it('lists the plugin that cannot load among its plugins and reports itself degraded', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel({ extraPlugins: [failing] })
+    const states = kernel.plugins.list().map((plugin) => [plugin.name, plugin.state])
+    expect(states).toStrictEqual([
+      ['workspace-local', 'loaded'],
+      ['agent-fake', 'loaded'],
+      ['failing', 'failed'],
+    ])
+    await expect(kernel.health.check()).resolves.toMatchObject({ status: 'degraded' })
+  })
 })

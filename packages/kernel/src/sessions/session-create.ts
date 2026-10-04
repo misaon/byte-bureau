@@ -69,7 +69,7 @@ export const makeCreate =
       yield* requireProvider(deps.host, employee.provider)
       yield* checkRuntime(deps, employee.permissionMode, runtimeIdOf(project))
       const session = newSession(project, employee, input)
-      yield* register(deps, session)
+      yield* register(deps, session, input.env ?? {})
       const passEnv = passEnvOf(project, employee.provider)
       deps.live.setEnvironment(session.id, { extra: input.env ?? {}, passEnv })
       return yield* provisionOrCrash(deps, { project, session, input })

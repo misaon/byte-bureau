@@ -4,6 +4,7 @@ import { Effect, Schema } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { SessionError, StoreError, toStoreError } from '../errors.js'
 import { nowIso } from '../ids.js'
+import { bytebureauEnv } from '../process/env-allowlist.js'
 import { decodeHandle } from '../workspace/workspace-records.js'
 import type { Session } from './types.js'
 
@@ -26,9 +27,13 @@ const Stored = Schema.Struct({
   created_at: Schema.String,
   started_at: Schema.NullOr(Schema.String),
   ended_at: Schema.NullOr(Schema.String),
+  env_json: Schema.String,
 })
 
 const decodeStored = Schema.decodeUnknownEffect(Stored)
+
+const Environment = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String))
+const decodeEnvironment = Schema.decodeUnknownEffect(Environment)
 
 // A row that does not fit the protocol is a failure of the store, not a defect
 const unreadable = (cause: unknown): StoreError =>
@@ -95,16 +100,28 @@ export const listSessions = (
     Effect.flatMap((rows) => Effect.all(rows.map((row) => toSession(row)))),
   )
 
-// The workspace stays empty until provisioning has made one
+// The workspace stays empty until provisioning has made one; only the BYTEBUREAU_* names of the environment are kept
 export const insertSession = (
   sql: SqlClient.SqlClient,
   session: Session,
+  env: Readonly<Record<string, string>>,
 ): Effect.Effect<void, StoreError> =>
   sql`
-    INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at)
-    VALUES (${session.id}, ${session.projectId}, ${session.title}, ${JSON.stringify(session.employee)}, ${session.providerId}, ${session.profileId}, ${NO_WORKSPACE}, ${session.status}, ${session.createdAt})`.pipe(
+    INSERT INTO sessions (id, project_id, title, employee_json, provider_id, profile_id, workspace_json, status, created_at, env_json)
+    VALUES (${session.id}, ${session.projectId}, ${session.title}, ${JSON.stringify(session.employee)}, ${session.providerId}, ${session.profileId}, ${NO_WORKSPACE}, ${session.status}, ${session.createdAt}, ${JSON.stringify(bytebureauEnv(env))})`.pipe(
     Effect.asVoid,
     Effect.mapError(toStoreError),
+  )
+
+// The environment stored at creation; a record that does not fit is a failure of the store
+export const loadEnvironment = (
+  sql: SqlClient.SqlClient,
+  sessionId: string,
+): Effect.Effect<Readonly<Record<string, string>>, StoreError> =>
+  sql<{ readonly env_json: string }>`SELECT env_json FROM sessions WHERE id = ${sessionId}`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(([row]) => (row === undefined ? '{}' : row.env_json)),
+    Effect.flatMap((json) => decodeEnvironment(json).pipe(Effect.mapError(unreadable))),
   )
 
 const ENDED = new Set<string>(['completed', 'stopped', 'errored'])

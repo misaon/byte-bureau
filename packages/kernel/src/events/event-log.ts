@@ -3,6 +3,7 @@ import { Context, Effect, Layer, PubSub, Stream } from 'effect'
 import { SqlClient, type Statement } from 'effect/sql'
 import { StoreError, toStoreError } from '../errors.js'
 import { nowIso, uuidv7 } from '../ids.js'
+import { redactValue } from '../logging/redact-value.js'
 
 export interface EventFilter {
   readonly sessionId?: string | undefined
@@ -76,8 +77,11 @@ const fromRow = (row: Row): Effect.Effect<EventEnvelope, StoreError> =>
     })),
   )
 
+// An event as the log keeps and fans it out: its payload is the redacted copy, which the catalogue no longer types
+type SafeEvent = Omit<KernelEvent, 'payload'> & { readonly payload: unknown }
+
 // A payload JSON cannot hold, such as a bigint or a cycle, is refused before anything is stored
-const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
+const payloadJson = (event: SafeEvent): Effect.Effect<string, StoreError> =>
   Effect.try({
     try: () => JSON.stringify(event.payload),
     catch: (cause) =>
@@ -91,7 +95,7 @@ const payloadJson = (event: KernelEvent): Effect.Effect<string, StoreError> =>
 // RETURNING yields the one new row; a missing row fails the publish instead of passing for an ephemeral seq 0
 const insertEvent = (
   sql: SqlClient.SqlClient,
-  event: KernelEvent,
+  event: SafeEvent,
   stamp: { readonly id: string; readonly ts: string },
 ): Effect.Effect<number, StoreError> =>
   Effect.flatMap(payloadJson(event), (json) =>
@@ -129,20 +133,22 @@ const makeRead =
     )
 
 // Nothing may interrupt the steps from the insert on: a stored row that no live subscriber is offered would be seen only by a replay
+// The payload is redacted once, here, before it is stored or fanned out (ADR-0012)
 const makePublish =
   (sql: SqlClient.SqlClient, hub: PubSub.PubSub<EventEnvelope>): EventLogShape['publish'] =>
   (event) =>
     Effect.gen(function* publishEvent() {
+      const safe: SafeEvent = { ...event, payload: redactValue(event.payload) }
       const stamp = { id: uuidv7(), ts: nowIso() }
-      const seq = isEphemeral(event.type) ? 0 : yield* insertEvent(sql, event, stamp)
+      const seq = isEphemeral(safe.type) ? 0 : yield* insertEvent(sql, safe, stamp)
       const envelope: EventEnvelope = {
         seq,
         ...stamp,
-        type: event.type,
-        ...(event.projectId === undefined ? {} : { projectId: event.projectId }),
-        ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
-        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
-        payload: event.payload,
+        type: safe.type,
+        ...(safe.projectId === undefined ? {} : { projectId: safe.projectId }),
+        ...(safe.sessionId === undefined ? {} : { sessionId: safe.sessionId }),
+        ...(safe.turnId === undefined ? {} : { turnId: safe.turnId }),
+        payload: safe.payload,
       }
       yield* PubSub.publish(hub, envelope)
       return envelope

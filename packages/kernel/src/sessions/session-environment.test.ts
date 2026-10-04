@@ -33,12 +33,12 @@ it.layer(world.layer)('SessionManager passEnv of a provider', (suite) => {
   )
 
   suite.effect(
-    'starts the agent of a session resumed after a stop without the environment of its creation',
+    'starts the agent of a session resumed after a stop with the environment of its creation, read back from its record',
     () =>
-      Effect.gen(function* forgetsEnvironment() {
+      Effect.gen(function* restoresEnvironment() {
         yield* withEnv('BB_PASSED', 'yes')
         const sessions = yield* SessionManager
-        const env = { BYTEBUREAU_EXTRA: '1' }
+        const env = { BYTEBUREAU_EXTRA: '1', NOT_KEPT: 'dropped' }
         const session = yield* startSession({ providerId: 'scripted', env }, CONFIG)
         const first = (yield* prompted(world, session)).agent.request.env
         yield* sessions.stop(session.id)
@@ -48,10 +48,12 @@ it.layer(world.layer)('SessionManager passEnv of a provider', (suite) => {
           [
             first['BYTEBUREAU_EXTRA'],
             first['BB_PASSED'],
+            first['NOT_KEPT'],
             second['BYTEBUREAU_EXTRA'],
             second['BB_PASSED'],
+            second['NOT_KEPT'],
           ],
-          ['1', 'yes', undefined, undefined],
+          ['1', 'yes', undefined, '1', 'yes', undefined],
         )
       }),
   )

@@ -1,9 +1,10 @@
 import { Effect, Layer } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { QUIET } from './facade-fixtures.js'
 import { createKernelFrom } from '../facade.js'
 import { KernelTest } from '../kernel-test.js'
 import { PluginHost } from '../plugins/plugin-host.js'
+import { leftBehind, leftIdOf, seedProject } from '../sessions/session-recover-fixtures.js'
 import { tempDir } from '../testing/temp-repo.js'
 
 // Notes in the journal that its layer was released, which happens when the runtime is disposed
@@ -30,6 +31,13 @@ const failingLoad = Layer.effect(
   PluginHost.useSync((host) =>
     PluginHost.of({ ...host, load: () => Effect.die(new Error('the plugins cannot be loaded')) }),
   ),
+)
+
+const EARLIER = 'earlier'
+
+// What a previous process left in the store: a session at work, its turn running
+const leftByAnother = Layer.effectDiscard(
+  Effect.andThen(seedProject(EARLIER), leftBehind(EARLIER, 'running')).pipe(Effect.orDie),
 )
 
 describe('a kernel that cannot start', () => {
@@ -79,5 +87,22 @@ describe('a kernel that cannot start', () => {
     expect(journal).toStrictEqual([])
     await kernel.close()
     expect(journal).toStrictEqual(['released'])
+  })
+})
+
+describe('a kernel that starts after another process', () => {
+  it('stops what that process left at work before it serves, and finds nothing more', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const layer = leftByAnother.pipe(Layer.provideMerge(KernelTest({ home })))
+    const kernel = await createKernelFrom(layer, { home, env: {}, logging: QUIET })
+    onTestFinished(async () => {
+      await kernel.close()
+    })
+    const sessionId = leftIdOf(EARLIER, 'running')
+    const events = await kernel.events.read({ sessionId }, { from: 0 })
+    await expect(kernel.sessions.get(sessionId)).resolves.toMatchObject({ status: 'stopped' })
+    expect(events.map((event) => event.type)).toStrictEqual(['turn.interrupted', 'session.stopped'])
+    await expect(kernel.sessions.recover()).resolves.toStrictEqual([])
   })
 })

@@ -7,12 +7,14 @@ import type {
   ProcessSpawner,
   SecretStore,
 } from '@bytebureau/plugin-api'
-import { Effect, Exit, Scope, Stream } from 'effect'
+import { Effect, Exit, Scope, Stream, type Context } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { toStoreError, type StoreError } from '../errors.js'
-import type { EventLogShape } from '../events/event-log.js'
+import type { EventLog, EventLogShape } from '../events/event-log.js'
 import { kernelLogger } from '../logging/logging.js'
 import type { ManagedProcess, SpawnSpec, Supervisor } from '../process/supervisor.js'
+
+type HostServices = Context.Context<EventLog | Supervisor | SqlClient.SqlClient>
 
 export interface ContextDeps {
   readonly log: EventLogShape
@@ -20,6 +22,8 @@ export interface ContextDeps {
   readonly sql: SqlClient.SqlClient
   readonly secrets: SecretStore
   readonly signal: AbortSignal
+  // Captured when the host was built: what a plugin calls runs on them like any fiber of the kernel, a process it spawns included
+  readonly services: HostServices
 }
 
 type Exec = ExecSpec & { readonly cwd: string }
@@ -45,15 +49,15 @@ const latestSeq = (sql: SqlClient.SqlClient): Effect.Effect<number, StoreError> 
   )
 
 // A plugin hears what happens from the moment it subscribes: the filter of the plugin API has no since, so nothing is replayed
-const eventsOf = (log: EventLogShape, sql: SqlClient.SqlClient): PluginEvents => ({
+const eventsOf = ({ log, sql, services }: ContextDeps): PluginEvents => ({
   publish: async (event) => {
-    await Effect.runPromise(log.publish(event))
+    await Effect.runPromiseWith(services)(log.publish(event))
   },
   subscribe: (filter) => {
     const live = Effect.map(latestSeq(sql), (since) =>
       log.subscribe({ types: filter.types, sessionId: filter.sessionId, since }),
     )
-    return Stream.toAsyncIterable(Stream.unwrap(live))
+    return Stream.toAsyncIterable(Stream.unwrap(live).pipe(Stream.provideContext(services)))
   },
 })
 
@@ -87,10 +91,10 @@ const jsonOf = (plugin: string, key: string, value: unknown): string => {
   throw new TypeError(`plugin ${plugin} cannot store ${key}: a ${typeof value} is not JSON`)
 }
 
-const kvOf = (sql: SqlClient.SqlClient, plugin: string): PluginKv => ({
+const kvOf = ({ sql, services }: ContextDeps, plugin: string): PluginKv => ({
   get: async (key) => {
     const rows = await keyed({ plugin, key }, 'read', async () => {
-      const read = await Effect.runPromise(
+      const read = await Effect.runPromiseWith(services)(
         sql<{
           readonly value_json: string
         }>`SELECT value_json FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
@@ -110,14 +114,14 @@ const kvOf = (sql: SqlClient.SqlClient, plugin: string): PluginKv => ({
   set: async (key, value) => {
     const json = jsonOf(plugin, key, value)
     await keyed({ plugin, key }, 'store', async () => {
-      await Effect.runPromise(
+      await Effect.runPromiseWith(services)(
         sql`INSERT INTO plugin_kv (plugin_id, key, value_json) VALUES (${plugin}, ${key}, ${json}) ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json`,
       )
     })
   },
   delete: async (key) => {
     await keyed({ plugin, key }, 'delete', async () => {
-      await Effect.runPromise(
+      await Effect.runPromiseWith(services)(
         sql`DELETE FROM plugin_kv WHERE plugin_id = ${plugin} AND key = ${key}`,
       )
     })
@@ -136,24 +140,28 @@ const specOf = (spec: Exec, hostSignal: AbortSignal): SpawnSpec => ({
   signal: spec.signal === undefined ? hostSignal : AbortSignal.any([spec.signal, hostSignal]),
 })
 
-const handleOf = (managed: ManagedProcess): ExecHandle => ({
+const handleOf = (managed: ManagedProcess, services: HostServices): ExecHandle => ({
   pid: managed.pid,
   stdout: Stream.toAsyncIterable(managed.stdout),
   stderr: Stream.toAsyncIterable(managed.stderr),
-  exited: Effect.runPromise(managed.exit),
+  exited: Effect.runPromiseWith(services)(managed.exit),
   kill: (signal) => {
-    Effect.runFork(managed.kill(signal))
+    Effect.runForkWith(services)(managed.kill(signal))
   },
 })
 
 interface SpawnDeps {
   readonly supervisor: Supervisor['Service']
   readonly signal: AbortSignal
+  readonly services: HostServices
 }
 
 // The process lives in a scope of its own that closes once it has exited; the timeout is a fiber of that scope
 // A timeout that is not positive sets no timer
-const spawnHandle = ({ supervisor, signal }: SpawnDeps, spec: Exec): Effect.Effect<ExecHandle> =>
+const spawnHandle = (
+  { supervisor, signal, services }: SpawnDeps,
+  spec: Exec,
+): Effect.Effect<ExecHandle> =>
   Effect.gen(function* spawnsHandle() {
     const scope = yield* Scope.make()
     const spawning = supervisor.spawn(specOf(spec, signal))
@@ -162,12 +170,12 @@ const spawnHandle = ({ supervisor, signal }: SpawnDeps, spec: Exec): Effect.Effe
     if (spec.timeoutMs !== undefined && spec.timeoutMs > 0) {
       yield* Effect.forkIn(Effect.andThen(Effect.sleep(spec.timeoutMs), managed.kill()), scope)
     }
-    return handleOf(managed)
+    return handleOf(managed, services)
   })
 
 const spawnerOf = (deps: SpawnDeps): ProcessSpawner => ({
   spawn: async (spec) => {
-    const handle = await Effect.runPromise(spawnHandle(deps, spec))
+    const handle = await Effect.runPromiseWith(deps.services)(spawnHandle(deps, spec))
     return handle
   },
 })
@@ -181,9 +189,9 @@ export function createPluginContext(
     config,
     project: null,
     logger: kernelLogger(['bb', 'plugin', name]),
-    events: eventsOf(deps.log, deps.sql),
+    events: eventsOf(deps),
     secrets: namespaced(deps.secrets, name),
-    kv: kvOf(deps.sql, name),
+    kv: kvOf(deps, name),
     process: spawnerOf(deps),
     http: fetch,
     signal: deps.signal,
