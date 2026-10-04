@@ -6,17 +6,26 @@ import { projectsCommand } from './commands/projects.js'
 import { runCommand } from './commands/run.js'
 import { serveCommand } from './commands/serve.js'
 import { workspacesCommand } from './commands/workspaces.js'
+import { drained } from './drain.js'
 import { run } from './run.js'
 import { version } from './version.js'
 
-process.on('uncaughtException', (error: unknown) => {
+// How the process ends: its exit code, and how long its output may take to drain; without a limit, as long as the reader takes
+interface Ending {
+  readonly code: number | string
+  readonly drainLimitMs?: number | undefined
+}
+
+// A failure nobody caught ends the process with exit code 2 once the output is out, or a second later: the flow it broke may never finish
+const { promise: uncaught, resolve: endUncaught } = Promise.withResolvers<Ending>()
+const uncaughtSeen = { failed: false }
+const onUncaught = (error: unknown): void => {
   console.error(error)
-  process.exit(2)
-})
-process.on('unhandledRejection', (error: unknown) => {
-  console.error(error)
-  process.exit(2)
-})
+  uncaughtSeen.failed = true
+  endUncaught({ code: 2, drainLimitMs: 1000 })
+}
+process.on('uncaughtException', onUncaught)
+process.on('unhandledRejection', onUncaught)
 
 const main = defineCommand({
   meta: {
@@ -34,16 +43,14 @@ const main = defineCommand({
   },
 })
 
-// Bun writes to a pipe asynchronously: an exit that does not wait for the writes would lose the last lines of NDJSON
-async function drained(stream: NodeJS.WriteStream): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<boolean>()
-  stream.write('', () => {
-    resolve(true)
-  })
-  await promise
+// A command with an exit code of its own (run: 3, 4; config: 1) leaves it in process.exitCode
+async function commandEnding(): Promise<Ending> {
+  const code = await run(main, process.argv.slice(2))
+  return { code: code === 0 ? (process.exitCode ?? 0) : code }
 }
 
-// A command with an exit code of its own (run: 3, 4; config: 1) leaves it in process.exitCode
-const code = await run(main, process.argv.slice(2))
-await Promise.all([drained(process.stdout), drained(process.stderr)])
-process.exit(code === 0 ? (process.exitCode ?? 0) : code)
+const ending = await Promise.race([commandEnding(), uncaught])
+const { drainLimitMs } = ending
+await Promise.all([drained(process.stdout, drainLimitMs), drained(process.stderr, drainLimitMs)])
+// A failure nobody caught that came while the output drained still ends the process with exit code 2
+process.exit(uncaughtSeen.failed ? 2 : ending.code)
