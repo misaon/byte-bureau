@@ -131,8 +131,8 @@ it.layer(ApiTestLayer())('the sessions of the API through @bytebureau/client', (
     Effect.gen(function* stops() {
       const api = yield* client
       const { session } = yield* createdWith(api)
-      const notFound = { status: 404, problem: { code: 'session_not_found' } }
-      assert.containSubset(yield* refused(api.sessions.interrupt(session.id)), notFound)
+      const idle = { status: 409, problem: { code: 'session_invalid_transition' } }
+      assert.containSubset(yield* refused(api.sessions.interrupt(session.id)), idle)
       yield* awaited(api.sessions.stop(session.id))
       assert.containSubset(yield* awaited(api.sessions.get(session.id)), { status: 'stopped' })
       const resumed = yield* awaited(api.sessions.resume(session.id))

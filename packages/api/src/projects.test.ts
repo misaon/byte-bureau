@@ -53,6 +53,21 @@ it.layer(ApiTestLayer())('the refusals of POST /api/v1/projects over the test ke
       assert.include(JSON.stringify(refused.body), `${repo}/bytebureau.json/version`)
     }),
   )
+})
+
+it.layer(ApiTestLayer())('the refusals of the body of POST /api/v1/projects', (suite) => {
+  suite.effect(
+    'refuses a relative path with 422: the daemon cannot tell what it is relative to',
+    () =>
+      Effect.gen(function* refusesRelative() {
+        const refused = yield* post('/projects', { path: 'repo' })
+        assert.strictEqual(refused.status, 422)
+        assert.containSubset(refused.body, {
+          code: 'project_path_not_absolute',
+          detail: 'repo is not an absolute path: the daemon cannot tell what it is relative to',
+        })
+      }),
+  )
 
   suite.effect('refuses a body the schema does not know with 400 request_invalid', () =>
     Effect.gen(function* refusesBody() {

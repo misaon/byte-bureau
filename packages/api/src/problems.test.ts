@@ -106,10 +106,45 @@ const KERNEL_FAILURES: {
     detail: 'x',
   },
   {
+    failure: new WorkspaceError({ code: 'not_found', reason: 'no project p' }),
+    status: 404,
+    code: 'workspace_not_found',
+    detail: 'no project p',
+  },
+  {
+    failure: new WorkspaceError({ code: 'git_failed', reason: 'x' }),
+    status: 502,
+    code: 'workspace_git_failed',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'fs_failed', reason: 'x' }),
+    status: 500,
+    code: 'workspace_fs_failed',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'constructor', reason: 'x' }),
+    status: 422,
+    code: 'workspace_constructor',
+    detail: 'x',
+  },
+  {
     failure: new ConfigError({ file: '/p/bytebureau.json', pointer: '/version', reason: 'bad' }),
     status: 422,
     code: 'config_invalid',
     detail: '/p/bytebureau.json/version: bad',
+  },
+  // The issues of a file name their places themselves: the first is not named twice
+  {
+    failure: new ConfigError({
+      file: '/p/bytebureau.json',
+      pointer: '/version',
+      reason: '/p/bytebureau.json/version: expected 1; /p/bytebureau.json/project: missing',
+    }),
+    status: 422,
+    code: 'config_invalid',
+    detail: '/p/bytebureau.json/version: expected 1; /p/bytebureau.json/project: missing',
   },
   {
     failure: new PluginError({ plugin: 'p', reason: 'x' }),

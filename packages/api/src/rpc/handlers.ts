@@ -7,7 +7,7 @@ import {
 } from '@bytebureau/kernel'
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
-import { projectOf } from '../handlers/found.js'
+import { absolutePath, projectOf } from '../handlers/found.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
@@ -16,7 +16,11 @@ export const RpcHandlers = BureauRpcsWithAuth.toLayer({
   'events.subscribe': (filter) =>
     Stream.unwrap(EventLog.use((log) => Effect.succeed(buffered(log.subscribe(filter))))),
   'projects.register': ({ path }) =>
-    orProblem(ProjectRegistry.use((registry) => registry.register(path))),
+    absolutePath(path).pipe(
+      Effect.flatMap((directory) =>
+        orProblem(ProjectRegistry.use((registry) => registry.register(directory))),
+      ),
+    ),
   'projects.remove': ({ id }) =>
     projectOf(id).pipe(
       Effect.flatMap(() => orProblem(ProjectRegistry.use((registry) => registry.remove(id)))),

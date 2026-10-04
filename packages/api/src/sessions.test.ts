@@ -135,6 +135,14 @@ it.layer(ApiTestLayer())('POST /api/v1/sessions/:id/interrupt without a turn at 
 })
 
 it.layer(ApiTestLayer())('GET /api/v1/usage/sessions/:id over the fake provider', (suite) => {
+  suite.effect('answers 404 for the usage of a session that is not there', () =>
+    Effect.gen(function* refusesUnknown() {
+      const missing = yield* get(`/usage/sessions/${UNKNOWN_ID}`)
+      assert.strictEqual(missing.status, 404)
+      assert.containSubset(missing.body, { code: 'session_not_found' })
+    }),
+  )
+
   suite.effect('reads no usage of a session that has had no turn, the costs as null', () =>
     Effect.gen(function* readsNothing() {
       const { session } = yield* createdSession

@@ -1,6 +1,7 @@
 import {
   AskError,
   ConfigError,
+  configErrorLine,
   PluginError,
   ProviderError,
   redactValue,
@@ -8,7 +9,7 @@ import {
   StoreError,
   WorkspaceError,
 } from '@bytebureau/kernel'
-import { problemType, type Problem } from '@bytebureau/protocol'
+import { problemType, type Problem, type ProblemCode } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import { HttpApiSchema } from 'effect/http-api'
 import { logApiError, logApiWarning } from './logging.js'
@@ -103,10 +104,13 @@ export const PROBLEM_SCHEMAS: readonly (typeof SCHEMAS)[KernelStatus][] = KERNEL
   (status) => SCHEMAS[status],
 )
 
+// The codes a problem carries: the well-known ones, and those of a workspace error, which a runtime of a plugin may name
+export type ApiCode = ProblemCode | `workspace_${string}`
+
 // The detail is told with every secret-shaped run of text replaced: it carries reasons from git, plugins and providers
 export const problem = <Status extends ProblemStatus>(
   status: Status,
-  code: string,
+  code: ApiCode,
   detail: string,
 ): ApiProblem<Status> => ({
   type: problemType(code),
@@ -137,12 +141,21 @@ const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], KernelStatus>> = {
   protocol: 502,
   missing: 422,
 }
-const CONFLICTS: ReadonlySet<string> = new Set(['locked', 'dirty', 'has_sessions'])
-const workspaceStatus = (code: string): KernelStatus => (CONFLICTS.has(code) ? 409 : 422)
+// A worktree in use or a project with sessions is a conflict, a project that is gone is not found, and git or the file system failing is the daemon's failure
+// Any other code, such as one a runtime names, is a request the workspace cannot take
+const WORKSPACE_STATUS: ReadonlyMap<string, KernelStatus> = new Map([
+  ['locked', 409],
+  ['dirty', 409],
+  ['has_sessions', 409],
+  ['not_found', 404],
+  ['git_failed', 502],
+  ['fs_failed', 500],
+])
+const workspaceStatus = (code: string): KernelStatus => WORKSPACE_STATUS.get(code) ?? 422
 
 const toProblemOfRest = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof ConfigError) {
-    return problem(422, 'config_invalid', `${error.file}${error.pointer}: ${error.reason}`)
+    return problem(422, 'config_invalid', configErrorLine(error))
   }
   if (error instanceof PluginError) {
     return problem(500, 'plugin_failed', `${error.plugin}: ${error.reason}`)

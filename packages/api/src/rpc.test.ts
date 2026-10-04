@@ -102,7 +102,7 @@ const refusedWith = (code: string): object => ({
 
 // The other procedures on a ready session, in an order the kernel accepts, and what each answers
 const lifecycle = (sessionId: string): [string, object, object][] => [
-  ['sessions.interrupt', { sessionId }, refusedWith('session_not_found')],
+  ['sessions.interrupt', { sessionId }, refusedWith('session_invalid_transition')],
   ['sessions.stop', { sessionId }, SUCCEEDED],
   ['sessions.resume', { sessionId }, { exit: { value: { id: sessionId, status: 'ready' } } }],
   ['sessions.complete', { sessionId }, SUCCEEDED],
@@ -146,6 +146,16 @@ it.layer(ApiTestLayer())('procedures over the WebSocket of /api/v1/ws', (suite) 
       const notFound = { _tag: 'Fail', error: { status: 404, code: 'not_found' } }
       const again = yield* called(client, { ...removal, id: '7' })
       assert.containSubset(again, { requestId: '7', exit: { _tag: 'Failure', cause: [notFound] } })
+    }),
+  )
+
+  suite.effect('refuses a relative project path as the REST API does', () =>
+    Effect.gen(function* refusesRelative() {
+      const client = yield* connected()
+      const payload = { path: 'repo' }
+      const register = { id: '8', tag: 'projects.register', payload, token: TEST_TOKEN }
+      const refused = yield* called(client, register)
+      assert.containSubset(refused, refusedWith('project_path_not_absolute'))
     }),
   )
 
