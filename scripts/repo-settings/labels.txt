@@ -8,6 +8,7 @@ area: kernel|c5def5|Kernel services
 area: agents|c5def5|Agent providers
 area: workspace|c5def5|Workspace runtimes
 area: api|c5def5|HTTP and WebSocket API
+area: client|c5def5|API client and its generator
 area: cli|c5def5|Command line
 area: ui|c5def5|Web and desktop UI
 area: sim|c5def5|Office simulation
