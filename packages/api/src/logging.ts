@@ -8,3 +8,6 @@ export const logApiError = (...parts: readonly unknown[]): Effect.Effect<void> =
 
 export const logApiWarning = (...parts: readonly unknown[]): Effect.Effect<void> =>
   underApi(Effect.logWarning(...parts))
+
+export const logApiDebug = (...parts: readonly unknown[]): Effect.Effect<void> =>
+  underApi(Effect.logDebug(...parts))
