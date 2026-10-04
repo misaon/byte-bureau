@@ -3,8 +3,13 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { lockPath, readServerInfo } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/daemon-log.js'
-import { startDaemonProcess, stoppedWithTheTest, watchedPort } from '../testing/daemon.js'
-import { oldLock } from '../testing/old-lock.js'
+import {
+  startDaemonProcess,
+  stoppedWithTheTest,
+  watchedPort,
+  type DaemonProcess,
+} from '../testing/daemon.js'
+import { lockReadBefore, oldLock, silentLine } from '../testing/old-lock.js'
 import { runCli } from '../testing/run-cli.js'
 import { testHome } from '../testing/temp-repo.js'
 
@@ -96,18 +101,59 @@ describe('bytebureau serve and a lock whose pid lives on after a crash or a rebo
   )
 })
 
-describe('bytebureau serve --stop and a daemon that is stopped', () => {
+// A second daemon of the home in the foreground: it starts only if it takes the lock, and says why it does not
+const SECOND = ['serve', '--no-daemonize', '--port', '0']
+
+// A daemon of a home of its own whose lock reads two seconds older than its start
+async function daemonOfSkewedLock(): Promise<{
+  readonly home: string
+  readonly daemon: DaemonProcess
+}> {
+  const home = testHome()
+  const daemon = await startDaemonProcess(home)
+  await lockReadBefore(home, daemon.info.pid, 2000)
+  return { home, daemon }
+}
+
+describe('bytebureau serve and a daemon whose lock reads older than its start, as a clock stepped since shows it', () => {
   it.skipIf(!POSIX)(
-    'keeps the lock of the daemon, which it does not signal, and says it does not answer',
+    'keeps the lock with the daemon that answers: a second one does not start',
     async () => {
       expect.hasAssertions()
       const home = testHome()
       const daemon = await startDaemonProcess(home)
+      await lockReadBefore(home, daemon.info.pid, 2000)
+      const second = await runCli(SECOND, { BYTEBUREAU_HOME: home })
+      expect([second.code, second.stderr.trim()]).toStrictEqual([
+        1,
+        `a daemon is already running (pid ${daemon.info.pid})`,
+      ])
+      expect([readFileSync(lockPath(home), 'utf8'), daemonPid(home)]).toStrictEqual([
+        String(daemon.info.pid),
+        daemon.info.pid,
+      ])
+      await expect(daemon.stop()).resolves.toBe(0)
+    },
+  )
+
+  it.skipIf(!POSIX)(
+    'keeps the lock with the daemon stopped a moment into it: --stop names it with the way out, and a second does not start',
+    async () => {
+      expect.hasAssertions()
+      const { home, daemon } = await daemonOfSkewedLock()
       daemon.child.kill('SIGSTOP')
-      const stopped = await runCli(['serve', '--stop'], { BYTEBUREAU_HOME: home })
-      const said = `A daemon of this home (pid ${daemon.info.pid}) holds the lock ${lockPath(home)} but does not answer; it may be stopped or busy`
-      expect([stopped.code, stopped.stderr.trim()]).toStrictEqual([1, said])
-      expect(readFileSync(lockPath(home), 'utf8')).toBe(String(daemon.info.pid))
+      const env = { BYTEBUREAU_HOME: home }
+      const stopped = await runCli(['serve', '--stop'], env)
+      const second = await runCli(SECOND, env)
+      expect([stopped.code, stopped.stderr.trim(), second.code]).toStrictEqual([
+        1,
+        silentLine(home, daemon.info.pid),
+        1,
+      ])
+      expect([readFileSync(lockPath(home), 'utf8'), daemonPid(home)]).toStrictEqual([
+        String(daemon.info.pid),
+        daemon.info.pid,
+      ])
       daemon.child.kill('SIGCONT')
       await expect(daemon.stop()).resolves.toBe(0)
     },

@@ -5,14 +5,19 @@ import { lockPath } from '../daemon/server-info.js'
 const AN_HOUR = 3_600_000
 
 /**
- * A lock left from before a crash or a reboot, naming a process that got the pid since: written an hour before that
- * process started, or an hour ago where the platform cannot tell when it did.
+ * The lock of the home made to read the time given before its holder started, or before now where the platform cannot
+ * tell when it did: as a clock stepped since the lock was written shows it, or a lock that a crash or a reboot left.
  */
+export async function lockReadBefore(home: string, pid: number, beforeMs: number): Promise<void> {
+  const started = await processStartedAt(pid)
+  const written = new Date((started ?? Date.now()) - beforeMs)
+  utimesSync(lockPath(home), written, written)
+}
+
+// A lock left from before a crash or a reboot, naming a process that got the pid since: written an hour before it started
 export async function oldLock(home: string, pid: number): Promise<void> {
   writeFileSync(lockPath(home), String(pid))
-  const started = await processStartedAt(pid)
-  const written = new Date((started ?? Date.now()) - AN_HOUR)
-  utimesSync(lockPath(home), written, written)
+  await lockReadBefore(home, pid, AN_HOUR)
 }
 
 // When a process started, for a judgement on a platform that cannot tell
@@ -20,3 +25,7 @@ export const unknownStart = async (): Promise<number | undefined> => {
   await Promise.resolve()
   return undefined
 }
+
+// What a start or a stop says of a daemon of the home that holds the lock without answering
+export const silentLine = (home: string, pid: number): string =>
+  `A daemon of this home (pid ${pid}) holds the lock ${lockPath(home)} but does not answer; it may be stopped or busy`

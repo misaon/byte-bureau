@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
-import { unknownStart } from '../testing/old-lock.js'
+import { silentLine, unknownStart } from '../testing/old-lock.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { lockPath, writeServerInfo } from './server-info.js'
 import { daemonLogPath } from './daemon-log.js'
@@ -80,7 +80,7 @@ describe('awaitStart when the process of the start has ended', () => {
       const judging = { graceMs: 200, bootMs: 0 }
       await expect(awaitStart({ home, child: ENDED, judging })).resolves.toStrictEqual({
         up: false,
-        reason: `A daemon of this home (pid ${process.pid}) holds the lock ${lockPath(home)} but does not answer; it may be stopped or busy`,
+        reason: silentLine(home, process.pid),
       })
     },
   )

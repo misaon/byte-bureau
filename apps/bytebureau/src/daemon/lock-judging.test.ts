@@ -2,7 +2,7 @@ import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
 import { healthStub, recordOn } from '../testing/health-stub.js'
-import { oldLock, unknownStart } from '../testing/old-lock.js'
+import { lockReadBefore, oldLock, unknownStart } from '../testing/old-lock.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { acquireLock, releaseLock } from './lock.js'
 import { lockPath, writeServerInfo } from './server-info.js'
@@ -66,6 +66,35 @@ describe('the daemon lock and a pid that lives on', () => {
         holder: 'silent',
       })
       expect(readFileSync(lockPath(home), 'utf8')).toBe(String(process.pid))
+    },
+  )
+})
+
+describe('the daemon lock and a clock or a file system that disagree a little', () => {
+  it.skipIf(!POSIX)(
+    'keeps the lock of a holder that seems to have started up to five seconds after it was written',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      writeFileSync(lockPath(home), String(process.pid))
+      await lockReadBefore(home, process.pid, 3000)
+      await expect(acquireLock(home, PAST_START)).resolves.toStrictEqual({
+        acquired: false,
+        pid: process.pid,
+        holder: 'silent',
+      })
+    },
+  )
+
+  it.skipIf(!POSIX)(
+    'takes over the lock of a holder that started well after it was written',
+    async () => {
+      expect.hasAssertions()
+      const home = tempDir('bb-home-')
+      writeFileSync(lockPath(home), String(process.pid))
+      await lockReadBefore(home, process.pid, 10_000)
+      await expect(acquireLock(home, PAST_START)).resolves.toStrictEqual({ acquired: true })
+      releaseLock(home)
     },
   )
 })
