@@ -1,12 +1,23 @@
 import { mkdirSync, renameSync } from 'node:fs'
 import path from 'node:path'
-import { stampOf } from './files.js'
+import { codeOf, stampOf } from './files.js'
 import { isAlive, lockHolder } from './server-info.js'
 
 export const daemonLogPath = (home: string): string => path.join(home, 'logs', 'daemon.log')
 
 // A log written this recently belongs to a start under way, which keeps writing to it
 const FRESH_MS = 2000
+
+// A start beside this one may have moved the log since it was looked at: then it is rotated already
+const rotated = (log: string): void => {
+  try {
+    renameSync(log, `${log}.1`)
+  } catch (error) {
+    if (codeOf(error) !== 'ENOENT') {
+      throw error
+    }
+  }
+}
 
 /**
  * The log of the previous run becomes daemon.log.1 when the next daemon starts, so the logs keep two runs at most
@@ -22,6 +33,6 @@ export const rotateDaemonLog = (home: string): void => {
     return
   }
   if (Date.now() - stamp.mtimeMs >= FRESH_MS) {
-    renameSync(log, `${log}.1`)
+    rotated(log)
   }
 }
