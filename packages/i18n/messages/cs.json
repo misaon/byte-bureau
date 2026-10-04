@@ -59,5 +59,6 @@
   "bureau_token_hint": "{detail} (předejte token toho démona přes --token-file)",
   "serve_failed": "Démona se nepodařilo spustit; viz {log}",
   "serve_lock_stuck": "Zámek {lock} uvádí pid {pid}, který neodpovídá jako démon tohoto domovského adresáře; pokud žádný neběží, odstraňte zámek přes bytebureau serve --stop",
-  "serve_lock_cleared": "Odstraněn zastaralý zámek procesu {pid}, který není démonem tohoto domovského adresáře"
+  "serve_lock_cleared": "Odstraněn zastaralý zámek procesu {pid}, který není démonem tohoto domovského adresáře",
+  "serve_lock_silent": "Zámek {lock} drží démon tohoto domovského adresáře (pid {pid}), ale neodpovídá; možná je zastavený nebo zaneprázdněný"
 }
