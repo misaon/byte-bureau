@@ -67,6 +67,20 @@ export type PluginStatus = {
 };
 
 /**
+ * Problem413
+ *
+ * RFC 9457 problem details
+ */
+export type Problem413 = {
+    type: string;
+    title: string;
+    status: 413;
+    detail: string;
+    code: string;
+    instance?: string;
+};
+
+/**
  * Problem429
  *
  * RFC 9457 problem details
@@ -663,6 +677,10 @@ export type ProjectsRegisterErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -728,6 +746,10 @@ export type ProjectsRemoveErrors = {
      * RFC 9457 problem details
      */
     409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
     /**
      * RFC 9457 problem details
      */
@@ -913,6 +935,10 @@ export type SessionsCreateErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -1051,6 +1077,10 @@ export type SessionsPromptErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -1116,6 +1146,10 @@ export type SessionsInterruptErrors = {
      * RFC 9457 problem details
      */
     409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
     /**
      * RFC 9457 problem details
      */
@@ -1187,6 +1221,10 @@ export type SessionsStopErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -1255,6 +1293,10 @@ export type SessionsResumeErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -1320,6 +1362,10 @@ export type SessionsCompleteErrors = {
      * RFC 9457 problem details
      */
     409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
     /**
      * RFC 9457 problem details
      */
@@ -1639,6 +1685,10 @@ export type AsksAnswerErrors = {
     /**
      * RFC 9457 problem details
      */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
     422: Problem422;
     /**
      * RFC 9457 problem details
@@ -1825,6 +1875,10 @@ export type WorkspacesPruneErrors = {
      * RFC 9457 problem details
      */
     409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
     /**
      * RFC 9457 problem details
      */

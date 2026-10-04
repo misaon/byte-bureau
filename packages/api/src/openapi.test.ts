@@ -76,6 +76,14 @@ describe('the OpenAPI document of the resource groups', () => {
     }
   })
 
+  it('declares the 413 problem of the body limit on every mutation, with the problem schema', () => {
+    expect.hasAssertions()
+    for (const { method, path, statuses } of operations()) {
+      expect(statuses.includes('413'), `${method} ${path}`).toBe(method !== 'get')
+    }
+    expect(openApiDocument().components.schemas).toHaveProperty('Problem413')
+  })
+
   it('names the schemas of the DTOs and of the problems once each', () => {
     const { schemas } = openApiDocument().components
     expect(schemas).toHaveProperty('Session')
