@@ -42,5 +42,6 @@ export const ApiLive = (options: ApiOptions): Layer.Layer<never, never, ApiRequi
 }
 
 // The API served by the HttpServer of the environment; the router is private to it
+// Neither requests nor the address are logged by Effect: the daemon's stderr carries the kernel's records alone
 export const serveApi = (options: ApiOptions): Layer.Layer<never, never, ServeRequirements> =>
-  HttpRouter.serve(ApiLive(options), { disableLogger: true })
+  HttpRouter.serve(ApiLive(options), { disableLogger: true, disableListenLog: true })

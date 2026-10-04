@@ -10,6 +10,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./bun": {
+      "types": "./src/bun.ts",
+      "default": "./src/bun.ts"
+    },
     "./testing": {
       "types": "./src/testing.ts",
       "default": "./src/testing.ts"

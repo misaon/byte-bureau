@@ -15,8 +15,6 @@ const config: KnipConfig = {
     'packages/api': {
       entry: ['scripts/*.ts'],
       project: ['src/**/*.ts', 'scripts/**/*.ts'],
-      // BunHttpServer serves the API in the daemon of Task 8; until then nothing imports the package
-      ignoreDependencies: ['@effect/platform-bun'],
     },
     // The generated client under src/gen is hey-api's output, committed as it is generated
     'packages/client': { project: ['src/**/*.ts'], ignore: ['src/gen/**'] },
