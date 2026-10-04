@@ -167,6 +167,15 @@ const daemonOf = ({
   health: { check: data(healthCheck, () => ({ client })) },
 })
 
+// Trailing slashes taken off one by one: a pattern anchored at the end would scan a long run of them again and again
+const withoutTrailingSlashes = (url: string): string => {
+  let end = url.length
+  while (end > 0 && url[end - 1] === '/') {
+    end -= 1
+  }
+  return url.slice(0, end)
+}
+
 /**
  * A client of the daemon at the base url: the REST API through the generated SDK, the event subscription over SSE
  * and the RPC connection over WebSocket. Each client has a generated client of its own, so one process may talk to
@@ -175,7 +184,7 @@ const daemonOf = ({
 export function createBureauClient(options: ClientOptions): BureauClient {
   const { token } = options
   // The paths are joined to the base url, so a slash at its end would double theirs
-  const baseUrl = options.baseUrl.replace(/\/+$/u, '')
+  const baseUrl = withoutTrailingSlashes(options.baseUrl)
   const calls = http({ ...options, baseUrl })
   return {
     projects: projectsOf(calls),

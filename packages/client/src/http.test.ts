@@ -75,10 +75,10 @@ describe('the lookups and the close of a client', () => {
     })
   })
 
-  it('joins the paths to a base url that ends with a slash', async () => {
+  it('joins the paths to a base url that ends with slashes, however many', async () => {
     expect.hasAssertions()
     const served = await serve([status(404), stream(frame(1, 'a'))])
-    const client = createBureauClient({ baseUrl: `${served.url}/`, token: 'tok' })
+    const client = createBureauClient({ baseUrl: `${served.url}////`, token: 'tok' })
     await expect(client.projects.get('p1')).resolves.toBeUndefined()
     for await (const event of client.events.subscribe({})) {
       expect(event.seq).toBe(1)
