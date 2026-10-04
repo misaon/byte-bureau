@@ -51,7 +51,7 @@ const refusesLostKey = Effect.gen(function* refusesLostKey() {
     [named.name, named.message],
     [
       'ProfileError',
-      'the key of profile "fake/key" is not in the secret store; add the profile again',
+      'the key of profile "fake/key" is not in the secret store; remove the profile and add it again',
     ],
   )
   assert.strictEqual(yield* codeOf(profiles.resolve('fake', null)), 'invalid')
@@ -78,10 +78,13 @@ const tellsStatus = Effect.gen(function* tellsStatus() {
   const profiles = yield* loadedProfiles
   const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
   const fine = yield* profiles.status(work.id)
-  rmSync(work.configDir ?? '', { recursive: true, force: true })
+  const dir = work.configDir ?? ''
+  rmSync(dir, { recursive: true, force: true })
   const gone = yield* profiles.status(work.id)
-  assert.deepStrictEqual([fine.state, gone.state], ['loggedIn', 'loggedOut'])
-  assert.include(gone.hint ?? '', work.configDir ?? '')
+  assert.deepStrictEqual(
+    [fine.state, gone.state, gone.hint],
+    ['loggedIn', 'loggedOut', `the directory ${dir} is gone; remove the profile and add it again`],
+  )
   const told = yield* EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
   assert.deepStrictEqual(
     told.map((event) => event.payload),
@@ -106,6 +109,28 @@ const tellsUnknown = Effect.gen(function* tellsUnknown() {
   assert.strictEqual(yield* codeOf(profiles.status('fake/nope')), 'not_found')
 })
 
+// An api_key profile whose key has left the secret store is logged out, whatever its provider would say
+const tellsLostKey = Effect.gen(function* tellsLostKey() {
+  const profiles = yield* loadedProfiles
+  const keyed = yield* profiles.add({
+    providerId: 'fake',
+    name: 'key',
+    kind: 'api_key',
+    apiKey: CANARY,
+  })
+  const kept = yield* profiles.status(keyed.id)
+  yield* resolved((yield* Secrets).delete('@bytebureau/profiles/fake/key/api_key'))
+  const lost = yield* profiles.status(keyed.id)
+  assert.deepStrictEqual(
+    [kept.state, lost.state, lost.hint],
+    [
+      'loggedIn',
+      'loggedOut',
+      'the key of profile "fake/key" is not in the secret store; remove the profile and add it again',
+    ],
+  )
+})
+
 const checking = profileWorld([doubtingPlugin])
 
 it.layer(checking.layer)('ProfileService status', (suite) => {
@@ -116,5 +141,9 @@ it.layer(checking.layer)('ProfileService status', (suite) => {
   suite.effect(
     'tells unknown with the reason when the provider cannot say, or is not loaded, and refuses an id nobody holds',
     () => tellsUnknown,
+  )
+  suite.effect(
+    'tells an api_key profile whose key is gone from the secret store as logged out, without asking its provider',
+    () => tellsLostKey,
   )
 })

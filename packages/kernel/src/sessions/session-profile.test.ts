@@ -76,7 +76,7 @@ const refusesLostKey = Effect.gen(function* refusesLostKey() {
     [
       'auth',
       false,
-      'the key of profile "scripted/lost" is not in the secret store; add the profile again',
+      'the key of profile "scripted/lost" is not in the secret store; remove the profile and add it again',
     ],
   )
   assert.strictEqual((yield* sessionOf(session.id)).status, 'ready')

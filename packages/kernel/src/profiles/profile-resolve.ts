@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 import { ProfileError, type StoreError } from '../errors.js'
 import { namelessRefOf } from './profile-ids.js'
-import { readKey } from './profile-keys.js'
+import { lostKeyReason, usableKeyOf } from './profile-keys.js'
 import { defaultProfileOf, requireProfile } from './profile-records.js'
 import { refOf } from './profile-status.js'
 import type { Profile, ProfileDeps, ResolvedProfile } from './profile-types.js'
@@ -17,19 +17,13 @@ const keyEnvOf = (deps: ProfileDeps, profile: Profile): Effect.Effect<string, Pr
     : Effect.succeed(env)
 }
 
-// The key as the secret store holds it; one that is gone, or empty, is no key
+// The key of an api_key profile; one the secret store no longer holds refuses the profile
 const keyOfProfile = (
   deps: ProfileDeps,
   profile: Profile,
 ): Effect.Effect<string, ProfileError | StoreError> =>
-  Effect.flatMap(readKey(deps.secrets, profile.id), (value) =>
-    value === undefined || value === ''
-      ? Effect.fail(
-          invalid(
-            `the key of profile "${profile.id}" is not in the secret store; add the profile again`,
-          ),
-        )
-      : Effect.succeed(value),
+  Effect.flatMap(usableKeyOf(deps.secrets, profile.id), (value) =>
+    value === undefined ? Effect.fail(invalid(lostKeyReason(profile.id))) : Effect.succeed(value),
   )
 
 // A login profile travels as its ref alone; an api_key profile with its key, in the variable its provider declared

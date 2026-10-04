@@ -6,8 +6,12 @@ import type { SecretsShape } from '../secrets/secrets.js'
 export const secretKeyOf = (profileId: string): string =>
   `@bytebureau/profiles/${profileId}/api_key`
 
+// What to say of an api_key profile whose key has left the secret store
+export const lostKeyReason = (profileId: string): string =>
+  `the key of profile "${profileId}" is not in the secret store; remove the profile and add it again`
+
 // A secret store that fails has failed like the store, not like the kernel
-export const readKey = (
+const readKey = (
   secrets: SecretsShape,
   profileId: string,
 ): Effect.Effect<string | undefined, StoreError> =>
@@ -18,6 +22,13 @@ export const readKey = (
     },
     catch: toStoreError,
   })
+
+// The key of a profile as the secret store holds it; one that is gone, or empty, is none
+export const usableKeyOf = (
+  secrets: SecretsShape,
+  profileId: string,
+): Effect.Effect<string | undefined, StoreError> =>
+  Effect.map(readKey(secrets, profileId), (value) => (value === '' ? undefined : value))
 
 export const writeKey = (
   secrets: SecretsShape,
