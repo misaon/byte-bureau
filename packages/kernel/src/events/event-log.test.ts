@@ -226,11 +226,18 @@ it.layer(TestLayer)('EventLog live delivery', (suite) => {
       const log = yield* EventLog
       const first = yield* log.publish(created('s9'))
       const upToDate = yield* collect(log, { sessionId: 's9', since: first.seq }, 1)
-      const ahead = yield* collect(log, { sessionId: 's9', since: first.seq + 100 }, 1)
       const second = yield* log.publish(ready('s9'))
-      const chunk = yield* log.publish(delta('s9', 'x'))
       assert.deepStrictEqual(yield* Fiber.join(upToDate), [second])
-      assert.deepStrictEqual(yield* Fiber.join(ahead), [chunk])
+    }),
+  )
+
+  suite.effect('resumes a since above the head of the log from the head, not from the since', () =>
+    Effect.gen(function* resumesFromHead() {
+      const log = yield* EventLog
+      const first = yield* log.publish(created('s11'))
+      const ahead = yield* collect(log, { sessionId: 's11', since: first.seq + 100 }, 1)
+      const next = yield* log.publish(ready('s11'))
+      assert.deepStrictEqual(yield* Fiber.join(ahead), [next])
     }),
   )
 

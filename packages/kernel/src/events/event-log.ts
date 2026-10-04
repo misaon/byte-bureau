@@ -154,19 +154,31 @@ const makePublish =
       return envelope
     }).pipe(Effect.uninterruptible)
 
+// The seq of the last durable event stored, 0 for an empty log
+const makeHead = (sql: SqlClient.SqlClient): Effect.Effect<number, StoreError> =>
+  sql<{ readonly head: number }>`SELECT COALESCE(MAX(seq), 0) AS head FROM events`.pipe(
+    Effect.mapError(toStoreError),
+    Effect.map(([row]) => (row === undefined ? 0 : row.head)),
+  )
+
 // The subscription opens before the replay is read, so nothing published meanwhile is lost
 // An event can then arrive twice; the live part drops those the replay already carried
 // An ephemeral event published during the replay waits in the subscription, so it arrives after the replayed rows
+// With nothing to replay the live part starts after the head of the log, read first: a since above it does not hold back what comes next
 const makeSubscribe =
-  (read: EventLogShape['read'], hub: PubSub.PubSub<EventEnvelope>): EventLogShape['subscribe'] =>
+  (
+    read: EventLogShape['read'],
+    head: Effect.Effect<number, StoreError>,
+    hub: PubSub.PubSub<EventEnvelope>,
+  ): EventLogShape['subscribe'] =>
   (filter) =>
     Stream.unwrap(
       Effect.gen(function* openSubscription() {
         const subscription = yield* PubSub.subscribe(hub)
-        const since = filter.since ?? 0
-        const replayed = yield* read(filter, { from: since })
+        const stored = yield* head
+        const replayed = yield* read(filter, { from: filter.since ?? 0 })
         const last = replayed.at(-1)
-        const replayedTo = last === undefined ? since : last.seq
+        const replayedTo = last === undefined ? stored : last.seq
         const live = Stream.fromSubscription(subscription).pipe(
           Stream.filter(
             (event) => matches(filter, event) && (event.seq === 0 || event.seq > replayedTo),
@@ -182,7 +194,11 @@ const make = Effect.gen(function* makeEventLog() {
   const hub = yield* PubSub.unbounded<EventEnvelope>()
   yield* Effect.addFinalizer(() => PubSub.shutdown(hub))
   const read = makeRead(sql)
-  return EventLog.of({ publish: makePublish(sql, hub), subscribe: makeSubscribe(read, hub), read })
+  return EventLog.of({
+    publish: makePublish(sql, hub),
+    subscribe: makeSubscribe(read, makeHead(sql), hub),
+    read,
+  })
 })
 
 export const EventLogLive: Layer.Layer<EventLog, never, SqlClient.SqlClient> = Layer.effect(
