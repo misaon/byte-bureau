@@ -12,8 +12,8 @@ export class RpcMutationLimit extends RpcMiddleware.Service<RpcMutationLimit>()(
 // The one procedure that changes nothing: it reads the event log
 const SUBSCRIPTION = 'events.subscribe'
 
-// A request on the socket runs in the context of its upgrade, so its client is known by the address the REST limit knows it by
-// Both doors then draw from one budget; without the upgrade in the context the socket clients would share one key
+// A request on the socket runs in the context of its upgrade, which carries the address captured before the upgrade (Bun forgets it after)
+// So the client is known by the address the REST limit knows it by, and both doors draw from one budget; without it the socket clients share one key
 const socketKey: Effect.Effect<string> = Effect.serviceOption(
   HttpServerRequest.HttpServerRequest,
 ).pipe(Effect.map((upgrade) => Option.match(upgrade, { onNone: () => 'rpc', onSome: clientKey })))
