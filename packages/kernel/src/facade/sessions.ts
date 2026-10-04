@@ -19,9 +19,10 @@ export const sessionsApi = (promised: Promised): Kernel['sessions'] => ({
   recover: promised(SessionManager, (sessions) => sessions.recover()),
 })
 
-// The record of the settled ask is not handed on
 export const asksApi = (promised: Promised): Kernel['asks'] => ({
   pending: promised(AskService, (asks, sessionId) => asks.pending(sessionId)),
+  get: promised(AskService, (asks, id) => asks.get(id)),
+  // The record of the settled ask is not handed on
   answer: promised(AskService, (asks, ...args) => Effect.asVoid(asks.answer(...args))),
 })
 

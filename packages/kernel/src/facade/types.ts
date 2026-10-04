@@ -1,4 +1,10 @@
-import type { AnsweredVia, Ask, AskAnswer, EventEnvelope, PromptInput } from '@bytebureau/protocol'
+import type {
+  AnsweredVia,
+  AskAnswer,
+  AskRecord,
+  EventEnvelope,
+  PromptInput,
+} from '@bytebureau/protocol'
 import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
 import type { EventFilter } from '../events/event-log.js'
 import type { HealthReport } from '../health/health.js'
@@ -49,7 +55,9 @@ export interface Kernel {
     readonly recover: () => Promise<readonly string[]>
   }
   readonly asks: {
-    readonly pending: (sessionId?: string) => Promise<readonly Ask[]>
+    readonly pending: (sessionId?: string) => Promise<readonly AskRecord[]>
+    // An ask pending or settled; nothing for an id nobody holds
+    readonly get: (id: string) => Promise<AskRecord | undefined>
     readonly answer: (askId: string, answer: AskAnswer, via: AnsweredVia) => Promise<void>
   }
   readonly events: {

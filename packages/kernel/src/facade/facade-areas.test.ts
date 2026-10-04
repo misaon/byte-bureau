@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AskError, ConfigError, SessionError, WorkspaceError } from '../errors.js'
-import { openKernel, startFakeSession } from './facade-fixtures.js'
+import { eventsUntil, openKernel, startFakeSession } from './facade-fixtures.js'
 import { createTempRepo } from '../testing/temp-repo.js'
 
 describe('the projects of the facade', () => {
@@ -77,6 +77,26 @@ describe('the sessions of the facade', () => {
       'workspace.provisioned',
       'session.ready',
     ])
+  })
+})
+
+describe('the asks of the facade', () => {
+  it('reads an ask by its id, and nothing for an id nobody holds', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const session = await startFakeSession(kernel)
+    const events = kernel.events.subscribe({ sessionId: session.id, since: 0 })
+    await kernel.sessions.prompt(session.id, { text: 'go' })
+    await eventsUntil(events, (event) => event.type === 'ask.requested')
+    const pending = await kernel.asks.pending(session.id)
+    const read = await Promise.all(
+      pending.map(async (ask) => {
+        const found = await kernel.asks.get(ask.id)
+        return found
+      }),
+    )
+    expect([pending.length, read]).toStrictEqual([1, pending])
+    await expect(kernel.asks.get('nobody')).resolves.toBeUndefined()
   })
 })
 
