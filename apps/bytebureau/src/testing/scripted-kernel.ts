@@ -16,6 +16,8 @@ export interface Scripted {
   // What the run asked of the Bureau, in order
   readonly calls: string[]
   readonly answered: Answered[]
+  // The signal of each subscription to the events
+  readonly signals: (AbortSignal | undefined)[]
 }
 
 export interface Overrides {
@@ -126,6 +128,7 @@ const unscripted: Pick<Bureau, 'health' | 'plugins' | 'usage' | 'workspaces' | '
 export function scripted(events: readonly EventEnvelope[], overrides: Overrides = {}): Scripted {
   const calls: string[] = []
   const answered: Answered[] = []
+  const signals: (AbortSignal | undefined)[] = []
   const bureau: Bureau = {
     ...unscripted,
     projects: projectsOf(calls, overrides),
@@ -139,13 +142,14 @@ export function scripted(events: readonly EventEnvelope[], overrides: Overrides 
       },
     },
     events: {
-      subscribe: (filter) => {
+      subscribe: (filter, signal) => {
         calls.push(`subscribe ${JSON.stringify(filter)}`)
+        signals.push(signal)
         return replay(events, overrides.gate ?? Promise.resolve(true))
       },
     },
   }
-  return { bureau, calls, answered }
+  return { bureau, calls, answered, signals }
 }
 
 // The context of a run: machine-readable or not, at a terminal or not

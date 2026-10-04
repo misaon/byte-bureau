@@ -1,7 +1,7 @@
-import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
+import { listening } from './listening.js'
 
 const STARTED_AT = '2026-10-04T10:00:00.000Z'
 
@@ -12,13 +12,9 @@ export async function healthStub(startedAt: string = STARTED_AT): Promise<number
     response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ status: 'ok', startedAt }))
   })
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  onTestFinished(() => {
-    server.close()
-  })
-  const address = server.address()
-  return typeof address === 'object' && address !== null ? address.port : 0
+  const { port, close } = await listening(server)
+  onTestFinished(close)
+  return port
 }
 
 export interface ProjectsStub {
@@ -40,13 +36,8 @@ export async function projectsStub(): Promise<ProjectsStub> {
     response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
     response.end(health ? JSON.stringify({ status: 'ok', startedAt: STARTED_AT }) : '[]')
   })
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  onTestFinished(() => {
-    server.close()
-  })
-  const address = server.address()
-  const port = typeof address === 'object' && address !== null ? address.port : 0
+  const { port, close } = await listening(server)
+  onTestFinished(close)
   return { port, authorizations: () => seen }
 }
 

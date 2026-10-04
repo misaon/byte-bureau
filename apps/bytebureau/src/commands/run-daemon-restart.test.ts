@@ -1,7 +1,8 @@
 import { once } from 'node:events'
+import { createBureauClient } from '@bytebureau/client'
 import { describe, expect, it } from 'vitest'
 import { freePort, startDaemonProcess, type DaemonProcess } from '../testing/daemon.js'
-import { eventLines } from '../testing/json-lines.js'
+import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
 import { PROMPT, workbench } from '../testing/workbench.js'
 
@@ -27,15 +28,39 @@ async function runAcrossRestart(repo: string, home: string): Promise<Restarted> 
   return { result, second }
 }
 
+// The session the events of a run belong to
+function sessionOf(stdout: string): string {
+  const [first] = jsonLines(stdout)
+  const id: unknown = first === undefined ? undefined : first['sessionId']
+  return typeof id === 'string' ? id : ''
+}
+
+// The seq of every durable event of the session as the daemon keeps them, up to its stop
+async function loggedSequence(daemon: DaemonProcess, sessionId: string): Promise<number[]> {
+  const client = createBureauClient({ baseUrl: daemon.url, token: daemon.info.token })
+  const sequence: number[] = []
+  for await (const event of client.events.subscribe({ sessionId, since: 0, ephemeral: false })) {
+    sequence.push(event.seq)
+    if (event.type === 'session.stopped') {
+      break
+    }
+  }
+  return sequence
+}
+
 describe('bytebureau run across a restart of the daemon', () => {
   it('resumes the events where they stopped and ends as the recovered session says', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     const { result, second } = await runAcrossRestart(repo, home)
-    const types = eventLines(result.stdout).map((line) => line.type)
-    expect([result.code, types.at(-1)]).toStrictEqual([3, 'session.stopped'])
+    const events = eventLines(result.stdout)
+    const sequence = events.map((event) => event.seq)
+    expect([result.code, events.at(-1)]).toMatchObject([3, { type: 'session.stopped' }])
     // Only the recovery of the next daemon cancels the ask: the events after the restart reached the run
-    expect(types).toContain('ask.cancelled')
+    expect(events.map((event) => event.type)).toContain('ask.cancelled')
+    // Every durable event of the session, before the restart and after it, once and in order
+    expect(sequence).toStrictEqual([...new Set(sequence)].toSorted((left, right) => left - right))
+    expect(sequence).toStrictEqual(await loggedSequence(second, sessionOf(result.stdout)))
     await second.stop()
   }, 30_000)
 })

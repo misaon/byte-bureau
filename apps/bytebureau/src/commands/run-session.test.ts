@@ -69,6 +69,18 @@ describe('runSession and the session it creates', () => {
   })
 })
 
+describe('runSession and its subscription', () => {
+  it('subscribes with a signal of its own and aborts it once the session has ended', async () => {
+    expect.hasAssertions()
+    captureConsole()
+    const script = scripted([TURN_DONE, COMPLETED])
+    await runSession(script.bureau, OPTIONS, contextOf())
+    expect(script.signals).toHaveLength(1)
+    expect(script.signals[0]).toBeInstanceOf(AbortSignal)
+    expect(script.signals[0]).toMatchObject({ aborted: true })
+  })
+})
+
 describe('runSession when the session ends badly', () => {
   it('exits 4 and says why when the provider errored the session', async () => {
     expect.hasAssertions()

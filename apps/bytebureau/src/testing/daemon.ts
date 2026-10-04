@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +6,7 @@ import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
 import { isAlive, lockHolder, readServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
+import { listening } from './listening.js'
 import { childEnv } from './run-cli.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
@@ -98,13 +98,9 @@ export async function startDaemonProcess(
 
 // A loopback port nothing listens on now, for daemons that must come and go on the same one
 export async function freePort(): Promise<number> {
-  const server = createServer()
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  const address = server.address()
-  server.close()
-  await once(server, 'close')
-  return typeof address === 'object' && address !== null ? address.port : 0
+  const { port, close } = await listening(createServer())
+  await close()
+  return port
 }
 
 const ended = async (pid: number, deadline: number): Promise<boolean> => {
