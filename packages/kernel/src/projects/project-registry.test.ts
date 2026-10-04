@@ -139,21 +139,32 @@ it.layer(TestLayer)('ProjectRegistry list, get and remove', (suite) => {
     }),
   )
 
-  suite.effect(
-    'removes a project and announces it, and announces nothing for an id nobody holds',
-    () =>
-      Effect.gen(function* removesProject() {
-        const registry = yield* ProjectRegistry
-        const log = yield* EventLog
-        const project = yield* registry.register(createTempRepo())
-        yield* registry.remove(project.id)
-        yield* registry.remove('unknown')
-        assert.strictEqual(yield* registry.get(project.id), undefined)
-        const known = yield* log.read({ projectId: project.id }, { from: 0 })
-        const unknown = yield* log.read({ projectId: 'unknown' }, { from: 0 })
-        const types = [known, unknown].map((events) => events.map((event) => event.type))
-        assert.deepStrictEqual(types, [['project.registered', 'project.removed'], []])
-      }),
+  suite.effect('removes a project and announces it', () =>
+    Effect.gen(function* removesProject() {
+      const registry = yield* ProjectRegistry
+      const log = yield* EventLog
+      const project = yield* registry.register(createTempRepo())
+      yield* registry.remove(project.id)
+      assert.strictEqual(yield* registry.get(project.id), undefined)
+      const known = yield* log.read({ projectId: project.id }, { from: 0 })
+      assert.deepStrictEqual(
+        known.map((event) => event.type),
+        ['project.registered', 'project.removed'],
+      )
+    }),
+  )
+
+  suite.effect('refuses an id nobody holds with not_found, and announces nothing', () =>
+    Effect.gen(function* refusesUnknown() {
+      const registry = yield* ProjectRegistry
+      const log = yield* EventLog
+      const refused = yield* Effect.flip(registry.remove('unknown'))
+      assert.deepStrictEqual(
+        refused,
+        new WorkspaceError({ code: 'not_found', reason: 'no project unknown' }),
+      )
+      assert.deepStrictEqual(yield* log.read({ projectId: 'unknown' }, { from: 0 }), [])
+    }),
   )
 })
 

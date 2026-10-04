@@ -26,7 +26,7 @@ export interface ProjectRegistryShape {
   ) => Effect.Effect<Project, WorkspaceError | ConfigError | StoreError>
   readonly list: () => Effect.Effect<readonly Project[], StoreError>
   readonly get: (id: string) => Effect.Effect<Project | undefined, StoreError>
-  // A project that sessions still belong to is refused with WorkspaceError has_sessions
+  // A project that sessions still belong to is refused with WorkspaceError has_sessions, an id nobody holds with not_found
   readonly remove: (id: string) => Effect.Effect<void, StoreError | WorkspaceError>
 }
 
@@ -139,15 +139,15 @@ const makeRegister =
       return yield* refreshProject(deps, existing, snapshot)
     })
 
-// Removing an id nobody holds is not an error, and announces nothing
+// An id nobody holds fails, as it does through the API, and announces nothing
 const makeRemove =
   ({ sql, log }: Deps): ProjectRegistryShape['remove'] =>
   (id) =>
     Effect.gen(function* removeProject() {
       const removed = yield* deleteProject(sql, id)
-      if (removed) {
-        yield* log.publish({ type: 'project.removed', projectId: id, payload: { id } })
-      }
+      yield* removed
+        ? Effect.asVoid(log.publish({ type: 'project.removed', projectId: id, payload: { id } }))
+        : Effect.fail(new WorkspaceError({ code: 'not_found', reason: `no project ${id}` }))
     })
 
 const make = Effect.gen(function* makeProjectRegistry() {
