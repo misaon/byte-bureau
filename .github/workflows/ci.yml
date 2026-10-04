@@ -41,6 +41,12 @@ jobs:
       - run: bun run knip
       - run: bun run depcruise
       - run: bun run typecheck
+      - name: generated contracts are up to date
+        run: |
+          set -euo pipefail
+          bun run build
+          bun run generate:client
+          git diff --exit-code -- packages/protocol/schemas packages/api/openapi.json packages/client/src/gen
       - run: bun run lint:long-tail
       - name: actionlint
         run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
@@ -105,6 +111,24 @@ jobs:
           BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
+      - name: 'smoke (daemon: serve, run through the API, sessions ls, stop)'
+        run: |
+          set -euo pipefail
+          BIN=(dist/bytebureau-*-linux-x64)
+          [ "${#BIN[@]}" -eq 1 ]
+          REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
+          git -C "$REPO" init -q -b main
+          git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
+          export BYTEBUREAU_HOME="$HOME_DIR"
+          "${BIN[0]}" serve --port 0 --json > serve.ndjson
+          grep -q '"command":"serve"' serve.ndjson || { cat serve.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" sessions ls --json | grep -q '"status":"completed"'
+          "${BIN[0]}" --json | grep -q '"command":"status"'
+          "${BIN[0]}" serve --stop
+          test ! -f "$HOME_DIR"/server.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries-linux
@@ -145,6 +169,25 @@ jobs:
           BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
+      - name: 'smoke (daemon: serve, run through the API, sessions ls, stop)'
+        run: |
+          set -euo pipefail
+          BIN=(dist/bytebureau-*-linux-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          chmod +x "${BIN[0]}"
+          REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
+          git -C "$REPO" init -q -b main
+          git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
+          export BYTEBUREAU_HOME="$HOME_DIR"
+          "${BIN[0]}" serve --port 0 --json > serve.ndjson
+          grep -q '"command":"serve"' serve.ndjson || { cat serve.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" sessions ls --json | grep -q '"status":"completed"'
+          "${BIN[0]}" --json | grep -q '"command":"status"'
+          "${BIN[0]}" serve --stop
+          test ! -f "$HOME_DIR"/server.json
 
   smoke-macos:
     name: smoke-macos
@@ -177,6 +220,24 @@ jobs:
           BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
+      - name: 'smoke (daemon: serve, run through the API, sessions ls, stop)'
+        run: |
+          set -euo pipefail
+          BIN=(dist/bytebureau-*-darwin-arm64)
+          [ "${#BIN[@]}" -eq 1 ]
+          REPO=$(mktemp -d)
+          HOME_DIR=$(mktemp -d)
+          git -C "$REPO" init -q -b main
+          git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
+          export BYTEBUREAU_HOME="$HOME_DIR"
+          "${BIN[0]}" serve --port 0 --json > serve.ndjson
+          grep -q '"command":"serve"' serve.ndjson || { cat serve.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; cat "$HOME_DIR"/logs/daemon.log; exit 1; }
+          "${BIN[0]}" sessions ls --json | grep -q '"status":"completed"'
+          "${BIN[0]}" --json | grep -q '"command":"status"'
+          "${BIN[0]}" serve --stop
+          test ! -f "$HOME_DIR"/server.json
 
   docs-build:
     name: docs-build
