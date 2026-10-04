@@ -1763,6 +1763,8 @@ Verified facts this task relies on (fact sheet `docs/research/2026-10-02-reports
 
 Semantics: the API is one `HttpApi` under `/api/v1`; every group except `health` carries the `Authorization` middleware (bearer token, constant-time comparison), every group carries `RequestValidation` (a body, query or path the schema refuses answers `400` with a `request_invalid` problem) and every mutation endpoint (Task 4) carries `MutationLimit` (a token bucket per remote address, `429` with `rate_limited` when it runs dry). Errors are RFC 9457 problems with `content-type: application/problem+json`; one schema per status, told apart by the literal `status`, so the API encodes a problem with the status it carries; `toProblem` maps the kernel's tagged errors to codes and statuses (`SessionError` → `session_<code>`, `AskError` → `ask_<code>`, `ProviderError` → `provider_<kind>`, `WorkspaceError` → `workspace_<code>`, `ConfigError` → `config_invalid` 422, `PluginError` → `plugin_failed` 500, `StoreError` → `store_unavailable` 503, anything else → `internal` 500 with the detail `unexpected failure` and the cause logged, never sent). A request without any `Authorization` header is refused by the security scheme itself with an empty `401`; a request with a wrong token gets the `unauthorized` problem. Request bodies are capped at 10 MB. The OpenAPI 3.1 document is served at `/api/v1/openapi.json` (unauthenticated, it holds no secret) and written to `packages/api/openapi.json` at build time, with a drift test (the same arrangement as `packages/protocol/schemas`). Tests run the real API on `@effect/platform-node`'s server on an ephemeral port over `KernelTest`, and talk to it with the global `fetch`.
 
+Semantics (as shipped, commits 2d7290d, 0ffa99c, 16a75ab): a request without any `Authorization` header gets the `unauthorized` 401 problem as well (Effect hands the middleware an empty credential); `sameToken` is false for an empty expected token and `AuthorizationLive` dies when built with one; `toProblem`/`orProblem` are typed `ApiProblem<KernelStatus>` over `KERNEL_STATUSES = [403, 404, 409, 422, 500, 502, 503]`, the one list `PROBLEM_SCHEMAS` is built from, so every endpoint that calls the kernel declares `error: PROBLEM_SCHEMAS`; `problem()` redacts the detail with the kernel's `redactValue` (the unauthorized detail reads `a valid API token is required`; a project name or path containing an `sk-` word and git's `Bearer realm=` output come out partly `[REDACTED]` — accepted, final wave may narrow the pattern); `RequestValidation` answers the response-side schema error kinds (`Body`, `ResponseHeaders`) with a logged `500 internal`; the API's log lines carry the category `bb.api` (`logging.ts`) and a store failure's cause is logged at warn; the token bucket clamps the elapsed time at 0 and stores a refused state; CORS checks the origin against the list itself (`layer.ts`; Effect would echo a single configured origin to every caller) and there is no CORS layer without origins; problem schemas carry `identifier` annotations and appear under `components.schemas`; the middlewares are composed in `middlewares.ts`, the handler layers in `handlers/all.ts`, the test kernel's temp home in `testing-kernel.ts`, and `ApiTestLayer(overrides?)` takes no home and loads the plugins itself (the kernel's `tempDir` throws when `it.layer` calls it at collection time). The 413 test is `it.effect.skip` until Task 4 adds the content-length precheck. Effect's empty `404`/`500` for unknown routes and defects are accepted for Phase B. `api` joined the `semantic-pr.yml` scopes here (a parity test asked for it).
+
 - [ ] **Step 1: Package scaffold and repository configuration**
 
 `packages/api/package.json`:
@@ -1849,47 +1851,138 @@ import {
   StoreError,
   WorkspaceError,
 } from '@bytebureau/kernel'
+import { Effect, Logger, References } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { problem, toProblem } from './problems.js'
+import {
+  KERNEL_STATUSES,
+  orProblem,
+  problem,
+  toProblem,
+  type ApiProblem,
+  type KernelStatus,
+  type PROBLEM_SCHEMAS,
+} from './problems.js'
+
+const NO_SESSION = 'no session 42'
+const API_KEY = 'sk-ant-api03-abcdefghij'
+
+// The typed errors of the kernel with the status, the code and the detail each is told with
+const KERNEL_FAILURES: {
+  readonly failure: unknown
+  readonly status: number
+  readonly code: string
+  readonly detail: string
+}[] = [
+  {
+    failure: new SessionError({ code: 'not_found', reason: NO_SESSION }),
+    status: 404,
+    code: 'session_not_found',
+    detail: NO_SESSION,
+  },
+  {
+    failure: new SessionError({ code: 'invalid_transition', reason: 'x' }),
+    status: 409,
+    code: 'session_invalid_transition',
+    detail: 'x',
+  },
+  {
+    failure: new SessionError({ code: 'provider_missing', reason: 'x' }),
+    status: 422,
+    code: 'session_provider_missing',
+    detail: 'x',
+  },
+  {
+    failure: new SessionError({ code: 'yolo_refused', reason: 'x' }),
+    status: 403,
+    code: 'session_yolo_refused',
+    detail: 'x',
+  },
+  {
+    failure: new AskError({ code: 'not_pending', reason: 'x' }),
+    status: 409,
+    code: 'ask_not_pending',
+    detail: 'x',
+  },
+  {
+    failure: new AskError({ code: 'invalid_answer', reason: 'x' }),
+    status: 422,
+    code: 'ask_invalid_answer',
+    detail: 'x',
+  },
+  {
+    failure: new ProviderError({
+      kind: 'auth',
+      reason: `${API_KEY} was refused`,
+      retryable: false,
+    }),
+    status: 502,
+    code: 'provider_auth',
+    detail: '[REDACTED] was refused',
+  },
+  {
+    failure: new ProviderError({ kind: 'missing', reason: 'x', retryable: false }),
+    status: 422,
+    code: 'provider_missing',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'dirty', reason: 'x' }),
+    status: 409,
+    code: 'workspace_dirty',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'locked', reason: 'x' }),
+    status: 409,
+    code: 'workspace_locked',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'has_sessions', reason: 'x' }),
+    status: 409,
+    code: 'workspace_has_sessions',
+    detail: 'x',
+  },
+  {
+    failure: new WorkspaceError({ code: 'not_a_repository', reason: 'x' }),
+    status: 422,
+    code: 'workspace_not_a_repository',
+    detail: 'x',
+  },
+  {
+    failure: new ConfigError({ file: '/p/bytebureau.json', pointer: '/version', reason: 'bad' }),
+    status: 422,
+    code: 'config_invalid',
+    detail: '/p/bytebureau.json/version: bad',
+  },
+  {
+    failure: new PluginError({ plugin: 'p', reason: 'x' }),
+    status: 500,
+    code: 'plugin_failed',
+    detail: 'p: x',
+  },
+  // The cause of a store failure (here "disk full") is logged, never told
+  {
+    failure: new StoreError({ cause: new Error('disk full') }),
+    status: 503,
+    code: 'store_unavailable',
+    detail: 'the store is unavailable',
+  },
+]
 
 describe('problem details of the API', () => {
   it('builds a problem whose type names its code and whose title names its status', () => {
-    expect(problem(404, 'session_not_found', 'no session 42')).toStrictEqual({
+    expect(problem(404, 'session_not_found', NO_SESSION)).toStrictEqual({
       type: 'https://bytebureau.dev/problems/session_not_found',
       title: 'Not Found',
       status: 404,
-      detail: 'no session 42',
+      detail: NO_SESSION,
       code: 'session_not_found',
     })
   })
 
-  it.each([
-    [new SessionError({ code: 'not_found', reason: 'no session 42' }), 404, 'session_not_found'],
-    [new SessionError({ code: 'invalid_transition', reason: 'x' }), 409, 'session_invalid_transition'],
-    [new SessionError({ code: 'provider_missing', reason: 'x' }), 422, 'session_provider_missing'],
-    [new SessionError({ code: 'yolo_refused', reason: 'x' }), 403, 'session_yolo_refused'],
-    [new AskError({ code: 'not_pending', reason: 'x' }), 409, 'ask_not_pending'],
-    [new AskError({ code: 'invalid_answer', reason: 'x' }), 422, 'ask_invalid_answer'],
-    [new ProviderError({ kind: 'auth', reason: 'x', retryable: false }), 502, 'provider_auth'],
-    [new ProviderError({ kind: 'missing', reason: 'x', retryable: false }), 422, 'provider_missing'],
-    [new WorkspaceError({ code: 'dirty', reason: 'x' }), 409, 'workspace_dirty'],
-    [new WorkspaceError({ code: 'has_sessions', reason: 'x' }), 409, 'workspace_has_sessions'],
-    [new WorkspaceError({ code: 'not_a_repository', reason: 'x' }), 422, 'workspace_not_a_repository'],
-    [new ConfigError({ file: '/p/bytebureau.json', pointer: '/version', reason: 'bad' }), 422, 'config_invalid'],
-    [new PluginError({ plugin: 'p', reason: 'x' }), 500, 'plugin_failed'],
-    [new StoreError({ cause: new Error('disk full') }), 503, 'store_unavailable'],
-  ])('maps %s to %i %s', (error, status, code) => {
-    expect(toProblem(error)).toMatchObject({ status, code })
-  })
-
-  it('keeps the reason of a typed error as the detail, and the file pointer of a config error', () => {
-    expect(toProblem(new SessionError({ code: 'not_found', reason: 'no session 42' })).detail).toBe(
-      'no session 42',
-    )
-    expect(
-      toProblem(new ConfigError({ file: '/p/bytebureau.json', pointer: '/version', reason: 'bad' }))
-        .detail,
-    ).toBe('/p/bytebureau.json/version: bad')
+  it.each(KERNEL_FAILURES)('maps $failure to $status $code', ({ failure, ...told }) => {
+    expect(toProblem(failure)).toMatchObject(told)
   })
 
   it('tells nothing of an unknown failure beyond that it was unexpected', () => {
@@ -1900,6 +1993,55 @@ describe('problem details of the API', () => {
       detail: 'unexpected failure',
       code: 'internal',
     })
+  })
+
+  it('tells a kernel failure only with a status the endpoints that call the kernel declare', () => {
+    // Typed on purpose: a handler's failure must fit the error schemas of PROBLEM_SCHEMAS, or tsc refuses the handler
+    const told: ApiProblem<KernelStatus> = toProblem(new StoreError({ cause: 'x' }))
+    const declared: (typeof PROBLEM_SCHEMAS)[number]['Type'] = told
+    expect(KERNEL_STATUSES).toContain(declared.status)
+  })
+})
+
+interface LogLine {
+  readonly level: string
+  readonly message: unknown
+  readonly category: unknown
+}
+
+// The problem a kernel call that fails so is answered with; the lines logged meanwhile are collected
+const problemOf = (failure: unknown, logged: LogLine[]): unknown => {
+  const logger = Logger.make((options) => {
+    const annotations = options.fiber.getRef(References.CurrentLogAnnotations)
+    logged.push({
+      level: options.logLevel,
+      message: options.message,
+      category: annotations['category'],
+    })
+  })
+  const call = Effect.flip(orProblem(Effect.fail(failure)))
+  return Effect.runSync(Effect.provide(call, Logger.layer([logger])))
+}
+
+describe(orProblem, () => {
+  it('turns the failure of a kernel call into its problem and logs under bb.api what it does not tell', () => {
+    const logged: LogLine[] = []
+    const typed = new AskError({ code: 'not_pending', reason: 'answered already' })
+    expect(problemOf(typed, logged)).toMatchObject({ status: 409, code: 'ask_not_pending' })
+    expect(logged).toStrictEqual([])
+    const full = new Error('disk full')
+    const store = problemOf(new StoreError({ cause: full }), logged)
+    expect(store).toMatchObject({ status: 503, code: 'store_unavailable' })
+    const unexpected = new Error('ENOENT /etc/secret')
+    expect(problemOf(unexpected, logged)).toMatchObject({ status: 500, code: 'internal' })
+    expect(logged).toStrictEqual([
+      { level: 'Warn', message: ['the store failed under an API call', full], category: 'bb.api' },
+      {
+        level: 'Error',
+        message: ['unexpected failure in an API handler', unexpected],
+        category: 'bb.api',
+      },
+    ])
   })
 })
 ```
@@ -1912,7 +2054,7 @@ import { TokenBuckets } from './token-bucket.js'
 describe(TokenBuckets, () => {
   it('allows capacity calls at once, refuses the next and says when to retry', () => {
     let now = 0
-    const buckets = new TokenBuckets({ capacity: 3, perMinute: 60, now: () => now })
+    const buckets = new TokenBuckets({ capacity: 3, perMinute: 60, now: (): number => now })
     expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
     buckets.take('a')
     buckets.take('a')
@@ -1923,13 +2065,23 @@ describe(TokenBuckets, () => {
 
   it('keeps one bucket per key and forgets a key that is full again', () => {
     let now = 0
-    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: () => now })
+    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: (): number => now })
     buckets.take('a')
     expect(buckets.take('b')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
     expect(buckets.size()).toBe(2)
     now = 60_000
     buckets.take('a')
     expect(buckets.size()).toBe(1)
+  })
+
+  it('takes no tokens away and keeps refilling when the clock steps back', () => {
+    let now = 60_000
+    const buckets = new TokenBuckets({ capacity: 1, perMinute: 60, now: (): number => now })
+    buckets.take('a')
+    now = 0
+    expect(buckets.take('a')).toStrictEqual({ allowed: false, retryAfterSec: 1 })
+    now = 1000
+    expect(buckets.take('a')).toStrictEqual({ allowed: true, retryAfterSec: 0 })
   })
 })
 ```
@@ -1948,6 +2100,7 @@ import {
   ConfigError,
   PluginError,
   ProviderError,
+  redactValue,
   SessionError,
   StoreError,
   WorkspaceError,
@@ -1955,9 +2108,14 @@ import {
 import { problemType, type Problem } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import { HttpApiSchema } from 'effect/http-api'
+import { logApiError, logApiWarning } from './logging.js'
 
 export const PROBLEM_STATUSES = [400, 401, 403, 404, 409, 413, 422, 429, 500, 502, 503] as const
 export type ProblemStatus = (typeof PROBLEM_STATUSES)[number]
+
+// Every status a kernel failure can turn into; the endpoints that call the kernel declare them all
+export const KERNEL_STATUSES = [403, 404, 409, 422, 500, 502, 503] as const
+export type KernelStatus = (typeof KERNEL_STATUSES)[number]
 
 const TITLES: Readonly<Record<ProblemStatus, string>> = {
   400: 'Bad Request',
@@ -1973,13 +2131,25 @@ const TITLES: Readonly<Record<ProblemStatus, string>> = {
   503: 'Service Unavailable',
 }
 
-export interface ApiProblem<Status extends ProblemStatus = ProblemStatus>
-  extends Omit<Problem, 'status'> {
+export interface ApiProblem<Status extends ProblemStatus = ProblemStatus> extends Omit<
+  Problem,
+  'status'
+> {
   readonly status: Status
 }
 
+type ProblemSchema<Status extends ProblemStatus> = Schema.Struct<{
+  readonly type: Schema.String
+  readonly title: Schema.String
+  readonly status: Schema.Literal<Status>
+  readonly detail: Schema.String
+  readonly code: Schema.String
+  readonly instance: Schema.optionalKey<Schema.String>
+}>
+
 // One schema per status, told apart by the literal status, so the API encodes a problem with the status it carries
-const problemSchema = <Status extends ProblemStatus>(status: Status) =>
+// The identifier names it under components.schemas of the OpenAPI document
+const problemSchema = <Status extends ProblemStatus>(status: Status): ProblemSchema<Status> =>
   Schema.Struct({
     type: Schema.String,
     title: Schema.String,
@@ -1988,7 +2158,11 @@ const problemSchema = <Status extends ProblemStatus>(status: Status) =>
     code: Schema.String,
     instance: Schema.optionalKey(Schema.String),
   })
-    .annotate({ title: `Problem${status}`, description: 'RFC 9457 problem details' })
+    .annotate({
+      identifier: `Problem${status}`,
+      title: `Problem${status}`,
+      description: 'RFC 9457 problem details',
+    })
     .pipe(
       HttpApiSchema.status(status),
       HttpApiSchema.asJson({ contentType: 'application/problem+json' }),
@@ -2006,36 +2180,54 @@ export const Problem500 = problemSchema(500)
 export const Problem502 = problemSchema(502)
 export const Problem503 = problemSchema(503)
 
-// Every status a kernel failure can turn into; the endpoints that call the kernel declare them all
-export const PROBLEM_SCHEMAS = [
-  Problem403,
-  Problem404,
-  Problem409,
-  Problem422,
-  Problem500,
-  Problem502,
-  Problem503,
-] as const
+// The schema of each status; the endpoints and the middlewares that declare a status share its one instance
+const SCHEMAS: { readonly [Status in ProblemStatus]: ProblemSchema<Status> } = {
+  400: Problem400,
+  401: Problem401,
+  403: Problem403,
+  404: Problem404,
+  409: Problem409,
+  413: Problem413,
+  422: Problem422,
+  429: Problem429,
+  500: Problem500,
+  502: Problem502,
+  503: Problem503,
+}
 
+// The error schemas of an endpoint that calls the kernel: one per status of KERNEL_STATUSES
+export const PROBLEM_SCHEMAS: readonly (typeof SCHEMAS)[KernelStatus][] = KERNEL_STATUSES.map(
+  (status) => SCHEMAS[status],
+)
+
+// The detail is told with every secret-shaped run of text replaced: it carries reasons from git, plugins and providers
 export const problem = <Status extends ProblemStatus>(
   status: Status,
   code: string,
   detail: string,
-): ApiProblem<Status> => ({ type: problemType(code), title: TITLES[status], status, detail, code })
+): ApiProblem<Status> => ({
+  type: problemType(code),
+  title: TITLES[status],
+  status,
+  detail: String(redactValue(detail)),
+  code,
+})
 
-const SESSION_STATUS: Readonly<Record<SessionError['code'], ProblemStatus>> = {
+export const UNEXPECTED_FAILURE = problem(500, 'internal', 'unexpected failure')
+
+const SESSION_STATUS: Readonly<Record<SessionError['code'], KernelStatus>> = {
   not_found: 404,
   invalid_transition: 409,
   provider_missing: 422,
   yolo_refused: 403,
   employee_missing: 422,
 }
-const ASK_STATUS: Readonly<Record<AskError['code'], ProblemStatus>> = {
+const ASK_STATUS: Readonly<Record<AskError['code'], KernelStatus>> = {
   not_found: 404,
   not_pending: 409,
   invalid_answer: 422,
 }
-const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], ProblemStatus>> = {
+const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], KernelStatus>> = {
   auth: 502,
   ratelimit: 502,
   crash: 502,
@@ -2043,10 +2235,23 @@ const PROVIDER_STATUS: Readonly<Record<ProviderError['kind'], ProblemStatus>> = 
   missing: 422,
 }
 const CONFLICTS: ReadonlySet<string> = new Set(['locked', 'dirty', 'has_sessions'])
-const workspaceStatus = (code: string): ProblemStatus => (CONFLICTS.has(code) ? 409 : 422)
+const workspaceStatus = (code: string): KernelStatus => (CONFLICTS.has(code) ? 409 : 422)
+
+const toProblemOfRest = (error: unknown): ApiProblem<KernelStatus> => {
+  if (error instanceof ConfigError) {
+    return problem(422, 'config_invalid', `${error.file}${error.pointer}: ${error.reason}`)
+  }
+  if (error instanceof PluginError) {
+    return problem(500, 'plugin_failed', `${error.plugin}: ${error.reason}`)
+  }
+  if (error instanceof StoreError) {
+    return problem(503, 'store_unavailable', 'the store is unavailable')
+  }
+  return UNEXPECTED_FAILURE
+}
 
 // The problem a kernel failure is told as; an unknown failure is not described, only logged by the caller
-export const toProblem = (error: unknown): ApiProblem => {
+export const toProblem = (error: unknown): ApiProblem<KernelStatus> => {
   if (error instanceof SessionError) {
     return problem(SESSION_STATUS[error.code], `session_${error.code}`, error.reason)
   }
@@ -2062,31 +2267,21 @@ export const toProblem = (error: unknown): ApiProblem => {
   return toProblemOfRest(error)
 }
 
-const toProblemOfRest = (error: unknown): ApiProblem => {
-  if (error instanceof ConfigError) {
-    return problem(422, 'config_invalid', `${error.file}${error.pointer}: ${error.reason}`)
+// What the client is not told is logged: the cause behind an unavailable store, and a failure the API did not expect
+const logUntold = (failure: unknown): Effect.Effect<void> => {
+  if (failure instanceof StoreError) {
+    return logApiWarning('the store failed under an API call', failure.cause)
   }
-  if (error instanceof PluginError) {
-    return problem(500, 'plugin_failed', `${error.plugin}: ${error.reason}`)
-  }
-  if (error instanceof StoreError) {
-    return problem(503, 'store_unavailable', 'the store is unavailable')
-  }
-  return problem(500, 'internal', 'unexpected failure')
+  return toProblem(failure).code === 'internal'
+    ? logApiError('unexpected failure in an API handler', failure)
+    : Effect.void
 }
 
-// A kernel call inside a handler: its typed failure becomes a problem, and what is unexpected is logged before it does
+// A kernel call inside a handler: its failure becomes a problem with a status the endpoint declares
 export const orProblem = <Value, Failure, Requirements>(
   effect: Effect.Effect<Value, Failure, Requirements>,
-): Effect.Effect<Value, ApiProblem, Requirements> =>
-  effect.pipe(
-    Effect.tapError((failure) =>
-      toProblem(failure).code === 'internal'
-        ? Effect.logError('unexpected failure in an API handler', failure)
-        : Effect.void,
-    ),
-    Effect.mapError(toProblem),
-  )
+): Effect.Effect<Value, ApiProblem<KernelStatus>, Requirements> =>
+  effect.pipe(Effect.tapError(logUntold), Effect.mapError(toProblem))
 ```
 
 `packages/api/src/config.ts`:
@@ -2102,7 +2297,7 @@ export interface MutationLimitOptions {
 export interface ApiOptions {
   readonly version: string
   readonly startedAt: string
-  readonly token: Redacted.Redacted<string>
+  readonly token: Redacted.Redacted
   // Origins browsers may call the API from; empty means none (the embedded UI of SP2 is same-origin)
   readonly corsOrigins: readonly string[]
   readonly heartbeat: Duration.Input
@@ -2130,39 +2325,54 @@ export class Authorization extends HttpApiMiddleware.Service<Authorization>()(
   { security: { bearer: HttpApiSecurity.bearer }, error: Problem401 },
 ) {}
 
-export const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid bearer token is required')
+// Worded so the redaction of details leaves it alone: it hides any "Bearer <word>"
+const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid API token is required')
 
-// Lengths first, then a constant-time comparison: the daemon never tells how much of a token was right
+// An empty token matches nothing, since a request without the header arrives with an empty one
+// Otherwise lengths first, then a constant-time comparison: the daemon never tells how much of a token was right
 export const sameToken = (given: string, expected: string): boolean => {
   const left = Buffer.from(given, 'utf8')
   const right = Buffer.from(expected, 'utf8')
-  return left.length === right.length && timingSafeEqual(left, right)
+  return right.length > 0 && left.length === right.length && timingSafeEqual(left, right)
 }
 
-export const AuthorizationLive = (token: Redacted.Redacted<string>): Layer.Layer<Authorization> =>
-  Layer.succeed(Authorization, {
+// A daemon without a token would let every request in, so the layer refuses to build; the caller made a mistake
+export const AuthorizationLive = (token: Redacted.Redacted): Layer.Layer<Authorization> => {
+  if (Redacted.value(token).length === 0) {
+    return Layer.effect(Authorization, Effect.die(new Error('the API token must not be empty')))
+  }
+  return Layer.succeed(Authorization, {
     bearer: (httpEffect, { credential }) =>
       sameToken(Redacted.value(credential), Redacted.value(token))
         ? httpEffect
         : Effect.fail(UNAUTHORIZED),
   })
+}
 ```
 
 `packages/api/src/validation.ts`:
 ```ts
 import { Effect, type Layer } from 'effect'
 import { HttpApiMiddleware } from 'effect/http-api'
-import { Problem400, problem } from './problems.js'
+import { logApiError } from './logging.js'
+import { Problem400, Problem500, problem, UNEXPECTED_FAILURE } from './problems.js'
 
 // A body, query, path or header the schema refuses is a 400 problem that names the part and the reason
 export class RequestValidation extends HttpApiMiddleware.Service<RequestValidation>()(
   'bb/api/RequestValidation',
-  { error: Problem400 },
+  { error: [Problem400, Problem500] },
 ) {}
 
+// A response its own schema refuses is a fault of the server: logged, and told as an unexpected failure
+const RESPONSE_PARTS: ReadonlySet<string> = new Set(['Body', 'ResponseHeaders'])
+
 export const RequestValidationLive: Layer.Layer<RequestValidation> =
-  HttpApiMiddleware.layerSchemaErrorTransform(RequestValidation, (error) =>
-    Effect.fail(problem(400, 'request_invalid', `${error.kind}: ${error.message}`)),
+  HttpApiMiddleware.layerSchemaErrorTransform(RequestValidation, (refused) =>
+    RESPONSE_PARTS.has(refused.kind)
+      ? logApiError('a response its schema refuses', refused.cause).pipe(
+          Effect.andThen(Effect.fail(UNEXPECTED_FAILURE)),
+        )
+      : Effect.fail(problem(400, 'request_invalid', `${refused.kind}: ${refused.cause.message}`)),
   )
 ```
 
@@ -2181,8 +2391,8 @@ export interface Verdict {
 }
 
 interface Bucket {
-  tokens: number
-  updatedAt: number
+  readonly tokens: number
+  readonly updatedAt: number
 }
 
 const MS_PER_MINUTE = 60_000
@@ -2197,30 +2407,38 @@ export class TokenBuckets {
   }
 
   public take(key: string): Verdict {
-    const bucket = this.refilled(key)
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1
-      this.buckets.set(key, bucket)
+    const now = this.options.now()
+    this.forgetFull(now)
+    const known = this.buckets.get(key)
+    const tokens = known === undefined ? this.options.capacity : this.refilled(known, now)
+    const allowed = tokens >= 1
+    // Stored with the time of this call even when refused, so after a clock that stepped back tokens flow from there
+    this.buckets.set(key, { tokens: allowed ? tokens - 1 : tokens, updatedAt: now })
+    if (allowed) {
       return { allowed: true, retryAfterSec: 0 }
     }
     const perMs = this.options.perMinute / MS_PER_MINUTE
-    return { allowed: false, retryAfterSec: Math.ceil((1 - bucket.tokens) / perMs / 1000) }
+    return { allowed: false, retryAfterSec: Math.ceil((1 - tokens) / perMs / 1000) }
   }
 
   public size(): number {
     return this.buckets.size
   }
 
-  // The bucket of the key with the tokens that flowed back since it was last seen; a full one is dropped from the map
-  private refilled(key: string): Bucket {
-    const now = this.options.now()
-    const known = this.buckets.get(key) ?? { tokens: this.options.capacity, updatedAt: now }
-    const flowed = ((now - known.updatedAt) * this.options.perMinute) / MS_PER_MINUTE
-    const tokens = Math.min(this.options.capacity, known.tokens + flowed)
-    if (tokens >= this.options.capacity) {
-      this.buckets.delete(key)
+  // The tokens of a bucket with what flowed back since it was last seen, at most the capacity; a clock that stepped back takes none away
+  private refilled(bucket: Bucket, now: number): number {
+    const elapsed = Math.max(0, now - bucket.updatedAt)
+    const flowed = (elapsed * this.options.perMinute) / MS_PER_MINUTE
+    return Math.min(this.options.capacity, bucket.tokens + flowed)
+  }
+
+  // A full bucket is the same as none, so the map keeps only the clients that called lately
+  private forgetFull(now: number): void {
+    for (const [key, bucket] of this.buckets) {
+      if (this.refilled(bucket, now) >= this.options.capacity) {
+        this.buckets.delete(key)
+      }
     }
-    return { tokens, updatedAt: now }
   }
 }
 ```
@@ -2240,7 +2458,7 @@ export class MutationLimit extends HttpApiMiddleware.Service<MutationLimit>()(
   { error: Problem429 },
 ) {}
 
-const clientKey = (request: HttpServerRequest): string =>
+const clientKey = (request: HttpServerRequest.HttpServerRequest): string =>
   Option.getOrElse(request.remoteAddress, () => 'local')
 
 export const MutationLimitLive: Layer.Layer<MutationLimit, never, ApiConfig> = Layer.effect(
@@ -2250,7 +2468,7 @@ export const MutationLimitLive: Layer.Layer<MutationLimit, never, ApiConfig> = L
     const buckets = new TokenBuckets({ ...mutationLimit, now: Date.now })
     return (httpEffect) =>
       Effect.gen(function* limitsMutation() {
-        const request = yield* HttpServerRequest
+        const request = yield* HttpServerRequest.HttpServerRequest
         const verdict = buckets.take(clientKey(request))
         if (!verdict.allowed) {
           return yield* Effect.fail(
@@ -2284,7 +2502,7 @@ import { HttpApiEndpoint, HttpApiGroup } from 'effect/http-api'
 import { Authorization } from '../auth.js'
 import { RequestValidation } from '../validation.js'
 
-export const JsonObject = Schema.Record(Schema.String, Schema.Unknown).annotate({
+const JsonObject = Schema.Record(Schema.String, Schema.Unknown).annotate({
   title: 'JsonSchemaDocument',
 })
 
@@ -2376,44 +2594,61 @@ writeFileSync(
 `packages/api/src/layer.ts`:
 ```ts
 import type { KernelServices } from '@bytebureau/kernel'
-import { ByteSize, Layer } from 'effect'
-import type { FileSystem, Path } from 'effect'
-import type { Etag, HttpPlatform, HttpServer } from 'effect/http'
-import { HttpIncomingMessage, HttpMiddleware, HttpRouter } from 'effect/http'
+import { ByteSize, Layer, type FileSystem, type Path } from 'effect'
+import {
+  HttpIncomingMessage,
+  HttpMiddleware,
+  HttpRouter,
+  type Etag,
+  type HttpPlatform,
+  type HttpServer,
+} from 'effect/http'
 import { HttpApiBuilder } from 'effect/http-api'
 import type { SqlClient } from 'effect/sql'
-import { BureauApi } from './api.js'
-import { AuthorizationLive } from './auth.js'
+import { API_PREFIX, BureauApi } from './api.js'
 import { ApiConfig, type ApiOptions } from './config.js'
-import { HealthHandlers } from './handlers/health.js'
-import { SchemasHandlers } from './handlers/schemas.js'
-import { MutationLimitLive } from './rate-limit.js'
-import { RequestValidationLive } from './validation.js'
+import { Handlers } from './handlers/all.js'
+import { Middlewares } from './middlewares.js'
 
-export const OPENAPI_PATH = '/api/v1/openapi.json'
+export const OPENAPI_PATH = `${API_PREFIX}/openapi.json` as const
 const MAX_BODY = ByteSize.megabytes(10)
 
 // What the platform layer of the server provides (BunHttpServer.layer in the binary, NodeHttpServer.layer under Vitest)
-export type ServerPlatform = HttpPlatform.HttpPlatform | FileSystem.FileSystem | Path.Path | Etag.Generator
+export type ServerPlatform =
+  | HttpPlatform.HttpPlatform
+  | FileSystem.FileSystem
+  | Path.Path
+  | Etag.Generator
 
-export type ApiRequirements = HttpRouter.HttpRouter | ServerPlatform | KernelServices | SqlClient.SqlClient
+// A handler reads the kernel when a request comes (a requirement of the request) or when the routes are built
+export type ApiRequirements =
+  | HttpRouter.HttpRouter
+  | ServerPlatform
+  | KernelServices
+  | SqlClient.SqlClient
+  | HttpRouter.Request.From<'Requires', KernelServices>
 
-// Tasks 4–6 add their handler layers here
-const Handlers = Layer.mergeAll(HealthHandlers, SchemasHandlers)
-
-const Middlewares = (options: ApiOptions) =>
-  Layer.mergeAll(AuthorizationLive(options.token), RequestValidationLive, MutationLimitLive).pipe(
-    Layer.provide(Layer.succeed(ApiConfig, options)),
+// The endpoints of the API with their handlers and middlewares
+// One configuration layer serves the middlewares, built with it, and the handlers, which read it with each request
+const Routes = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> => {
+  const config = Layer.succeed(ApiConfig, options)
+  const middlewares = Middlewares(options.token).pipe(Layer.provide(config))
+  return HttpApiBuilder.layer(BureauApi, { openapiPath: OPENAPI_PATH }).pipe(
+    Layer.provide(Handlers),
+    Layer.provide(middlewares),
+    HttpRouter.provideRequest(config),
   )
+}
 
 // Browsers may call the API only from the listed origins; with none listed there is no CORS at all (the embedded UI of SP2 is same-origin)
+// A predicate rather than the list: with a list of one, Effect would name that origin to every requester
 const Cors = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
   origins.length === 0
     ? Layer.empty
     : HttpRouter.use((router) =>
         router.addGlobalMiddleware(
           HttpMiddleware.cors({
-            allowedOrigins: origins,
+            allowedOrigins: (origin) => origins.includes(origin),
             allowedMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
             allowedHeaders: ['authorization', 'content-type', 'last-event-id'],
           }),
@@ -2424,28 +2659,228 @@ const BodyLimit = Layer.succeed(HttpIncomingMessage.MaxBodySize, MAX_BODY)
 
 // The routes of the API on the router of the environment; the OpenAPI document is served next to them
 export const ApiLive = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> =>
-  Layer.mergeAll(
-    HttpApiBuilder.layer(BureauApi, { openapiPath: OPENAPI_PATH }).pipe(
-      Layer.provide(Handlers),
-      Layer.provide(Middlewares(options)),
-      Layer.provide(Layer.succeed(ApiConfig, options)),
-    ),
-    Cors(options.corsOrigins),
-  ).pipe(Layer.provide(BodyLimit))
+  Layer.mergeAll(Routes(options), Cors(options.corsOrigins)).pipe(Layer.provide(BodyLimit))
 
 // The API served by the HttpServer of the environment; the router is private to it
 export const serveApi = (
   options: ApiOptions,
-): Layer.Layer<never, never, HttpServer.HttpServer | ServerPlatform | KernelServices | SqlClient.SqlClient> =>
-  HttpRouter.serve(ApiLive(options), { disableLogger: true })
+): Layer.Layer<
+  never,
+  never,
+  HttpServer.HttpServer | ServerPlatform | KernelServices | SqlClient.SqlClient
+> => HttpRouter.serve(ApiLive(options), { disableLogger: true })
 ```
 If the compiler names a service the alias misses (or one it does not need), adjust `ServerPlatform`; the shape of the layer is the point, not the exact alias. `Layer.empty` is the layer that provides nothing; if `effect@4.0.0` spells it differently (`Layer.succeedContext(Context.empty())`), use that. Body size: `MaxBodySize` bounds the bodies the Node server of the tests reads; on Bun the limit that counts is `maxRequestBodySize` of `BunHttpServer.layer` (fact sheet §1.8, §5), which Task 8 sets to the same 10 MB — Bun answers an oversized body with an empty `413`, a documented exception to the problem bodies.
+
+`packages/api/src/middlewares.ts` (added during execution):
+```ts
+import { Layer, type Redacted } from 'effect'
+import { AuthorizationLive, type Authorization } from './auth.js'
+import type { ApiConfig } from './config.js'
+import { MutationLimitLive, type MutationLimit } from './rate-limit.js'
+import { RequestValidationLive, type RequestValidation } from './validation.js'
+
+// The middlewares the groups declare: the bearer token, the validation of requests and the limit on mutations
+export const Middlewares = (
+  token: Redacted.Redacted,
+): Layer.Layer<Authorization | RequestValidation | MutationLimit, never, ApiConfig> =>
+  Layer.mergeAll(AuthorizationLive(token), RequestValidationLive, MutationLimitLive)
+```
+`packages/api/src/handlers/all.ts` (added during execution):
+```ts
+import { Layer } from 'effect'
+import { HealthHandlers } from './health.js'
+import { SchemasHandlers } from './schemas.js'
+
+// The handler layers of every group; Tasks 4–6 add theirs here
+export const Handlers = Layer.mergeAll(HealthHandlers, SchemasHandlers)
+```
+`packages/api/src/logging.ts` (added during execution):
+```ts
+import { Effect } from 'effect'
+
+// The kernel's LogTape bridge files a log line under its category annotation; the API's own lines go to bb.api
+const underApi = Effect.annotateLogs('category', 'bb.api')
+
+export const logApiError = (...parts: readonly unknown[]): Effect.Effect<void> =>
+  underApi(Effect.logError(...parts))
+
+export const logApiWarning = (...parts: readonly unknown[]): Effect.Effect<void> =>
+  underApi(Effect.logWarning(...parts))
+```
+`packages/api/src/testing-kernel.ts` (added during execution):
+```ts
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { PluginHost, type KernelServices } from '@bytebureau/kernel'
+import { KernelTest } from '@bytebureau/kernel/testing'
+import { Effect, Layer } from 'effect'
+import type { SqlClient } from 'effect/sql'
+
+// A home of its own for the kernel of a suite, removed when the layer is released; the kernel's tempDir lives only as long as one test
+const tempHome = Effect.acquireRelease(
+  Effect.sync(() => {
+    const created = mkdtempSync(path.join(tmpdir(), 'bb-api-'))
+    return realpathSync(created)
+  }),
+  (home) =>
+    Effect.sync(() => {
+      rmSync(home, { recursive: true, force: true })
+    }),
+)
+
+// The test kernel over the home with its plugins loaded, as the daemon loads them at start
+const bootedOver = (home: string): Layer.Layer<KernelServices | SqlClient.SqlClient> =>
+  Layer.effectDiscard(PluginHost.use((host) => host.load())).pipe(
+    Layer.provideMerge(KernelTest({ home, env: {} })),
+  )
+
+export const BootedKernel: Layer.Layer<KernelServices | SqlClient.SqlClient> = Layer.unwrap(
+  tempHome.pipe(Effect.map((home) => bootedOver(home))),
+)
+```
+`packages/api/src/cors.test.ts` (added during execution):
+```ts
+import { assert, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { ApiTestLayer, baseUrl, fetched } from './testing.js'
+
+const UI = 'http://ui.test'
+
+// The preflight a browser sends from the origin before it reads the events schema
+const preflight = (origin: string): RequestInit => ({
+  method: 'OPTIONS',
+  headers: { origin, 'access-control-request-method': 'GET' },
+})
+
+it.layer(ApiTestLayer({ corsOrigins: [UI] }))('CORS for a configured origin', (suite) => {
+  suite.effect('answers the preflight of the origin with the origin and the token header', () =>
+    Effect.gen(function* answersPreflight() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/api/v1/schemas/events.json`, preflight(UI))
+      assert.strictEqual(response.status, 204)
+      assert.strictEqual(response.headers.get('access-control-allow-origin'), UI)
+      assert.include(response.headers.get('access-control-allow-headers'), 'authorization')
+    }),
+  )
+
+  suite.effect('names no origin to an origin off the list', () =>
+    Effect.gen(function* refusesOthers() {
+      const base = yield* baseUrl
+      const other = preflight('http://elsewhere.test')
+      const response = yield* fetched(`${base}/api/v1/schemas/events.json`, other)
+      assert.isNull(response.headers.get('access-control-allow-origin'))
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('CORS by default', (suite) => {
+  suite.effect('lets no browser origin read an answer', () =>
+    Effect.gen(function* refusesOrigins() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/api/v1/health`, { headers: { origin: UI } })
+      assert.strictEqual(response.status, 200)
+      assert.isNull(response.headers.get('access-control-allow-origin'))
+    }),
+  )
+})
+```
+`packages/api/src/validation.test.ts` (added during execution):
+```ts
+import { createServer } from 'node:http'
+import { NodeHttpServer } from '@effect/platform-node'
+import { assert, it } from '@effect/vitest'
+import { Effect, Layer, Logger, References, Schema } from 'effect'
+import { HttpRouter } from 'effect/http'
+import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/http-api'
+import { baseUrl, bodyOf, fetched } from './testing.js'
+import { RequestValidation, RequestValidationLive } from './validation.js'
+
+// An endpoint that reads a number from its query, and one whose answer its own schema refuses
+const Probe = HttpApi.make('probe').add(
+  HttpApiGroup.make('probe')
+    .add(
+      HttpApiEndpoint.get('since', '/since', {
+        query: { since: Schema.FiniteFromString },
+        success: Schema.Finite,
+      }),
+      HttpApiEndpoint.get('broken', '/broken', { success: Schema.Int }),
+    )
+    .middleware(RequestValidation),
+)
+
+const ProbeHandlers = HttpApiBuilder.group(Probe, 'probe', (handlers) =>
+  handlers
+    .handle('since', ({ query }) => Effect.succeed(query.since))
+    .handle('broken', () => Effect.succeed(0.5)),
+)
+
+// The categories of the lines the server logs
+const categories: unknown[] = []
+const capture = Logger.make((options) => {
+  categories.push(options.fiber.getRef(References.CurrentLogAnnotations)['category'])
+})
+
+const ProbeServer = HttpRouter.serve(
+  HttpApiBuilder.layer(Probe).pipe(
+    Layer.provide(ProbeHandlers),
+    Layer.provide(RequestValidationLive),
+  ),
+  { disableLogger: true, disableListenLog: true },
+).pipe(
+  Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
+  Layer.provide(Logger.layer([capture])),
+)
+
+it.layer(ProbeServer)('RequestValidation', (suite) => {
+  suite.effect('answers input the schema refuses with a 400 problem that names the part', () =>
+    Effect.gen(function* refusesInput() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/since?since=soon`)
+      assert.strictEqual(response.status, 400)
+      assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.containSubset(yield* bodyOf(response), {
+        code: 'request_invalid',
+        detail: 'Query: Expected a finite number\n  at ["since"]',
+      })
+    }),
+  )
+
+  suite.effect('answers a response its schema refuses as an internal failure and logs it', () =>
+    Effect.gen(function* refusesResponse() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/broken`)
+      assert.strictEqual(response.status, 500)
+      assert.deepStrictEqual(yield* bodyOf(response), {
+        type: 'https://bytebureau.dev/problems/internal',
+        title: 'Internal Server Error',
+        status: 500,
+        detail: 'unexpected failure',
+        code: 'internal',
+      })
+      assert.deepStrictEqual(categories, ['bb.api'])
+    }),
+  )
+})
+```
 
 `packages/api/src/index.ts`:
 ```ts
 export { BureauApi, API_PREFIX } from './api.js'
-export { ApiConfig, DEFAULT_API_OPTIONS, type ApiOptions, type MutationLimitOptions } from './config.js'
-export { ApiLive, serveApi, OPENAPI_PATH, type ApiRequirements, type ServerPlatform } from './layer.js'
+export {
+  ApiConfig,
+  DEFAULT_API_OPTIONS,
+  type ApiOptions,
+  type MutationLimitOptions,
+} from './config.js'
+export {
+  ApiLive,
+  serveApi,
+  OPENAPI_PATH,
+  type ApiRequirements,
+  type ServerPlatform,
+} from './layer.js'
 export { Authorization, AuthorizationLive, sameToken } from './auth.js'
 export { RequestValidation } from './validation.js'
 export { MutationLimit } from './rate-limit.js'
@@ -2456,7 +2891,20 @@ export {
   orProblem,
   PROBLEM_SCHEMAS,
   PROBLEM_STATUSES,
+  KERNEL_STATUSES,
+  Problem400,
+  Problem401,
+  Problem403,
+  Problem404,
+  Problem409,
+  Problem413,
+  Problem422,
+  Problem429,
+  Problem500,
+  Problem502,
+  Problem503,
   type ApiProblem,
+  type KernelStatus,
   type ProblemStatus,
 } from './problems.js'
 ```
@@ -2464,12 +2912,14 @@ export {
 `packages/api/src/testing.ts`:
 ```ts
 import { createServer } from 'node:http'
-import { KernelTest } from '@bytebureau/kernel/testing'
+import type { KernelServices } from '@bytebureau/kernel'
 import { NodeHttpServer } from '@effect/platform-node'
 import { Effect, Layer, Redacted } from 'effect'
-import { HttpServer } from 'effect/http'
+import { HttpServer, type HttpServerError } from 'effect/http'
+import type { SqlClient } from 'effect/sql'
 import { DEFAULT_API_OPTIONS, type ApiOptions } from './config.js'
 import { serveApi } from './layer.js'
+import { BootedKernel } from './testing-kernel.js'
 
 export const TEST_TOKEN = 'test-token-0123456789abcdef0123456789abcdef0123456789abcdef'
 
@@ -2481,14 +2931,16 @@ export const testOptions = (overrides: Partial<ApiOptions> = {}): ApiOptions => 
   ...overrides,
 })
 
-// The API over the test kernel on an ephemeral port of the Node server; a test reads the address from HttpServer
+// The API over the test kernel on an ephemeral loopback port of the Node server; a test reads the address from HttpServer
 export const ApiTestLayer = (
-  home: string,
   overrides: Partial<ApiOptions> = {},
-): Layer.Layer<HttpServer.HttpServer> =>
+): Layer.Layer<
+  HttpServer.HttpServer | KernelServices | SqlClient.SqlClient,
+  HttpServerError.ServeError
+> =>
   serveApi(testOptions(overrides)).pipe(
-    Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0 })),
-    Layer.provideMerge(KernelTest({ home, env: {} })),
+    Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
+    Layer.provideMerge(BootedKernel),
   )
 
 // http://127.0.0.1:<port>, whatever form the platform prints the address in
@@ -2497,16 +2949,32 @@ export const baseUrl: Effect.Effect<string, never, HttpServer.HttpServer> =
     Effect.succeed(address.startsWith('http') ? address : `http://${address}`),
   )
 
-export const authorized = (init: RequestInit = {}): RequestInit => ({
-  ...init,
-  headers: { ...init.headers, authorization: `Bearer ${TEST_TOKEN}` },
-})
+// The request with the bearer token of the tests added to the headers it already has
+export const authorized = (init: RequestInit = {}): RequestInit => {
+  const headers = new Headers(init.headers)
+  headers.set('authorization', `Bearer ${TEST_TOKEN}`)
+  return { ...init, headers }
+}
 
 export const json = (body: unknown): RequestInit =>
   authorized({
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+  })
+
+// What the server answers, as an effect a test yields
+export const fetched = (url: string, init?: RequestInit): Effect.Effect<Response> =>
+  Effect.promise(async () => {
+    const response = await fetch(url, init)
+    return response
+  })
+
+// The JSON body of an answer
+export const bodyOf = (response: Response): Effect.Effect<unknown> =>
+  Effect.promise(async () => {
+    const body: unknown = await response.json()
+    return body
   })
 ```
 `Layer.provideMerge(KernelTest(...))` exposes the kernel services too, so a test can call the kernel directly next to the HTTP calls; the declared type may need `HttpServer.HttpServer | KernelServices | SqlClient.SqlClient` — widen it if the compiler asks.
@@ -2515,118 +2983,120 @@ export const json = (body: unknown): RequestInit =>
 
 `packages/api/src/health.test.ts`:
 ```ts
-import { tempDir } from '@bytebureau/kernel/testing'
-import { it } from '@effect/vitest'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, baseUrl } from './testing.js'
+import { ApiTestLayer, baseUrl, bodyOf, fetched } from './testing.js'
 
-describe('GET /api/v1/health', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the test kernel', (it) => {
-    it.effect('answers without a token with the status, the version and the checks', () =>
-      Effect.gen(function* checksHealth() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/health`))
-        expect(response.status).toBe(200)
-        expect(response.headers.get('content-type')).toContain('application/json')
-        expect(yield* Effect.promise(() => response.json())).toStrictEqual({
-          status: 'ok',
-          version: '0.0.0-test',
-          startedAt: '2026-10-04T00:00:00.000Z',
-          checks: { store: 'ok', plugins: { loaded: 2, failed: 0 } },
-        })
-      }),
-    )
+it.layer(ApiTestLayer())('GET /api/v1/health over the test kernel', (suite) => {
+  suite.effect('answers without a token with the status, the version and the checks', () =>
+    Effect.gen(function* checksHealth() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/api/v1/health`)
+      assert.strictEqual(response.status, 200)
+      assert.include(response.headers.get('content-type'), 'application/json')
+      assert.deepStrictEqual(yield* bodyOf(response), {
+        status: 'ok',
+        version: '0.0.0-test',
+        startedAt: '2026-10-04T00:00:00.000Z',
+        checks: { store: 'ok', plugins: { loaded: 2, failed: 0 } },
+      })
+    }),
+  )
 
-    it.effect('serves the OpenAPI document without a token', () =>
-      Effect.gen(function* readsOpenApi() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/openapi.json`))
-        expect(response.status).toBe(200)
-        const document: unknown = yield* Effect.promise(() => response.json())
-        expect(document).toMatchObject({ openapi: '3.1.0', info: { title: 'ByteBureau API' } })
-      }),
-    )
-  })
+  suite.effect('serves the OpenAPI document without a token', () =>
+    Effect.gen(function* readsOpenApi() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/api/v1/openapi.json`)
+      assert.strictEqual(response.status, 200)
+      assert.containSubset(yield* bodyOf(response), {
+        openapi: '3.1.0',
+        info: { title: 'ByteBureau API' },
+      })
+    }),
+  )
 })
 ```
 The two loaded plugins are the bundled `workspace-local` and the fake agent (`BUNDLED_PLUGINS` in the kernel); if the kernel of Task 2 reports another count, the test follows the kernel.
 
 `packages/api/src/auth.test.ts`:
 ```ts
-import { tempDir } from '@bytebureau/kernel/testing'
-import { it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { configJsonSchema, eventsJsonSchema } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Cause, Effect, Exit, Layer, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
-import { sameToken } from './auth.js'
-import { ApiTestLayer, authorized, baseUrl, TEST_TOKEN } from './testing.js'
+import { AuthorizationLive, sameToken } from './auth.js'
+import { ApiTestLayer, authorized, baseUrl, bodyOf, fetched, json } from './testing.js'
+
+const EVENTS_SCHEMA = '/api/v1/schemas/events.json'
+
+// What a refused request carries in its Authorization header: nothing, an empty bearer token, a wrong one
+const REFUSED: [string, Record<string, string>][] = [
+  ['no Authorization header', {}],
+  ['an empty bearer token', { authorization: 'Bearer ' }],
+  ['a wrong token', { authorization: 'Bearer not-the-token' }],
+]
+
+// What building the layer dies with, or nothing when it builds
+const buildFailure = <Out>(layer: Layer.Layer<Out>): string => {
+  const built = Effect.runSyncExit(Effect.scoped(Layer.build(layer)))
+  return Exit.match(built, { onFailure: (cause) => Cause.pretty(cause), onSuccess: () => '' })
+}
 
 describe(sameToken, () => {
-  it('is true only for the same token, whatever the length of the other', () => {
+  it('is true only for the same token, whatever the length of the other, and never for an empty one', () => {
     expect(sameToken('abc', 'abc')).toBe(true)
     expect(sameToken('abc', 'abd')).toBe(false)
     expect(sameToken('ab', 'abc')).toBe(false)
-    expect(sameToken('', '')).toBe(true)
+    expect(sameToken('', '')).toBe(false)
   })
 })
 
-describe('the bearer token', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('on a protected endpoint', (it) => {
-    it.effect('is required: no header is an empty 401', () =>
-      Effect.gen(function* refusesMissing() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/schemas/events.json`))
-        expect(response.status).toBe(401)
-      }),
-    )
-
-    it.effect('is checked: a wrong token is a 401 problem', () =>
-      Effect.gen(function* refusesWrong() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/schemas/events.json`, {
-            headers: { authorization: 'Bearer not-the-token' },
-          }),
-        )
-        expect(response.status).toBe(401)
-        expect(response.headers.get('content-type')).toContain('application/problem+json')
-        expect(yield* Effect.promise(() => response.json())).toStrictEqual({
-          type: 'https://bytebureau.dev/problems/unauthorized',
-          title: 'Unauthorized',
-          status: 401,
-          detail: 'a valid bearer token is required',
-          code: 'unauthorized',
-        })
-      }),
-    )
-
-    it.effect('refuses a body over 10 MB with 413 before any handler runs', () =>
-      Effect.gen(function* refusesBig() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/projects`, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${TEST_TOKEN}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ path: 'x'.repeat(11 * 1024 * 1024) }),
-          }),
-        )
-        expect(response.status).toBe(413)
-      }),
-    )
-
-    it.effect('opens the endpoint: the events schema is the one the protocol publishes', () =>
-      Effect.gen(function* serves() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/schemas/events.json`, authorized()),
-        )
-        expect(response.status).toBe(200)
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({
-          $id: 'https://bytebureau.dev/schema/v1/events.json',
-        })
-      }),
-    )
+describe(AuthorizationLive, () => {
+  it('refuses to build without a token, which would let every request in', () => {
+    const withoutToken = AuthorizationLive(Redacted.make(''))
+    expect(buildFailure(withoutToken)).toContain('the API token must not be empty')
+    const withToken = AuthorizationLive(Redacted.make('token'))
+    expect(buildFailure(withToken)).toBe('')
   })
+})
+
+it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => {
+  suite.effect.each(REFUSED)('refuses %s with the 401 problem', ([, headers]) =>
+    Effect.gen(function* refuses() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}${EVENTS_SCHEMA}`, { headers })
+      assert.strictEqual(response.status, 401)
+      assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.deepStrictEqual(yield* bodyOf(response), {
+        type: 'https://bytebureau.dev/problems/unauthorized',
+        title: 'Unauthorized',
+        status: 401,
+        detail: 'a valid API token is required',
+        code: 'unauthorized',
+      })
+    }),
+  )
+
+  // POST /api/v1/projects arrives with Task 4, which un-skips this test
+  suite.effect.skip('refuses a body over 10 MB with 413 before any handler runs', () =>
+    Effect.gen(function* refusesBig() {
+      const base = yield* baseUrl
+      const oversized = json({ path: 'x'.repeat(11 * 1024 * 1024) })
+      const response = yield* fetched(`${base}/api/v1/projects`, oversized)
+      assert.strictEqual(response.status, 413)
+    }),
+  )
+
+  suite.effect('opens the endpoints: the schemas are the ones the protocol publishes', () =>
+    Effect.gen(function* serves() {
+      const base = yield* baseUrl
+      const events = yield* fetched(`${base}${EVENTS_SCHEMA}`, authorized())
+      assert.strictEqual(events.status, 200)
+      assert.deepStrictEqual(yield* bodyOf(events), eventsJsonSchema())
+      const config = yield* fetched(`${base}/api/v1/schemas/config.json`, authorized())
+      assert.deepStrictEqual(yield* bodyOf(config), configJsonSchema())
+    }),
+  )
 })
 ```
 
@@ -2637,8 +3107,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { openApiDocument } from './openapi.js'
 
-const committed = (): unknown =>
-  JSON.parse(readFileSync(fileURLToPath(new URL('../openapi.json', import.meta.url)), 'utf8'))
+const committed = fileURLToPath(new URL('../openapi.json', import.meta.url))
 
 describe('the OpenAPI document', () => {
   it('is OpenAPI 3.1 with the title and the bearer scheme, and openapi.json is up to date', () => {
@@ -2646,7 +3115,9 @@ describe('the OpenAPI document', () => {
     expect(document.openapi).toBe('3.1.0')
     expect(document.info).toMatchObject({ title: 'ByteBureau API', version: 'v1' })
     expect(document.components.securitySchemes).toHaveProperty('bearer')
-    expect(JSON.parse(JSON.stringify(document))).toStrictEqual(committed())
+    expect(document.components.schemas).toHaveProperty('Problem401')
+    // The text the build writes, so a stale or reformatted openapi.json fails as well
+    expect(readFileSync(committed, 'utf8')).toBe(`${JSON.stringify(document, undefined, 2)}\n`)
   })
 
   it('lists the health check and the schemas under /api/v1', () => {
@@ -2678,7 +3149,7 @@ git commit -m "feat(api): scaffold the API package with problems, bearer auth, v
 - Modify: `packages/api/src/api.ts` (the groups join the `.add(...)` call), `packages/api/src/layer.ts` (the handler layers join `Handlers`), `packages/api/openapi.json` (regenerated), `packages/kernel/src/asks/ask-service.ts` (+ `ask-service` shape: `get(askId)`), `packages/kernel/src/index.ts` if `AskRecord` helpers need exporting
 
 **Interfaces:**
-- Consumes: kernel services `ProjectRegistry`, `SessionManager`, `AskService`, `UsageService`, `WorkspaceManager`, `PluginHost` and their shapes (Phase A, with `recover` from Task 2); `orProblem`, `problem`, `PROBLEM_SCHEMAS`, `Authorization`, `RequestValidation`, `MutationLimit`, `BureauApi`, `ApiTestLayer`, `baseUrl`, `authorized`, `json` (Task 3); the DTO and request schemas of Task 1; `tempDir`, `createTempRepo`, `writeConfig` (`@bytebureau/kernel/testing`).
+- Consumes: kernel services `ProjectRegistry`, `SessionManager`, `AskService`, `UsageService`, `WorkspaceManager`, `PluginHost` and their shapes (Phase A, with `recover` from Task 2); `orProblem`, `problem`, `PROBLEM_SCHEMAS`, `KernelStatus`, `Authorization`, `RequestValidation`, `MutationLimit`, `BureauApi`, `ApiTestLayer(overrides?)`, `baseUrl`, `authorized`, `json` (Task 3; `json` is the authorised POST helper — if Task 3 named it differently, use its name); the DTO and request schemas of Task 1; `tempDir`, `createTempRepo`, `writeConfig` (`@bytebureau/kernel/testing`).
 - Produces: the endpoints listed below (the OpenAPI document and the client of Task 7 are generated from them), `found()`, `AskServiceShape.get(askId): Effect<AskRecord | undefined, StoreError>`, and for tests `fakeProjectConfig`, `createdSession()`, `firstEvent()`.
 
 Endpoints (every one under `/api/v1`, bearer token required, bodies and queries validated; `M` marks a mutation, rate limited):
@@ -2707,7 +3178,11 @@ Endpoints (every one under `/api/v1`, bearer token required, bodies and queries 
 
 Profile endpoints (`profiles` group) and per-profile usage snapshots arrive with the profiles of Phase C; the spec's `usage` group ships its session part here.
 
-Semantics: handlers call the kernel's Effect services directly (no Promise facade in the daemon) and turn every typed failure into a problem with `orProblem`; `found(entity, code, detail)` turns an `undefined` lookup into a `404`. `POST /sessions` is synchronous up to `ready`, like `SessionManager.create` (the worktree is provisioned before the response), so a client can prompt right after; `POST /sessions/:id/prompt` returns as soon as the turn is recorded, and the turn's progress arrives on the event stream (Task 5). The kernel records answer the DTO schemas field for field; the handlers return them as they are, and `Schema.encodeSync(SessionDto)` in `testing-sessions.ts` pins the mirror at compile time. Every mutation carries `MutationLimit`.
+Semantics: handlers call the kernel's Effect services directly (no Promise facade in the daemon) and turn every typed failure into a problem with `orProblem` (typed `ApiProblem<KernelStatus>` since Task 3's fix round, so every endpoint that calls the kernel — the list endpoints included — declares `error: PROBLEM_SCHEMAS`; the handler layers join `Handlers` in `handlers/all.ts`; `ApiTestLayer(overrides?)` takes no home and loads the plugins itself); `found(entity, code, detail)` turns an `undefined` lookup into a `404`. `POST /sessions` is synchronous up to `ready`, like `SessionManager.create` (the worktree is provisioned before the response), so a client can prompt right after; `POST /sessions/:id/prompt` returns as soon as the turn is recorded, and the turn's progress arrives on the event stream (Task 5). The kernel records answer the DTO schemas field for field; the handlers return them as they are, and `Schema.encodeSync(SessionDto)` in `testing-sessions.ts` pins the mirror at compile time. Every mutation carries `MutationLimit`.
+
+- [ ] **Step 0: The 10 MB body limit answers a problem**
+
+Add a global middleware (`packages/api/src/body-limit.ts`, registered next to CORS in `layer.ts`) that reads the request's `content-length` header and, when it is a number above `MAX_BODY_BYTES` (10 MB, the value `layer.ts` already uses for `MaxBodySize`), answers at once with the `413` problem `payload_too_large` (`application/problem+json`, built with `problem(413, 'payload_too_large', 'the request body exceeds 10 MB')` and `HttpServerResponse.jsonUnsafe(problem, { status: 413, contentType: 'application/problem+json' })` or the equivalent) without reading the body. `MaxBodySize` stays as the backstop for bodies that arrive without a length (Node drops such a connection, Bun answers an empty `413`). Un-skip the 413 test of `auth.test.ts` (Task 3 left it `it.effect.skip`) and let it assert `413` and `{ code: 'payload_too_large' }` on a POST to `/api/v1/projects` with an 11 MB body.
 
 - [ ] **Step 1: `AskService.get` in the kernel**
 
@@ -2727,7 +3202,7 @@ import { RequestValidation } from '../validation.js'
 
 export const ProjectsGroup = HttpApiGroup.make('projects')
   .add(
-    HttpApiEndpoint.get('list', '/projects', { success: Schema.Array(ProjectDto) }),
+    HttpApiEndpoint.get('list', '/projects', { success: Schema.Array(ProjectDto), error: PROBLEM_SCHEMAS }),
     HttpApiEndpoint.post('register', '/projects', {
       payload: RegisterProjectBody,
       success: ProjectDto.pipe(HttpApiSchema.status(201)),
@@ -2773,7 +3248,7 @@ const command = <const Identifier extends string, const Path extends `/${string}
 
 export const SessionsGroup = HttpApiGroup.make('sessions')
   .add(
-    HttpApiEndpoint.get('list', '/sessions', { success: Schema.Array(SessionDto) }),
+    HttpApiEndpoint.get('list', '/sessions', { success: Schema.Array(SessionDto), error: PROBLEM_SCHEMAS }),
     HttpApiEndpoint.post('create', '/sessions', {
       payload: CreateSessionBody,
       success: SessionDto.pipe(HttpApiSchema.status(201)),
@@ -2819,6 +3294,7 @@ export const AsksGroup = HttpApiGroup.make('asks')
     HttpApiEndpoint.get('pending', '/asks', {
       query: { session: Schema.optionalKey(Id) },
       success: Schema.Array(AskRecord),
+      error: PROBLEM_SCHEMAS,
     }),
     HttpApiEndpoint.get('get', '/asks/:id', {
       params: { id: Id },
@@ -2875,6 +3351,7 @@ export const WorkspacesGroup = HttpApiGroup.make('workspaces')
     HttpApiEndpoint.get('list', '/workspaces', {
       query: { project: Schema.optionalKey(Id) },
       success: Schema.Array(WorkspaceInfoDto),
+      error: PROBLEM_SCHEMAS,
     }),
     HttpApiEndpoint.post('prune', '/workspaces/prune', {
       payload: PruneBody,
@@ -2917,7 +3394,7 @@ export const found = <Entity>(
   entity: Entity | undefined,
   code: string,
   detail: string,
-): Effect.Effect<Entity, ApiProblem> =>
+): Effect.Effect<Entity, ApiProblem<404>> =>
   entity === undefined ? Effect.fail(problem(404, code, detail)) : Effect.succeed(entity)
 ```
 
@@ -3128,7 +3605,7 @@ import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
 import { registeredProject } from './testing-sessions.js'
 
 describe('/api/v1/projects', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the test kernel', (it) => {
+  it.layer(ApiTestLayer())('over the test kernel', (it) => {
     it.effect('registers a repository with 201, lists it, reads it and removes it', () =>
       Effect.gen(function* roundTrips() {
         const base = yield* baseUrl
@@ -3189,7 +3666,6 @@ The exact `detail` of the not-a-repository refusal is the kernel's `WorkspaceErr
 
 `packages/api/src/sessions.test.ts`:
 ```ts
-import { tempDir } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
@@ -3197,7 +3673,7 @@ import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
 import { createdSession, firstEvent, post } from './testing-sessions.js'
 
 describe('/api/v1/sessions', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the test kernel and the fake provider', (it) => {
+  it.layer(ApiTestLayer())('over the test kernel and the fake provider', (it) => {
     it.effect('creates a ready session with its worktree, prompts it, completes it and reads its usage', () =>
       Effect.gen(function* runsOne() {
         const base = yield* baseUrl
@@ -3257,7 +3733,6 @@ The option id the fake provider's question offers is the one `packages/kernel/sr
 
 `packages/api/src/asks.test.ts`:
 ```ts
-import { tempDir } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
@@ -3265,7 +3740,7 @@ import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
 import { createdSession, firstEvent } from './testing-sessions.js'
 
 describe('/api/v1/asks', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the fake provider', (it) => {
+  it.layer(ApiTestLayer())('over the fake provider', (it) => {
     it.effect('lists the pending ask of a session, answers it once and reads it back answered via api', () =>
       Effect.gen(function* answers() {
         const base = yield* baseUrl
@@ -3310,7 +3785,6 @@ The `?.` and `??` chains above are refused by the lint (`oxc/no-optional-chainin
 
 `packages/api/src/workspaces-plugins.test.ts`:
 ```ts
-import { tempDir } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
@@ -3318,7 +3792,7 @@ import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
 import { createdSession } from './testing-sessions.js'
 
 describe('/api/v1/workspaces, /plugins and /providers', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the test kernel', (it) => {
+  it.layer(ApiTestLayer())('over the test kernel', (it) => {
     it.effect('lists the worktree of a session and prunes nothing while it is young', () =>
       Effect.gen(function* lists() {
         const base = yield* baseUrl
@@ -3347,14 +3821,14 @@ describe('/api/v1/workspaces, /plugins and /providers', () => {
 
 `packages/api/src/rate-limit.test.ts`:
 ```ts
-import { createTempRepo, tempDir } from '@bytebureau/kernel/testing'
+import { createTempRepo } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 import { ApiTestLayer, baseUrl, json } from './testing.js'
 
 describe('the mutation rate limit', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-'), { mutationLimit: { capacity: 2, perMinute: 60 } }))(
+  it.layer(ApiTestLayer({ mutationLimit: { capacity: 2, perMinute: 60 } }))(
     'with two tokens',
     (it) => {
       it.effect('answers the third mutation in a row with 429 rate_limited', () =>
@@ -3681,7 +4155,6 @@ The `??` operators are fine (only `?.` is refused); `max-statements` may ask for
 `packages/api/src/events.test.ts`:
 ```ts
 import { EventLog } from '@bytebureau/kernel'
-import { tempDir } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
@@ -3693,7 +4166,7 @@ const seqOf = (frame: SseFrame): number => Number(frame.id)
 const typesOf = (frames: readonly SseFrame[]): string[] => frames.map((frame) => frame.event)
 
 describe('GET /api/v1/events', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-'), { heartbeat: '100 millis' }))('over the fake provider', (it) => {
+  it.layer(ApiTestLayer({ heartbeat: '100 millis' }))('over the fake provider', (it) => {
     it.effect('replays the durable events of a session with their seq as id, then streams the live ones', () =>
       Effect.gen(function* streams() {
         const base = yield* baseUrl
@@ -3813,6 +4286,7 @@ import { Effect, Layer, Option, Redacted } from 'effect'
 import { Headers } from 'effect/http'
 import { RpcMiddleware } from 'effect/rpc'
 import { sameToken, UNAUTHORIZED } from '../auth.js'
+// Task 3 stopped exporting UNAUTHORIZED while nothing used it: export it from auth.ts again here
 
 export class RpcAuthorization extends RpcMiddleware.Service<RpcAuthorization>()(
   'bb/api/RpcAuthorization',
@@ -3830,15 +4304,21 @@ export const bearerOf = (headers: Headers.Headers): string | undefined => {
   return value.slice(BEARER.length).trim()
 }
 
+// Built the way AuthorizationLive is: an empty token is a programming error and dies at construction
 export const RpcAuthorizationLive = (
   token: Redacted.Redacted<string>,
 ): Layer.Layer<RpcAuthorization> =>
-  Layer.succeed(RpcAuthorization, (effect, { headers }) => {
-    const given = bearerOf(headers)
-    return given !== undefined && sameToken(given, Redacted.value(token))
-      ? effect
-      : Effect.fail(UNAUTHORIZED)
-  })
+  Layer.effect(
+    RpcAuthorization,
+    Redacted.value(token) === ''
+      ? Effect.die(new Error('the API token must not be empty'))
+      : Effect.succeed((effect, { headers }) => {
+          const given = bearerOf(headers)
+          return given !== undefined && sameToken(given, Redacted.value(token))
+            ? effect
+            : Effect.fail(UNAUTHORIZED)
+        }),
+  )
 ```
 If `Headers.get` returns `string | undefined` rather than an `Option`, drop the `Option.getOrUndefined`.
 
@@ -3991,7 +4471,7 @@ Both Bun's and Node's (undici) global `WebSocket` accept a non-standard `{ heade
 
 `packages/api/src/rpc.test.ts`:
 ```ts
-import { createTempRepo, tempDir } from '@bytebureau/kernel/testing'
+import { createTempRepo } from '@bytebureau/kernel/testing'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
@@ -4002,7 +4482,7 @@ import { request, wsClient } from './testing-ws.js'
 const wsUrl = (base: string): string => `${base.replace(/^http/u, 'ws')}/api/v1/ws`
 
 describe('GET /api/v1/ws (effect/rpc over WebSocket)', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('over the test kernel', (it) => {
+  it.layer(ApiTestLayer())('over the test kernel', (it) => {
     it.effect('runs a procedure with the token in the request headers and answers with its exit', () =>
       Effect.gen(function* calls() {
         const base = yield* baseUrl
@@ -4646,7 +5126,7 @@ export async function connectRpc(options: RpcOptions): Promise<RpcConnection> {
 
 `packages/api/src/client.test.ts` (criterion 9: the client round-trips every endpoint; `@bytebureau/client` is a devDependency of `packages/api`):
 ```ts
-import { createTempRepo, tempDir, writeConfig } from '@bytebureau/kernel/testing'
+import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
 import { ApiError, createBureauClient } from '@bytebureau/client'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
@@ -4655,7 +5135,7 @@ import { ApiTestLayer, baseUrl, TEST_TOKEN } from './testing.js'
 import { fakeProjectConfig, firstEvent } from './testing-sessions.js'
 
 describe('@bytebureau/client against the API', () => {
-  it.layer(ApiTestLayer(tempDir('bb-api-')))('round-trips every endpoint', (it) => {
+  it.layer(ApiTestLayer())('round-trips every endpoint', (it) => {
     it.effect('projects, sessions, asks, usage, workspaces, plugins and health', () =>
       Effect.gen(function* roundTrips() {
         const client = createBureauClient({ baseUrl: yield* baseUrl, token: TEST_TOKEN })
