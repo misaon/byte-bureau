@@ -1,6 +1,6 @@
 import { m } from '@bytebureau/i18n'
 import { defineCommand } from 'citty'
-import { globalArgs, portOf, processContext, type Context } from '../context.js'
+import { commonArgs, portOf, processContext, refuseBureauFlags, type Context } from '../context.js'
 import { alreadyRunning, announce } from '../daemon/announce.js'
 import { startDetached as started } from '../daemon/start.js'
 import { stopDaemon, type StopOutcome } from '../daemon/stop.js'
@@ -88,7 +88,7 @@ export const serveCommand = defineCommand({
     description: 'Start the ByteBureau daemon (detached unless --no-daemonize)',
   },
   args: {
-    ...globalArgs,
+    ...commonArgs,
     host: {
       type: 'string',
       description: 'Address to listen on (default: 127.0.0.1 or server.host)',
@@ -104,7 +104,9 @@ export const serveCommand = defineCommand({
     },
     stop: { type: 'boolean', description: 'Stop the running daemon of this home', default: false },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
+    // The daemon itself: --host and --port say where it listens, and no other daemon is talked to
+    refuseBureauFlags('serve', rawArgs, ['--host', '--port'])
     const context = processContext(args)
     const home = kernelHome(process.env)
     process.exitCode = args.stop ? await stop(home, context) : await serve(home, args, context)

@@ -195,3 +195,25 @@ describe('bytebureau global flags before a sub-command that has sub-commands', (
     expect([result.code, readServerInfo(home).state]).toStrictEqual([0, 'absent'])
   })
 })
+
+describe('bytebureau commands that talk to no daemon', () => {
+  it.each([
+    ['hello', ['hello', '--host', '127.0.0.1'], '--host'],
+    ['config schema', ['--no-daemon', 'config', 'schema'], '--no-daemon'],
+    ['serve', ['serve', '--token-file', 'token'], '--token-file'],
+  ])('refuse the flags that choose one: %s', async (command, argv, flag) => {
+    expect.hasAssertions()
+    const home = testHome()
+    const refused = await runCli(argv, { BYTEBUREAU_HOME: home })
+    expect([refused.code, readServerInfo(home).state]).toStrictEqual([1, 'absent'])
+    expect(refused.stderr).toContain(`${command} talks to no daemon: it takes no ${flag}`)
+  })
+
+  it('leaves the flags that choose a daemon out of the help of serve', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['serve', '--help'])
+    const usage = stripVTControlCharacters(stdout)
+    expect(usage).toContain('--no-daemonize')
+    expect(usage).not.toMatch(/--(?:no-)?daemon\b|--token-file/u)
+  })
+})

@@ -5,7 +5,8 @@ import { resolveLocale } from './locale.js'
 import { colorEnabled, createOutput, type Output } from './output.js'
 import { usageError } from './usage-error.js'
 
-export const globalArgs = {
+// The flags of every command
+export const commonArgs = {
   lang: { type: 'string', description: 'UI language: en or cs' },
   json: { type: 'boolean', description: 'Machine-readable JSON output', default: false },
   color: {
@@ -24,6 +25,10 @@ export const globalArgs = {
       'Debug logging for every category; --debug=<categories> picks some (bb.agent,!bb.store), always with =',
   },
   'log-level': { type: 'string', description: 'Log level: debug, info, warn or error' },
+} as const
+
+// The flags that choose the daemon a command talks to; a command that talks to none does not take them
+export const bureauArgs = {
   daemon: {
     type: 'boolean',
     description:
@@ -34,6 +39,8 @@ export const globalArgs = {
   port: { type: 'string', description: 'Port of that daemon' },
   'token-file': { type: 'string', description: 'File holding the bearer token of that daemon' },
 } as const
+
+export const globalArgs = { ...commonArgs, ...bureauArgs } as const
 
 export interface GlobalArgs {
   readonly lang?: string | undefined
@@ -111,5 +118,30 @@ export function bureauFlags(args: GlobalArgs): BureauFlags {
     host: args.host,
     port: portOf(args.port),
     tokenFile: args['token-file'],
+  }
+}
+
+const BUREAU_FLAGS: ReadonlySet<string> = new Set([
+  '--daemon',
+  '--no-daemon',
+  '--host',
+  '--port',
+  '--token-file',
+])
+
+// A command that talks to no daemon refuses the flags that choose one, which it would otherwise ignore; those it takes in a sense of its own are kept
+// What follows -- is no flag
+export function refuseBureauFlags(
+  command: string,
+  rawArgs: readonly string[],
+  kept: readonly string[] = [],
+): void {
+  const end = rawArgs.indexOf('--')
+  const flags = (end === -1 ? rawArgs : rawArgs.slice(0, end)).map(
+    (arg) => arg.split('=')[0] ?? arg,
+  )
+  const refused = flags.find((flag) => BUREAU_FLAGS.has(flag) && !kept.includes(flag))
+  if (refused !== undefined) {
+    throw usageError(`${command} talks to no daemon: it takes no ${refused}`)
   }
 }

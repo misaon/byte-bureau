@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { bureauFlags, createContext, globalArgs, type GlobalArgs } from './context.js'
+import {
+  bureauFlags,
+  createContext,
+  globalArgs,
+  refuseBureauFlags,
+  type GlobalArgs,
+} from './context.js'
+import { usageError } from './usage-error.js'
 
 const QUIET: GlobalArgs = { json: false, color: false, yes: false }
 
@@ -95,5 +102,29 @@ describe('the global flags', () => {
     expect(globalArgs.yes.description).toBe(
       'Answer every ask that has a recommended option with it',
     )
+  })
+})
+
+describe(refuseBureauFlags, () => {
+  it.each([
+    ['--host', ['--host', 'h']],
+    ['--port', ['--port=4800']],
+    ['--no-daemon', ['--no-daemon']],
+    ['--daemon', ['--daemon']],
+    ['--token-file', ['--token-file', 't']],
+  ])('refuses %s for a command that talks to no daemon, as a usage error', (flag, rawArgs) => {
+    expect(() => {
+      refuseBureauFlags('hello', rawArgs)
+    }).toThrow(usageError(`hello talks to no daemon: it takes no ${flag}`))
+  })
+
+  it('keeps the flags a command takes in a sense of its own, and what follows --', () => {
+    expect(() => {
+      refuseBureauFlags('serve', ['--host', '0.0.0.0', '--port', '0'], ['--host', '--port'])
+      refuseBureauFlags('hello', ['--lang', 'cs', '--', '--host'])
+    }).not.toThrow()
+    expect(() => {
+      refuseBureauFlags('serve', ['--port', '0', '--token-file', 't'], ['--host', '--port'])
+    }).toThrow(usageError('serve talks to no daemon: it takes no --token-file'))
   })
 })
