@@ -55,7 +55,7 @@ A daemon started on demand gets the environment of the command without the `BYTE
 
 `bytebureau` with no command prints the status: the daemon with its URL, pid and start time, the projects, the sessions running, waiting for you and in all, and the pending asks. With `--json` it prints one record, `{"command":"status",…}`.
 
-Three global flags choose another way:
+These global flags choose another way:
 
 | Flag | What it does |
 | --- | --- |
@@ -65,7 +65,7 @@ Three global flags choose another way:
 
 Like every global flag, they may stand before or after any command name: `bytebureau --port 4848 sessions ls` and `bytebureau sessions ls --port 4848` are the same command. For `serve` itself, `--host` and `--port` are the address to listen on.
 
-Every one of these commands but `run` ends a refused request, a `4xx` problem of the daemon or the refusal of the kernel in-process, with exit 1 and the detail of the problem on stderr; any other failure exits 2. `run` exits 0 when the session completes, 3 when it is stopped or interrupted, 4 when the project, its worktree or the provider cannot be used or the session errors, 2 for any other failure (an invalid configuration, a failure of the store, a daemon that cannot be reached) and 1 for a usage error or a refused `--no-daemon`.
+Every one of these commands but `run` ends a refused request with exit 1 and one line on stderr: a `4xx` problem of the daemon with its detail, the refusal of the kernel in-process, or what the command finds itself (a session or an ask that is not there, an ask without an answer to give). A usage error, a refused `--no-daemon` and a cancelled interactive answer exit 1 as well, and any other failure exits 2. `run` exits 0 when the session completes, 3 when it is stopped or interrupted, 4 when the project, its worktree or the provider cannot be used or the session errors, 2 for any other failure (an invalid configuration, a failure of the store, a daemon that cannot be reached) and 1 for a usage error or a refused `--no-daemon`.
 
 ## The API
 
@@ -98,7 +98,7 @@ Every path starts with `/api/v1` and every body is JSON. Every operation needs t
 | `GET /plugins` | `200 PluginStatus[]` | |
 | `GET /providers` | `200 Provider[]` | the agent providers the loaded plugins offer |
 | `GET /events` | `200` | the event stream, see [Events over SSE](#events-over-sse) |
-| `GET /ws` | `101` | the RPC socket, see [RPC over WebSocket](#rpc-over-websocket) |
+| `GET /ws` | `101` | the RPC socket, see [RPC over WebSocket](#rpc-over-websocket); the upgrade takes no token (`101`, or `403` for a foreign `Origin`), and every RPC request on the socket carries it |
 
 ### Problems
 
@@ -114,7 +114,7 @@ A refusal is an RFC 9457 problem, `application/problem+json`:
 }
 ```
 
-The OpenAPI document has one problem schema per status, `Problem400` to `Problem503`, each with its status as a literal, so a client knows which problem every status carries. Text in a detail that looks like a secret is replaced with `[REDACTED]`. The codes, by status:
+The OpenAPI document has one problem schema for each status an endpoint declares (`Problem400`, `Problem401`, `Problem403`, `Problem404`, `Problem409`, `Problem422`, `Problem429`, `Problem500`, `Problem502` and `Problem503`), each with its status as a literal, so a client knows which problem every status carries. The 413 of the body limit is answered before routing and is not in the document. Text in a detail that looks like a secret is replaced with `[REDACTED]`. The codes, by status:
 
 | Status | Codes |
 | --- | --- |
@@ -123,7 +123,7 @@ The OpenAPI document has one problem schema per status, `Problem400` to `Problem
 | 403 | `session_yolo_refused` |
 | 404 | `not_found` (a project), `session_not_found`, `ask_not_found` |
 | 409 | `session_invalid_transition`, `ask_not_pending`, `workspace_locked`, `workspace_dirty`, `workspace_has_sessions` |
-| 413 | `payload_too_large` |
+| 413 | `payload_too_large`, answered before routing and not in the OpenAPI document |
 | 422 | `config_invalid`, `session_provider_missing`, `session_employee_missing`, `ask_invalid_answer`, `provider_missing`, `workspace_not_a_repository`, `workspace_is_bytebureau_worktree`, `workspace_git_too_old`, `workspace_git_failed`, `workspace_fs_failed`, `workspace_runtime_missing` |
 | 429 | `rate_limited` |
 | 500 | `internal`, `plugin_failed` |

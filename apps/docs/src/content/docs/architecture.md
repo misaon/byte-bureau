@@ -52,7 +52,7 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 ## Decisions of phase B
 
 - The health check, `GET /api/v1/health`, is the one operation of the API without a token, so a client can check a daemon before it has read the token; the OpenAPI document is served without one as well.
-- Errors are RFC 9457 problems with one schema per status, each with its status as a literal, so the OpenAPI document and the generated client know which problem every status carries.
+- Errors are RFC 9457 problems with one schema for each status an endpoint declares, each with its status as a literal, so the OpenAPI document and the generated client know which problem every status carries; the 413 of the body limit is answered before routing and is not in the document.
 - The token is made at the first start of a home and kept in `daemon.token` across restarts, so a client that has read it goes on working; `server.json` carries a copy while the daemon runs.
 - A session that a restart interrupted is `stopped`, with its turn `interrupted` (reason `daemon_restart`) and its asks cancelled, and resumable with `sessions resume`; spec §14 had the session marked `interrupted`, which is a status of turns.
 - Event payloads are redacted once, at publish ([ADR-0012](../decisions/0012-event-payloads-are-redacted-at-publish/)).

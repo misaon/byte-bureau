@@ -69,7 +69,7 @@ Start with `docs/research/2026-10-02-technology-landscape.md`, the specs in `doc
 - A service is a `Context.Service` class with a `Live` layer beside it (`EventLog` and `EventLogLive`); `KernelLayer` composes them.
 - Persistence goes through `effect/sql`: `StoreLive` (`bun:sqlite`) in the binary, the in-memory `StoreTest` under Vitest ([ADR-0010](docs/decisions/0010-sqlite-through-effect-sql.md)). Configuration files are JSON or JSONC read as text, never run ([ADR-0011](docs/decisions/0011-configuration-files-are-data.md)).
 - Tests use `@effect/vitest` (`it.effect`, `it.layer`), `KernelTest` from `@bytebureau/kernel/testing` (the whole kernel over `StoreTest`), `TestClock` for time and the fake provider for the agent; no test spawns a real agent.
-- `StoreLive` cannot load under Node, so Vitest never imports it: the CLI tests run it in a Bun subprocess, and the compiled-binary smoke in CI (`bytebureau run … --provider fake`) runs it in the shipped binary. To try that by hand, build with `bun run build:binaries --host` and point `BYTEBUREAU_HOME` at a throwaway directory so that `~/.bytebureau` stays untouched.
+- `StoreLive` cannot load under Node, so Vitest never imports it: the CLI tests run it in a Bun subprocess, and the compiled-binary smoke in CI (`bytebureau run … --provider fake --no-daemon`) runs it in the shipped binary. To try that by hand, build with `bun run build:binaries --host`, point `BYTEBUREAU_HOME` at a throwaway directory so that `~/.bytebureau` stays untouched, and pass `--no-daemon` so that no daemon starts.
 
 ## Working in the API and the client
 
