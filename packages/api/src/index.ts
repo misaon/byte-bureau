@@ -5,7 +5,8 @@ export {
   type ApiOptions,
   type MutationLimitOptions,
 } from './config.js'
-export { ApiLive, serveApi, OPENAPI_PATH } from './layer.js'
+export { ApiLive, serveApi } from './layer.js'
+export { OPENAPI_PATH } from './routes.js'
 export type { ApiRequirements, ServerPlatform } from './requirements.js'
 export { Authorization, AuthorizationLive, sameToken } from './auth.js'
 export { RpcAuthorization, RpcAuthorizationLive } from './rpc/auth.js'

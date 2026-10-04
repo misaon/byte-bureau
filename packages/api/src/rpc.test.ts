@@ -1,36 +1,25 @@
 import { EventLog, type StoreError } from '@bytebureau/kernel'
 import { createTempRepo } from '@bytebureau/kernel/testing'
-import { ProjectDto, SessionDto, type EventEnvelope } from '@bytebureau/protocol'
+import { ProjectDto, PruneReportDto, SessionDto, type EventEnvelope } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
 import { Effect, Schema, type Cause, type Scope } from 'effect'
 import type { HttpServer } from 'effect/http'
 import { UNAUTHORIZED } from './auth.js'
-import { ApiTestLayer, baseUrl, fetched, get, TEST_TOKEN } from './testing.js'
+import { ApiTestLayer, get, TEST_TOKEN } from './testing.js'
 import { createdSession, registeredProject, UNKNOWN_ID } from './testing-sessions.js'
 import {
   called,
+  connected,
   envelopesOf,
   readUntil,
   request,
   tagOf,
-  wsClient,
   type WsClient,
   type WsMessage,
 } from './testing-ws.js'
 
-const UI = 'http://ui.test'
-const ELSEWHERE = 'http://evil.example'
-
 // Far longer than an event takes to reach a subscriber that is free to receive it
 const QUIET = '300 millis'
-
-// A client of the server under test, closed with the test; a browser would send its Origin
-const connected = (
-  headers: Readonly<Record<string, string>> = {},
-): Effect.Effect<WsClient, Error, HttpServer.HttpServer | Scope.Scope> =>
-  baseUrl.pipe(
-    Effect.flatMap((base) => wsClient(`${base.replace(/^http/u, 'ws')}/api/v1/ws`, headers)),
-  )
 
 interface Subscribed {
   readonly client: WsClient
@@ -64,16 +53,45 @@ const isExit = (message: WsMessage): boolean => tagOf(message) === 'Exit'
 const isWarning = (message: WsMessage): boolean =>
   envelopesOf(message).some((event) => event.type === 'session.warning')
 
-// The body of an answer as text
-const textOf = (response: Response): Effect.Effect<string> =>
-  Effect.promise(async () => {
-    const whole = await response.text()
-    return whole
-  })
-
-// The exits of a register and of a create as a client reads them, through the protocol's schemas
+// The exits of a register, a create and a prune as a client reads them, through the protocol's schemas
 const Registered = Schema.Struct({ exit: Schema.Struct({ value: ProjectDto }) })
 const Created = Schema.Struct({ exit: Schema.Struct({ value: SessionDto }) })
+const Pruned = Schema.Struct({ exit: Schema.Struct({ value: PruneReportDto }) })
+
+interface CreatedOver {
+  readonly session: SessionDto
+  readonly worktree: string
+}
+
+// A session of the project created over the socket, and the path of its worktree
+const createdOver = (
+  client: WsClient,
+  projectId: string,
+): Effect.Effect<CreatedOver, Cause.Done | Cause.NoSuchElementError> =>
+  Effect.gen(function* creates() {
+    const payload = { projectId, title: 'Over the socket' }
+    const answer = yield* called(client, {
+      id: 'create',
+      tag: 'sessions.create',
+      payload,
+      token: TEST_TOKEN,
+    })
+    const session = Schema.decodeUnknownSync(Created)(answer).exit.value
+    const workspace = yield* Effect.fromNullishOr(session.workspace)
+    return { session, worktree: workspace.path }
+  })
+
+// What the prune of a project over the socket reports
+const prunedOver = (
+  client: WsClient,
+  projectId: string,
+): Effect.Effect<PruneReportDto, Cause.Done> =>
+  called(client, {
+    id: 'prune',
+    tag: 'workspaces.prune',
+    payload: { projectId },
+    token: TEST_TOKEN,
+  }).pipe(Effect.map((answer) => Schema.decodeUnknownSync(Pruned)(answer).exit.value))
 
 const SUCCEEDED = { exit: { _tag: 'Success' } }
 
@@ -82,8 +100,8 @@ const refusedWith = (code: string): object => ({
   exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: { code } }] },
 })
 
-// Every other procedure on a ready session, in an order the kernel accepts, and what each answers
-const lifecycle = (sessionId: string, projectId: string): [string, object, object][] => [
+// The other procedures on a ready session, in an order the kernel accepts, and what each answers
+const lifecycle = (sessionId: string): [string, object, object][] => [
   ['sessions.interrupt', { sessionId }, refusedWith('session_not_found')],
   ['sessions.stop', { sessionId }, SUCCEEDED],
   ['sessions.resume', { sessionId }, { exit: { value: { id: sessionId, status: 'ready' } } }],
@@ -94,7 +112,6 @@ const lifecycle = (sessionId: string, projectId: string): [string, object, objec
     refusedWith('session_invalid_transition'),
   ],
   ['asks.answer', { askId: UNKNOWN_ID, answer: { selected: ['x'] } }, refusedWith('ask_not_found')],
-  ['workspaces.prune', { projectId }, { exit: { value: { removed: [], retained: [] } } }],
 ]
 
 // What a refused request carries: no authorization header, or a token that is not the daemon's
@@ -168,15 +185,15 @@ it.layer(ApiTestLayer())('the session procedures over the WebSocket of /api/v1/w
     Effect.gen(function* drivesSession() {
       const { project } = yield* registeredProject
       const client = yield* connected()
-      const payload = { projectId: project.id, title: 'Over the socket' }
-      const create = { id: 'create', tag: 'sessions.create', payload, token: TEST_TOKEN }
-      const { exit } = Schema.decodeUnknownSync(Created)(yield* called(client, create))
-      assert.strictEqual(exit.value.status, 'ready')
-      for (const [tag, input, answer] of lifecycle(exit.value.id, project.id)) {
+      const { session, worktree } = yield* createdOver(client, project.id)
+      assert.strictEqual(session.status, 'ready')
+      for (const [tag, input, answer] of lifecycle(session.id)) {
         const done = yield* called(client, { id: tag, tag, payload: input, token: TEST_TOKEN })
         assert.containSubset(done, { requestId: tag, ...answer })
       }
-      assert.containSubset((yield* get(`/sessions/${exit.value.id}`)).body, { status: 'completed' })
+      const retained = [{ path: worktree, reason: 'younger than 7 days' }]
+      assert.deepStrictEqual(yield* prunedOver(client, project.id), { removed: [], retained })
+      assert.containSubset((yield* get(`/sessions/${session.id}`)).body, { status: 'completed' })
     }),
   )
 })
@@ -217,30 +234,6 @@ it.layer(ApiTestLayer(), { excludeTestServices: true })(
           '4',
         )
         assert.containSubset(read.at(-1), { _tag: 'Chunk', requestId: '4' })
-      }),
-    )
-  },
-)
-
-it.layer(ApiTestLayer({ corsOrigins: [UI] }))(
-  'the Origin a browser sends to /api/v1/ws',
-  (suite) => {
-    suite.effect('turns away an origin the daemon does not serve before the socket opens', () =>
-      Effect.gen(function* refusesOrigin() {
-        const base = yield* baseUrl
-        const response = yield* fetched(`${base}/api/v1/ws`, { headers: { origin: ELSEWHERE } })
-        assert.strictEqual(response.status, 403)
-        assert.strictEqual(yield* textOf(response), '')
-        const refused = yield* Effect.flip(connected({ origin: ELSEWHERE }))
-        assert.include(refused.message, 'cannot open')
-      }),
-    )
-
-    suite.effect('lets a listed origin open the socket', () =>
-      Effect.gen(function* acceptsOrigin() {
-        const client = yield* connected({ origin: UI })
-        client.send({ _tag: 'Ping' })
-        assert.deepStrictEqual(yield* client.next, { _tag: 'Pong' })
       }),
     )
   },

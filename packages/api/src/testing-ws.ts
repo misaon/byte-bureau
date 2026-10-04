@@ -1,5 +1,8 @@
 import { EventEnvelope } from '@bytebureau/protocol'
 import { Effect, Queue, Schema, type Cause, type Scope } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { WS_PATH } from './rpc/group.js'
+import { baseUrl } from './testing.js'
 
 // One envelope of effect/rpc as it travels: Request, Ack, Interrupt, Ping from the client; Chunk, Exit, Defect, Pong from the server
 export interface WsMessage {
@@ -66,7 +69,7 @@ const opened = (
   })
 
 // A client of the wire protocol; the socket closes with the scope of the test, whatever its outcome
-export const wsClient = (
+const wsClient = (
   url: string,
   headers: Readonly<Record<string, string>> = {},
 ): Effect.Effect<WsClient, Error, Scope.Scope> =>
@@ -84,6 +87,14 @@ export const wsClient = (
       next: Queue.take(inbox),
     }
   })
+
+// A client of the RPC socket of the server under test; a browser would send its Origin among the headers
+export const connected = (
+  headers: Readonly<Record<string, string>> = {},
+): Effect.Effect<WsClient, Error, HttpServer.HttpServer | Scope.Scope> =>
+  baseUrl.pipe(
+    Effect.flatMap((base) => wsClient(`${base.replace(/^http/u, 'ws')}${WS_PATH}`, headers)),
+  )
 
 // Reads until a message satisfies the predicate and gives every message read, that one last
 // An ack follows each chunk when the stream is named, so the stream keeps coming

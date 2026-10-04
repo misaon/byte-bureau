@@ -7,7 +7,7 @@ import {
 } from '@bytebureau/kernel'
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
-import { projectOf } from '../handlers/projects.js'
+import { projectOf } from '../handlers/found.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
