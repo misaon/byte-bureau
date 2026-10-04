@@ -1,8 +1,7 @@
-import { stripVTControlCharacters } from 'node:util'
 import { SessionError } from '@bytebureau/kernel'
-import { S_BAR_END, S_BAR_START } from '@clack/prompts'
 import { describe, expect, it } from 'vitest'
 import { event } from '../testing/events.js'
+import { frames } from '../testing/frames.js'
 import {
   captureConsole,
   captureTerminal,
@@ -22,20 +21,6 @@ const WRITE = event(
   { id: 't1', name: 'Write', kind: 'builtin', input: { path: 'src/hello.ts' } },
   1,
 )
-
-// The lines that begin with the glyph and the two spaces clack puts after it; the ASCII glyphs of TERM=linux turn up inside the words as well (the end of the frame is an em dash)
-function linesStartingWith(text: string, glyph: string): number {
-  const lines = stripVTControlCharacters(text).split('\n')
-  return lines.filter((line) => line.startsWith(`${glyph}  `)).length
-}
-
-// How often the frame was opened and closed
-function frames(text: string): { readonly starts: number; readonly ends: number } {
-  return {
-    starts: linesStartingWith(text, S_BAR_START),
-    ends: linesStartingWith(text, S_BAR_END),
-  }
-}
 
 // Whether the parts are in the text, one after the other
 function inOrder(text: string, parts: readonly string[]): boolean {

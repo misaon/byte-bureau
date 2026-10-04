@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import { runCli } from './testing/run-cli.js'
 
@@ -21,10 +22,26 @@ describe('bytebureau CLI', () => {
   it('lists the kernel commands in help', async () => {
     expect.hasAssertions()
     const { stdout } = await runCli(['--help'])
-    expect(stdout).toContain('run')
-    expect(stdout).toContain('config')
-    expect(stdout).toContain('projects')
-    expect(stdout).toContain('workspaces')
+    const commands = stripVTControlCharacters(stdout)
+    for (const name of [
+      'run',
+      'config',
+      'projects',
+      'workspaces',
+      'serve',
+      'sessions',
+      'ask',
+      'plugins',
+    ]) {
+      expect(commands, name).toMatch(new RegExp(`^\\s+${name}\\s+\\S`, 'mu'))
+    }
+  })
+
+  it('lists the global flags in the help of the bare command, which tells the status', async () => {
+    expect.hasAssertions()
+    const { stdout } = await runCli(['--help'])
+    expect(stdout).toContain('--json')
+    expect(stdout).toContain('--no-daemon')
   })
 })
 

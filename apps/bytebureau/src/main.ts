@@ -1,11 +1,8 @@
 #!/usr/bin/env bun
-import { defineCommand } from 'citty'
-import { configCommand } from './commands/config.js'
-import { helloCommand } from './commands/hello.js'
-import { projectsCommand } from './commands/projects.js'
-import { runCommand } from './commands/run.js'
-import { serveCommand } from './commands/serve.js'
-import { workspacesCommand } from './commands/workspaces.js'
+import { runCommand, type CommandDef } from 'citty'
+import { statusCommand } from './commands/status.js'
+import { subCommands } from './commands/sub-commands.js'
+import { globalArgs } from './context.js'
 import { drained } from './drain.js'
 import { run } from './run.js'
 import { version } from './version.js'
@@ -27,23 +24,25 @@ const onUncaught = (error: unknown): void => {
 process.on('uncaughtException', onUncaught)
 process.on('unhandledRejection', onUncaught)
 
-const main = defineCommand({
+// Typed as a command of any arguments, which is what the runner takes; defineCommand would type it by its own
+const main: CommandDef = {
   meta: {
     name: 'bytebureau',
     version,
     description: 'ByteBureau — the AI office: a bureau of coding agents.',
   },
-  subCommands: {
-    hello: helloCommand,
-    run: runCommand,
-    config: configCommand,
-    projects: projectsCommand,
-    workspaces: workspacesCommand,
-    serve: serveCommand,
+  // The global flags are the status's: they come before a sub-command as well, where citty needs to know which of them take a value
+  args: { ...globalArgs },
+  subCommands,
+  // Citty runs this after a sub-command too; the status is what bytebureau tells when it is called with none
+  async run({ args, rawArgs }) {
+    if (args._.length === 0) {
+      await runCommand(statusCommand, { rawArgs })
+    }
   },
-})
+}
 
-// A command with an exit code of its own (run: 3, 4; config: 1) leaves it in process.exitCode
+// A command with an exit code of its own (run: 3, 4; a request that is refused: 1) leaves it in process.exitCode
 async function commandEnding(): Promise<Ending> {
   const code = await run(main, process.argv.slice(2))
   return { code: code === 0 ? (process.exitCode ?? 0) : code }

@@ -1,16 +1,13 @@
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { readServerInfo, writeServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
-import { freePort, startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
+import { freePort, startDaemonProcess, stoppedWithTheTest } from '../testing/daemon.js'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli, type CliResult } from '../testing/run-cli.js'
 import { createTempRepo, testHome } from '../testing/temp-repo.js'
-import { PROMPT, projectIdIn, workbench, worktreesOf } from '../testing/workbench.js'
-
-// The fake provider read like a script: events as JSON, every ask answered; no --no-daemon here
-const SCRIPTED = ['--provider', 'fake', '--json', '--yes']
+import { PROMPT, projectIdIn, SCRIPTED, workbench, worktreesOf } from '../testing/workbench.js'
 
 // Without --yes and off a terminal the run waits on the question of the fake provider
 const WAITING = ['--provider', 'fake', '--json']
@@ -21,13 +18,6 @@ async function runOn(repo: string, home: string, flags = SCRIPTED): Promise<CliR
     BYTEBUREAU_HOME: home,
   })
   return result
-}
-
-// A daemon the CLI starts on demand ends with the test, should an assertion fail before the test stops it
-function stoppedWithTheTest(home: string): void {
-  onTestFinished(async () => {
-    await stopDaemonOf(home)
-  })
 }
 
 describe('bytebureau run through the daemon', () => {

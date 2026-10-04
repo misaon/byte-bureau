@@ -134,3 +134,10 @@ export async function stopDaemonOf(home: string): Promise<void> {
     signal(holder, 'SIGKILL')
   }
 }
+
+// A daemon that a command starts on demand ends with the test, should an assertion fail before the test stops it
+export function stoppedWithTheTest(home: string): void {
+  onTestFinished(async () => {
+    await stopDaemonOf(home)
+  })
+}

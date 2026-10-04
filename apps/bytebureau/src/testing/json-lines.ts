@@ -22,6 +22,27 @@ export function jsonLines(stdout: string): readonly Record<string, unknown>[] {
     })
 }
 
+// The records a command lists under the key of its first JSON record: the sessions of `sessions ls`, the asks of `ask ls`
+export function listedUnder(stdout: string, key: string): readonly Record<string, unknown>[] {
+  const [record] = jsonLines(stdout)
+  const listed: unknown = record === undefined ? undefined : record[key]
+  return Array.isArray(listed) ? listed.filter((item) => isRecord(item)) : []
+}
+
+// A text field of the first record listed under the key; a test that needs one is told what there was instead
+export function firstField(stdout: string, key: string, field: string): string {
+  const [first] = listedUnder(stdout, key)
+  const value: unknown = first === undefined ? undefined : first[field]
+  if (typeof value !== 'string') {
+    throw new TypeError(`no ${field} of a ${key} listed in ${stdout}`)
+  }
+  return value
+}
+
+export function firstId(stdout: string, key: string): string {
+  return firstField(stdout, key, 'id')
+}
+
 // The same lines read as events: each has the seq and the type of an envelope
 export function eventLines(stdout: string): readonly EventLine[] {
   return jsonLines(stdout).map((line) => {
