@@ -9,7 +9,7 @@ export class Authorization extends HttpApiMiddleware.Service<Authorization>()(
 ) {}
 
 // Worded so the redaction of details leaves it alone: it hides any "Bearer <word>"
-const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid API token is required')
+export const UNAUTHORIZED = problem(401, 'unauthorized', 'a valid API token is required')
 
 // An empty token matches nothing, since a request without the header arrives with an empty one
 // Otherwise lengths first, then a constant-time comparison: the daemon never tells how much of a token was right

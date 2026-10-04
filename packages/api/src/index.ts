@@ -5,14 +5,11 @@ export {
   type ApiOptions,
   type MutationLimitOptions,
 } from './config.js'
-export {
-  ApiLive,
-  serveApi,
-  OPENAPI_PATH,
-  type ApiRequirements,
-  type ServerPlatform,
-} from './layer.js'
+export { ApiLive, serveApi, OPENAPI_PATH } from './layer.js'
+export type { ApiRequirements, ServerPlatform } from './requirements.js'
 export { Authorization, AuthorizationLive, sameToken } from './auth.js'
+export { RpcAuthorization, RpcAuthorizationLive } from './rpc/auth.js'
+export { BureauRpcsWithAuth, WS_PATH } from './rpc/group.js'
 export { RequestValidation } from './validation.js'
 export { MutationLimit } from './rate-limit.js'
 export { openApiDocument } from './openapi.js'

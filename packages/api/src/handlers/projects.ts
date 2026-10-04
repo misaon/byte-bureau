@@ -6,7 +6,9 @@ import { orProblem, type ApiProblem, type KernelStatus } from '../problems.js'
 import { found } from './found.js'
 
 // The project, or the 404 problem when nobody holds the id
-const projectOf = (id: string): Effect.Effect<Project, ApiProblem<KernelStatus>, ProjectRegistry> =>
+export const projectOf = (
+  id: string,
+): Effect.Effect<Project, ApiProblem<KernelStatus>, ProjectRegistry> =>
   orProblem(ProjectRegistry.use((registry) => registry.get(id))).pipe(
     Effect.flatMap((project) => found(project, 'not_found', `no project ${id}`)),
   )
