@@ -27,5 +27,12 @@
   "projects_added": "Registered {name} ({path})",
   "projects_removed": "Removed {id}",
   "workspaces_none": "No workspaces",
-  "workspaces_pruned": "Removed {removed} worktree(s), kept {retained}"
+  "workspaces_pruned": "Removed {removed} worktree(s), kept {retained}",
+  "serve_started": "Daemon listening on {url}",
+  "serve_already_running": "Daemon already running on {url} (pid {pid})",
+  "serve_stopped": "Stopped daemon (pid {pid})",
+  "serve_not_running": "No daemon is running",
+  "serve_still_running": "Daemon (pid {pid}) did not stop in time",
+  "serve_timeout": "The daemon did not come up in time; see {log}",
+  "serve_lan_warning": "Listening on {host}: anyone on the network with the token can use this daemon"
 }

@@ -27,5 +27,12 @@
   "projects_added": "Zaregistrován projekt {name} ({path})",
   "projects_removed": "Odebrán projekt {id}",
   "workspaces_none": "Žádné pracovní prostory",
-  "workspaces_pruned": "Odstraněno pracovních prostorů: {removed}, ponecháno: {retained}"
+  "workspaces_pruned": "Odstraněno pracovních prostorů: {removed}, ponecháno: {retained}",
+  "serve_started": "Démon naslouchá na {url}",
+  "serve_already_running": "Démon už běží na {url} (pid {pid})",
+  "serve_stopped": "Démon zastaven (pid {pid})",
+  "serve_not_running": "Žádný démon neběží",
+  "serve_still_running": "Démon (pid {pid}) se včas nezastavil",
+  "serve_timeout": "Démon se včas nespustil; viz {log}",
+  "serve_lan_warning": "Naslouchá na {host}: kdokoli v síti s tokenem může tohoto démona používat"
 }
