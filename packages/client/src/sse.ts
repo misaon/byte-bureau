@@ -112,6 +112,12 @@ const messagesOf = (
   }
 }
 
+// The stream and nothing else: a 2xx of another kind, such as the page of a proxy, is a failed attempt as well
+const isStream = (response: Response): boolean =>
+  response.ok &&
+  response.body !== null &&
+  (response.headers.get('content-type') ?? '').startsWith('text/event-stream')
+
 // What an answer that is not the stream fails the attempt with: an ApiError when asking again will not help
 const refusalOf = async (response: Response, url: string): Promise<Error> => {
   if (isFinal(response.status)) {
@@ -120,7 +126,7 @@ const refusalOf = async (response: Response, url: string): Promise<Error> => {
   if (response.body !== null) {
     await response.body.cancel()
   }
-  return new Error(`the daemon answered ${response.status}`)
+  return new Error(`the daemon answered ${response.status} without the event stream`)
 }
 
 // One connection, open: the daemon answered with the stream, so the next failure starts a new count
@@ -131,7 +137,7 @@ const opened = async (url: string, state: State): Promise<AsyncIterable<EventSou
     ...(signal === undefined ? {} : { signal }),
   }
   const response = await fetchImpl(url, init)
-  if (!response.ok || response.body === null) {
+  if (!isStream(response) || response.body === null) {
     throw await refusalOf(response, url)
   }
   state.backoff = undefined

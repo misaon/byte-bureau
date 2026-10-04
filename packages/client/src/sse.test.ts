@@ -1,7 +1,7 @@
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './errors.js'
-import { broken, frame, serve, status, stream } from './sse-fixture.js'
+import { broken, frame, page, serve, status, stream } from './sse-fixture.js'
 import { subscribeEvents, type SubscribeOptions } from './sse.js'
 
 // The seq of every event until the one that says enough, which is the last one taken
@@ -93,6 +93,41 @@ describe('the events of a subscription', () => {
     const events = subscribeEvents({ baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10 })
     await expect(seqNumbersUntil(events, () => true)).resolves.toStrictEqual([4])
     expect(served.requests).toHaveLength(2)
+  })
+})
+
+describe('where a subscription resumes', () => {
+  it('resumes after the last durable event, which a heartbeat after it does not move', async () => {
+    expect.hasAssertions()
+    const served = await serve([
+      stream(frame(1, 'a') + frame(2, 'b') + frame(0, 'heartbeat')),
+      stream(frame(3, 'c')),
+    ])
+    const options = { baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10 }
+    const numbers = seqNumbersUntil(subscribeEvents(options), (event) => event.seq === 3)
+    await expect(numbers).resolves.toStrictEqual([1, 2, 0, 3])
+    expect(served.requests.map((request) => request.lastEventId)).toStrictEqual([undefined, '2'])
+  })
+
+  it('counts an answer of 200 that is no event stream as a failed attempt', async () => {
+    expect.hasAssertions()
+    const proxied = await serve([page])
+    const options = { baseUrl: proxied.url, token: 'tok', filter: {}, backoffMs: 10, retryFor: 200 }
+    await expect(failureOf(options)).resolves.toMatchObject({ status: 0 })
+  })
+
+  it('starts the pauses and the time it may keep failing over once a connection opens', async () => {
+    expect.hasAssertions()
+    // Five failed attempts take about 300 ms, and so do four after the connection that opens between them
+    const served = await serve([
+      ...Array.from({ length: 5 }, () => broken),
+      stream(frame(1, 'a')),
+      ...Array.from({ length: 4 }, () => broken),
+      stream(frame(2, 'b')),
+    ])
+    const options = { baseUrl: served.url, token: 'tok', filter: {}, backoffMs: 10, retryFor: 400 }
+    const numbers = seqNumbersUntil(subscribeEvents(options), (event) => event.seq === 2)
+    await expect(numbers).resolves.toStrictEqual([1, 2])
   })
 })
 

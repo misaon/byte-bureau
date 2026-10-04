@@ -1,13 +1,13 @@
 import { ApiError } from '../errors.js'
 import { encodeAck, encodePing, errorOf, type ExitMessage } from './codec.js'
-import { Link, type Exchange, type RequestMessage, type Stop } from './link.js'
+import { Link, type Exchange, type RequestMessage, type SocketLike, type Stop } from './link.js'
 
 export interface RpcOptions {
   // The url of the socket: ws://<host>:<port>/api/v1/ws
   readonly url: string
   readonly token: string
   // The constructor to open the socket with; the global WebSocket by default
-  readonly WebSocket?: typeof WebSocket | undefined
+  readonly WebSocket?: (new (url: string) => SocketLike) | undefined
   readonly pingMs?: number | undefined
 }
 
@@ -68,6 +68,7 @@ function* untilAborted(values: readonly unknown[], signal: AbortSignal): Generat
 }
 
 // Each chunk is acknowledged once its values are taken, so the daemon sends the next one only as fast as they are read
+// A chunk the signal cut short is not acknowledged: the request is over
 async function* valuesOf(link: Link, exchange: Exchange, signal: AbortSignal): AsyncGenerator {
   for await (const message of exchange.inbox) {
     if (!('values' in message)) {
@@ -75,11 +76,14 @@ async function* valuesOf(link: Link, exchange: Exchange, signal: AbortSignal): A
       return
     }
     yield* untilAborted(message.values, signal)
+    if (signal.aborted) {
+      return
+    }
     link.send(encodeAck(exchange.id))
   }
 }
 
-// Leaving early, or an aborted signal, interrupts the request on the daemon
+// Leaving early, or an aborted signal, interrupts the request on the daemon; an abort does at once, whether or not the values are being read
 async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): AsyncGenerator {
   const watched = signal ?? new AbortController().signal
   if (watched.aborted) {
@@ -87,6 +91,7 @@ async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): A
   }
   const exchange = link.open(tag, payload)
   const stop = (): void => {
+    exchange.release()
     exchange.inbox.push(STOPPED)
   }
   watched.addEventListener('abort', stop, { once: true })
@@ -99,7 +104,7 @@ async function* streamed(link: Link, { tag, payload, signal }: StreamRequest): A
 }
 
 // Resolves once the socket is open; a socket that fails or closes first is a daemon that cannot be reached
-const opened = async (socket: WebSocket, url: string): Promise<boolean> => {
+const opened = async (socket: SocketLike, url: string): Promise<boolean> => {
   const { promise, resolve, reject } = Promise.withResolvers<boolean>()
   const unreachable = (): void => {
     reject(new ApiError(0, undefined, url))
@@ -123,7 +128,8 @@ const opened = async (socket: WebSocket, url: string): Promise<boolean> => {
  * Rejects with an ApiError of status 0 when the socket does not open.
  */
 export async function connectRpc(options: RpcOptions): Promise<RpcConnection> {
-  const { url, token, WebSocket: Socket = WebSocket, pingMs = PING_MS } = options
+  const { url, token, pingMs = PING_MS } = options
+  const Socket: new (address: string) => SocketLike = options.WebSocket ?? WebSocket
   const socket = new Socket(url)
   const link = new Link(socket, url, token)
   await opened(socket, url)
@@ -140,6 +146,7 @@ export async function connectRpc(options: RpcOptions): Promise<RpcConnection> {
     },
     stream: (tag, payload, signal) => streamed(link, { tag, payload, signal }),
     close: () => {
+      clearInterval(ping)
       link.close(new Error('the connection is closed'))
     },
   }

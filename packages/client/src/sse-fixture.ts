@@ -93,3 +93,9 @@ export const status =
 export const broken: Step = (response) => {
   response.destroy()
 }
+
+// A page that is no event stream, as a proxy in the way would answer
+export const page: Step = (response) => {
+  response.writeHead(200, { 'content-type': 'text/html' })
+  response.end('<html><body>sign in to the proxy</body></html>')
+}

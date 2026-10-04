@@ -17,6 +17,17 @@ export interface Stop {
 
 export type RequestMessage = ChunkMessage | ExitMessage | Stop
 
+// What a connection needs of a WebSocket, which the global one of a browser, Node or Bun has
+export interface SocketLike {
+  readonly addEventListener: (
+    type: 'message' | 'open' | 'close' | 'error',
+    listener: (event: Event) => void,
+    options?: { readonly once?: boolean },
+  ) => void
+  readonly send: (data: string) => void
+  readonly close: () => void
+}
+
 // The messages of one request in the order they came: the link pushes, the request takes them one at a time
 export interface Inbox extends AsyncIterable<RequestMessage> {
   readonly push: (message: RequestMessage) => void
@@ -65,7 +76,7 @@ export interface Exchange {
 /** The socket as the requests of one connection see it: each request has an inbox its messages are routed to. */
 export class Link {
   public readonly url: string
-  private readonly socket: WebSocket
+  private readonly socket: SocketLike
   private readonly token: string
   // The requests the daemon has not ended yet, by id
   private readonly requests = new Map<string, Inbox>()
@@ -77,12 +88,12 @@ export class Link {
    * @param url The url of the socket, which the errors name.
    * @param token The bearer token every request carries in its headers.
    */
-  public constructor(socket: WebSocket, url: string, token: string) {
+  public constructor(socket: SocketLike, url: string, token: string) {
     this.socket = socket
     this.url = url
     this.token = token
     socket.addEventListener('message', (event) => {
-      this.receive(event.data)
+      this.receive(Reflect.get(event, 'data'))
     })
     socket.addEventListener('close', () => {
       this.end(new ApiError(0, undefined, url))
