@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { runCommand, type CommandDef } from 'citty'
+import { quietOnClosedPipe } from './closed-pipe.js'
 import { statusCommand } from './commands/status.js'
 import { subCommands } from './commands/sub-commands.js'
 import { globalArgs } from './context.js'
@@ -23,6 +24,9 @@ const onUncaught = (error: unknown): void => {
 }
 process.on('uncaughtException', onUncaught)
 process.on('unhandledRejection', onUncaught)
+// A reader that closes the pipe early, such as head, gets no stack trace written after it
+process.stdout.on('error', quietOnClosedPipe)
+process.stderr.on('error', quietOnClosedPipe)
 
 // Typed as a command of any arguments, which is what the runner takes; defineCommand would type it by its own
 const main: CommandDef = {
