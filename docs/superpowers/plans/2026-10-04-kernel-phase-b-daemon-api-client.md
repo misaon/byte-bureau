@@ -15472,7 +15472,7 @@ git commit -m "feat(cli): add sessions, ask and plugins commands and the bare st
 
 **Files:**
 - Create: `apps/docs/src/content/docs/daemon-and-api.md`
-- Modify: `.github/workflows/ci.yml` (contract drift step; daemon smoke in `build-smoke`, `smoke-arm64`, `smoke-macos`), `.github/workflows/semantic-pr.yml` (scopes `api`, `client`), `.github/labeler.yml` (`area: api`, `area: client`), `apps/docs/astro.config.mjs` (sidebar entry), `apps/docs/src/content/docs/architecture.md` (package table, run flow, Phase B decisions, the deferred list), `CONTRIBUTING.md` ("Working in the API and the client"), `README.md` + `README.cs.md` (status line), `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` (amendments listed below), `docs/superpowers/plans/2026-10-04-kernel-phase-b-daemon-api-client.md` (this plan: the controller syncs the fences after the task)
+- Modify: `.github/workflows/ci.yml` (contract drift step; daemon smoke in `build-smoke`, `smoke-arm64`, `smoke-macos`), `.github/workflows/semantic-pr.yml` (scopes `api`, `client`), `.github/labeler.yml` (`area: api`, `area: client`), `apps/docs/astro.config.mjs` (sidebar entry), `apps/docs/src/content/docs/architecture.md` (package table, run flow, Phase B decisions, the deferred list), `CONTRIBUTING.md` ("Working in the API and the client"), `README.md` + `README.cs.md` (status line), `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` (amendments listed below), `docs/superpowers/plans/2026-10-04-kernel-phase-b-daemon-api-client.md` (this plan: the controller syncs the fences after the task) As shipped: `.github/workflows/semantic-pr.yml` already listed `api` and `client` (Tasks 3 and 7) and was left alone; `scripts/repo-settings/labels.txt` gained `area: client` for the labels parity test (the label itself is created on GitHub before the pull request); `cspell-words.txt` gained the new words of the docs page.
 
 **Interfaces:**
 - Consumes: everything Tasks 1–10 shipped.
@@ -15487,19 +15487,23 @@ Semantics: Phase B is done when a fresh clone passes every gate, the compiled bi
       - name: generated contracts are up to date
         run: |
           set -euo pipefail
-          bun run build
+          bun run --cwd packages/protocol build
+          bun run --cwd packages/api build
           bun run generate:client
           git diff --exit-code -- packages/protocol/schemas packages/api/openapi.json packages/client/src/gen
+          untracked=$(git ls-files --others --exclude-standard -- packages/protocol/schemas packages/api/openapi.json packages/client/src/gen)
+          [ -z "$untracked" ] || { printf 'untracked generated files:\n%s\n' "$untracked"; exit 1; }
 ```
 Every smoke job (`build-smoke` x64, `smoke-arm64`, `smoke-macos`) gains, after the existing fake-provider run, a daemon step with the same `BIN`, `REPO` and `HOME_DIR` conventions:
 ```yaml
-      - name: smoke (daemon: serve, run through the API, sessions ls, stop)
+      - name: 'smoke (daemon: serve, run through the API, sessions ls, stop)'
         run: |
           set -euo pipefail
           BIN=(dist/bytebureau-*-linux-x64)
           [ "${#BIN[@]}" -eq 1 ]
           REPO=$(mktemp -d)
           HOME_DIR=$(mktemp -d)
+          trap 'cat "$HOME_DIR"/logs/daemon.log 2>/dev/null || true' ERR
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
           export BYTEBUREAU_HOME="$HOME_DIR"
@@ -15532,6 +15536,8 @@ In `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md`, each 
 - §11.3: `serve` detaches by default (`--no-daemonize` for the foreground) and has `--stop`; the bare command is the status; `--no-daemon` is refused while a daemon runs on the same home; `run` exits 2 with the URL when a daemon named by `--host`/`--port` cannot be reached.
 - §14 "Daemon restart": sessions left running are `stopped` (turn `interrupted`, reason `daemon_restart`, asks cancelled), resumable with `resume`.
 - §3 / §11.2: the client is generated with hey-api from `packages/api/openapi.json` via `tools/client-codegen`; `publint`/`arethetypeswrong` run before the first publish.
+
+**Semantics (as shipped, commits 697917c, ae2590e, 2b7fb05, f1a9b9c, 7a8460b):** CI: the `static` job gains the step "generated contracts are up to date" after `bun run typecheck`, which builds the protocol schemas and the API's `openapi.json`, regenerates the client and fails when `git diff --exit-code` or `git status --porcelain` over `packages/protocol/schemas`, `packages/api/openapi.json` and `packages/client/src/gen` shows a change or a new file (the whole `bun run build` would also have compiled the binary); the three smoke jobs (`build-smoke` x64, `smoke-arm64` with `chmod +x` first, `smoke-macos` on `macos-26`) keep their in-process run with `--no-daemon` and gain the daemon step (a quoted step name — the brief's unquoted form does not parse): `serve --port 0 --json` on a temp home, a `run` through the daemon, `sessions ls --json` showing `completed`, the bare `--json` status, `serve --stop` and the absence of `server.json`; `bun run lint:actions` is clean. `.github/labeler.yml` gains `area: api` and `area: client` in its `changed-files` form; `semantic-pr.yml` already listed both scopes. Docs: `apps/docs/src/content/docs/daemon-and-api.md` (the daemon, talking to it, the API, events over SSE, RPC over WebSocket, the client package) with the sidebar entry `{ label: 'Daemon and API', translations: { cs: 'Démon a API' }, link: '/daemon-and-api/' }` after `architecture`; `architecture.md` gains the `packages/api`, `packages/client` and `tools/client-codegen` rows, the run flow through the daemon, the "Phase B decisions" list (with the shipped rulings the brief predates: the environment forwarded with a run and stripped from a daemon started on demand, the exit-1 refusals of every command but `run`, flags before or after a command name) and the rewritten "Deferred to later phases" list; `CONTRIBUTING.md` gains "Working in the API and the client"; the READMEs carry the Phase B status sentence in both languages, with the Czech saying "démon" as the CLI messages do (the sidebar label too); the spec carries the eight amendments of the brief, one sentence each marked "(amended in Phase B …)", the §14 "Daemon restart" table row rewritten to `stopped` with turn `interrupted` and reason `daemon_restart`, plus marked sentences for the shipped rulings; the docs, the architecture page and the spec say that the OpenAPI document holds one problem schema per status an endpoint declares (the 413 of the body limit is answered before routing and is not in the document), that a usage error, a refused `--no-daemon` and a cancelled interactive answer exit 1 like a refusal while any other failure exits 2, and that the `/ws` upgrade takes no token (every RPC request carries it); the smoke steps print `daemon.log` through an `ERR` trap when a command fails. Gate: a fresh clone of the final commit passed `bun install --frozen-lockfile`, `bun run check` (1859 tests, coverage thresholds met), `bun run lint:actions` and `bun run build:binaries --host`, and the macOS daemon smoke as committed exited 0 with `server.json` gone after `serve --stop`; the docs site builds; no daemon was left and `~/.bytebureau` was not touched. The GitHub label `area: client` was created from `scripts/repo-settings/labels.txt` before the pull request.
 
 - [ ] **Step 4: Fresh-clone gate and the binary**
 
