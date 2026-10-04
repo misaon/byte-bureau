@@ -202,7 +202,8 @@ describe('bytebureau run read by a person', () => {
     expect(result.code).toBe(0)
     const lines = result.stdout.trim().split('\n')
     expect(lines[0]).toMatch(/^Preparing the workspace on branch bb\//u)
-    expect(lines.slice(1, 4)).toStrictEqual([
+    expect(lines.slice(1, 5)).toStrictEqual([
+      '! api key: absent',
       'The employee is working…',
       '⚙ Write src/hello.ts',
       'Created src/hello.ts exporting hello().',

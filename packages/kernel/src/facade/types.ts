@@ -9,11 +9,11 @@ import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
 import type { EventFilter } from '../events/event-log.js'
 import type { HealthReport } from '../health/health.js'
 import type { KernelLayerOptions } from '../kernel-live.js'
-import type { PluginStatus } from '../plugins/plugin-host.js'
 import type { Project } from '../projects/project-registry.js'
 import type { CreateSessionInput, Session, Turn } from '../sessions/types.js'
 import type { SessionUsage } from '../usage/usage-service.js'
 import type { PruneReport, WorkspaceInfo } from '../workspace/workspace-manager.js'
+import type { ProviderAreas } from './provider-areas.js'
 
 // The log level of the layer comes from logging.level, a string as the command line gives it
 export interface KernelOptions extends Omit<KernelLayerOptions, 'logLevel'> {
@@ -27,7 +27,7 @@ export interface KernelOptions extends Omit<KernelLayerOptions, 'logLevel'> {
     | undefined
 }
 
-export interface Kernel {
+export interface Kernel extends ProviderAreas {
   readonly projects: {
     readonly register: (path: string) => Promise<Project>
     readonly list: () => Promise<readonly Project[]>
@@ -76,14 +76,6 @@ export interface Kernel {
     readonly prune: (projectId?: string) => Promise<PruneReport>
   }
   readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsage> }
-  readonly providers: {
-    readonly list: () => readonly {
-      readonly id: string
-      readonly displayName: string
-      readonly supportsApiKey: boolean
-    }[]
-  }
-  readonly plugins: { readonly list: () => readonly PluginStatus[] }
   readonly health: { readonly check: () => Promise<HealthReport> }
   /** Stops the agents and ends the open event subscriptions; a call made after it may reject. */
   readonly close: () => Promise<void>

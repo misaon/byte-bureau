@@ -27,14 +27,31 @@ export const currentProject = (
     config: resolved.project,
   }))
 
-// The names of further variables the agents of the provider are given, from providers.<id>.passEnv
-export const passEnvOf = ({ config }: Project, providerId: string): readonly string[] => {
+type ProviderSection = NonNullable<Project['config']['providers']>[string]
+
+// The providers.<id> section of the project's configuration, if it has one
+const sectionOf = ({ config }: Project, providerId: string): ProviderSection | undefined => {
   const { providers } = config
-  const section =
-    providers !== undefined && Object.hasOwn(providers, providerId)
-      ? providers[providerId]
-      : undefined
+  return providers !== undefined && Object.hasOwn(providers, providerId)
+    ? providers[providerId]
+    : undefined
+}
+
+// The names of further variables the agents of the provider are given, from providers.<id>.passEnv
+export const passEnvOf = (project: Project, providerId: string): readonly string[] => {
+  const section = sectionOf(project, providerId)
   return section === undefined ? [] : (section.passEnv ?? [])
+}
+
+// The options the provider gets with a session: its section without passEnv, which is the kernel's
+export const providerOptionsOf = (
+  project: Project,
+  providerId: string,
+): Readonly<Record<string, unknown>> => {
+  const section = sectionOf(project, providerId)
+  return section === undefined
+    ? {}
+    : Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'passEnv'))
 }
 
 export const runtimeIdOf = ({ config }: Project): string =>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AskError, ConfigError, SessionError, WorkspaceError } from '../errors.js'
+import { AskError, ConfigError, ProfileError, SessionError, WorkspaceError } from '../errors.js'
 import { eventsUntil, openKernel, startFakeSession } from './facade-fixtures.js'
 import { createTempRepo } from '../testing/temp-repo.js'
 
@@ -115,6 +115,37 @@ describe('the workspaces of the facade', () => {
   })
 })
 
+describe('the profiles of the facade', () => {
+  it('adds, lists, reads, makes the default, tells the status of and removes a profile', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    const work = await kernel.profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+    const key = await kernel.profiles.add({
+      providerId: 'fake',
+      name: 'key',
+      kind: 'api_key',
+      apiKey: 'sk-canary-f',
+    })
+    await kernel.profiles.setDefault(key.id)
+    const status = await kernel.profiles.status(work.id)
+    const listed = await kernel.profiles.list()
+    await kernel.profiles.remove('fake/key')
+    const read = await Promise.all([kernel.profiles.get(work.id), kernel.profiles.get('fake/key')])
+    expect([
+      status.state,
+      listed.map((profile) => [profile.id, profile.isDefault]),
+      read,
+    ]).toStrictEqual([
+      'loggedIn',
+      [
+        ['fake/work', false],
+        ['fake/key', true],
+      ],
+      [{ ...work, isDefault: true }, undefined],
+    ])
+  })
+})
+
 describe('the failures of the facade', () => {
   it('rejects with the errors of the sessions and of the asks as they are', async () => {
     expect.hasAssertions()
@@ -129,5 +160,12 @@ describe('the failures of the facade', () => {
     const kernel = await openKernel()
     await expect(kernel.projects.register('/')).rejects.toBeInstanceOf(WorkspaceError)
     await expect(kernel.config.load('/no/such/dir')).rejects.toBeInstanceOf(ConfigError)
+  })
+
+  it('rejects with the errors of the profiles as they are', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    await expect(kernel.profiles.remove('fake/nope')).rejects.toBeInstanceOf(ProfileError)
+    await expect(kernel.profiles.status('fake/nope')).rejects.toBeInstanceOf(ProfileError)
   })
 })

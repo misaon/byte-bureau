@@ -1,11 +1,18 @@
 import type { AgentProvider, AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
-import { ProviderError } from '../errors.js'
+import {
+  ProviderError,
+  type ConfigError,
+  type ProfileError,
+  type SessionError,
+  type StoreError,
+} from '../errors.js'
 import { kernelLogger } from '../logging/logging.js'
 import { reasonOf } from '../plugins/reason.js'
 import { allowlistEnv, bytebureauEnv } from '../process/env-allowlist.js'
 import type { SessionDeps } from './session-deps.js'
 import { attempt } from './session-live.js'
+import { profilePartOf, providerConfigOf } from './session-profile.js'
 import type { Session } from './types.js'
 
 // What the start of a provider session is made of: the signal of its controller is the one the provider gets
@@ -15,28 +22,41 @@ export interface Start {
   readonly controller: AbortController
 }
 
-// The agent gets the environment of the kernel through the allowlist, widened by the passEnv names of its provider, the names of ByteBureau among the extra variables given at creation, and the id of its session
+// What can keep a provider session from starting
+export type StartFailure = ProviderError | SessionError | ConfigError | StoreError
+
+// A profile the session cannot run under refuses the start as the provider would refuse a login
+const authRefusal = (refused: ProfileError): ProviderError =>
+  new ProviderError({ kind: 'auth', reason: refused.reason, retryable: false })
+
+// The agent gets the environment of the kernel through the allowlist, widened by the passEnv names of its provider, the names of ByteBureau among the extra variables given at creation, the key of its profile and the id of its session
 const requestOf = (
   deps: SessionDeps,
   { session, workspacePath, controller }: Start,
-): CreateSessionRequest => {
-  const { extra, passEnv } = deps.live.environmentOf(session.id)
-  return {
-    sessionId: session.id,
-    workspace: { path: workspacePath },
-    employee: session.employee,
-    profile: { id: session.profileId ?? 'default', providerId: session.providerId, kind: 'login' },
-    providerConfig: {},
-    ...(session.externalRef === null ? {} : { resume: session.externalRef }),
-    env: {
-      ...allowlistEnv(process.env, passEnv),
-      ...bytebureauEnv(extra),
-      BYTEBUREAU_SESSION_ID: session.id,
-    },
-    signal: controller.signal,
-    logger: kernelLogger(['bb', 'agent', session.providerId]),
-  }
-}
+): Effect.Effect<CreateSessionRequest, StartFailure> =>
+  Effect.gen(function* buildsRequest() {
+    const part = yield* profilePartOf(deps, session).pipe(
+      Effect.catchTag('ProfileError', (refused) => Effect.fail(authRefusal(refused))),
+    )
+    const providerConfig = yield* providerConfigOf(deps, session)
+    const { extra, passEnv } = deps.live.environmentOf(session.id)
+    return {
+      sessionId: session.id,
+      workspace: { path: workspacePath },
+      employee: session.employee,
+      profile: part.profile,
+      providerConfig,
+      ...(session.externalRef === null ? {} : { resume: session.externalRef }),
+      env: {
+        ...allowlistEnv(process.env, passEnv),
+        ...bytebureauEnv(extra),
+        ...part.env,
+        BYTEBUREAU_SESSION_ID: session.id,
+      },
+      signal: controller.signal,
+      logger: kernelLogger(['bb', 'agent', session.providerId]),
+    }
+  })
 
 // A provider that has not started a session within this time is given up on, so it cannot hold a session for ever
 export const START_LIMIT = '60 seconds'
@@ -86,22 +106,26 @@ const abandon = (
   )
 }
 
+// The request is made before the start is timed: the provider's start alone is bounded
+// The start and what calls it off are set up in one step, so an interruption cannot fall between them; only the wait can be interrupted
 export const startAgent = (
   deps: SessionDeps,
   provider: AgentProvider,
   start: Start,
-): Effect.Effect<AgentSession, ProviderError> =>
-  Effect.suspend(() => {
-    const starting = begin(provider, requestOf(deps, start))
-    return Effect.tryPromise({
-      try: async () => {
-        const agent = await starting
-        return agent
-      },
-      catch: (cause) => cause,
-    }).pipe(
-      Effect.timeout(START_LIMIT),
-      Effect.onError(() => abandon(deps, starting, start)),
-      Effect.mapError(startFailure),
-    )
-  })
+): Effect.Effect<AgentSession, StartFailure> =>
+  Effect.flatMap(requestOf(deps, start), (request) =>
+    Effect.uninterruptibleMask((restore) => {
+      const starting = begin(provider, request)
+      const awaited = Effect.tryPromise({
+        try: async () => {
+          const agent = await starting
+          return agent
+        },
+        catch: (cause) => cause,
+      })
+      return restore(Effect.timeout(awaited, START_LIMIT)).pipe(
+        Effect.onError(() => abandon(deps, starting, start)),
+        Effect.mapError(startFailure),
+      )
+    }),
+  )

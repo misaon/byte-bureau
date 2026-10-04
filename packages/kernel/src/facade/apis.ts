@@ -1,10 +1,10 @@
-import type { Context } from 'effect'
 import { configApi } from './config.js'
 import { eventsApi } from './events.js'
 import { healthApi } from './health.js'
 import { pluginsApi, providersApi } from './plugins.js'
+import { profilesApi } from './profiles.js'
 import { projectsApi } from './projects.js'
-import type { Promised, Services } from './promised.js'
+import type { Captured, Promised } from './promised.js'
 import { asksApi, sessionsApi, usageApi } from './sessions.js'
 import type { Kernel, KernelOptions } from './types.js'
 import { workspacesApi } from './workspaces.js'
@@ -12,7 +12,7 @@ import { workspacesApi } from './workspaces.js'
 // Every area of the facade: the calls go through the runtime, what is read without a promise comes from the captured services
 export const apisOf = (
   promised: Promised,
-  services: Context.Context<Services>,
+  services: Captured,
   env: KernelOptions['env'],
 ): Omit<Kernel, 'close'> => ({
   projects: projectsApi(promised),
@@ -23,6 +23,7 @@ export const apisOf = (
   workspaces: workspacesApi(promised),
   usage: usageApi(promised),
   providers: providersApi(services),
+  profiles: profilesApi(promised),
   plugins: pluginsApi(services),
   health: healthApi(promised),
 })

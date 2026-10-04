@@ -1,7 +1,10 @@
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
+import { EventLog } from '../events/event-log.js'
+import { doubtingPlugin } from '../profiles/failing-fixtures.js'
+import { codeOf, loadedProfiles } from '../profiles/profile-fixtures.js'
 import { git } from '../testing/temp-repo.js'
-import { registerRepo, sessionOf, typesOf } from './session-fixtures.js'
+import { registerRepo, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
 import { firstOf, refusalOf } from './session-helper-fixtures.js'
 import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
@@ -14,6 +17,15 @@ const CONFIG = {
   },
 }
 const WITH_TRUNK = { ...CONFIG, defaults: { branch: 'trunk' } }
+const CANARY = 'sk-canary-create'
+const WARNING = 'session.warning'
+const FAKE_DEVELOPER = { name: 'Dev', provider: 'fake', model: 'm', permissionMode: 'supervised' }
+const SLOW_FLAVOUR = {
+  version: 1,
+  project: { name: 'flavoured' },
+  employees: { developer: FAKE_DEVELOPER },
+  providers: { fake: { passEnv: ['X'], flavour: 'slow' } },
+}
 
 it.layer(sessionLayer())('SessionManager create refusals', (suite) => {
   suite.effect('refuses a project nobody registered', () =>
@@ -117,6 +129,85 @@ it.layer(sessionLayer())('SessionManager create failures', (suite) => {
         'session.provisioning',
         'session.errored',
       ])
+    }),
+  )
+})
+
+it.layer(sessionLayer())('SessionManager create under a named profile', (suite) => {
+  suite.effect(
+    'stores the profile and runs the agent with its key set, which no event carries',
+    () =>
+      Effect.gen(function* runsUnderKey() {
+        const profiles = yield* loadedProfiles
+        yield* profiles.add({ providerId: 'fake', name: 'key', kind: 'api_key', apiKey: CANARY })
+        const session = yield* startSession({ profileId: 'fake/key' })
+        yield* (yield* SessionManager).prompt(session.id, { text: 'go' })
+        const warning = yield* waitFor(session.id, WARNING)
+        assert.deepStrictEqual(
+          [session.profileId, (yield* sessionOf(session.id)).profileId, warning.payload],
+          ['fake/key', 'fake/key', { kind: 'env', message: 'api key: present' }],
+        )
+        const events = yield* EventLog.use((log) => log.read({}, { from: 0 }))
+        assert.notInclude(JSON.stringify(events), CANARY)
+      }),
+  )
+})
+
+it.layer(sessionLayer())('SessionManager create under the default profile', (suite) => {
+  suite.effect(
+    'runs without a profile while its provider has none, and under the default one after',
+    () =>
+      Effect.gen(function* takesDefault() {
+        const before = yield* startSession()
+        yield* (yield* SessionManager).prompt(before.id, { text: 'go' })
+        const warning = yield* waitFor(before.id, WARNING)
+        yield* (yield* loadedProfiles).add({ providerId: 'fake', name: 'work', kind: 'login' })
+        const after = yield* startSession()
+        assert.deepStrictEqual(
+          [before.profileId, warning.payload, after.profileId],
+          [null, { kind: 'env', message: 'api key: absent' }, 'fake/work'],
+        )
+      }),
+  )
+})
+
+it.layer(sessionLayer({ extraPlugins: [doubtingPlugin] }))(
+  'SessionManager create refusals of a profile',
+  (suite) => {
+    suite.effect(
+      'refuses a profile nobody holds and one of another provider before it creates anything',
+      () =>
+        Effect.gen(function* refusesProfiles() {
+          const project = yield* registerRepo()
+          const profiles = yield* loadedProfiles
+          yield* profiles.add({ providerId: 'doubting', name: 'd', kind: 'login' })
+          const sessions = yield* SessionManager
+          const base = { projectId: project.id, title: 'x', providerId: 'fake' }
+          const refused = yield* Effect.all([
+            codeOf(sessions.create({ ...base, profileId: 'fake/nope' })),
+            codeOf(sessions.create({ ...base, profileId: 'doubting/d' })),
+          ])
+          assert.deepStrictEqual(refused, ['not_found', 'invalid'])
+          assert.deepStrictEqual(yield* sessions.list(), [])
+        }),
+    )
+  },
+)
+
+it.layer(sessionLayer())('SessionManager create with provider options', (suite) => {
+  suite.effect('hands the fake agent the options of its provider, which pick its script', () =>
+    Effect.gen(function* picksScript() {
+      const sessions = yield* SessionManager
+      const session = yield* startSession({}, SLOW_FLAVOUR)
+      yield* sessions.prompt(session.id, { text: 'take your time' })
+      yield* waitFor(session.id, 'turn.started')
+      yield* sessions.interrupt(session.id)
+      yield* waitFor(session.id, 'turn.interrupted')
+      const types = yield* typesOf(session.id)
+      assert.deepStrictEqual(
+        types.filter((type) => type === 'tool.started' || type === 'ask.requested'),
+        [],
+      )
     }),
   )
 })

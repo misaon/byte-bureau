@@ -79,6 +79,15 @@ export {
 } from './asks/ask-service.js'
 export { recommendForPermission, parseDuration } from './asks/policy.js'
 export {
+  ProfileService,
+  ProfileServiceLive,
+  type AddProfileInput,
+  type Profile,
+  type ProfileServiceShape,
+  type ProfileStatus,
+  type ResolvedProfile,
+} from './profiles/profile-service.js'
+export {
   SessionManager,
   SessionManagerLive,
   type SessionManagerShape,

@@ -1,7 +1,7 @@
 import type { PromptInput } from '@bytebureau/protocol'
 import { Effect, Fiber } from 'effect'
 import { TestClock } from 'effect/testing'
-import type { ProviderError, SessionError, StoreError } from '../errors.js'
+import type { ConfigError, ProviderError, SessionError, StoreError } from '../errors.js'
 import { sessionOfKernel, type ScriptedSession } from '../testing/scripted-provider.js'
 import type { Driven } from './session-script-fixtures.js'
 import { START_LIMIT } from './session-start.js'
@@ -16,18 +16,18 @@ export interface Prompted {
 
 const GO: PromptInput = { text: 'go' }
 
+type PromptFailure = SessionError | ProviderError | ConfigError | StoreError
+
 export const prompted = (
   world: Driven,
   session: Session,
   input: PromptInput = GO,
-): Effect.Effect<Prompted, SessionError | ProviderError | StoreError, SessionManager> =>
+): Effect.Effect<Prompted, PromptFailure, SessionManager> =>
   Effect.gen(function* promptsSession() {
     const sessions = yield* SessionManager
     const turn = yield* sessions.prompt(session.id, input)
     return { turn, agent: sessionOfKernel(world.scripted, session.id) }
   })
-
-type PromptFailure = SessionError | ProviderError | StoreError
 
 // A prompt whose provider session never starts, followed for as long as the kernel waits for it; what the prompt fails with
 export const promptWhileStartHangs = (
