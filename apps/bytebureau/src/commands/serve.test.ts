@@ -1,13 +1,13 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { serverUrl } from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/spawn.js'
-import { stopDaemon } from '../daemon/stop.js'
-import { startDaemonProcess } from '../testing/daemon.js'
+import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir } from '../testing/temp-repo.js'
+import { tempDir, testHome } from '../testing/temp-repo.js'
 
 const modeOf = (file: string): number => statSync(file).mode % 0o1000
 
@@ -33,7 +33,7 @@ const describedDaemon = (home: string): Record<string, unknown> => {
 // A detached daemon of the home ends with the test, should an assertion fail before the test stops it
 const stoppedWithTheTest = (home: string): Record<string, string> => {
   onTestFinished(async () => {
-    await stopDaemon(home)
+    await stopDaemonOf(home)
   })
   return { BYTEBUREAU_HOME: home }
 }
@@ -57,9 +57,11 @@ describe('bytebureau serve --no-daemonize', () => {
     expect.hasAssertions()
     const daemon = await startDaemonProcess(tempDir('bb-home-'))
     const health = await fetch(`${daemon.url}/api/v1/health`)
+    // The plugins have loaded before the server answers anything
     await expect(health.json()).resolves.toMatchObject({
       status: 'ok',
       startedAt: daemon.info.startedAt,
+      checks: { plugins: { loaded: 2, failed: 0 } },
     })
     const denied = await fetch(`${daemon.url}/api/v1/projects`)
     const allowed = await fetch(`${daemon.url}/api/v1/projects`, bearer(daemon.info.token))
@@ -160,6 +162,32 @@ describe('bytebureau serve (detached) that cannot start', () => {
     const gaveUp = `The daemon did not come up in time; see ${daemonLogPath(home)}`
     expect([started.code, started.stderr.trim()]).toStrictEqual([1, gaveUp])
     expect(readFileSync(daemonLogPath(home), 'utf8')).toContain(cannotListen(port))
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+})
+
+describe('bytebureau serve and the user configuration', () => {
+  it('listens on the port the configuration of the home names when no flag names one', async () => {
+    expect.hasAssertions()
+    // The configuration of a test home says port 0: a free port, never the default 4747
+    const daemon = await startDaemonProcess(testHome(), [])
+    expect(daemon.info.port).not.toBe(4747)
+    expect(daemon.info.port).toBeGreaterThan(0)
+    const health = await fetch(`${daemon.url}/api/v1/health`)
+    expect(health.status).toBe(200)
+    await expect(daemon.stop()).resolves.toBe(0)
+  })
+
+  it('starts on the flags and says so when the configuration of the home cannot be read', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    writeFileSync(path.join(home, 'config.json'), '{ "server": { "port": "not a port" } }\n')
+    const daemon = await startDaemonProcess(home)
+    await vi.waitFor(() => {
+      expect(daemon.stderr()).toContain(
+        'the user configuration cannot be read: its server section is not applied',
+      )
+    })
     await expect(daemon.stop()).resolves.toBe(0)
   })
 })

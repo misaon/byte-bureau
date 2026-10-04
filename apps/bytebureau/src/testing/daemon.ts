@@ -3,7 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { serverUrl, type ServerInfo } from '@bytebureau/protocol'
 import { onTestFinished } from 'vitest'
-import { readServerInfo } from '../daemon/server-info.js'
+import { isAlive, lockHolder, readServerInfo } from '../daemon/server-info.js'
+import { stopDaemon } from '../daemon/stop.js'
 import { childEnv } from './run-cli.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
@@ -55,20 +56,17 @@ const recordOf = async (
   return recordOf(home, child, deadline)
 }
 
-// A foreground daemon on a free port of the home, run from source; killed when the test ends if it is still there
+// A foreground daemon of the home, run from source; killed when the test ends if it is still there
+// The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
 export async function startDaemonProcess(
   home: string,
-  extra: readonly string[] = [],
+  flags: readonly string[] = ['--port', '0'],
 ): Promise<DaemonProcess> {
-  const child = spawn(
-    'bun',
-    ['run', 'src/main.ts', 'serve', '--no-daemonize', '--port', '0', ...extra],
-    {
-      cwd: CLI_DIRECTORY,
-      env: childEnv({ BYTEBUREAU_HOME: home }),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  )
+  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', ...flags], {
+    cwd: CLI_DIRECTORY,
+    env: childEnv({ BYTEBUREAU_HOME: home }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   onTestFinished(() => {
     child.kill('SIGKILL')
   })
@@ -93,5 +91,37 @@ export async function startDaemonProcess(
     stdout: () => output.stdout,
     stderr: () => output.stderr,
     stop,
+  }
+}
+
+const ended = async (pid: number, deadline: number): Promise<boolean> => {
+  const alive = isAlive(pid)
+  if (!alive || Date.now() >= deadline) {
+    return !alive
+  }
+  await sleep(100)
+  return ended(pid, deadline)
+}
+
+// A pid that ended meanwhile has nothing left to signal
+const signal = (pid: number, name: NodeJS.Signals): void => {
+  try {
+    process.kill(pid, name)
+  } catch {
+    // Gone already
+  }
+}
+
+// The daemon of the home ends with the test: as --stop ends it, else through the pid of its lock, which a daemon holds from its start on
+// One that does not end within the wait is killed; both waits together stay within the 10 s a test hook is given
+export async function stopDaemonOf(home: string): Promise<void> {
+  await stopDaemon(home, 4000)
+  const holder = lockHolder(home)
+  if (holder === undefined || !isAlive(holder)) {
+    return
+  }
+  signal(holder, 'SIGTERM')
+  if (!(await ended(holder, Date.now() + 4000))) {
+    signal(holder, 'SIGKILL')
   }
 }

@@ -29,6 +29,13 @@ export function tempDir(prefix: string): string {
   return dir
 }
 
+// A home whose daemons listen on a free port, as every daemon of a test must: its config.json says port 0
+export function testHome(): string {
+  const home = tempDir('bb-home-')
+  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify({ server: { port: 0 } })}\n`)
+  return home
+}
+
 // A repository with one commit on `main`
 export function createTempRepo(): string {
   const dir = tempDir('bb-repo-')
