@@ -35,6 +35,7 @@ const openSession = async (
     workspace: { path: workspace },
     employee,
     profile: { id: 'default', providerId: 'fake', kind: 'login' },
+    providerConfig: {},
     env,
     signal: new AbortController().signal,
     logger: kernelLogger(['bb', 'test']),
@@ -94,6 +95,10 @@ describe(FakeAgentProvider, () => {
     await expect(provider.authStatus()).resolves.toStrictEqual({ state: 'loggedIn' })
     expect(provider.id).toBe('fake')
     expect(provider.capabilities).toMatchObject({ askUser: true, interrupt: true, usage: true })
+  })
+
+  it('names the variable an API key is handed in, so a profile of that kind can be given to it', () => {
+    expect(provider.apiKeyEnv).toBe('BYTEBUREAU_FAKE_API_KEY')
   })
 
   it('starts a session without an external reference', async () => {

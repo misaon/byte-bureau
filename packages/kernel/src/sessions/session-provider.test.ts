@@ -35,7 +35,7 @@ const KERNEL_OWN = {
 const plain = driven()
 
 it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
-  suite.effect('hands over the workspace, the employee and the profile', () =>
+  suite.effect('hands over the workspace, the employee, the profile and no provider options', () =>
     Effect.gen(function* handsOver() {
       const session = yield* startSession({ providerId: 'scripted' })
       const { agent } = yield* prompted(plain, session)
@@ -47,6 +47,7 @@ it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
         providerId: 'scripted',
         kind: 'login',
       })
+      assert.deepStrictEqual(request.providerConfig, {})
       assert.strictEqual(request.resume, undefined)
     }),
   )

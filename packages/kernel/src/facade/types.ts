@@ -77,7 +77,11 @@ export interface Kernel {
   }
   readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsage> }
   readonly providers: {
-    readonly list: () => readonly { readonly id: string; readonly displayName: string }[]
+    readonly list: () => readonly {
+      readonly id: string
+      readonly displayName: string
+      readonly supportsApiKey: boolean
+    }[]
   }
   readonly plugins: { readonly list: () => readonly PluginStatus[] }
   readonly health: { readonly check: () => Promise<HealthReport> }

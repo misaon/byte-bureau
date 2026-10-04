@@ -41,6 +41,7 @@ export class FakeAgentProvider implements AgentProvider {
   public readonly id = 'fake'
   public readonly displayName = 'Fake agent (tests and CI)'
   public readonly capabilities = CAPABILITIES
+  public readonly apiKeyEnv = 'BYTEBUREAU_FAKE_API_KEY'
   public readonly authStatus = loggedIn
   public readonly createSession = startSession
 }

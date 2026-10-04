@@ -47,6 +47,8 @@ export interface CreateSessionRequest {
   readonly workspace: { readonly path: string }
   readonly employee: EmployeeSpec
   readonly profile: ProfileRef
+  // The providers.<id> section of the project's configuration, without passEnv (the kernel's); {} when there is none
+  readonly providerConfig: Readonly<Record<string, unknown>>
   readonly resume?: ExternalSessionRef | undefined
   readonly env: Readonly<Record<string, string>>
   readonly signal: AbortSignal
@@ -68,6 +70,8 @@ export interface AgentProvider {
   readonly id: string
   readonly displayName: string
   readonly capabilities: AgentCapabilities
+  // The environment variable an API-key profile's key is handed in; a provider without it takes no API-key profiles
+  readonly apiKeyEnv?: string | undefined
   authStatus(profile: ProfileRef): Promise<AuthStatus>
   listModels?(profile: ProfileRef): Promise<ModelInfo[]>
   createSession(request: CreateSessionRequest): Promise<AgentSession>

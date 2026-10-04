@@ -26,6 +26,7 @@ const requestOf = (
     workspace: { path: workspacePath },
     employee: session.employee,
     profile: { id: session.profileId ?? 'default', providerId: session.providerId, kind: 'login' },
+    providerConfig: {},
     ...(session.externalRef === null ? {} : { resume: session.externalRef }),
     env: {
       ...allowlistEnv(process.env, passEnv),

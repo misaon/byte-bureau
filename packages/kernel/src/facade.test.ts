@@ -72,4 +72,19 @@ describe(createKernelFrom, () => {
       await kernel.close()
     }
   })
+
+  it('lists each provider with whether it takes an API key, as the API does', async () => {
+    expect.hasAssertions()
+    const home = tempDir('bb-home-')
+    const kernel = await createKernelFrom(KernelTest({ home }), { home, env: {}, logging: QUIET })
+    try {
+      expect(kernel.providers.list()).toContainEqual({
+        id: 'fake',
+        displayName: 'Fake agent (tests and CI)',
+        supportsApiKey: true,
+      })
+    } finally {
+      await kernel.close()
+    }
+  })
 })

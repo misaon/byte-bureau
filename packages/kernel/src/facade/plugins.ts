@@ -17,5 +17,9 @@ export const providersApi = (services: Context.Context<Services>): Kernel['provi
   list: () =>
     Context.get(services, PluginHost)
       .agentProviders()
-      .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
+      .map((provider) => ({
+        id: provider.id,
+        displayName: provider.displayName,
+        supportsApiKey: provider.apiKeyEnv !== undefined,
+      })),
 })
