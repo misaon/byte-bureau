@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option } from 'effect'
+import { Clock, Context, Effect, Layer, Option } from 'effect'
 import type { HttpServerRequest } from 'effect/http'
 import { ApiConfig } from './config.js'
 import { problem, type ApiProblem } from './problems.js'
@@ -13,7 +13,7 @@ export const MutationBucketsLive: Layer.Layer<MutationBuckets, never, ApiConfig>
   MutationBuckets,
   Effect.gen(function* makeMutationBuckets() {
     const { mutationLimit } = yield* ApiConfig
-    return new TokenBuckets({ ...mutationLimit, now: Date.now })
+    return new TokenBuckets(mutationLimit)
   }),
 )
 
@@ -22,13 +22,16 @@ export const clientKey = (request: HttpServerRequest.HttpServerRequest): string 
   Option.getOrElse(request.remoteAddress, () => 'local')
 
 // A token from the budget of the client, or the 429 problem that says when to retry
+// The time is the Clock's of the request, so a test drives the budget with the TestClock instead of waiting
 export const drawToken = (
   buckets: TokenBuckets,
   key: string,
 ): Effect.Effect<void, ApiProblem<429>> =>
-  Effect.suspend(() => {
-    const verdict = buckets.take(key)
-    return verdict.allowed
-      ? Effect.void
-      : Effect.fail(problem(429, 'rate_limited', `retry after ${verdict.retryAfterSec} s`))
-  })
+  Clock.currentTimeMillis.pipe(
+    Effect.flatMap((now) => {
+      const verdict = buckets.take(key, now)
+      return verdict.allowed
+        ? Effect.void
+        : Effect.fail(problem(429, 'rate_limited', `retry after ${verdict.retryAfterSec} s`))
+    }),
+  )

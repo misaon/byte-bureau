@@ -1,8 +1,6 @@
 export interface TokenBucketOptions {
   readonly capacity: number
   readonly perMinute: number
-  // Milliseconds; injectable so tests move time by hand
-  readonly now: () => number
 }
 
 export interface Verdict {
@@ -18,6 +16,7 @@ interface Bucket {
 const MS_PER_MINUTE = 60_000
 
 // A token bucket per key: a call takes a token, tokens flow back at a steady rate, a full bucket is forgotten
+// The time of each call comes from the caller (milliseconds), so a test moves it by hand
 export class TokenBuckets {
   private readonly buckets = new Map<string, Bucket>()
   private readonly options: TokenBucketOptions
@@ -26,8 +25,7 @@ export class TokenBuckets {
     this.options = options
   }
 
-  public take(key: string): Verdict {
-    const now = this.options.now()
+  public take(key: string, now: number): Verdict {
     this.forgetFull(now)
     const known = this.buckets.get(key)
     const tokens = known === undefined ? this.options.capacity : this.refilled(known, now)
