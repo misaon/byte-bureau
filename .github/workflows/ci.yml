@@ -102,7 +102,7 @@ jobs:
           HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -142,7 +142,7 @@ jobs:
           HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
 
@@ -174,7 +174,7 @@ jobs:
           HOME_DIR=$(mktemp -d)
           git -C "$REPO" init -q -b main
           git -C "$REPO" -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes > events.ndjson
+          BYTEBUREAU_HOME="$HOME_DIR" "${BIN[0]}" run "Create src/hello.ts exporting hello()" --project "$REPO" --provider fake --json --yes --no-daemon > events.ndjson
           grep -q '"type":"session.completed"' events.ndjson || { tail -n 3 events.ndjson; exit 1; }
           test -f "$REPO"/.bytebureau/worktrees/*/src/hello.ts || { tail -n 3 events.ndjson; exit 1; }
 
