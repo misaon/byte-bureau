@@ -2,7 +2,7 @@ import { EventEnvelope } from '@bytebureau/protocol'
 import { Effect, Schema } from 'effect'
 import type { HttpServer } from 'effect/http'
 import { API_PREFIX } from './api.js'
-import { authorized, baseUrl, fetched } from './testing.js'
+import { authorized, baseUrl } from './testing.js'
 
 export interface SseFrame {
   readonly id: string | undefined
@@ -68,17 +68,18 @@ async function readSse(
 }
 
 // The event stream as a client opens it: the answer is there once the server has sent its headers
+// A test that is interrupted while it waits for them aborts the request
 export const opened = (
   query = '',
   init: RequestInit = {},
 ): Effect.Effect<Response, never, HttpServer.HttpServer> =>
   Effect.gen(function* opens() {
     const base = yield* baseUrl
-    const response = yield* fetched(
-      `${base}${API_PREFIX}/events${query === '' ? '' : `?${query}`}`,
-      authorized(init),
-    )
-    return response
+    const url = `${base}${API_PREFIX}/events${query === '' ? '' : `?${query}`}`
+    return yield* Effect.promise(async (signal) => {
+      const response = await fetch(url, { ...authorized(init), signal })
+      return response
+    })
   })
 
 // What an open stream sends until the predicate says enough

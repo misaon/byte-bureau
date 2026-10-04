@@ -1,7 +1,7 @@
 import { EventLog } from '@bytebureau/kernel'
-import { KernelEventSchemas } from '@bytebureau/protocol'
+import { decodeEventPayload } from '@bytebureau/protocol'
 import { assert, it } from '@effect/vitest'
-import { Effect, Schema } from 'effect'
+import { Effect } from 'effect'
 import type { HttpServer } from 'effect/http'
 import { API_PREFIX } from './api.js'
 import { ApiTestLayer, baseUrl, bodyOf, fetched, get, post } from './testing.js'
@@ -26,16 +26,29 @@ const hasEvent =
 
 const beats = hasEvent('heartbeat')
 
+const beatsOf = (frames: readonly SseFrame[]): SseFrame[] =>
+  frames.filter((frame) => frame.event === 'heartbeat')
+
 const firstOf = (frames: readonly SseFrame[], type: string): SseFrame | undefined =>
   frames.find((frame) => frame.event === type)
 
 const CREATED = ['session.created', 'session.provisioning', 'workspace.provisioned']
 
-// Read until the durable events have come, and a heartbeat after them shows that nothing else is on its way
+const endsWithBeat = (seen: readonly SseFrame[]): boolean => {
+  const latest = seen.at(-1)
+  return latest !== undefined && latest.event === 'heartbeat'
+}
+
+// Read until the durable events have come and a heartbeat has followed them, which shows that nothing else is on its way
+// The first heartbeat leaves at once, so having seen one says nothing about the end of the replay: the latest frame has to be one
 const replayedWithBeat =
   (count: number) =>
   (seen: readonly SseFrame[]): boolean =>
-    seqNumbersOf(seen).length >= count && beats(seen)
+    seqNumbersOf(seen).length >= count && endsWithBeat(seen)
+
+// The time a heartbeat says it was made at, read the way a client reads it: a payload with nothing but that field
+const beatTime = (frame: SseFrame): number =>
+  Date.parse(decodeEventPayload('heartbeat', envelopeOf(frame).payload).at)
 
 // The seq numbers the log holds for a session
 const loggedSeqNumbers = (sessionId: string): Effect.Effect<number[], never, EventLog> =>
@@ -136,20 +149,15 @@ it.layer(BEATING, LIVE)('GET /api/v1/events resumes a client', (suite) => {
 
 // The heartbeat test stays first: with other requests before it, closing the Node server at the end of this suite waited 3 s on a keep-alive connection (a bare http server and fetch do the same)
 it.layer(BEATING, LIVE)('GET /api/v1/events beats and narrows', (suite) => {
-  suite.effect('sends a heartbeat frame without an id while nothing happens', () =>
+  suite.effect('sends heartbeat frames without an id, one interval apart', () =>
     Effect.gen(function* beating() {
-      const started = Date.now()
       const response = yield* opened('since=1000000')
-      const frames = yield* framesUntil(response, beats)
-      // The first beat comes after one interval of 100 ms, not at once
-      assert.isAtLeast(Date.now() - started, 90)
-      const beat = yield* Effect.fromNullishOr(firstOf(frames, 'heartbeat'))
-      assert.isUndefined(beat.id)
-      assert.containSubset(envelopeOf(beat), { type: 'heartbeat', seq: 0 })
-      const payload = Schema.decodeUnknownSync(KernelEventSchemas.heartbeat)(
-        envelopeOf(beat).payload,
-      )
-      assert.isFalse(Number.isNaN(Date.parse(payload.at)))
+      const frames = yield* framesUntil(response, (seen) => beatsOf(seen).length >= 2)
+      const first = yield* Effect.fromNullishOr(beatsOf(frames).at(0))
+      const second = yield* Effect.fromNullishOr(beatsOf(frames).at(1))
+      assert.isUndefined(first.id)
+      assert.containSubset(envelopeOf(first), { type: 'heartbeat', seq: 0 })
+      assert.isAtLeast(beatTime(second) - beatTime(first), 90)
     }),
   )
 
@@ -165,6 +173,23 @@ it.layer(BEATING, LIVE)('GET /api/v1/events beats and narrows', (suite) => {
       )
       const sessions = durable.map((frame) => envelopeOf(frame).sessionId)
       assert.deepStrictEqual(sessions, [session.id, session.id])
+    }),
+  )
+})
+
+// A heartbeat an hour apart: only a first beat that leaves at once answers an idle client in time
+const IDLE = ApiTestLayer({ heartbeat: '1 hour' })
+
+it.layer(IDLE, LIVE)('GET /api/v1/events of a client that has nothing to replay', (suite) => {
+  suite.effect('has its headers and a first heartbeat at once, without waiting an interval', () =>
+    Effect.gen(function* opensAtOnce() {
+      const response = yield* opened('since=1000000').pipe(Effect.timeout('5 seconds'))
+      assert.strictEqual(response.status, 200)
+      const frames = yield* framesUntil(response, beats).pipe(Effect.timeout('5 seconds'))
+      assert.deepStrictEqual(
+        frames.map((frame) => frame.event),
+        ['heartbeat'],
+      )
     }),
   )
 })

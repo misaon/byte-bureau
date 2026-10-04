@@ -39,9 +39,10 @@ const seqOf = (lastEventId: string | undefined): number | undefined => {
 export const sinceOf = (query: EventsQuery, lastEventId: string | undefined): number =>
   seqOf(lastEventId) ?? query.since ?? 0
 
-// The types are comma-separated; with none listed the stream is not narrowed by type
+// The types are comma-separated, with or without blanks around a name; with none listed the stream is not narrowed by type
 const typesOf = (types: string | undefined): readonly string[] | undefined => {
-  const listed = (types ?? '').split(',').filter((type) => type !== '')
+  const names = (types ?? '').split(',').map((name) => name.trim())
+  const listed = names.filter((name) => name !== '')
   return listed.length === 0 ? undefined : listed
 }
 

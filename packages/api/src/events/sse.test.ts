@@ -56,12 +56,26 @@ describe(filterOf, () => {
   })
 
   it.each([
-    { given: 'nothing', query: {}, header: undefined },
-    { given: 'a list of no type', query: { types: ',' }, header: undefined },
-  ])(
-    'leaves out what the query leaves out: $given does not narrow the stream',
-    ({ query, header }) => {
-      expect(filterOf(query, header)).toStrictEqual({ since: 0 })
+    {
+      given: 'names with blanks around them',
+      query: { types: ' session.created, session.ready ,tool.started' },
+      header: undefined,
+      expected: { since: 0, types: ['session.created', 'session.ready', 'tool.started'] },
     },
-  )
+    { given: 'nothing', query: {}, header: undefined, expected: { since: 0 } },
+    {
+      given: 'a list of no type',
+      query: { types: ',' },
+      header: undefined,
+      expected: { since: 0 },
+    },
+    {
+      given: 'a list of blanks',
+      query: { types: ' , ' },
+      header: undefined,
+      expected: { since: 0 },
+    },
+  ])('maps $given to the filter of the kernel', ({ query, header, expected }) => {
+    expect(filterOf(query, header)).toStrictEqual(expected)
+  })
 })

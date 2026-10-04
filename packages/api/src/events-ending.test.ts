@@ -17,16 +17,28 @@ const envelope = (seq: number): EventEnvelope => ({
   payload: {},
 })
 
-// What the API logs, as the level and the category of each line (its listening lines among them)
-const logged: { level: string; category: unknown }[] = []
-const capture = Logger.make((options) => {
-  const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
-  logged.push({ level: options.logLevel, category })
-})
+interface LogLine {
+  readonly level: string
+  readonly category: unknown
+}
+
+// A logger of its own for each suite, and the lines it has been given: the level and the category (the listening lines among them)
+const collecting = (): { logger: Logger.Logger<unknown, void>; lines: LogLine[] } => {
+  const lines: LogLine[] = []
+  const logger = Logger.make((options) => {
+    const { category } = options.fiber.getRef(References.CurrentLogAnnotations)
+    lines.push({ level: options.logLevel, category })
+  })
+  return { logger, lines }
+}
+
+const warningsOf = (lines: readonly LogLine[]): LogLine[] =>
+  lines.filter((line) => line.level === 'Warn')
 
 // The API over a log whose subscription is the one given; the logger sits next to the API, where its requests see it
 const over = (
   subscription: Stream.Stream<EventEnvelope, StoreError>,
+  logger: Logger.Logger<unknown, void>,
 ): ReturnType<typeof ApiTestLayer> => {
   const log = Layer.succeed(
     EventLog,
@@ -37,7 +49,7 @@ const over = (
     }),
   )
   return serveApi(testOptions({ heartbeat: '100 millis' })).pipe(
-    Layer.provide(Logger.layer([capture])),
+    Layer.provide(Logger.layer([logger])),
     Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port: 0, host: '127.0.0.1' })),
     Layer.provideMerge(log),
     Layer.provideMerge(BootedKernel),
@@ -51,30 +63,33 @@ const wholeStream = Effect.gen(function* reads() {
 })
 
 const live = { excludeTestServices: true }
+
+const ended = collecting()
 const endingSubscription = Stream.make(envelope(1), envelope(2))
 
-it.layer(over(endingSubscription), live)(
+it.layer(over(endingSubscription, ended.logger), live)(
   'GET /api/v1/events when the subscription ends',
   (suite) => {
-    suite.effect('ends the response with it, after the events it gave, instead of beating on', () =>
+    suite.effect('ends the response with it, after the events it gave, without a word', () =>
       Effect.gen(function* ends() {
         assert.deepStrictEqual(seqNumbersOf(yield* wholeStream), [1, 2])
+        assert.deepStrictEqual(warningsOf(ended.lines), [])
       }),
     )
   },
 )
 
+const failed = collecting()
 const gone = new StoreError({ cause: new Error('the store is gone') })
 const failingSubscription = Stream.make(envelope(1)).pipe(Stream.concat(Stream.fail(gone)))
 
-it.layer(over(failingSubscription), live)(
+it.layer(over(failingSubscription, failed.logger), live)(
   'GET /api/v1/events when the subscription fails',
   (suite) => {
     suite.effect('ends the response after the events it gave, and logs the failure', () =>
       Effect.gen(function* fails() {
         assert.deepStrictEqual(seqNumbersOf(yield* wholeStream), [1])
-        const warnings = logged.filter((line) => line.level === 'Warn')
-        assert.deepStrictEqual(warnings, [{ level: 'Warn', category: 'bb.api' }])
+        assert.deepStrictEqual(warningsOf(failed.lines), [{ level: 'Warn', category: 'bb.api' }])
       }),
     )
   },

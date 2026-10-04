@@ -14,12 +14,9 @@ export const EventsHandlers = HttpApiBuilder.group(BureauApi, 'events', (handler
       const events = buffered(log.subscribe(filterOf(query, headers['last-event-id']))).pipe(
         Stream.map(toSseEvent),
       )
-      // Stream.tick fires at once and then every heartbeat; the first is dropped, so the first beat comes after one interval
+      // Stream.tick fires at once and then every heartbeat; the first beat leaves with the response, so an idle client has its headers at once
       // The beats stop when the events end, so the response ends with them
-      const beats = Stream.tick(heartbeat).pipe(
-        Stream.drop(1),
-        Stream.map(() => heartbeatEvent()),
-      )
+      const beats = Stream.tick(heartbeat).pipe(Stream.map(() => heartbeatEvent()))
       return Stream.merge(events, beats, { haltStrategy: 'left' })
     }),
   ),
