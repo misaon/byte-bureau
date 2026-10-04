@@ -12,6 +12,7 @@
     "coverage",
     "bun.lock",
     "**/paraglide/**",
+    "packages/client/src/gen/**",
     "docs/research/**",
     "docs/superpowers/**",
     "CHANGELOG.md",

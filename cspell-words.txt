@@ -103,3 +103,5 @@ NOCASE
 reflog
 doporučený
 doporučená
+codegen
+eventsource

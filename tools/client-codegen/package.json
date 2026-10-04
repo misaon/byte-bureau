@@ -1,0 +1,13 @@
+{
+  "name": "@bytebureau/client-codegen",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "openapi-ts"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2"
+  }
+}

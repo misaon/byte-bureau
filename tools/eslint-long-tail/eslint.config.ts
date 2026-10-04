@@ -8,7 +8,16 @@ import tseslint from 'typescript-eslint'
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 export default defineConfig(
-  { ignores: ['**/dist/**', '**/coverage/**', '**/paraglide/**', '**/.astro/**', '**/*.config.*'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/coverage/**',
+      '**/paraglide/**',
+      '**/.astro/**',
+      '**/*.config.*',
+      '**/src/gen/**',
+    ],
+  },
   {
     files: ['**/*.ts'],
     languageOptions: {
