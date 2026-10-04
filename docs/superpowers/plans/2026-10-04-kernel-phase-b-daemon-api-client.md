@@ -3180,6 +3180,8 @@ Profile endpoints (`profiles` group) and per-profile usage snapshots arrive with
 
 Semantics: handlers call the kernel's Effect services directly (no Promise facade in the daemon) and turn every typed failure into a problem with `orProblem` (typed `ApiProblem<KernelStatus>` since Task 3's fix round, so every endpoint that calls the kernel — the list endpoints included — declares `error: PROBLEM_SCHEMAS`; the handler layers join `Handlers` in `handlers/all.ts`; `ApiTestLayer(overrides?)` takes no home and loads the plugins itself); `found(entity, code, detail)` turns an `undefined` lookup into a `404`. `POST /sessions` is synchronous up to `ready`, like `SessionManager.create` (the worktree is provisioned before the response), so a client can prompt right after; `POST /sessions/:id/prompt` returns as soon as the turn is recorded, and the turn's progress arrives on the event stream (Task 5). The kernel records answer the DTO schemas field for field; the handlers return them as they are, and `Schema.encodeSync(SessionDto)` in `testing-sessions.ts` pins the mirror at compile time. Every mutation carries `MutationLimit`.
 
+Semantics (as shipped, commits 5cca25c, e4f9770, e2f03c9): the 201 success schemas are `Schema.suspend(() => Dto).pipe(HttpApiSchema.status(201))` (the plain form made the OpenAPI document emit `Project_1`/`Session_1` duplicates; `openapi.test.ts` guards against numbered components); `PruneBody` is private to `groups/workspaces.ts` with an identifier and `POST /workspaces/prune` requires a JSON body (`{}` at least); `interrupt` on a session with no agent attached answers `404 session_not_found` (the kernel's semantics — a follow-up may map it to 409 or a no-op 204); `GET /usage/sessions/:id` answers zeros for an unknown session (final wave: a `found` precheck); a relative `POST /projects` path resolves in the daemon's working directory, so the CLI sends absolute paths (Task 9); the body limit lives in `body-limit.ts` (a content-length precheck answering the `413 payload_too_large` problem, registered after CORS; `MaxBodySize` reads the same constant as the backstop); the tests use the `get`/`post(path, body?)`/`remove` helpers of `testing.ts` and `UNKNOWN_ID`, `registeredWith`, `recommendedOption`, `askedSession` of `testing-sessions.ts`; the 401-on-every-protected-operation and 429-on-exactly-the-mutations tests are derived from the OpenAPI document; `firstEvent` has no timeout of its own because the suite runs on the TestClock (a missing event shows as a Vitest timeout). Known minors (final wave): the 429 test depends on wall time (three registrations within one second — use `perMinute: 1` or feed the bucket from the Effect `Clock`); no 413 in the OpenAPI document; no chunked-body test for the precheck; the interrupt test does not assert `ready` afterwards; `config_invalid` details repeat the file pointer (Task 3's mapper prefixes what the reason holds).
+
 - [ ] **Step 0: The 10 MB body limit answers a problem**
 
 Add a global middleware (`packages/api/src/body-limit.ts`, registered next to CORS in `layer.ts`) that reads the request's `content-length` header and, when it is a number above `MAX_BODY_BYTES` (10 MB, the value `layer.ts` already uses for `MaxBodySize`), answers at once with the `413` problem `payload_too_large` (`application/problem+json`, built with `problem(413, 'payload_too_large', 'the request body exceeds 10 MB')` and `HttpServerResponse.jsonUnsafe(problem, { status: 413, contentType: 'application/problem+json' })` or the equivalent) without reading the body. `MaxBodySize` stays as the backstop for bodies that arrive without a length (Node drops such a connection, Bun answers an empty `413`). Un-skip the 413 test of `auth.test.ts` (Task 3 left it `it.effect.skip`) and let it assert `413` and `{ code: 'payload_too_large' }` on a POST to `/api/v1/projects` with an 11 MB body.
@@ -3200,12 +3202,18 @@ import { PROBLEM_SCHEMAS } from '../problems.js'
 import { MutationLimit } from '../rate-limit.js'
 import { RequestValidation } from '../validation.js'
 
+// The status is an annotation, and an annotated schema is a copy of its own; a suspended one keeps naming the one component of the OpenAPI document
+const Created = Schema.suspend(() => ProjectDto).pipe(HttpApiSchema.status(201))
+
 export const ProjectsGroup = HttpApiGroup.make('projects')
   .add(
-    HttpApiEndpoint.get('list', '/projects', { success: Schema.Array(ProjectDto), error: PROBLEM_SCHEMAS }),
+    HttpApiEndpoint.get('list', '/projects', {
+      success: Schema.Array(ProjectDto),
+      error: PROBLEM_SCHEMAS,
+    }),
     HttpApiEndpoint.post('register', '/projects', {
       payload: RegisterProjectBody,
-      success: ProjectDto.pipe(HttpApiSchema.status(201)),
+      success: Created,
       error: PROBLEM_SCHEMAS,
     }).middleware(MutationLimit),
     HttpApiEndpoint.get('get', '/projects/:id', {
@@ -3213,7 +3221,7 @@ export const ProjectsGroup = HttpApiGroup.make('projects')
       success: ProjectDto,
       error: PROBLEM_SCHEMAS,
     }),
-    HttpApiEndpoint.del('remove', '/projects/:id', {
+    HttpApiEndpoint.delete('remove', '/projects/:id', {
       params: { id: Id },
       success: HttpApiSchema.NoContent,
       error: PROBLEM_SCHEMAS,
@@ -3235,23 +3243,18 @@ import { RequestValidation } from '../validation.js'
 
 const byId = { id: Id }
 
-// A command on one session: no body, nothing back but the status
-const command = <const Identifier extends string, const Path extends `/${string}`>(
-  identifier: Identifier,
-  path: Path,
-) =>
-  HttpApiEndpoint.post(identifier, path, {
-    params: byId,
-    success: HttpApiSchema.NoContent,
-    error: PROBLEM_SCHEMAS,
-  }).middleware(MutationLimit)
+// The status is an annotation, and an annotated schema is a copy of its own; a suspended one keeps naming the one component of the OpenAPI document
+const Created = Schema.suspend(() => SessionDto).pipe(HttpApiSchema.status(201))
 
 export const SessionsGroup = HttpApiGroup.make('sessions')
   .add(
-    HttpApiEndpoint.get('list', '/sessions', { success: Schema.Array(SessionDto), error: PROBLEM_SCHEMAS }),
+    HttpApiEndpoint.get('list', '/sessions', {
+      success: Schema.Array(SessionDto),
+      error: PROBLEM_SCHEMAS,
+    }),
     HttpApiEndpoint.post('create', '/sessions', {
       payload: CreateSessionBody,
-      success: SessionDto.pipe(HttpApiSchema.status(201)),
+      success: Created,
       error: PROBLEM_SCHEMAS,
     }).middleware(MutationLimit),
     HttpApiEndpoint.get('get', '/sessions/:id', {
@@ -3265,14 +3268,26 @@ export const SessionsGroup = HttpApiGroup.make('sessions')
       success: TurnDto,
       error: PROBLEM_SCHEMAS,
     }).middleware(MutationLimit),
-    command('interrupt', '/sessions/:id/interrupt'),
-    command('stop', '/sessions/:id/stop'),
+    HttpApiEndpoint.post('interrupt', '/sessions/:id/interrupt', {
+      params: byId,
+      success: HttpApiSchema.NoContent,
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
+    HttpApiEndpoint.post('stop', '/sessions/:id/stop', {
+      params: byId,
+      success: HttpApiSchema.NoContent,
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
     HttpApiEndpoint.post('resume', '/sessions/:id/resume', {
       params: byId,
       success: SessionDto,
       error: PROBLEM_SCHEMAS,
     }).middleware(MutationLimit),
-    command('complete', '/sessions/:id/complete'),
+    HttpApiEndpoint.post('complete', '/sessions/:id/complete', {
+      params: byId,
+      success: HttpApiSchema.NoContent,
+      error: PROBLEM_SCHEMAS,
+    }).middleware(MutationLimit),
   )
   .middleware(Authorization)
   .middleware(RequestValidation)
@@ -3342,8 +3357,9 @@ import { PROBLEM_SCHEMAS } from '../problems.js'
 import { MutationLimit } from '../rate-limit.js'
 import { RequestValidation } from '../validation.js'
 
-export const PruneBody = Schema.Struct({ projectId: Schema.optionalKey(Id) }).annotate({
+const PruneBody = Schema.Struct({ projectId: Schema.optionalKey(Id) }).annotate({
   title: 'PruneWorkspaces',
+  identifier: 'PruneWorkspaces',
 })
 
 export const WorkspacesGroup = HttpApiGroup.make('workspaces')
@@ -3400,12 +3416,18 @@ export const found = <Entity>(
 
 `packages/api/src/handlers/projects.ts`:
 ```ts
-import { ProjectRegistry } from '@bytebureau/kernel'
+import { ProjectRegistry, type Project } from '@bytebureau/kernel'
 import { Effect } from 'effect'
 import { HttpApiBuilder } from 'effect/http-api'
 import { BureauApi } from '../api.js'
-import { orProblem } from '../problems.js'
+import { orProblem, type ApiProblem, type KernelStatus } from '../problems.js'
 import { found } from './found.js'
+
+// The project, or the 404 problem when nobody holds the id
+const projectOf = (id: string): Effect.Effect<Project, ApiProblem<KernelStatus>, ProjectRegistry> =>
+  orProblem(ProjectRegistry.use((registry) => registry.get(id))).pipe(
+    Effect.flatMap((project) => found(project, 'not_found', `no project ${id}`)),
+  )
 
 export const ProjectsHandlers = HttpApiBuilder.group(BureauApi, 'projects', (handlers) =>
   handlers
@@ -3413,15 +3435,12 @@ export const ProjectsHandlers = HttpApiBuilder.group(BureauApi, 'projects', (han
     .handle('register', ({ payload }) =>
       orProblem(ProjectRegistry.use((registry) => registry.register(payload.path))),
     )
-    .handle('get', ({ params }) =>
-      orProblem(ProjectRegistry.use((registry) => registry.get(params.id))).pipe(
-        Effect.flatMap((project) => found(project, 'not_found', `no project ${params.id}`)),
-      ),
-    )
+    .handle('get', ({ params }) => projectOf(params.id))
     .handle('remove', ({ params }) =>
-      orProblem(ProjectRegistry.use((registry) => registry.get(params.id))).pipe(
-        Effect.flatMap((project) => found(project, 'not_found', `no project ${params.id}`)),
-        Effect.flatMap(() => orProblem(ProjectRegistry.use((registry) => registry.remove(params.id)))),
+      projectOf(params.id).pipe(
+        Effect.flatMap(() =>
+          orProblem(ProjectRegistry.use((registry) => registry.remove(params.id))),
+        ),
       ),
     ),
 )
@@ -3430,16 +3449,17 @@ export const ProjectsHandlers = HttpApiBuilder.group(BureauApi, 'projects', (han
 
 `packages/api/src/handlers/sessions.ts`:
 ```ts
-import { SessionManager } from '@bytebureau/kernel'
+import { SessionManager, type SessionManagerShape } from '@bytebureau/kernel'
 import { Effect } from 'effect'
 import { HttpApiBuilder } from 'effect/http-api'
 import { BureauApi } from '../api.js'
-import { orProblem } from '../problems.js'
+import { orProblem, type ApiProblem, type KernelStatus } from '../problems.js'
 import { found } from './found.js'
 
 const sessions = <Value, Failure>(
-  call: (manager: SessionManager['Service']) => Effect.Effect<Value, Failure>,
-) => orProblem(SessionManager.use(call))
+  call: (manager: SessionManagerShape) => Effect.Effect<Value, Failure>,
+): Effect.Effect<Value, ApiProblem<KernelStatus>, SessionManager> =>
+  orProblem(SessionManager.use(call))
 
 export const SessionsHandlers = HttpApiBuilder.group(BureauApi, 'sessions', (handlers) =>
   handlers
@@ -3472,14 +3492,18 @@ import { found } from './found.js'
 
 export const AsksHandlers = HttpApiBuilder.group(BureauApi, 'asks', (handlers) =>
   handlers
-    .handle('pending', ({ query }) => orProblem(AskService.use((asks) => asks.pending(query.session))))
+    .handle('pending', ({ query }) =>
+      orProblem(AskService.use((asks) => asks.pending(query.session))),
+    )
     .handle('get', ({ params }) =>
       orProblem(AskService.use((asks) => asks.get(params.id))).pipe(
         Effect.flatMap((ask) => found(ask, 'ask_not_found', `no ask ${params.id}`)),
       ),
     )
     .handle('answer', ({ params, payload }) =>
-      orProblem(AskService.use((asks) => asks.answer(params.id, payload, 'api'))).pipe(Effect.asVoid),
+      orProblem(AskService.use((asks) => asks.answer(params.id, payload, 'api'))).pipe(
+        Effect.asVoid,
+      ),
     ),
 )
 ```
@@ -3519,16 +3543,17 @@ export const WorkspacesHandlers = HttpApiBuilder.group(BureauApi, 'workspaces', 
 `packages/api/src/handlers/plugins.ts`:
 ```ts
 import { PluginHost } from '@bytebureau/kernel'
-import { Effect } from 'effect'
 import { HttpApiBuilder } from 'effect/http-api'
 import { BureauApi } from '../api.js'
 
 export const PluginsHandlers = HttpApiBuilder.group(BureauApi, 'plugins', (handlers) =>
   handlers
-    .handle('list', () => Effect.map(PluginHost.asEffect(), (host) => host.plugins()))
+    .handle('list', () => PluginHost.useSync((host) => host.plugins()))
     .handle('providers', () =>
-      Effect.map(PluginHost.asEffect(), (host) =>
-        host.agentProviders().map((provider) => ({ id: provider.id, displayName: provider.displayName })),
+      PluginHost.useSync((host) =>
+        host
+          .agentProviders()
+          .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
       ),
     ),
 )
@@ -3541,11 +3566,22 @@ export const PluginsHandlers = HttpApiBuilder.group(BureauApi, 'plugins', (handl
 
 `packages/api/src/testing-sessions.ts`:
 ```ts
-import { EventLog } from '@bytebureau/kernel'
+import { EventLog, type StoreError } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
-import { SessionDto, type EventEnvelope, type ProjectDto } from '@bytebureau/protocol'
-import { Effect, Schema, Stream } from 'effect'
-import { authorized, baseUrl, json } from './testing.js'
+import {
+  AskRecord,
+  ProjectDto,
+  SessionDto,
+  type AskOption,
+  type EventEnvelope,
+} from '@bytebureau/protocol'
+import { assert } from '@effect/vitest'
+import { Effect, Schema, Stream, type Cause } from 'effect'
+import type { HttpServer } from 'effect/http'
+import { get, post, type Reply } from './testing.js'
+
+// An id no project, session or ask has
+export const UNKNOWN_ID = '0192f0a0-0000-7000-8000-000000000009'
 
 // A project file whose default employee works with the bundled fake provider
 export const fakeProjectConfig = {
@@ -3557,292 +3593,630 @@ export const fakeProjectConfig = {
   defaults: { employee: 'developer' },
 }
 
+// A call that was meant to work fails the test with what the server answered
+const succeeded = (reply: Reply, status: number): Reply => {
+  assert.strictEqual(reply.status, status, JSON.stringify(reply.body))
+  return reply
+}
+
+interface Registered {
+  readonly repo: string
+  readonly project: ProjectDto
+  readonly status: number
+}
+
+// A repository with the project file as given, registered through the API
+export const registeredWith = (
+  config: Record<string, unknown>,
+): Effect.Effect<Registered, never, HttpServer.HttpServer> =>
+  Effect.gen(function* registers() {
+    const repo = createTempRepo()
+    writeConfig(repo, config)
+    const { status, body } = succeeded(yield* post('/projects', { path: repo }), 201)
+    return { repo, project: Schema.decodeUnknownSync(ProjectDto)(body), status }
+  })
+
 // A repository configured for the fake provider, registered through the API
-export const registeredProject = Effect.gen(function* registers() {
-  const repo = createTempRepo()
-  writeConfig(repo, fakeProjectConfig)
-  const base = yield* baseUrl
-  const response = yield* Effect.promise(() => fetch(`${base}/api/v1/projects`, json({ path: repo })))
-  const project: ProjectDto = yield* Effect.promise(() => response.json())
-  return { repo, project }
-})
+export const registeredProject = registeredWith(fakeProjectConfig)
 
 // A session created through the API, ready to be prompted
 export const createdSession = Effect.gen(function* creates() {
   const { project } = yield* registeredProject
-  const base = yield* baseUrl
-  const response = yield* Effect.promise(() =>
-    fetch(`${base}/api/v1/sessions`, json({ projectId: project.id, title: 'Create hello' })),
-  )
-  const body: unknown = yield* Effect.promise(() => response.json())
-  return { project, session: Schema.decodeUnknownSync(SessionDto)(body), status: response.status }
+  const created = yield* post('/sessions', { projectId: project.id, title: 'Create hello' })
+  const { status, body } = succeeded(created, 201)
+  return { project, session: Schema.decodeUnknownSync(SessionDto)(body), status }
 })
 
-// The first event of the type for the session, from the kernel behind the API; ten seconds at most
-export const firstEvent = (sessionId: string, type: string): Effect.Effect<EventEnvelope, unknown, EventLog> =>
+// The first event of the type the session has had or will have, from the kernel behind the API
+// Only the timeout of the test bounds the wait: the clock of a suite is the test clock
+export const firstEvent = (
+  sessionId: string,
+  type: string,
+): Effect.Effect<EventEnvelope, StoreError | Cause.NoSuchElementError, EventLog> =>
   EventLog.use((log) =>
-    log.subscribe({ sessionId, since: 0 }).pipe(
-      Stream.filter((event) => event.type === type),
-      Stream.take(1),
-      Stream.runCollect,
-      Effect.flatMap(([first]) => (first === undefined ? Effect.fail(new Error(`no ${type}`)) : Effect.succeed(first))),
-      Effect.timeout('10 seconds'),
+    Stream.runHead(log.subscribe({ sessionId, types: [type], since: 0 })).pipe(
+      Effect.flatMap(Effect.fromOption),
     ),
   )
 
-export const post = (base: string, path: string): Promise<Response> =>
-  fetch(`${base}${path}`, authorized({ method: 'POST' }))
+// The option an ask recommends
+export const recommendedOption = (
+  ask: AskRecord,
+): Effect.Effect<AskOption, Cause.NoSuchElementError> =>
+  Effect.fromNullishOr(
+    ask.questions.flatMap((question) => question.options).find((option) => option.recommended),
+  )
+
+// A session whose first turn has raised its question, and the ask as it waits for an answer
+export const askedSession = Effect.gen(function* asks() {
+  const { project, session } = yield* createdSession
+  const text = 'Create src/hello.ts exporting hello()'
+  succeeded(yield* post(`/sessions/${session.id}/prompt`, { text }), 200)
+  yield* firstEvent(session.id, 'ask.requested')
+  const pending = yield* get(`/asks?session=${session.id}`)
+  const [ask] = Schema.decodeUnknownSync(Schema.Array(AskRecord))(succeeded(pending, 200).body)
+  return { project, session, ask: yield* Effect.fromNullishOr(ask) }
+})
 ```
 `Schema` comes from `effect` (the protocol barrel does not re-export it; the api package may import `effect`). `Stream.runCollect` returns an array in Effect 4 (`dist/Stream.d.ts` line 14891).
 
 `packages/api/src/projects.test.ts`:
 ```ts
-import { createTempRepo, tempDir } from '@bytebureau/kernel/testing'
-import { it } from '@effect/vitest'
+import { createTempRepo, tempDir, writeConfig } from '@bytebureau/kernel/testing'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
-import { registeredProject } from './testing-sessions.js'
+import { ApiTestLayer, get, post, remove } from './testing.js'
+import { createdSession, fakeProjectConfig, registeredProject } from './testing-sessions.js'
 
-describe('/api/v1/projects', () => {
-  it.layer(ApiTestLayer())('over the test kernel', (it) => {
-    it.effect('registers a repository with 201, lists it, reads it and removes it', () =>
-      Effect.gen(function* roundTrips() {
-        const base = yield* baseUrl
-        const repo = createTempRepo()
-        const created = yield* Effect.promise(() => fetch(`${base}/api/v1/projects`, json({ path: repo })))
-        expect(created.status).toBe(201)
-        const project: { id: string; path: string; defaultBranch: string } = yield* Effect.promise(() => created.json())
-        expect(project).toMatchObject({ path: repo, defaultBranch: 'main' })
-        const listed = yield* Effect.promise(() => fetch(`${base}/api/v1/projects`, authorized()))
-        expect(yield* Effect.promise(() => listed.json())).toMatchObject([{ id: project.id }])
-        const read = yield* Effect.promise(() => fetch(`${base}/api/v1/projects/${project.id}`, authorized()))
-        expect(read.status).toBe(200)
-        const removed = yield* Effect.promise(() => fetch(`${base}/api/v1/projects/${project.id}`, authorized({ method: 'DELETE' })))
-        expect(removed.status).toBe(204)
-        const gone = yield* Effect.promise(() => fetch(`${base}/api/v1/projects/${project.id}`, authorized()))
-        expect(gone.status).toBe(404)
-        expect(yield* Effect.promise(() => gone.json())).toMatchObject({ code: 'not_found', status: 404 })
-      }),
-    )
+it.layer(ApiTestLayer())('POST /api/v1/projects over the test kernel', (suite) => {
+  suite.effect('registers a repository with 201 and tells it as the kernel keeps it', () =>
+    Effect.gen(function* registers() {
+      const { repo, project, status } = yield* registeredProject
+      assert.strictEqual(status, 201)
+      const { name } = fakeProjectConfig.project
+      assert.containSubset(project, { path: repo, name, defaultBranch: 'main' })
+      assert.containSubset(project.config, {
+        defaults: { employee: 'developer' },
+        employees: { developer: { provider: 'fake', model: 'any' } },
+      })
+    }),
+  )
+})
 
-    it.effect('refuses a directory that is no repository with 422 and the kernel reason', () =>
-      Effect.gen(function* refuses() {
-        const base = yield* baseUrl
-        const plain = tempDir('bb-plain-')
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/projects`, json({ path: plain })))
-        expect(response.status).toBe(422)
-        expect(response.headers.get('content-type')).toContain('application/problem+json')
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({
-          code: 'workspace_not_a_repository',
-          detail: `${plain} is not inside a git repository`,
-        })
-      }),
-    )
+it.layer(ApiTestLayer())('the refusals of POST /api/v1/projects over the test kernel', (suite) => {
+  suite.effect('refuses a directory that is no repository with 422 and the kernel reason', () =>
+    Effect.gen(function* refusesDirectory() {
+      const plain = tempDir('bb-plain-')
+      const refused = yield* post('/projects', { path: plain })
+      assert.strictEqual(refused.status, 422)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, {
+        code: 'workspace_not_a_repository',
+        detail: `${plain} is not inside a git repository`,
+      })
+    }),
+  )
 
-    it.effect('refuses a body the schema does not know with 400 request_invalid', () =>
-      Effect.gen(function* refusesBody() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/projects`, json({ directory: '/x' })))
-        expect(response.status).toBe(400)
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({ code: 'request_invalid' })
-      }),
-    )
+  suite.effect('refuses a ByteBureau worktree with 422 workspace_is_bytebureau_worktree', () =>
+    Effect.gen(function* refusesWorktree() {
+      const { session } = yield* createdSession
+      const workspace = yield* Effect.fromNullishOr(session.workspace)
+      const refused = yield* post('/projects', { path: workspace.path })
+      assert.strictEqual(refused.status, 422)
+      assert.containSubset(refused.body, { code: 'workspace_is_bytebureau_worktree' })
+    }),
+  )
 
-    it.effect('does not remove a project that has sessions: 409 workspace_has_sessions', () =>
-      Effect.gen(function* keeps() {
-        const base = yield* baseUrl
-        const { project } = yield* registeredProject
-        yield* Effect.promise(() => fetch(`${base}/api/v1/sessions`, json({ projectId: project.id, title: 'x' })))
-        const removed = yield* Effect.promise(() => fetch(`${base}/api/v1/projects/${project.id}`, authorized({ method: 'DELETE' })))
-        expect(removed.status).toBe(409)
-        expect(yield* Effect.promise(() => removed.json())).toMatchObject({ code: 'workspace_has_sessions' })
-      }),
-    )
-  })
+  suite.effect('refuses a project file the schema does not know with 422 config_invalid', () =>
+    Effect.gen(function* refusesFile() {
+      const repo = createTempRepo()
+      writeConfig(repo, { version: 99 })
+      const refused = yield* post('/projects', { path: repo })
+      assert.strictEqual(refused.status, 422)
+      assert.containSubset(refused.body, { code: 'config_invalid' })
+      assert.include(JSON.stringify(refused.body), `${repo}/bytebureau.json/version`)
+    }),
+  )
+
+  suite.effect('refuses a body the schema does not know with 400 request_invalid', () =>
+    Effect.gen(function* refusesBody() {
+      const refused = yield* post('/projects', { directory: '/x' })
+      assert.strictEqual(refused.status, 400)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, {
+        code: 'request_invalid',
+        detail: 'Payload: Missing key\n  at ["path"]',
+      })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('GET and DELETE /api/v1/projects/:id over the test kernel', (suite) => {
+  suite.effect('lists a registered project and reads it by its id', () =>
+    Effect.gen(function* reads() {
+      const { project } = yield* registeredProject
+      const listed = yield* get('/projects')
+      assert.strictEqual(listed.status, 200)
+      assert.containSubset(listed.body, [{ id: project.id }])
+      const read = yield* get(`/projects/${project.id}`)
+      assert.strictEqual(read.status, 200)
+      assert.deepStrictEqual(read.body, project)
+    }),
+  )
+
+  suite.effect('removes a project with 204 and answers 404 not_found for it afterwards', () =>
+    Effect.gen(function* removes() {
+      const { project } = yield* registeredProject
+      assert.strictEqual((yield* remove(`/projects/${project.id}`)).status, 204)
+      const gone = yield* get(`/projects/${project.id}`)
+      assert.strictEqual(gone.status, 404)
+      assert.include(gone.type, 'application/problem+json')
+      assert.containSubset(gone.body, { code: 'not_found', status: 404 })
+      assert.strictEqual((yield* remove(`/projects/${project.id}`)).status, 404)
+    }),
+  )
+
+  suite.effect('does not remove a project that has sessions: 409 workspace_has_sessions', () =>
+    Effect.gen(function* keeps() {
+      const { project } = yield* createdSession
+      const refused = yield* remove(`/projects/${project.id}`)
+      assert.strictEqual(refused.status, 409)
+      assert.containSubset(refused.body, { code: 'workspace_has_sessions' })
+      assert.strictEqual((yield* get(`/projects/${project.id}`)).status, 200)
+    }),
+  )
 })
 ```
 The exact `detail` of the not-a-repository refusal is the kernel's `WorkspaceError.reason` from Phase A (the CLI test `projects.test.ts` asserts `${plain} is not inside a git repository`); keep the two in step.
 
 `packages/api/src/sessions.test.ts`:
 ```ts
-import { it } from '@effect/vitest'
-import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
-import { createdSession, firstEvent, post } from './testing-sessions.js'
+import { EventLog, SessionManager } from '@bytebureau/kernel'
+import { SessionDto, TurnDto } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect, Schema } from 'effect'
+import { ApiTestLayer, get, post } from './testing.js'
+import {
+  askedSession,
+  createdSession,
+  firstEvent,
+  recommendedOption,
+  registeredProject,
+  UNKNOWN_ID,
+} from './testing-sessions.js'
 
-describe('/api/v1/sessions', () => {
-  it.layer(ApiTestLayer())('over the test kernel and the fake provider', (it) => {
-    it.effect('creates a ready session with its worktree, prompts it, completes it and reads its usage', () =>
-      Effect.gen(function* runsOne() {
-        const base = yield* baseUrl
-        const { session, status } = yield* createdSession
-        expect(status).toBe(201)
-        expect(session.status).toBe('ready')
-        expect(session.workspace).toMatchObject({ runtimeId: 'local', branch: 'bb/create-hello' })
-        const prompted = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/sessions/${session.id}/prompt`, json({ text: 'Create src/hello.ts exporting hello()' })),
-        )
-        expect(prompted.status).toBe(200)
-        expect(yield* Effect.promise(() => prompted.json())).toMatchObject({ sessionId: session.id, index: 0, status: 'running' })
-        const ask = yield* firstEvent(session.id, 'ask.requested')
-        const askId = String(Reflect.get(Object(Reflect.get(Object(ask.payload), 'ask')), 'id'))
-        const answered = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/asks/${askId}/answer`, json({ selected: ['yes'] })),
-        )
-        expect(answered.status).toBe(204)
-        yield* firstEvent(session.id, 'turn.completed')
-        expect((yield* Effect.promise(() => post(base, `/api/v1/sessions/${session.id}/complete`))).status).toBe(204)
-        const read = yield* Effect.promise(() => fetch(`${base}/api/v1/sessions/${session.id}`, authorized()))
-        expect(yield* Effect.promise(() => read.json())).toMatchObject({ status: 'completed' })
-        const usage = yield* Effect.promise(() => fetch(`${base}/api/v1/usage/sessions/${session.id}`, authorized()))
-        expect(yield* Effect.promise(() => usage.json())).toMatchObject({ turns: 1 })
-      }),
-    )
+it.layer(ApiTestLayer())('POST and GET /api/v1/sessions over the fake provider', (suite) => {
+  suite.effect('creates a ready session with its worktree, as the kernel keeps it', () =>
+    Effect.gen(function* creates() {
+      const { session, status } = yield* createdSession
+      assert.strictEqual(status, 201)
+      assert.strictEqual(session.status, 'ready')
+      assert.containSubset(session.workspace, { runtimeId: 'local', branch: 'bb/create-hello' })
+      const record = yield* SessionManager.use((manager) => manager.get(session.id))
+      const kept = Schema.encodeSync(SessionDto)(yield* Effect.fromNullishOr(record))
+      assert.deepStrictEqual(kept, session)
+      const events = yield* EventLog.use((log) => log.read({ sessionId: session.id }, { from: 0 }))
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ['session.created', 'session.provisioning', 'workspace.provisioned', 'session.ready'],
+      )
+    }),
+  )
 
-    it.effect('refuses a prompt on a session that is not ready with 409, and an unknown session with 404', () =>
-      Effect.gen(function* refuses() {
-        const base = yield* baseUrl
-        const { session } = yield* createdSession
-        expect((yield* Effect.promise(() => post(base, `/api/v1/sessions/${session.id}/stop`))).status).toBe(204)
-        const prompted = yield* Effect.promise(() => fetch(`${base}/api/v1/sessions/${session.id}/prompt`, json({ text: 'x' })))
-        expect(prompted.status).toBe(409)
-        expect(yield* Effect.promise(() => prompted.json())).toMatchObject({ code: 'session_invalid_transition' })
-        const missing = yield* Effect.promise(() => post(base, '/api/v1/sessions/0192f0a0-0000-7000-8000-000000000009/stop'))
-        expect(missing.status).toBe(404)
-        expect(yield* Effect.promise(() => missing.json())).toMatchObject({ code: 'session_not_found' })
-      }),
-    )
+  suite.effect('lists the sessions and reads one by its id, 404 for an unknown one', () =>
+    Effect.gen(function* reads() {
+      const { session } = yield* createdSession
+      assert.containSubset((yield* get('/sessions')).body, [{ id: session.id }])
+      const read = yield* get(`/sessions/${session.id}`)
+      assert.deepStrictEqual(read.body, session)
+      const missing = yield* get(`/sessions/${UNKNOWN_ID}`)
+      assert.strictEqual(missing.status, 404)
+      assert.include(missing.type, 'application/problem+json')
+      assert.containSubset(missing.body, { code: 'session_not_found' })
+    }),
+  )
+})
 
-    it.effect('refuses a provider nobody offers with 422 session_provider_missing and creates nothing', () =>
-      Effect.gen(function* refusesProvider() {
-        const base = yield* baseUrl
-        const { project } = yield* createdSession
-        const response = yield* Effect.promise(() =>
-          fetch(`${base}/api/v1/sessions`, json({ projectId: project.id, title: 'x', providerId: 'nobody' })),
-        )
-        expect(response.status).toBe(422)
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({ code: 'session_provider_missing' })
-      }),
-    )
-  })
+it.layer(ApiTestLayer())('POST /api/v1/sessions/:id/prompt over the fake provider', (suite) => {
+  suite.effect('prompts a ready session and answers with the turn it began', () =>
+    Effect.gen(function* prompts() {
+      const { session } = yield* createdSession
+      const text = 'Create src/hello.ts exporting hello()'
+      const prompted = yield* post(`/sessions/${session.id}/prompt`, { text })
+      assert.strictEqual(prompted.status, 200)
+      const turn = Schema.decodeUnknownSync(TurnDto)(prompted.body)
+      const expected = { sessionId: session.id, index: 0, status: 'running', prompt: { text } }
+      assert.containSubset(turn, expected)
+    }),
+  )
+
+  suite.effect('takes the answer of its question, completes it and reads its usage', () =>
+    Effect.gen(function* runsOne() {
+      const { session, ask } = yield* askedSession
+      const option = yield* recommendedOption(ask)
+      const answered = yield* post(`/asks/${ask.id}/answer`, { selected: [option.id] })
+      assert.strictEqual(answered.status, 204)
+      yield* firstEvent(session.id, 'turn.completed')
+      assert.strictEqual((yield* post(`/sessions/${session.id}/complete`)).status, 204)
+      assert.containSubset((yield* get(`/sessions/${session.id}`)).body, { status: 'completed' })
+      const usage = { turns: 1, inputTokens: 120, outputTokens: 40, costUsd: 0.002, contextPct: 3 }
+      assert.deepStrictEqual((yield* get(`/usage/sessions/${session.id}`)).body, usage)
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('the commands on a session over the fake provider', (suite) => {
+  suite.effect('refuses a prompt on a stopped session with 409, an unknown one with 404', () =>
+    Effect.gen(function* refuses() {
+      const { session } = yield* createdSession
+      assert.strictEqual((yield* post(`/sessions/${session.id}/stop`)).status, 204)
+      const prompted = yield* post(`/sessions/${session.id}/prompt`, { text: 'x' })
+      assert.strictEqual(prompted.status, 409)
+      assert.containSubset(prompted.body, { code: 'session_invalid_transition' })
+      const missing = yield* post(`/sessions/${UNKNOWN_ID}/stop`)
+      assert.strictEqual(missing.status, 404)
+      assert.containSubset(missing.body, { code: 'session_not_found' })
+    }),
+  )
+
+  suite.effect('stops a session, resumes it and refuses to resume one that is ready', () =>
+    Effect.gen(function* stopsAndResumes() {
+      const { session } = yield* createdSession
+      yield* post(`/sessions/${session.id}/stop`)
+      assert.containSubset((yield* get(`/sessions/${session.id}`)).body, { status: 'stopped' })
+      const resumed = yield* post(`/sessions/${session.id}/resume`)
+      assert.strictEqual(resumed.status, 200)
+      assert.containSubset(resumed.body, { id: session.id, status: 'ready' })
+      const again = yield* post(`/sessions/${session.id}/resume`)
+      assert.strictEqual(again.status, 409)
+      assert.containSubset(again.body, { code: 'session_invalid_transition' })
+    }),
+  )
+
+  suite.effect('interrupts a turn that is running, and the session is ready again', () =>
+    Effect.gen(function* interrupts() {
+      const { project } = yield* registeredProject
+      const env = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+      const created = yield* post('/sessions', { projectId: project.id, title: 'Slow', env })
+      const { id } = Schema.decodeUnknownSync(SessionDto)(created.body)
+      yield* post(`/sessions/${id}/prompt`, { text: 'go' })
+      yield* firstEvent(id, 'turn.started')
+      assert.strictEqual((yield* post(`/sessions/${id}/interrupt`)).status, 204)
+      yield* firstEvent(id, 'turn.interrupted')
+      assert.strictEqual((yield* post(`/sessions/${id}/complete`)).status, 204)
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('GET /api/v1/usage/sessions/:id over the fake provider', (suite) => {
+  suite.effect('reads no usage of a session that has had no turn, the costs as null', () =>
+    Effect.gen(function* readsNothing() {
+      const { session } = yield* createdSession
+      const usage = yield* get(`/usage/sessions/${session.id}`)
+      assert.strictEqual(usage.status, 200)
+      const none = { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: null, contextPct: null }
+      assert.deepStrictEqual(usage.body, none)
+    }),
+  )
 })
 ```
 The option id the fake provider's question offers is the one `packages/kernel/src/testing/fake-ask.ts` exports (`exportQuestion`): read it and use its recommended option id in place of `'yes'`; the answered ask then lets the hello script write `src/hello.ts` and complete the turn.
 
 `packages/api/src/asks.test.ts`:
 ```ts
-import { it } from '@effect/vitest'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
-import { createdSession, firstEvent } from './testing-sessions.js'
+import { ApiTestLayer, get, post } from './testing.js'
+import { askedSession, recommendedOption, UNKNOWN_ID } from './testing-sessions.js'
 
-describe('/api/v1/asks', () => {
-  it.layer(ApiTestLayer())('over the fake provider', (it) => {
-    it.effect('lists the pending ask of a session, answers it once and reads it back answered via api', () =>
+it.layer(ApiTestLayer())('GET /api/v1/asks over the fake provider', (suite) => {
+  suite.effect(
+    'lists the pending ask of a session, and the asks of every session without a filter',
+    () =>
+      Effect.gen(function* lists() {
+        const first = yield* askedSession
+        const second = yield* askedSession
+        const own = yield* get(`/asks?session=${first.session.id}`)
+        assert.strictEqual(own.status, 200)
+        assert.deepStrictEqual(own.body, [first.ask])
+        const all = yield* get('/asks')
+        assert.containSubset(all.body, [{ id: first.ask.id }, { id: second.ask.id }])
+      }),
+  )
+
+  suite.effect('answers 404 ask_not_found for an unknown ask, read or answered', () =>
+    Effect.gen(function* missing() {
+      const read = yield* get(`/asks/${UNKNOWN_ID}`)
+      assert.strictEqual(read.status, 404)
+      assert.containSubset(read.body, { code: 'ask_not_found' })
+      const answered = yield* post(`/asks/${UNKNOWN_ID}/answer`, { selected: ['yes'] })
+      assert.strictEqual(answered.status, 404)
+      assert.containSubset(answered.body, { code: 'ask_not_found' })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('POST /api/v1/asks/:id/answer over the fake provider', (suite) => {
+  suite.effect('refuses an option the ask does not offer with 422 and leaves it pending', () =>
+    Effect.gen(function* refuses() {
+      const { ask } = yield* askedSession
+      const refused = yield* post(`/asks/${ask.id}/answer`, { selected: ['no-such-option'] })
+      assert.strictEqual(refused.status, 422)
+      assert.containSubset(refused.body, {
+        code: 'ask_invalid_answer',
+        detail: `ask ${ask.id} has no option no-such-option`,
+      })
+      assert.containSubset((yield* get(`/asks/${ask.id}`)).body, { status: 'pending' })
+    }),
+  )
+
+  suite.effect(
+    'takes an answer once, reads it back answered via api and refuses a second one',
+    () =>
       Effect.gen(function* answers() {
-        const base = yield* baseUrl
-        const { session } = yield* createdSession
-        yield* Effect.promise(() => fetch(`${base}/api/v1/sessions/${session.id}/prompt`, json({ text: 'go' })))
-        yield* firstEvent(session.id, 'ask.requested')
-        const pending = yield* Effect.promise(() => fetch(`${base}/api/v1/asks?session=${session.id}`, authorized()))
-        const asks: { id: string; questions: { options: { id: string; recommended: boolean }[] }[] }[] = yield* Effect.promise(() => pending.json())
-        expect(asks).toHaveLength(1)
-        const [ask] = asks
-        if (ask === undefined) {
-          throw new Error('no ask')
-        }
-        const recommended = ask.questions[0]?.options.find((option) => option.recommended)
-        const invalid = yield* Effect.promise(() => fetch(`${base}/api/v1/asks/${ask.id}/answer`, json({ selected: ['no-such-option'] })))
-        expect(invalid.status).toBe(422)
-        expect(yield* Effect.promise(() => invalid.json())).toMatchObject({ code: 'ask_invalid_answer' })
-        const answered = yield* Effect.promise(() => fetch(`${base}/api/v1/asks/${ask.id}/answer`, json({ selected: [recommended?.id ?? ''] })))
-        expect(answered.status).toBe(204)
-        const again = yield* Effect.promise(() => fetch(`${base}/api/v1/asks/${ask.id}/answer`, json({ selected: [recommended?.id ?? ''] })))
-        expect(again.status).toBe(409)
-        expect(yield* Effect.promise(() => again.json())).toMatchObject({ code: 'ask_not_pending' })
-        const read = yield* Effect.promise(() => fetch(`${base}/api/v1/asks/${ask.id}`, authorized()))
-        expect(yield* Effect.promise(() => read.json())).toMatchObject({ status: 'answered', answeredVia: 'api' })
-        const none = yield* Effect.promise(() => fetch(`${base}/api/v1/asks?session=${session.id}`, authorized()))
-        expect(yield* Effect.promise(() => none.json())).toStrictEqual([])
+        const { session, ask } = yield* askedSession
+        const answer = { selected: [(yield* recommendedOption(ask)).id] }
+        assert.strictEqual((yield* post(`/asks/${ask.id}/answer`, answer)).status, 204)
+        const again = yield* post(`/asks/${ask.id}/answer`, answer)
+        assert.strictEqual(again.status, 409)
+        assert.containSubset(again.body, { code: 'ask_not_pending' })
+        const read = yield* get(`/asks/${ask.id}`)
+        assert.containSubset(read.body, { status: 'answered', answeredVia: 'api', answer })
+        assert.deepStrictEqual((yield* get(`/asks?session=${session.id}`)).body, [])
       }),
-    )
-
-    it.effect('answers 404 ask_not_found for an unknown ask', () =>
-      Effect.gen(function* missing() {
-        const base = yield* baseUrl
-        const response = yield* Effect.promise(() => fetch(`${base}/api/v1/asks/0192f0a0-0000-7000-8000-000000000009`, authorized()))
-        expect(response.status).toBe(404)
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({ code: 'ask_not_found' })
-      }),
-    )
-  })
+  )
 })
 ```
 The `?.` and `??` chains above are refused by the lint (`oxc/no-optional-chaining`); write them with `find` and an `if` that throws when the fixture is not as expected.
 
 `packages/api/src/workspaces-plugins.test.ts`:
 ```ts
-import { it } from '@effect/vitest'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, authorized, baseUrl, json } from './testing.js'
+import { TestClock } from 'effect/testing'
+import { ApiTestLayer, get, post } from './testing.js'
 import { createdSession } from './testing-sessions.js'
 
-describe('/api/v1/workspaces, /plugins and /providers', () => {
-  it.layer(ApiTestLayer())('over the test kernel', (it) => {
-    it.effect('lists the worktree of a session and prunes nothing while it is young', () =>
-      Effect.gen(function* lists() {
-        const base = yield* baseUrl
-        const { session, project } = yield* createdSession
-        const listed = yield* Effect.promise(() => fetch(`${base}/api/v1/workspaces?project=${project.id}`, authorized()))
-        expect(yield* Effect.promise(() => listed.json())).toMatchObject([{ sessionId: session.id, branch: 'bb/create-hello', exists: true }])
-        const pruned = yield* Effect.promise(() => fetch(`${base}/api/v1/workspaces/prune`, json({ projectId: project.id })))
-        expect(pruned.status).toBe(200)
-        expect(yield* Effect.promise(() => pruned.json())).toMatchObject({ removed: [] })
-      }),
-    )
+// A worktree is kept for seven days after its session ended, unless the project says otherwise
+const EIGHT_DAYS = 8 * 24 * 60 * 60 * 1000
 
-    it.effect('lists the bundled plugins as loaded and the fake provider among the providers', () =>
-      Effect.gen(function* plugins() {
-        const base = yield* baseUrl
-        const listed = yield* Effect.promise(() => fetch(`${base}/api/v1/plugins`, authorized()))
-        const statuses: { name: string; state: string }[] = yield* Effect.promise(() => listed.json())
-        expect(statuses.map((status) => status.state)).toStrictEqual(['loaded', 'loaded'])
-        const providers = yield* Effect.promise(() => fetch(`${base}/api/v1/providers`, authorized()))
-        expect(yield* Effect.promise(() => providers.json())).toMatchObject([{ id: 'fake' }])
-      }),
-    )
-  })
+it.layer(ApiTestLayer())('GET /api/v1/workspaces and POST /api/v1/workspaces/prune', (suite) => {
+  suite.effect('lists the worktree of a session, of its project and of every project', () =>
+    Effect.gen(function* lists() {
+      const { session, project } = yield* createdSession
+      const workspace = yield* Effect.fromNullishOr(session.workspace)
+      const info = {
+        sessionId: session.id,
+        projectId: project.id,
+        path: workspace.path,
+        branch: 'bb/create-hello',
+        baseRef: 'main',
+        sessionStatus: 'ready',
+        exists: true,
+      }
+      assert.deepStrictEqual((yield* get(`/workspaces?project=${project.id}`)).body, [info])
+      assert.containSubset((yield* get('/workspaces')).body, [info])
+    }),
+  )
+
+  suite.effect('prunes nothing while its session is at work, and says why', () =>
+    Effect.gen(function* prunesNothing() {
+      const { session, project } = yield* createdSession
+      const workspace = yield* Effect.fromNullishOr(session.workspace)
+      const pruned = yield* post('/workspaces/prune', { projectId: project.id })
+      assert.strictEqual(pruned.status, 200)
+      assert.deepStrictEqual(pruned.body, {
+        removed: [],
+        retained: [{ path: workspace.path, reason: 'session is ready' }],
+      })
+      assert.containSubset((yield* post('/workspaces/prune', {})).body, { removed: [] })
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('GET /api/v1/plugins and GET /api/v1/providers', (suite) => {
+  suite.effect('lists the bundled plugins as loaded, with the ports each offers', () =>
+    Effect.gen(function* listsPlugins() {
+      const listed = yield* get('/plugins')
+      assert.strictEqual(listed.status, 200)
+      assert.deepStrictEqual(listed.body, [
+        {
+          name: 'workspace-local',
+          version: '0.0.0',
+          state: 'loaded',
+          ports: ['workspaceRuntimes:local'],
+        },
+        { name: 'agent-fake', version: '0.0.0', state: 'loaded', ports: ['agentProviders:fake'] },
+      ])
+    }),
+  )
+
+  suite.effect('lists the fake provider among the agent providers the plugins offer', () =>
+    Effect.gen(function* listsProviders() {
+      const listed = yield* get('/providers')
+      assert.strictEqual(listed.status, 200)
+      assert.deepStrictEqual(listed.body, [
+        { id: 'fake', displayName: 'Fake agent (tests and CI)' },
+      ])
+    }),
+  )
+})
+
+// The clock of the suite is the test clock the handlers read, so the retention can run out at once
+it.layer(ApiTestLayer())('POST /api/v1/workspaces/prune after the retention', (suite) => {
+  suite.effect('removes the worktree of a session that ended long ago', () =>
+    Effect.gen(function* prunesOld() {
+      const { session, project } = yield* createdSession
+      const workspace = yield* Effect.fromNullishOr(session.workspace)
+      assert.strictEqual((yield* post(`/sessions/${session.id}/stop`)).status, 204)
+      yield* TestClock.setTime(Date.now() + EIGHT_DAYS)
+      const pruned = yield* post('/workspaces/prune', { projectId: project.id })
+      assert.deepStrictEqual(pruned.body, { removed: [workspace.path], retained: [] })
+      const listed = yield* get(`/workspaces?project=${project.id}`)
+      assert.containSubset(listed.body, [{ sessionId: session.id, exists: false }])
+    }),
+  )
 })
 ```
 
 `packages/api/src/rate-limit.test.ts`:
 ```ts
 import { createTempRepo } from '@bytebureau/kernel/testing'
-import { it } from '@effect/vitest'
+import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect } from 'vitest'
-import { ApiTestLayer, baseUrl, json } from './testing.js'
+import { ApiTestLayer, baseUrl, fetched, get, post } from './testing.js'
 
-describe('the mutation rate limit', () => {
-  it.layer(ApiTestLayer({ mutationLimit: { capacity: 2, perMinute: 60 } }))(
-    'with two tokens',
-    (it) => {
-      it.effect('answers the third mutation in a row with 429 rate_limited', () =>
-        Effect.gen(function* limits() {
-          const base = yield* baseUrl
-          const register = (): Promise<Response> => fetch(`${base}/api/v1/projects`, json({ path: createTempRepo() }))
-          expect((yield* Effect.promise(register)).status).toBe(201)
-          expect((yield* Effect.promise(register)).status).toBe(201)
-          const third = yield* Effect.promise(register)
-          expect(third.status).toBe(429)
-          expect(yield* Effect.promise(() => third.json())).toMatchObject({ code: 'rate_limited', detail: 'retry after 1 s' })
-        }),
+const TWO_TOKENS = ApiTestLayer({ mutationLimit: { capacity: 2, perMinute: 60 } })
+
+it.layer(TWO_TOKENS)('the mutation rate limit with two tokens', (suite) => {
+  suite.effect(
+    'answers the third mutation in a row with 429 rate_limited and still serves reads',
+    () =>
+      Effect.gen(function* limits() {
+        const repos = [createTempRepo(), createTempRepo(), createTempRepo()]
+        const replies = yield* Effect.all(repos.map((path) => post('/projects', { path })))
+        assert.deepStrictEqual(
+          replies.map((reply) => reply.status),
+          [201, 201, 429],
+        )
+        const limited = yield* Effect.fromNullishOr(replies[2])
+        assert.include(limited.type, 'application/problem+json')
+        assert.containSubset(limited.body, {
+          code: 'rate_limited',
+          status: 429,
+          detail: 'retry after 1 s',
+        })
+        assert.strictEqual((yield* get('/projects')).status, 200)
+      }),
+  )
+})
+
+it.layer(TWO_TOKENS)('the mutation rate limit and the bearer token', (suite) => {
+  suite.effect('does not count a request without the token against the limit', () =>
+    Effect.gen(function* keepsTokens() {
+      const base = yield* baseUrl
+      const refused = yield* Effect.forEach([1, 2, 3], () =>
+        fetched(`${base}/api/v1/projects`, { method: 'POST' }),
       )
-    },
+      assert.deepStrictEqual(
+        refused.map((response) => response.status),
+        [401, 401, 401],
+      )
+      const replies = yield* Effect.forEach([createTempRepo(), createTempRepo()], (path) =>
+        post('/projects', { path }),
+      )
+      assert.deepStrictEqual(
+        replies.map((reply) => reply.status),
+        [201, 201],
+      )
+    }),
+  )
+})
+```
+
+`packages/api/src/body-limit.ts` (added during execution):
+```ts
+import { ByteSize, Effect } from 'effect'
+import { HttpServerRequest, HttpServerResponse } from 'effect/http'
+import { problem } from './problems.js'
+
+// Decimal megabytes, as the platform limit (MaxBodySize) counts them
+export const MAX_BODY_BYTES = ByteSize.toNumberUnsafe(ByteSize.megabytes(10))
+
+const tooLarge = (): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.jsonUnsafe(
+    problem(413, 'payload_too_large', 'the request body exceeds 10 MB'),
+    { status: 413, contentType: 'application/problem+json' },
+  )
+
+// A request without a length, or with one that is no number, is left to the platform limit
+const declaredLength = (request: HttpServerRequest.HttpServerRequest): number =>
+  Number(request.headers['content-length'])
+
+// A body that declares itself larger than the limit is refused with a problem before any of it is read
+// The platform limit stays as the backstop for a body without a length: Node drops that connection and Bun answers an empty 413
+export const bodyLimit = <Failure, Requirements>(
+  app: Effect.Effect<HttpServerResponse.HttpServerResponse, Failure, Requirements>,
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  Failure,
+  Requirements | HttpServerRequest.HttpServerRequest
+> =>
+  Effect.gen(function* limitsBody() {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    return declaredLength(request) > MAX_BODY_BYTES ? tooLarge() : yield* app
+  })
+```
+
+`packages/api/src/sessions-refusals.test.ts` (added during execution):
+```ts
+import { SessionDto } from '@bytebureau/protocol'
+import { assert, it } from '@effect/vitest'
+import { Effect, Schema } from 'effect'
+import { ApiTestLayer, get, post } from './testing.js'
+import { fakeProjectConfig, registeredWith } from './testing-sessions.js'
+
+interface Refusal {
+  readonly title: string
+  readonly config: Record<string, unknown>
+  readonly body: Record<string, unknown>
+  readonly status: number
+  readonly code: string
+  readonly detail: string
+}
+
+const { developer } = fakeProjectConfig.employees
+const YOLO = {
+  ...fakeProjectConfig,
+  employees: { developer: { ...developer, permissionMode: 'yolo' } },
+}
+
+// What the kernel refuses a session for, with the status and the code the API tells it as
+const REFUSALS: Refusal[] = [
+  {
+    title: 'a provider nobody offers',
+    config: fakeProjectConfig,
+    body: { providerId: 'nobody' },
+    status: 422,
+    code: 'session_provider_missing',
+    detail: 'provider "nobody" is not available; available: fake',
+  },
+  {
+    title: 'an employee the project does not have',
+    config: fakeProjectConfig,
+    body: { employeeId: 'nobody' },
+    status: 422,
+    code: 'session_employee_missing',
+    detail: 'employee "nobody" is not defined in bytebureau.json',
+  },
+  {
+    title: 'permission mode yolo on the local runtime',
+    config: YOLO,
+    body: {},
+    status: 403,
+    code: 'session_yolo_refused',
+    detail:
+      'permission mode "yolo" is refused on the "local" runtime (isolation: none); container runtimes enable it later',
+  },
+]
+
+it.layer(ApiTestLayer())('the refusals of POST /api/v1/sessions', (suite) => {
+  suite.effect.each(REFUSALS)('refuses $title with $status $code and creates nothing', (refusal) =>
+    Effect.gen(function* refuses() {
+      const { project } = yield* registeredWith(refusal.config)
+      const body = { projectId: project.id, title: 'x', ...refusal.body }
+      const refused = yield* post('/sessions', body)
+      assert.strictEqual(refused.status, refusal.status)
+      assert.include(refused.type, 'application/problem+json')
+      assert.containSubset(refused.body, { code: refusal.code, detail: refusal.detail })
+      const listed = Schema.decodeUnknownSync(Schema.Array(SessionDto))(
+        (yield* get('/sessions')).body,
+      )
+      assert.deepStrictEqual(
+        listed.filter((session) => session.projectId === project.id),
+        [],
+      )
+    }),
   )
 })
 ```
@@ -3876,7 +4250,7 @@ git commit -m "feat(api): add the projects, sessions, asks, usage, workspaces an
 
 Verified facts this task relies on (fact sheet §3): `effect@4.0.0` ships SSE natively — `HttpApiSchema.StreamSse({ events })` declares a `text/event-stream` success whose handler returns a `Stream` of events, each event's schema being an `Sse.EventCodec` (encoded as `{ id?: string; event?: string; data: string }`); `Schema.fromJsonString(EventEnvelope)` turns the envelope into the `data` string; `Stream.tick(interval)` emits once at once and then at the interval, `Stream.merge(left, right, { haltStrategy })` ends the merge as the strategy says, `Stream.fromQueue`, `Queue.unbounded`, `Queue.end` exist (`dist/Stream.d.ts`, `dist/Queue.d.ts`); an endpoint's `headers` schema reads request headers by lower-case name.
 
-Semantics: a client that passes `since=<seq>` or `Last-Event-ID: <seq>` (the header wins) gets every durable event after that seq replayed from the log in order, then the live ones; the kernel's `EventLog.subscribe` already opens the subscription before reading the replay, so nothing published meanwhile is lost (Phase A Task 6). Ephemeral events (`seq` 0: text deltas, tool progress, heartbeats) carry no `id`, so a browser's automatic reconnect resends the last durable seq. A heartbeat frame goes out every `heartbeat` (15 s by default; tests shorten it) so proxies and clients see a live connection; it is an `event: heartbeat` frame with an envelope of type `heartbeat`, not an SSE comment, because the schema encodes events only. Backpressure (spec §11.1 "drop oldest ephemeral deltas first"): each connection has a `DeliveryBuffer` — durable events are never dropped, ephemeral events are kept up to a capacity (64) and the oldest ephemeral one goes when a new one arrives above it; a client that reads slowly therefore misses deltas, never durable facts. A failure of the subscription ends the stream (the client resumes with its last id); a client that goes away ends the subscription (the stream's scope closes with the response).
+Semantics: the SSE suite is built with `{ excludeTestServices: true }` so the heartbeat runs on the live clock (`@effect/vitest`'s `it.layer` provides the TestClock otherwise, and handlers see it — Task 4 verified the clock reads 0 under the default layer). A client that passes `since=<seq>` or `Last-Event-ID: <seq>` (the header wins) gets every durable event after that seq replayed from the log in order, then the live ones; the kernel's `EventLog.subscribe` already opens the subscription before reading the replay, so nothing published meanwhile is lost (Phase A Task 6). Ephemeral events (`seq` 0: text deltas, tool progress, heartbeats) carry no `id`, so a browser's automatic reconnect resends the last durable seq. A heartbeat frame goes out every `heartbeat` (15 s by default; tests shorten it) so proxies and clients see a live connection; it is an `event: heartbeat` frame with an envelope of type `heartbeat`, not an SSE comment, because the schema encodes events only. Backpressure (spec §11.1 "drop oldest ephemeral deltas first"): each connection has a `DeliveryBuffer` — durable events are never dropped, ephemeral events are kept up to a capacity (64) and the oldest ephemeral one goes when a new one arrives above it; a client that reads slowly therefore misses deltas, never durable facts. A failure of the subscription ends the stream (the client resumes with its last id); a client that goes away ends the subscription (the stream's scope closes with the response).
 
 - [ ] **Step 1: Write the failing buffer test**
 
@@ -4166,7 +4540,8 @@ const seqOf = (frame: SseFrame): number => Number(frame.id)
 const typesOf = (frames: readonly SseFrame[]): string[] => frames.map((frame) => frame.event)
 
 describe('GET /api/v1/events', () => {
-  it.layer(ApiTestLayer({ heartbeat: '100 millis' }))('over the fake provider', (it) => {
+  // The test layer would otherwise run on the TestClock (Task 4 found handlers see it), and Stream.tick never ticks there
+  it.layer(ApiTestLayer({ heartbeat: '100 millis' }), { excludeTestServices: true })('over the fake provider', (it) => {
     it.effect('replays the durable events of a session with their seq as id, then streams the live ones', () =>
       Effect.gen(function* streams() {
         const base = yield* baseUrl
@@ -4776,7 +5151,7 @@ export const configureClient = ({ baseUrl, token, fetch: fetchImpl }: HttpOption
   client.setConfig({ baseUrl, auth: () => token, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) })
 }
 ```
-The `as Data` is the one cast the lint will refuse; replace it with a guard (`if (answer.data === undefined) throw new ApiError(answer.response.status, undefined, url)` — a `204` carries no data and its callers return `void`, so route the no-content calls through a `done()` variant that ignores `data`). `ApiError` takes an options object as a fourth argument only if the class is given one (`super(message, { cause })`); add it. The resource objects (`projects`, `sessions`, …) are built in `index.ts` from `unwrap`/`optional` and the SDK functions, e.g. `list: () => unwrap(`${baseUrl}/api/v1/projects`, () => sdk.projectsList())`, `register: (body) => unwrap(url, () => sdk.projectsRegister({ body }))`, `get: (id) => optional(unwrap(url, () => sdk.projectsGet({ path: { id } })))`. hey-api's SDK takes `{ path, query, body }` options and returns the `{ data, error, response }` answer; one generated client instance (`client`) is configured by `configureClient`, so `createBureauClient` is effectively a singleton per process — acceptable for the CLI; a later consumer that needs two daemons at once uses `createClient` from `gen/client` (note it in the index JSDoc).
+The `as Data` is the one cast the lint will refuse; replace it with a guard (`if (answer.data === undefined) throw new ApiError(answer.response.status, undefined, url)` — a `204` carries no data and its callers return `void`, so route the no-content calls through a `done()` variant that ignores `data`). `ApiError` takes an options object as a fourth argument only if the class is given one (`super(message, { cause })`); add it. The resource objects (`projects`, `sessions`, …) are built in `index.ts` from `unwrap`/`optional` and the SDK functions, e.g. `list: () => unwrap(`${baseUrl}/api/v1/projects`, () => sdk.projectsList())`, `register: (body) => unwrap(url, () => sdk.projectsRegister({ body }))`, `get: (id) => optional(unwrap(url, () => sdk.projectsGet({ path: { id } })))`. `workspaces.prune(projectId?)` always sends a JSON body (`{}` when no project is given — the endpoint requires one); hey-api's SDK takes `{ path, query, body }` options and returns the `{ data, error, response }` answer; one generated client instance (`client`) is configured by `configureClient`, so `createBureauClient` is effectively a singleton per process — acceptable for the CLI; a later consumer that needs two daemons at once uses `createClient` from `gen/client` (note it in the index JSDoc).
 
 - [ ] **Step 3: The SSE subscription — test first**
 
@@ -6283,7 +6658,7 @@ and `GlobalArgs` the matching fields; `bureauFlags(args): BureauFlags` (a helper
 
 - [ ] **Step 4: Commands and the run through a Bureau**
 
-`run-session.ts`: `RunKernel` is replaced by `Bureau` (import the type), `unknownProvider` awaits `bureau.plugins.providers()`, `answerAsk` calls `bureau.asks.answer(ask.id, answer)`, `followSession` subscribes with `bureau.events.subscribe({ sessionId, since: 0, ephemeral: false }, controller.signal)` and aborts the controller in its `finally`, and the signal handling covers `SIGINT`, `SIGTERM` and `SIGHUP` (one `stop` for the three, `process.once` each, `process.off` each in `finally`). `isRefusal` is exported and gains:
+`run-session.ts`: `RunKernel` is replaced by `Bureau` (import the type); the project path is made absolute with `path.resolve` before `bureau.projects.register` (the daemon resolves a relative path in its own working directory — the `run` command and `projects add` resolve `args.project`/`args.path` against the CLI's cwd, and the Phase A tests pass absolute temp paths already); `unknownProvider` awaits `bureau.plugins.providers()`, `answerAsk` calls `bureau.asks.answer(ask.id, answer)`, `followSession` subscribes with `bureau.events.subscribe({ sessionId, since: 0, ephemeral: false }, controller.signal)` and aborts the controller in its `finally`, and the signal handling covers `SIGINT`, `SIGTERM` and `SIGHUP` (one `stop` for the three, `process.once` each, `process.off` each in `finally`). `isRefusal` is exported and gains:
 ```ts
 const REMOTE_REFUSALS = /^(?:workspace_|provider_|session_provider_missing$)/u
 if (error instanceof ApiError) {
@@ -6431,7 +6806,7 @@ Commands (spec §11.3; every one takes the global flags, `--json` emits one reco
 - `sessions ls` — `id  status  title  project` per session (`No sessions` when empty); `sessions show <id>` — the session's fields one per line and its pending asks; `sessions prompt <id> "<text>"` — prompts and follows the turn like `run` does (exit 0 when the turn completes, 3 stopped, 4 errored); `sessions interrupt|stop|resume <id>`.
 - `ask ls [--session <id>]` — the pending asks (`id  session  title  recommended option`); `ask answer <id> [--option <id>]... [--other <text>]` — answers; without `--option`/`--other` an interactive prompt at a terminal (`--yes` picks the recommended option), a refusal otherwise.
 - `plugins ls` — `name  version  state  ports` (a failed plugin shows its reason).
-A command whose request the daemon refuses (`409`, `404`, `422` problems) prints the problem's detail and exits 1 — the same shape as `projects rm` of Phase A.
+A command whose request the daemon refuses (`409`, `404`, `422` problems) prints the problem's detail and exits 1 — the same shape as `projects rm` of Phase A (`sessions interrupt` on a session with no agent attached is such a refusal: the kernel answers `session_not_found`).
 
 - [ ] **Step 1: The table renderer — test first**
 
