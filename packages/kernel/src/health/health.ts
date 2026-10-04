@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { PluginHost } from '../plugins/plugin-host.js'
+import { Secrets, type SecretBackend } from '../secrets/secrets.js'
 
 type Check = 'ok' | 'failed'
 
@@ -10,6 +11,8 @@ export interface HealthReport {
     readonly store: Check
     readonly plugins: { readonly loaded: number; readonly failed: number }
   }
+  // Where the secrets are kept, for doctor; the health of the API does not serve it
+  readonly secrets: SecretBackend
 }
 
 export interface HealthShape {
@@ -36,6 +39,7 @@ const storeCheck = (sql: SqlClient.SqlClient): Effect.Effect<Check> =>
 const make = Effect.gen(function* makeHealth() {
   const sql = yield* SqlClient.SqlClient
   const host = yield* PluginHost
+  const { backend } = yield* Secrets
   // Concurrent probes share one check, and the plugins are counted afresh for each
   const store = yield* Effect.cachedWithTTL(storeCheck(sql), STORE_CHECK_TTL)
   return Health.of({
@@ -46,11 +50,11 @@ const make = Effect.gen(function* makeHealth() {
           const failed = statuses.filter((plugin) => plugin.state === 'failed').length
           const plugins = { loaded: statuses.length - failed, failed }
           const status = checked === 'ok' && failed === 0 ? 'ok' : 'degraded'
-          return { status, checks: { store: checked, plugins } }
+          return { status, checks: { store: checked, plugins }, secrets: backend }
         }),
       ),
   })
 })
 
-export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | PluginHost> =
+export const HealthLive: Layer.Layer<Health, never, SqlClient.SqlClient | PluginHost | Secrets> =
   Layer.effect(Health, make)

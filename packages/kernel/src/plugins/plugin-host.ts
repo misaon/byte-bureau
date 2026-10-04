@@ -1,9 +1,9 @@
-import type { AgentProvider, Plugin, SecretStore, WorkspaceRuntime } from '@bytebureau/plugin-api'
+import type { AgentProvider, Plugin, WorkspaceRuntime } from '@bytebureau/plugin-api'
 import { Context, Effect, Layer, type Scope } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { Supervisor } from '../process/supervisor.js'
-import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { Secrets } from '../secrets/secrets.js'
 import { WorkspaceRuntimes, type WorkspaceRuntimesShape } from '../workspace/runtimes.js'
 import { BUNDLED_PLUGINS } from './bundled.js'
 import type { HookBus } from './hooks.js'
@@ -24,7 +24,6 @@ export interface PluginHostShape {
 export interface PluginHostOptions {
   readonly extraPlugins?: readonly Plugin[] | undefined
   readonly pluginConfig?: Readonly<Record<string, unknown>> | undefined
-  readonly secrets?: SecretStore | undefined
 }
 
 export class PluginHost extends Context.Service<PluginHost, PluginHostShape>()('bb/PluginHost') {}
@@ -51,15 +50,20 @@ interface Assembled {
 // At release the plugins' signal aborts first, then they are disposed
 const make = (
   options: PluginHostOptions,
-): Effect.Effect<Assembled, never, EventLog | Supervisor | SqlClient.SqlClient | Scope.Scope> =>
+): Effect.Effect<
+  Assembled,
+  never,
+  EventLog | Supervisor | SqlClient.SqlClient | Secrets | Scope.Scope
+> =>
   Effect.gen(function* makePluginHost() {
     const services = yield* Effect.context<EventLog | Supervisor | SqlClient.SqlClient>()
+    const secrets = yield* Secrets
     const controller = new AbortController()
     const deps = {
       log: Context.get(services, EventLog),
       supervisor: Context.get(services, Supervisor),
       sql: Context.get(services, SqlClient.SqlClient),
-      secrets: options.secrets ?? new InMemorySecretStore(),
+      secrets,
       signal: controller.signal,
       services,
     }
@@ -83,7 +87,7 @@ export const PluginHostLive = (
 ): Layer.Layer<
   PluginHost | WorkspaceRuntimes,
   never,
-  EventLog | Supervisor | SqlClient.SqlClient
+  EventLog | Supervisor | SqlClient.SqlClient | Secrets
 > =>
   Layer.unwrap(
     Effect.map(make(options), ({ host, runtimes }) =>

@@ -12,6 +12,8 @@ import { Context, Effect, Exit, Layer, Scope } from 'effect'
 import type { SqlClient } from 'effect/sql'
 import { EventLogLive, type EventLog } from '../events/event-log.js'
 import { SupervisorLive, type Supervisor } from '../process/supervisor.js'
+import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
+import { Secrets } from '../secrets/secrets.js'
 import { StoreTest } from '../store/store-test.js'
 import type { WorkspaceRuntimes } from '../workspace/runtimes.js'
 import {
@@ -37,12 +39,20 @@ const NO_CAPABILITIES: AgentCapabilities = {
   attachments: false,
 }
 
-type Dependencies = EventLog | Supervisor | SqlClient.SqlClient
+type Dependencies = EventLog | Supervisor | SqlClient.SqlClient | Secrets
 
-// The event log and the supervisor over an in-memory store
-const Deps: Layer.Layer<Dependencies> = Layer.mergeAll(EventLogLive, SupervisorLive).pipe(
-  Layer.provideMerge(StoreTest),
+// Secrets in memory, a store of its own for each build of a layer
+export const SecretsInMemory: Layer.Layer<Secrets> = Layer.sync(
+  Secrets,
+  () => new InMemorySecretStore(),
 )
+
+// The event log and the supervisor over an in-memory store, and secrets in memory
+const Deps: Layer.Layer<Dependencies> = Layer.mergeAll(
+  EventLogLive,
+  SupervisorLive,
+  SecretsInMemory,
+).pipe(Layer.provideMerge(StoreTest))
 
 // The host over those dependencies, which stay in reach of a test beside it
 export const hostOver = (

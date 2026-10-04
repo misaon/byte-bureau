@@ -66,6 +66,10 @@ export {
 export { HookBus } from './plugins/hooks.js'
 export { BUNDLED_PLUGINS, HOST_API_VERSION } from './plugins/bundled.js'
 export { InMemorySecretStore } from './secrets/in-memory-secret-store.js'
+export { Secrets, type SecretBackend, type SecretsShape } from './secrets/secrets.js'
+export { FileSecretStore } from './secrets/file-secret-store.js'
+export { BunSecretStore } from './secrets/bun-secret-store.js'
+export { secretStoreFor } from './secrets/secret-store-for.js'
 export {
   AskService,
   AskServiceLive,

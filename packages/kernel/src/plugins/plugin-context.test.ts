@@ -5,6 +5,7 @@ import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
 import { flush } from '../sessions/session-helper-fixtures.js'
+import { sessionLayer } from '../sessions/session-layer-fixtures.js'
 import { rejected, resolved, takeFrom } from './plugin-call-fixtures.js'
 import { hostOver, loadedHost, probe } from './plugin-fixtures.js'
 
@@ -69,7 +70,7 @@ it.layer(hostOver({ extraPlugins }))('plugin context fields', (suite) => {
 
 const store = new InMemorySecretStore()
 
-it.layer(hostOver({ extraPlugins, secrets: store }))('plugin context secrets', (suite) => {
+it.layer(sessionLayer({ extraPlugins, secrets: store }))('plugin context secrets', (suite) => {
   suite.effect('keeps the secrets of a plugin apart from the secrets of another', () =>
     Effect.gen(function* separatesSecrets() {
       yield* loadedHost

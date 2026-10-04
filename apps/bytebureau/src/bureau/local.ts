@@ -82,7 +82,7 @@ export const localBureau = (kernel: Kernel, version: string): Bureau => {
     health: {
       check: async () => {
         const report = await kernel.health.check()
-        return { ...report, version, startedAt }
+        return { status: report.status, version, startedAt, checks: report.checks }
       },
     },
     where: { kind: 'in-process' },

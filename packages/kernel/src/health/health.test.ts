@@ -50,6 +50,7 @@ it.layer(sessionLayer())('Health over a sound kernel', (suite) => {
       assert.deepStrictEqual(report, {
         status: 'ok',
         checks: { store: 'ok', plugins: { loaded: 2, failed: 0 } },
+        secrets: 'memory',
       })
     }),
   )
@@ -63,6 +64,7 @@ it.layer(withPlugins([broken]))('Health over a kernel with a failed plugin', (su
       assert.deepStrictEqual(report, {
         status: 'degraded',
         checks: { store: 'ok', plugins: { loaded: 2, failed: 1 } },
+        secrets: 'memory',
       })
     }),
   )
@@ -82,6 +84,7 @@ it.layer(overDamagedStore)('Health over a store that fails its check', (suite) =
       assert.deepStrictEqual(report, {
         status: 'degraded',
         checks: { store: 'failed', plugins: { loaded: 2, failed: 0 } },
+        secrets: 'memory',
       })
     }),
   )

@@ -69,6 +69,13 @@ describe(localBureau, () => {
     const plugins = await bureau.plugins.list()
     const providers = await bureau.plugins.providers()
     expect(health).toMatchObject({ status: 'ok', version: '1.2.3', checks: { store: 'ok' } })
+    // What the API serves, and nothing more
+    expect(Object.keys(health).toSorted()).toStrictEqual([
+      'checks',
+      'startedAt',
+      'status',
+      'version',
+    ])
     expect(Number.isNaN(Date.parse(health.startedAt))).toBe(false)
     expect(plugins.map((plugin) => plugin.name)).toContain('agent-fake')
     expect(providers.map((provider) => provider.id)).toContain('fake')

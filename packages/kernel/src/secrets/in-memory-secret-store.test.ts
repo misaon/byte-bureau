@@ -12,5 +12,6 @@ describe(InMemorySecretStore, () => {
     await expect(store.get('key')).resolves.toBe('second')
     await store.delete('key')
     await expect(store.get('key')).resolves.toBeUndefined()
+    expect(store.backend).toBe('memory')
   })
 })
