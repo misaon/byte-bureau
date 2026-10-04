@@ -1,4 +1,6 @@
+import { m } from '@bytebureau/i18n'
 import type { AskRecord, PluginStatusDto, SessionDto } from '@bytebureau/protocol'
+import { flat } from './tables.js'
 
 // The rows a listing is told in, for table(): one row to a record, a cell to each of its columns
 
@@ -27,6 +29,10 @@ const recommendedOf = (ask: AskRecord): string =>
 
 export const askRows = (asks: readonly AskRecord[]): string[][] =>
   asks.map((ask) => [ask.id, ask.sessionId, ask.title, recommendedOf(ask)])
+
+// The asks that wait for an answer to a session, a line to each: the title of an ask may hold the lines of a command
+export const pendingAskLines = (asks: readonly AskRecord[]): string[] =>
+  asks.map((ask) => m.sessions_pending_ask({ id: ask.id, title: flat(ask.title) }))
 
 // A plugin that failed to load tells why in place of its ports
 export const pluginRows = (plugins: readonly PluginStatusDto[]): string[][] =>

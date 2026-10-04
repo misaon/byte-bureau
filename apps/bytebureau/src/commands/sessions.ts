@@ -2,7 +2,7 @@ import { m } from '@bytebureau/i18n'
 import type { AskRecord, SessionDto } from '@bytebureau/protocol'
 import { defineCommand, type CommandDef } from 'citty'
 import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
-import { sessionFields, sessionRows } from '../render/rows.js'
+import { pendingAskLines, sessionFields, sessionRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
 import { withBureauRefusable } from './refusable.js'
 import { promptSession } from './sessions-prompt.js'
@@ -43,8 +43,8 @@ function tellSession(context: Context, session: SessionDto, asks: readonly AskRe
   for (const line of table(sessionFields(session))) {
     context.output.print(line)
   }
-  for (const ask of asks) {
-    context.output.print(m.sessions_pending_ask({ id: ask.id, title: ask.title }))
+  for (const line of pendingAskLines(asks)) {
+    context.output.print(line)
   }
 }
 

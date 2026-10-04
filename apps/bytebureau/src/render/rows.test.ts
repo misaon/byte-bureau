@@ -2,7 +2,7 @@ import type { SessionDto } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { askOf, option, question } from '../testing/events.js'
 import { ASK, SESSION } from '../testing/records.js'
-import { askRows, pluginRows, sessionFields, sessionRows } from './rows.js'
+import { askRows, pendingAskLines, pluginRows, sessionFields, sessionRows } from './rows.js'
 
 // A session whose worktree is not made yet: the wire tells it as null, which JSON text keeps out of the CLI sources
 function withoutWorktree(session: SessionDto): SessionDto {
@@ -83,6 +83,16 @@ describe(pluginRows, () => {
     expect(pluginRows([failed, nothing])).toStrictEqual([
       ['broken', '1.0.0', 'failed', 'no hostApi'],
       ['odd', '1.0.0', 'failed', ''],
+    ])
+  })
+})
+
+describe(pendingAskLines, () => {
+  it('tells every ask on a line of its own, and its title on that one line', () => {
+    const permission = { ...ASK, id: 'a2', title: 'Run:\n  ls -l\r\n  pwd' }
+    expect(pendingAskLines([ASK, permission])).toStrictEqual([
+      'Waiting for your answer: Export style (a1)',
+      'Waiting for your answer: Run: ls -l pwd (a2)',
     ])
   })
 })

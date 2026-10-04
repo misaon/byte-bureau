@@ -1,5 +1,5 @@
 // A cell is told on the one line it belongs to: the title of an ask may hold the lines of a command
-const flat = (cell: string): string =>
+export const flat = (cell: string): string =>
   /[\r\n]/u.test(cell)
     ? cell
         .split(/\r\n|[\r\n]/u)
