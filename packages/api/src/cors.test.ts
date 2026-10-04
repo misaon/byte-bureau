@@ -1,6 +1,6 @@
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { ApiTestLayer, baseUrl, fetched } from './testing.js'
+import { ApiTestLayer, authorized, baseUrl, fetched } from './testing.js'
 
 const UI = 'http://ui.test'
 
@@ -18,6 +18,17 @@ it.layer(ApiTestLayer({ corsOrigins: [UI] }))('CORS for a configured origin', (s
       assert.strictEqual(response.status, 204)
       assert.strictEqual(response.headers.get('access-control-allow-origin'), UI)
       assert.include(response.headers.get('access-control-allow-headers'), 'authorization')
+    }),
+  )
+
+  suite.effect('lets the origin read the 413 problem of a body that is too large', () =>
+    Effect.gen(function* answersOversized() {
+      const base = yield* baseUrl
+      const headers = { origin: UI, 'content-type': 'application/json' }
+      const oversized = authorized({ method: 'POST', headers, body: 'x'.repeat(11 * 1024 * 1024) })
+      const response = yield* fetched(`${base}/api/v1/projects`, oversized)
+      assert.strictEqual(response.status, 413)
+      assert.strictEqual(response.headers.get('access-control-allow-origin'), UI)
     }),
   )
 

@@ -4,6 +4,7 @@ import { NodeHttpServer } from '@effect/platform-node'
 import { Effect, Layer, Redacted } from 'effect'
 import { HttpServer, type HttpServerError } from 'effect/http'
 import type { SqlClient } from 'effect/sql'
+import { API_PREFIX } from './api.js'
 import { DEFAULT_API_OPTIONS, type ApiOptions } from './config.js'
 import { serveApi } from './layer.js'
 import { BootedKernel } from './testing-kernel.js'
@@ -63,3 +64,39 @@ export const bodyOf = (response: Response): Effect.Effect<unknown> =>
     const body: unknown = await response.json()
     return body
   })
+
+// What the server answered to a call: the status, the content type and the JSON of the body, when it has one
+export interface Reply {
+  readonly status: number
+  readonly type: string | null
+  readonly body: unknown
+}
+
+const call = (
+  path: string,
+  init: RequestInit,
+): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  Effect.gen(function* calls() {
+    const base = yield* baseUrl
+    const response = yield* fetched(`${base}${API_PREFIX}${path}`, init)
+    const text = yield* Effect.promise(async () => {
+      const whole = await response.text()
+      return whole
+    })
+    const body: unknown = text === '' ? undefined : JSON.parse(text)
+    return { status: response.status, type: response.headers.get('content-type'), body }
+  })
+
+// The calls a test makes under /api/v1, each with the token of the tests
+export const get = (path: string): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, authorized())
+
+// A body of JSON, or none for a command that takes none
+export const post = (
+  path: string,
+  body?: unknown,
+): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, body === undefined ? authorized({ method: 'POST' }) : json(body))
+
+export const remove = (path: string): Effect.Effect<Reply, never, HttpServer.HttpServer> =>
+  call(path, authorized({ method: 'DELETE' }))

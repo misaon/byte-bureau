@@ -1,5 +1,5 @@
 import type { KernelServices } from '@bytebureau/kernel'
-import { ByteSize, Layer, type FileSystem, type Path } from 'effect'
+import { ByteSize, Effect, Layer, type FileSystem, type Path } from 'effect'
 import {
   HttpIncomingMessage,
   HttpMiddleware,
@@ -11,12 +11,12 @@ import {
 import { HttpApiBuilder } from 'effect/http-api'
 import type { SqlClient } from 'effect/sql'
 import { API_PREFIX, BureauApi } from './api.js'
+import { bodyLimit, MAX_BODY_BYTES } from './body-limit.js'
 import { ApiConfig, type ApiOptions } from './config.js'
 import { Handlers } from './handlers/all.js'
 import { Middlewares } from './middlewares.js'
 
 export const OPENAPI_PATH = `${API_PREFIX}/openapi.json` as const
-const MAX_BODY = ByteSize.megabytes(10)
 
 // What the platform layer of the server provides (BunHttpServer.layer in the binary, NodeHttpServer.layer under Vitest)
 export type ServerPlatform =
@@ -45,26 +45,31 @@ const Routes = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements>
   )
 }
 
+// What every request passes before it is routed: CORS and the limit on the length of its body
 // Browsers may call the API only from the listed origins; with none listed there is no CORS at all (the embedded UI of SP2 is same-origin)
 // A predicate rather than the list: with a list of one, Effect would name that origin to every requester
-const Cors = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
-  origins.length === 0
-    ? Layer.empty
-    : HttpRouter.use((router) =>
-        router.addGlobalMiddleware(
+// The first middleware added is the outermost, so a refusal of the body limit carries the CORS headers too
+const Globals = (origins: readonly string[]): Layer.Layer<never, never, HttpRouter.HttpRouter> =>
+  HttpRouter.use((router) =>
+    Effect.gen(function* addsGlobals() {
+      if (origins.length > 0) {
+        yield* router.addGlobalMiddleware(
           HttpMiddleware.cors({
             allowedOrigins: (origin) => origins.includes(origin),
             allowedMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
             allowedHeaders: ['authorization', 'content-type', 'last-event-id'],
           }),
-        ),
-      )
+        )
+      }
+      yield* router.addGlobalMiddleware(bodyLimit)
+    }),
+  )
 
-const BodyLimit = Layer.succeed(HttpIncomingMessage.MaxBodySize, MAX_BODY)
+const BodyLimit = Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(MAX_BODY_BYTES))
 
 // The routes of the API on the router of the environment; the OpenAPI document is served next to them
 export const ApiLive = (options: ApiOptions): Layer.Layer<never, never, ApiRequirements> =>
-  Layer.mergeAll(Routes(options), Cors(options.corsOrigins)).pipe(Layer.provide(BodyLimit))
+  Layer.mergeAll(Routes(options), Globals(options.corsOrigins)).pipe(Layer.provide(BodyLimit))
 
 // The API served by the HttpServer of the environment; the router is private to it
 export const serveApi = (

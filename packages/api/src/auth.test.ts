@@ -3,6 +3,7 @@ import { assert, it } from '@effect/vitest'
 import { Cause, Effect, Exit, Layer, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
 import { AuthorizationLive, sameToken } from './auth.js'
+import { openApiDocument } from './openapi.js'
 import { ApiTestLayer, authorized, baseUrl, bodyOf, fetched, json } from './testing.js'
 
 const EVENTS_SCHEMA = '/api/v1/schemas/events.json'
@@ -13,6 +14,19 @@ const REFUSED: [string, Record<string, string>][] = [
   ['an empty bearer token', { authorization: 'Bearer ' }],
   ['a wrong token', { authorization: 'Bearer not-the-token' }],
 ]
+
+const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete'])
+
+// The method and the path of each operation of a path of the OpenAPI document, with an id where the path has one
+const operationsOf = ([path, item]: [string, object]): [string, string][] =>
+  Object.keys(item)
+    .filter((method) => METHODS.has(method))
+    .map((method) => [method.toUpperCase(), path.replace('{id}', 'x')])
+
+// Every operation the document lists but the health check
+const PROTECTED = Object.entries(openApiDocument().paths)
+  .filter(([path]) => path !== '/api/v1/health')
+  .flatMap((entry) => operationsOf(entry))
 
 // What building the layer dies with, or nothing when it builds
 const buildFailure = <Out>(layer: Layer.Layer<Out>): string => {
@@ -55,13 +69,14 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
     }),
   )
 
-  // POST /api/v1/projects arrives with Task 4, which un-skips this test
-  suite.effect.skip('refuses a body over 10 MB with 413 before any handler runs', () =>
+  suite.effect('refuses a body over 10 MB with the 413 problem before any handler runs', () =>
     Effect.gen(function* refusesBig() {
       const base = yield* baseUrl
       const oversized = json({ path: 'x'.repeat(11 * 1024 * 1024) })
       const response = yield* fetched(`${base}/api/v1/projects`, oversized)
       assert.strictEqual(response.status, 413)
+      assert.include(response.headers.get('content-type'), 'application/problem+json')
+      assert.containSubset(yield* bodyOf(response), { status: 413, code: 'payload_too_large' })
     }),
   )
 
@@ -73,6 +88,17 @@ it.layer(ApiTestLayer())('the bearer token on a protected endpoint', (suite) => 
       assert.deepStrictEqual(yield* bodyOf(events), eventsJsonSchema())
       const config = yield* fetched(`${base}/api/v1/schemas/config.json`, authorized())
       assert.deepStrictEqual(yield* bodyOf(config), configJsonSchema())
+    }),
+  )
+})
+
+it.layer(ApiTestLayer())('the bearer token on every operation of the API', (suite) => {
+  suite.effect.each(PROTECTED)('refuses %s %s without it', ([method, path]) =>
+    Effect.gen(function* refuses() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}${path}`, { method })
+      assert.strictEqual(response.status, 401)
+      assert.containSubset(yield* bodyOf(response), { code: 'unauthorized' })
     }),
   )
 })
