@@ -49,13 +49,13 @@ export const tell = (line: string): void => {
   console.error(`smoke: ${line}`)
 }
 
-// A home the CLI may run on: a directory under the temporary one that is still there
-// An unset or empty BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
+// A home the CLI may run on: a directory under the temporary one that is still there, as its .. and links resolve
+// An unset BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
 export const isThrowawayHome = (home: string | undefined, root: string = TEMP_ROOT): boolean =>
   home !== undefined &&
   path.isAbsolute(home) &&
-  home.startsWith(`${root}${path.sep}`) &&
-  existsSync(home)
+  existsSync(home) &&
+  realpathSync(path.resolve(home)).startsWith(`${root}${path.sep}`)
 
 // The environment of a command of the CLI, which runs on the smoke's own throwaway home or not at all
 const cliEnv = (smoke: Throwaway, args: readonly string[]): Throwaway['env'] => {
@@ -266,14 +266,27 @@ export const stopperOf =
     }
   }
 
-export function heldSignals(smoke: Throwaway): () => void {
+// The signals are held while the smoke runs; an abort of its caller stops it as a SIGTERM does, so a bounded caller leaves nothing
+export function heldSignals(smoke: Throwaway, abort?: AbortSignal): () => void {
   const stop = stopperOf(smoke)
+  const aborted = (): void => {
+    stop('SIGTERM')
+  }
   for (const signal of HELD) {
     process.on(signal, stop)
+  }
+  if (abort !== undefined) {
+    abort.addEventListener('abort', aborted, { once: true })
+  }
+  if (abort !== undefined && abort.aborted) {
+    aborted()
   }
   return () => {
     for (const signal of HELD) {
       process.off(signal, stop)
+    }
+    if (abort !== undefined) {
+      abort.removeEventListener('abort', aborted)
     }
   }
 }

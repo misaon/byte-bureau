@@ -1,5 +1,5 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { devNull, homedir, tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
 import { recordOf, type SmokePlan } from './smoke-agent.js'
@@ -38,22 +38,22 @@ function heard(): Heard {
   return { told: () => linesOf(told), printed: () => linesOf(printed) }
 }
 
-// The daemon the smoke started, as the record of serve names it
+// The daemon the smoke started, as the record of serve names it; a pid of 0 or below names a process group, never a daemon
 function daemonOf(printed: readonly string[]): number | undefined {
   const served = printed
     .map((line) => recordOf(line))
     .find((record) => record !== undefined && record['command'] === 'serve')
   const pid = served === undefined ? undefined : served['pid']
-  return typeof pid === 'number' ? pid : undefined
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
 }
 
-// A daemon that a failing smoke left is killed with the test; the git of the daemon reads no configuration of whoever runs it
+// Well within the time of a test: a smoke still running then stops as a SIGTERM stops it, and cleans up
+const BOUND_MS = 45_000
+
+// A daemon that a failing smoke left is killed with the test
 function smokeTest(): Heard {
-  vi.stubEnv('GIT_CONFIG_GLOBAL', devNull)
-  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1')
   const output = heard()
   onTestFinished(() => {
-    vi.unstubAllEnvs()
     const pid = daemonOf(output.printed())
     if (pid !== undefined && alive(pid)) {
       process.kill(pid, 'SIGKILL')
@@ -62,25 +62,30 @@ function smokeTest(): Heard {
   return output
 }
 
-// The home and the repository the smoke named in its first line
+const NAMED = /on the throwaway home (?<home>\S+) and repository (?<repo>\S+)$/u
+
+// The home and the repository the smoke named as it began
 const throwawaysOf = (told: readonly string[]): readonly string[] => {
-  const [first = ''] = told
-  const named = /on the throwaway home (?<home>\S+) and repository (?<repo>\S+)$/u.exec(first)
-  const { home, repo } = named === null || named.groups === undefined ? {} : named.groups
+  const named = told.map((line) => NAMED.exec(line)).find((match) => match !== null)
+  const { home, repo } = named === undefined || named.groups === undefined ? {} : named.groups
   return [home, repo].filter((dir) => dir !== undefined)
 }
 
-// Whether the daemon and the directories of the smoke are gone
+// Whether the serve record named the daemon, and whether the daemon and the directories of the smoke are left
 const leftOf = ({ told, printed }: Heard): readonly unknown[] => {
   const pid = daemonOf(printed())
-  return [pid !== undefined && alive(pid), throwawaysOf(told()).map((dir) => existsSync(dir))]
+  return [
+    pid !== undefined,
+    pid !== undefined && alive(pid),
+    throwawaysOf(told()).map((dir) => existsSync(dir)),
+  ]
 }
 
 describe(runSmoke, () => {
   it('runs a turn to its end, then stops, resumes and prompts a second session, and leaves neither its daemon nor its home', async () => {
     expect.hasAssertions()
     const output = smokeTest()
-    await expect(runSmoke(FAKE)).resolves.toBe(0)
+    await expect(runSmoke(FAKE, AbortSignal.timeout(BOUND_MS))).resolves.toBe(0)
     expect(output.told()).toStrictEqual(
       expect.arrayContaining([
         'smoke: serve exited 0',
@@ -93,17 +98,18 @@ describe(runSmoke, () => {
         'smoke: the home and the repository are gone',
       ]),
     )
-    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+    expect(leftOf(output)).toStrictEqual([true, false, [false, false]])
   })
 
   it('adds the login profile SMOKE_PROFILE names to its home and runs under it', async () => {
     expect.hasAssertions()
     const output = smokeTest()
-    await expect(runSmoke({ ...FAKE, profile: 'fake/work' })).resolves.toBe(0)
+    const plan = { ...FAKE, profile: 'fake/work' }
+    await expect(runSmoke(plan, AbortSignal.timeout(BOUND_MS))).resolves.toBe(0)
     expect(output.told()).toStrictEqual(
       expect.arrayContaining(['smoke: profiles add exited 0', 'smoke: run exited 0']),
     )
-    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+    expect(leftOf(output)).toStrictEqual([true, false, [false, false]])
   })
 
   it('refuses a profile of another provider before it makes a home or runs anything', async () => {
@@ -114,6 +120,22 @@ describe(runSmoke, () => {
       ['smoke: SMOKE_PROFILE must be a profile id of fake, such as fake/work, not claude/work'],
       [],
     ])
+  })
+})
+
+describe('runSmoke and an abort of its caller', () => {
+  it('stops as a SIGTERM stops it when its caller aborts, runs nothing more and leaves nothing', async () => {
+    expect.hasAssertions()
+    const output = smokeTest()
+    await expect(runSmoke(FAKE, AbortSignal.abort())).resolves.toBe(130)
+    expect(output.told()).toStrictEqual(
+      expect.arrayContaining([
+        'smoke: SIGTERM: no further command starts; the daemon is stopped and the home removed',
+        'smoke: serve exited 130',
+        'smoke: the home and the repository are gone',
+      ]),
+    )
+    expect(leftOf(output)).toStrictEqual([false, false, [false, false]])
   })
 })
 
@@ -128,6 +150,18 @@ describe(isThrowawayHome, () => {
     expect(
       [...homes, path.join(root, 'bb-smoke-gone')].map((home) => isThrowawayHome(home)),
     ).toStrictEqual([true, false, false, false, false, false, false])
+  })
+
+  it('never takes a home under the temporary one by its text that resolves outside it, by .. or by a link', () => {
+    const root = realpathSync(tmpdir())
+    const made = mkdtempSync(path.join(root, 'bb-smoke-test-'))
+    onTestFinished(() => {
+      rmSync(made, { recursive: true, force: true })
+    })
+    const link = path.join(made, 'home')
+    symlinkSync(homedir(), link)
+    const climbing = `${made}${path.sep}..${path.sep}..`
+    expect([climbing, link].map((home) => isThrowawayHome(home))).toStrictEqual([false, false])
   })
 })
 

@@ -170,9 +170,13 @@ const flagsOf = (plan: SmokePlan, choice: ProfileChoice): readonly string[] => [
 ]
 
 // The steps on a throwaway home, whose daemon is stopped and which is removed whatever happens
-async function onThrowaway(plan: SmokePlan, choice: ProfileChoice): Promise<number> {
+async function onThrowaway(
+  plan: SmokePlan,
+  choice: ProfileChoice,
+  abort: AbortSignal | undefined,
+): Promise<number> {
   const smoke: Smoke = { ...throwaway(), plan, flags: flagsOf(plan, choice) }
-  const release = heldSignals(smoke)
+  const release = heldSignals(smoke, abort)
   try {
     prepare(smoke)
     return await steps(smoke, choice)
@@ -182,13 +186,13 @@ async function onThrowaway(plan: SmokePlan, choice: ProfileChoice): Promise<numb
   }
 }
 
-// A run to its end, then a stop, resume and prompt of a second session
-export async function runSmoke(plan: SmokePlan): Promise<number> {
+// A run to its end, then a stop, resume and prompt of a second session; an abort stops it as a SIGTERM does
+export async function runSmoke(plan: SmokePlan, abort?: AbortSignal): Promise<number> {
   const choice = profileChoiceOf(plan)
   if (choice.kind === 'refused') {
     tell(choice.reason)
     return 1
   }
-  const code = await onThrowaway(plan, choice)
+  const code = await onThrowaway(plan, choice, abort)
   return code
 }
