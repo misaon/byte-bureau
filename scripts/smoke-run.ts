@@ -23,9 +23,6 @@ import {
   type Throwaway,
 } from './smoke-cli.js'
 
-// The steps of a real-agent smoke, run by hand only
-/* v8 ignore start */
-
 // What the resumed session is told: it reads the same whether or not the agent remembers the turn that was stopped
 const GO_ON = 'Go on: create src/hello.ts exporting hello() unless it is there already'
 
@@ -111,12 +108,14 @@ const waitingIn =
     }
   }
 
-// A run that ended before its agent asked anything left no session to stop
+// A run that ended before its agent asked anything left no session to stop; only a real agent may ask nothing, the fake one always asks
+/* v8 ignore start */
 async function unasked(running: Running): Promise<number> {
   const ran = await running.done
   tell(`the second run ended (exit ${ran.code}) before its agent asked anything: no resume to show`)
   return ran.code
 }
+/* v8 ignore stop */
 
 // Off a terminal and without --yes, the first ask of a second run waits: its session is stopped there, resumed and prompted again
 async function resumePath(smoke: Smoke): Promise<number> {
@@ -124,10 +123,12 @@ async function resumePath(smoke: Smoke): Promise<number> {
   const args = ['run', PROMPT, '--project', smoke.repo, ...smoke.flags, '--json']
   const running = started(smoke, args, waitingIn(asked))
   const id = await Promise.race([asked.promise, ended(running)])
+  /* v8 ignore start */
   if (id === undefined) {
     const code = await unasked(running)
     return code
   }
+  /* v8 ignore stop */
   const resumed =
     (await stoppedAndResumed(smoke, id, running)) && (await promptedAndCompleted(smoke, id))
   return resumed ? 0 : 1
@@ -155,7 +156,7 @@ async function steps(smoke: Smoke, choice: ProfileChoice): Promise<number> {
   const serve = await command(smoke, ['serve', '--json'])
   tell(`serve exited ${serve.code}`)
   if (serve.code !== 0 || !(await profileAdded(smoke, choice))) {
-    return 1
+    return exitOf(smoke, [1])
   }
   const first = await firstRun(smoke)
   const second = smoke.stopping.received ? first : await resumePath(smoke)
@@ -191,4 +192,3 @@ export async function runSmoke(plan: SmokePlan): Promise<number> {
   const code = await onThrowaway(plan, choice)
   return code
 }
-/* v8 ignore stop */

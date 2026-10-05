@@ -45,7 +45,7 @@ export const planOf = (env: Env, plan: Omit<SmokePlan, 'profile'>): SmokePlan =>
 export function usageOf(plan: SmokePlan): string {
   const file = `scripts/${plan.script.replace(':', '-')}.ts`
   return [
-    `${plan.script} runs ${plan.provider}, a real agent, on your own login or key; CI never runs it.`,
+    `${plan.script} runs ${plan.provider}, a real agent, on your own login; CI never runs it.`,
     `Run it with: bun run ${plan.script}   (or ${SMOKE_GUARD}=1 bun ${file})`,
     'It works on a throwaway BYTEBUREAU_HOME and repository, with a daemon from source that it stops at the end.',
     `SMOKE_PROFILE=${plan.provider}/<name> adds that login profile to the throwaway home and runs under it.`,

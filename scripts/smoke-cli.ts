@@ -6,10 +6,11 @@ import type { Readable } from 'node:stream'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { recordOf, type JsonRecord } from './smoke-agent.js'
 
-// The CLI and the daemon of a smoke, run from source; only a real-agent smoke, run by hand, gets here
-/* v8 ignore start */
+// The CLI and the daemon of a smoke, run from source
 const CLI_DIRECTORY = path.join(import.meta.dirname, '..', 'apps', 'bytebureau')
 const FROM_SOURCE = ['run', 'src/main.ts'] as const
+// Where every throwaway home and repository is made, its links resolved as theirs are
+const TEMP_ROOT = realpathSync(tmpdir())
 
 // A daemon on a free port that keeps its secrets in a file under the home, never in the keychain
 const HOME_CONFIG = { server: { port: 0 }, secrets: { backend: 'file' } }
@@ -25,7 +26,7 @@ export interface Throwaway {
   // Set once a signal stops the smoke: no further command starts, the cleanup still runs
   readonly stopping: { received: boolean }
   // The commands running now, which a SIGTERM sent to the smoke is passed on to
-  readonly running: Set<ChildProcess>
+  readonly running: Set<Pick<ChildProcess, 'kill'>>
 }
 
 export interface Ran {
@@ -46,6 +47,24 @@ function unwatched(): void {
 // The lines of the smoke itself go to stderr; its stdout is what the commands printed
 export const tell = (line: string): void => {
   console.error(`smoke: ${line}`)
+}
+
+// A home the CLI may run on: a directory under the temporary one that is still there
+// An unset or empty BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
+export const isThrowawayHome = (home: string | undefined, root: string = TEMP_ROOT): boolean =>
+  home !== undefined &&
+  path.isAbsolute(home) &&
+  home.startsWith(`${root}${path.sep}`) &&
+  existsSync(home)
+
+// The environment of a command of the CLI, which runs on the smoke's own throwaway home or not at all
+const cliEnv = (smoke: Throwaway, args: readonly string[]): Throwaway['env'] => {
+  const home = smoke.env['BYTEBUREAU_HOME']
+  if (home !== smoke.home || !isThrowawayHome(home)) {
+    const where = home === undefined || home === '' ? 'an unset home, ~/.bytebureau' : home
+    throw new Error(`refusing to run bytebureau ${args.join(' ')} on ${where}`)
+  }
+  return smoke.env
 }
 
 // Links resolved, as git reports paths: on macOS /var is a link to /private/var
@@ -128,7 +147,7 @@ async function endOf(smoke: Throwaway, child: ChildProcess, records: JsonRecord[
 function spawned(smoke: Throwaway, args: readonly string[], watch: Watch): Running {
   const child = spawn('bun', [...FROM_SOURCE, ...args], {
     cwd: CLI_DIRECTORY,
-    env: smoke.env,
+    env: cliEnv(smoke, args),
     stdio: ['ignore', 'pipe', 'inherit'],
   })
   const records: JsonRecord[] = []
@@ -155,7 +174,7 @@ export async function atTheTerminal(smoke: Throwaway, args: readonly string[]): 
   }
   const child = spawn('bun', [...FROM_SOURCE, ...args], {
     cwd: CLI_DIRECTORY,
-    env: smoke.env,
+    env: cliEnv(smoke, args),
     stdio: ['inherit', 2, 'inherit'],
   })
   const ran = await endOf(smoke, child, [])
@@ -181,9 +200,12 @@ const killed = (pid: number): void => {
 
 // The daemon's pid, which the lock of its home holds while it runs
 const daemonOf = (home: string): number | undefined => {
-  const lock = path.join(home, 'daemon.lock')
-  const pid = existsSync(lock) ? Number(readFileSync(lock, 'utf8').trim()) : Number.NaN
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined
+  try {
+    const pid = Number(readFileSync(path.join(home, 'daemon.lock'), 'utf8').trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // A daemon that outlives its stop gets until the deadline, then SIGKILL; true when it ended by itself
@@ -200,20 +222,39 @@ async function endedBy(pid: number, deadline: number): Promise<boolean> {
   return ended
 }
 
-// The daemon ends with the smoke, as serve --stop ends it, else by its pid; the home and the repository go after it
-export async function cleanedUp(smoke: Throwaway): Promise<void> {
-  const pid = daemonOf(smoke.home)
-  const stop = await spawned(smoke, ['serve', '--stop', '--json'], unwatched).done
-  const ended = pid === undefined || (await endedBy(pid, Date.now() + 5000))
-  rmSync(smoke.home, { recursive: true, force: true })
-  rmSync(smoke.repo, { recursive: true, force: true })
-  const kill = ended ? '' : '; the daemon did not end and was killed'
-  tell(`serve --stop exited ${stop.code}${kill}; the home and the repository are removed`)
+// A step of the cleanup that fails is told, never thrown, so the failure that ended the smoke stays the one it ends with
+async function attempted(what: string, step: () => Promise<void> | void): Promise<void> {
+  try {
+    await step()
+  } catch (error) {
+    tell(`${what} failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
-// A signal stops the smoke where it is; Ctrl-C reaches the commands at the terminal by itself, a SIGTERM to the smoke alone is passed on
-export function heldSignals(smoke: Throwaway): () => void {
-  const stop = (signal: NodeJS.Signals): void => {
+// The daemon ends with the smoke, as serve --stop ends it, else by its pid; the home and the repository go whatever happened
+export async function cleanedUp(smoke: Throwaway): Promise<void> {
+  const pid = daemonOf(smoke.home)
+  await attempted('serve --stop', async () => {
+    const stop = await spawned(smoke, ['serve', '--stop', '--json'], unwatched).done
+    tell(`serve --stop exited ${stop.code}`)
+  })
+  const ended = pid === undefined || (await endedBy(pid, Date.now() + 5000))
+  await attempted('removing the home and the repository', () => {
+    rmSync(smoke.home, { recursive: true, force: true })
+    rmSync(smoke.repo, { recursive: true, force: true })
+  })
+  tell(
+    `${ended ? '' : 'the daemon did not end and was killed; '}the home and the repository are gone`,
+  )
+}
+
+const HELD = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+// A signal stops the smoke where it is: no further command starts, and the cleanup runs
+// Ctrl-C and a hangup reach the commands of the terminal by themselves; a SIGTERM sent to the smoke alone is passed on to them
+export const stopperOf =
+  (smoke: Pick<Throwaway, 'stopping' | 'running'>) =>
+  (signal: NodeJS.Signals): void => {
     if (!smoke.stopping.received) {
       tell(`${signal}: no further command starts; the daemon is stopped and the home removed`)
     }
@@ -224,11 +265,15 @@ export function heldSignals(smoke: Throwaway): () => void {
       }
     }
   }
-  process.on('SIGINT', stop)
-  process.on('SIGTERM', stop)
+
+export function heldSignals(smoke: Throwaway): () => void {
+  const stop = stopperOf(smoke)
+  for (const signal of HELD) {
+    process.on(signal, stop)
+  }
   return () => {
-    process.off('SIGINT', stop)
-    process.off('SIGTERM', stop)
+    for (const signal of HELD) {
+      process.off(signal, stop)
+    }
   }
 }
-/* v8 ignore stop */
