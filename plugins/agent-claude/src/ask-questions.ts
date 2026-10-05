@@ -22,8 +22,9 @@ const isRecommended = (label: string): boolean => label.trimEnd().toLowerCase().
 const plainLabel = (label: string): string =>
   isRecommended(label) ? label.trimEnd().slice(0, -SUFFIX.length).trimEnd() : label
 
+// The id is the plain label too, so a person answers with the label as it reads
 const optionOf = ({ label, description }: OptionInput): AskOption => ({
-  id: label,
+  id: plainLabel(label),
   label: plainLabel(label),
   ...(description === undefined || description === '' ? {} : { description }),
   recommended: isRecommended(label),
@@ -61,16 +62,23 @@ const labelOf = (question: AskQuestion, id: string | undefined): string | undefi
   return option === undefined ? id : option.label
 }
 
+// The person's own text answers the first question alone: it was written for one question, not for every one of them
+const textOf = (answer: AskAnswer, question: AskQuestion, index: number): string | undefined => {
+  const { selected } = answer
+  if (selected === 'other') {
+    return index === 0 ? (answer.otherText ?? '') : undefined
+  }
+  return labelOf(question, selected[index])
+}
+
 // The answers as AskUserQuestion takes them, keyed by the question: the label chosen, or the person's own text
 // An ask with several questions is answered with one option id for each, in order
 export const answersOf = (
   questions: readonly AskQuestion[],
   answer: AskAnswer,
 ): Record<string, string> => {
-  const { selected } = answer
   const pairs = questions.flatMap((question, index) => {
-    const text =
-      selected === 'other' ? (answer.otherText ?? '') : labelOf(question, selected[index])
+    const text = textOf(answer, question, index)
     return text === undefined ? [] : [[question.prompt, text] as const]
   })
   return Object.fromEntries(pairs)

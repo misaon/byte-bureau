@@ -28,7 +28,7 @@ const EXPORT_ASK = {
         id: '0',
         header: 'Export',
         options: [
-          { id: 'Named (Recommended)', label: 'Named', recommended: true },
+          { id: 'Named', label: 'Named', recommended: true },
           { id: 'Default', label: 'Default', recommended: false },
         ],
       },
@@ -53,7 +53,7 @@ describe('the asks of a permission prompt', () => {
     const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
     const [requested] = broker.drain()
     expect(requested).toMatchObject(EXPORT_ASK)
-    broker.answer('req-1', { selected: ['Named (Recommended)'] })
+    broker.answer('req-1', { selected: ['Named'] })
     await expect(pending).resolves.toStrictEqual({
       behavior: 'allow',
       updatedInput: { questions: exportQuestion.questions, answers: { 'Which export?': 'Named' } },
