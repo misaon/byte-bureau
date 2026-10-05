@@ -1,11 +1,17 @@
 import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentEvent } from '@bytebureau/plugin-api'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ClaudeAgentProvider } from './provider.js'
 import type { ClaudeSession } from './session.js'
 import { fakeQuery } from './testing/fake-query.js'
 import { recordingLogger, sessionRequest } from './testing/requests.js'
-import { init, modelUsage, resultSuccess, textDelta } from './testing/sdk-fixtures.js'
+import {
+  contextMeasured,
+  init,
+  modelUsage,
+  resultSuccess,
+  textDelta,
+} from './testing/sdk-fixtures.js'
 import { rest, start, until } from './testing/session-harness.js'
 
 const TURN_END = 'turn.completed'
@@ -95,5 +101,41 @@ describe('a Claude Code that cannot be started', () => {
       { type: 'session.closed' },
     ])
     await session.close()
+  })
+})
+
+describe('the context a turn leaves in use', () => {
+  it('is measured after every turn, by a summary that makes no request, and told with the usage', async () => {
+    expect.hasAssertions()
+    const { session, fake } = start({ turns: [[init, resultSuccess]], context: contextMeasured })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.at(-1)).toHaveProperty('usage.contextPct', 25)
+    expect(fake.contextDetails).toStrictEqual(['summary'])
+    await session.close()
+  })
+
+  it('is left out when the SDK cannot tell it', async () => {
+    expect.hasAssertions()
+    const { session } = start({ turns: [[init, resultSuccess]], context: new Error('no measure') })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.at(-1)).not.toHaveProperty('usage.contextPct')
+    await session.close()
+  })
+
+  it('is given up after 5 s, and the turn ends without it', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    try {
+      const { session } = start({ turns: [[init, resultSuccess]], context: 'hangs' })
+      await session.prompt({ text: 'Hello' })
+      await vi.advanceTimersByTimeAsync(5000)
+      const ended = await until(session, TURN_END)
+      expect(ended.at(-1)).not.toHaveProperty('usage.contextPct')
+      await session.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -4,6 +4,7 @@ import type { AccountInfo, Options, SDKUserMessage } from '@anthropic-ai/claude-
 import type { AuthStatus, ProfileRef } from '@bytebureau/plugin-api'
 import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
+import { withinLimit } from './within-limit.js'
 
 interface Probe {
   readonly deps: ClaudeDeps
@@ -85,37 +86,20 @@ const accountOf = async (probe: AgentQuery): Promise<AccountInfo> => {
   return account
 }
 
-// Gives up once the limit is over, after aborting the probe
-const deadline = (
-  abort: AbortController,
-): { readonly over: Promise<null>; readonly cancel: () => void } => {
-  const { promise, resolve } = Promise.withResolvers<null>()
-  const timer = setTimeout(() => {
-    abort.abort()
-    resolve(null)
-  }, PROBE_LIMIT_MS)
-  return {
-    over: promise,
-    cancel: () => {
-      clearTimeout(timer)
-    },
-  }
-}
-
-// The probe is closed whatever happens, and given 20 s
+// The probe is closed whatever happens, and given 20 s, after which it is aborted
 const probed = async (probe: Probe): Promise<AuthStatus> => {
   const abort = new AbortController()
   const query = startProbe(probe, abort)
-  const limit = deadline(abort)
   try {
-    const account = await Promise.race([accountOf(query), limit.over])
-    return account === null
-      ? { state: 'unknown', hint: TOO_SLOW }
-      : statusOf(account, probe.profile)
+    const account = await withinLimit(accountOf(query), PROBE_LIMIT_MS)
+    if (account === null) {
+      abort.abort()
+      return { state: 'unknown', hint: TOO_SLOW }
+    }
+    return statusOf(account, probe.profile)
   } catch (error) {
     return failedStatus(error, probe.profile)
   } finally {
-    limit.cancel()
     query.close()
   }
 }

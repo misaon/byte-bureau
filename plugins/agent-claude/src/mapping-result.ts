@@ -2,6 +2,7 @@ import type {
   ModelUsage,
   NonNullableUsage,
   SDKContextUsage,
+  SDKControlGetContextUsageResponse,
   SDKRateLimitInfo,
   SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
@@ -145,8 +146,15 @@ export const unreadResult = (message: SDKResultMessage, state: MapState): AgentE
   }
 }
 
+const shareOf = (total: number, window: number, percentage: number): number =>
+  window > 0 ? (total / window) * 100 : percentage
+
 export const contextPctOf = (usage: SDKContextUsage): number =>
-  usage.raw_max_tokens > 0 ? (usage.total_tokens / usage.raw_max_tokens) * 100 : usage.percentage
+  shareOf(usage.total_tokens, usage.raw_max_tokens, usage.percentage)
+
+// The share of the context getContextUsage measured, by the same window as the context_usage of a /context
+export const measuredPctOf = (usage: SDKControlGetContextUsageResponse): number =>
+  shareOf(usage.totalTokens, usage.rawMaxTokens, usage.percentage)
 
 const isoOf = (seconds: number): string => new Date(seconds * 1000).toISOString()
 

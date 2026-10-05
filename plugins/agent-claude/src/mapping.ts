@@ -8,7 +8,7 @@ import type {
 import type { AgentEvent, ToolKind } from '@bytebureau/protocol'
 import { contextPctOf, mapRateLimit, mapResult, type MapState } from './mapping-result.js'
 
-export { newMapState, unreadResult, type MapState } from './mapping-result.js'
+export { measuredPctOf, newMapState, unreadResult, type MapState } from './mapping-result.js'
 
 type Block = SDKAssistantMessage['message']['content'][number]
 type Delta = Extract<SDKPartialAssistantMessage['event'], { type: 'content_block_delta' }>['delta']

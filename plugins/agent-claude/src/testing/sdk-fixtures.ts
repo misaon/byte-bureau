@@ -5,6 +5,7 @@ import type {
   SDKAssistantMessage,
   SDKAuthStatusMessage,
   SDKCompactBoundaryMessage,
+  SDKControlGetContextUsageResponse,
   SDKMessage,
   SDKPartialAssistantMessage,
   SDKRateLimitEvent,
@@ -55,6 +56,22 @@ export const modelUsage = (
     maxOutputTokens: 32_000,
   },
 })
+
+// What getContextUsage answers with a summary: a quarter of the window in use
+export const contextMeasured: SDKControlGetContextUsageResponse = {
+  categories: [],
+  totalTokens: 50_000,
+  maxTokens: 200_000,
+  rawMaxTokens: 200_000,
+  percentage: 25,
+  gridRows: [],
+  model: MODEL,
+  memoryFiles: [],
+  mcpTools: [],
+  agents: [],
+  isAutoCompactEnabled: true,
+  apiUsage: null,
+}
 
 export const init: SDKSystemMessage = {
   type: 'system',

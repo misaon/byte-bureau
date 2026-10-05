@@ -14,12 +14,15 @@ import type {
 } from '@bytebureau/plugin-api'
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
-import { mapMessage, newMapState, unreadResult, type MapState } from './mapping.js'
+import { mapMessage, measuredPctOf, newMapState, unreadResult, type MapState } from './mapping.js'
 import { claudeResumeOf, optionsOf } from './options.js'
 import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
+import { withinLimit } from './within-limit.js'
 
 type SubagentEvent = 'subagent.started' | 'subagent.stopped'
+
+const CONTEXT_LIMIT_MS = 5000
 
 const reasonOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
@@ -143,6 +146,9 @@ export class ClaudeSession implements AgentSession {
   private async read(): Promise<void> {
     try {
       for await (const message of this.query) {
+        if (message.type === 'result') {
+          await this.measureContext()
+        }
         this.tell(this.mapped(message))
       }
     } catch (error) {
@@ -150,6 +156,22 @@ export class ClaudeSession implements AgentSession {
     } finally {
       this.output.push({ type: 'session.closed' })
       this.output.end()
+    }
+  }
+
+  // The share of the context a turn left in use, asked after every turn by a summary that makes no request
+  // A measure that fails or takes more than 5 s leaves the turn with what the SDK told during it, if anything
+  private async measureContext(): Promise<void> {
+    try {
+      const measured = await withinLimit(
+        this.query.getContextUsage({ detail: 'summary' }),
+        CONTEXT_LIMIT_MS,
+      )
+      if (measured !== null) {
+        this.state.contextPct = measuredPctOf(measured)
+      }
+    } catch {
+      // Not measured: the turn keeps what it had
     }
   }
 

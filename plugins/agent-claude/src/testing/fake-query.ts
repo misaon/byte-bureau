@@ -1,6 +1,7 @@
 import type {
   AccountInfo,
   HookInput,
+  SDKControlGetContextUsageResponse,
   Options,
   PermissionResult,
   SDKMessage,
@@ -38,6 +39,8 @@ export interface FakeScript {
   readonly hangs?: boolean
   // When set, query() throws it at once, as the SDK does when it finds no Claude Code to run
   readonly throws?: Error
+  // What getContextUsage answers, fails with or never answers; without it, it fails
+  readonly context?: SDKControlGetContextUsageResponse | Error | 'hangs'
 }
 
 // What the adapter did with the query: every query's options, the prompts, what canUseTool answered, the calls
@@ -47,6 +50,8 @@ export interface FakeQuery {
   readonly prompts: SDKUserMessage[]
   readonly permissions: (PermissionResult | null)[]
   readonly models: string[]
+  // The detail of every getContextUsage the adapter asked for
+  readonly contextDetails: (string | undefined)[]
   readonly calls: { interrupt: number; close: number }
 }
 
@@ -142,6 +147,18 @@ const initializationOf = async (run: Run): ReturnType<AgentQuery['initialization
   }
 }
 
+const contextOf = async ({ context }: FakeScript): Promise<SDKControlGetContextUsageResponse> => {
+  if (context === 'hangs') {
+    const never = await Promise.withResolvers<never>().promise
+    return never
+  }
+  if (context === undefined || context instanceof Error) {
+    throw context ?? new Error('the fake query measures no context')
+  }
+  const measured = await Promise.resolve(context)
+  return measured
+}
+
 const queryOf = (prompt: AsyncIterable<SDKUserMessage>, run: Run): AgentQuery => {
   const turns = playTurns(prompt, run)
   return {
@@ -167,6 +184,11 @@ const queryOf = (prompt: AsyncIterable<SDKUserMessage>, run: Run): AgentQuery =>
       const { account } = await initializationOf(run)
       return account
     },
+    getContextUsage: async (opts) => {
+      run.fake.contextDetails.push(opts === undefined ? undefined : opts.detail)
+      const measured = await contextOf(run.script)
+      return measured
+    },
   }
 }
 
@@ -184,6 +206,7 @@ export const fakeQuery = (script: FakeScript = {}): FakeQuery => {
     prompts: [],
     permissions: [],
     models: [],
+    contextDetails: [],
     calls: { interrupt: 0, close: 0 },
   }
   return fake

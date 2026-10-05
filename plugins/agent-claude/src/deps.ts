@@ -3,7 +3,10 @@ import type { Logger } from '@bytebureau/plugin-api'
 
 // The part of the SDK's query the adapter drives; the SDK's own query() is one, and so is the fake of the tests
 export type AgentQuery = AsyncIterable<SDKMessage> &
-  Pick<Query, 'interrupt' | 'close' | 'setModel' | 'initializationResult' | 'accountInfo'>
+  Pick<
+    Query,
+    'interrupt' | 'close' | 'setModel' | 'initializationResult' | 'accountInfo' | 'getContextUsage'
+  >
 
 export type QueryFn = (params: {
   readonly prompt: AsyncIterable<SDKUserMessage>
@@ -35,6 +38,7 @@ const failedQuery = (cause: unknown): AgentQuery => {
     setModel: failing,
     initializationResult: failing,
     accountInfo: failing,
+    getContextUsage: failing,
   }
 }
 
