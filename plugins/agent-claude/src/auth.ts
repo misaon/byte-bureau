@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import type { AccountInfo, Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AuthStatus, ProfileRef } from '@bytebureau/plugin-api'
-import type { AgentQuery, ClaudeDeps } from './deps.js'
+import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
 
 interface Probe {
@@ -76,7 +76,7 @@ const startProbe = ({ deps, profile, executable }: Probe, abort: AbortController
     abortController: abort,
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
   }
-  return deps.query({ prompt: input, options })
+  return startQuery(deps, { prompt: input, options })
 }
 
 const accountOf = async (probe: AgentQuery): Promise<AccountInfo> => {

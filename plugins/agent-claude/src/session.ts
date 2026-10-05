@@ -16,7 +16,7 @@ import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
 import { mapMessage, newMapState, unreadResult, type MapState } from './mapping.js'
 import { claudeResumeOf, optionsOf } from './options.js'
-import type { AgentQuery, ClaudeDeps } from './deps.js'
+import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
 
 type SubagentEvent = 'subagent.started' | 'subagent.stopped'
@@ -53,7 +53,7 @@ export class ClaudeSession implements AgentSession {
       hooks: this.hooks(),
       canUseTool: this.canUseTool,
     }
-    this.query = deps.query({ prompt: this.input, options: optionsOf(parts) })
+    this.query = startQuery(deps, { prompt: this.input, options: optionsOf(parts) })
     this.ended = this.read()
   }
 

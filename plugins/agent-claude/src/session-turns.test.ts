@@ -1,10 +1,12 @@
 import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentEvent } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
+import { ClaudeAgentProvider } from './provider.js'
 import type { ClaudeSession } from './session.js'
-import { sessionRequest } from './testing/requests.js'
+import { fakeQuery } from './testing/fake-query.js'
+import { recordingLogger, sessionRequest } from './testing/requests.js'
 import { init, modelUsage, resultSuccess, textDelta } from './testing/sdk-fixtures.js'
-import { start, until } from './testing/session-harness.js'
+import { rest, start, until } from './testing/session-harness.js'
 
 const TURN_END = 'turn.completed'
 
@@ -70,6 +72,28 @@ describe('a turn whose result cannot be read', () => {
     ])
     await session.prompt({ text: 'Again' })
     await expect(until(session, 'turn.started')).resolves.toStrictEqual([{ type: 'turn.started' }])
+    await session.close()
+  })
+})
+
+// What the SDK throws when it finds no Claude Code to run, before any process starts
+const NO_BINARY = new Error(
+  'Native CLI binary for darwin-arm64 not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.',
+)
+
+describe('a Claude Code that cannot be started', () => {
+  it('gives a session that ends with a crash naming the reason, rather than a refused start', async () => {
+    expect.hasAssertions()
+    const fake = fakeQuery({ throws: NO_BINARY })
+    const provider = new ClaudeAgentProvider({
+      query: fake.query,
+      logger: recordingLogger().logger,
+    })
+    const session = await provider.createSession(sessionRequest())
+    await expect(rest(session)).resolves.toStrictEqual([
+      { type: 'session.error', kind: 'crash', message: NO_BINARY.message, retryable: true },
+      { type: 'session.closed' },
+    ])
     await session.close()
   })
 })

@@ -109,6 +109,14 @@ describe('a login check that fails', () => {
     expect(missing.fake.calls.close).toBe(1)
   })
 
+  it('tells a Claude Code that cannot even be started as unknown, with the reason', async () => {
+    expect.hasAssertions()
+    const reason = 'Native CLI binary for darwin-arm64 not found.'
+    const { status, fake } = await checked({ throws: new Error(reason) })
+    expect(status).toStrictEqual({ state: 'unknown', hint: reason })
+    expect(fake.options).toHaveLength(1)
+  })
+
   it('gives up on a CLI that does not answer within 20 s', async () => {
     expect.hasAssertions()
     vi.useFakeTimers()

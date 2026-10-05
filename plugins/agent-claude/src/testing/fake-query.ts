@@ -36,6 +36,8 @@ export interface FakeScript {
   readonly initFailure?: Error
   // When set, initializationResult never answers
   readonly hangs?: boolean
+  // When set, query() throws it at once, as the SDK does when it finds no Claude Code to run
+  readonly throws?: Error
 }
 
 // What the adapter did with the query: every query's options, the prompts, what canUseTool answered, the calls
@@ -173,6 +175,9 @@ export const fakeQuery = (script: FakeScript = {}): FakeQuery => {
   const fake: FakeQuery = {
     query: ({ prompt, options }) => {
       fake.options.push(options)
+      if (script.throws !== undefined) {
+        throw script.throws
+      }
       return queryOf(prompt, { options, script, fake, closed: false })
     },
     options: [],

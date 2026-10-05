@@ -1,4 +1,4 @@
-import type { AgentEvent, CreateSessionRequest } from '@bytebureau/plugin-api'
+import type { AgentEvent, AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
 import { ClaudeSession } from '../session.js'
 import { fakeQuery, type FakeQuery, type FakeScript } from './fake-query.js'
 import { recordingLogger, sessionRequest, type LogEntry } from './requests.js'
@@ -25,7 +25,7 @@ export const start = (
 
 // The events of a session up to the first of the type, that one included
 export const until = async (
-  session: ClaudeSession,
+  session: AgentSession,
   type: AgentEvent['type'],
 ): Promise<AgentEvent[]> => {
   const seen: AgentEvent[] = []
@@ -39,7 +39,7 @@ export const until = async (
 }
 
 // Every event a session still has to tell, up to its end
-export const rest = async (session: ClaudeSession): Promise<AgentEvent[]> => {
+export const rest = async (session: AgentSession): Promise<AgentEvent[]> => {
   const seen: AgentEvent[] = []
   for await (const event of session.events()) {
     seen.push(event)
