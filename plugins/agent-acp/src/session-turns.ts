@@ -1,6 +1,6 @@
 import type { PromptResponse, SessionNotification } from '@agentclientprotocol/sdk'
 import type { AgentEvent, Usage } from '@bytebureau/protocol'
-import { reasonOf, settled, type Running } from './connection.js'
+import { settled, type Running } from './connection.js'
 import { mapUpdate } from './mapping.js'
 
 // What a running turn has gathered: the text the agent said and the last usage it reported
@@ -81,9 +81,9 @@ export const completionOf = (turn: Turn, { stopReason }: PromptResponse): readon
 ]
 
 // A prompt the agent answered with an error ends its turn on that error; the session goes on
-export const refusalOf = (turn: Turn, error: unknown): readonly AgentEvent[] => [
+export const refusalOf = (turn: Turn, reason: string): readonly AgentEvent[] => [
   ...saidIn(turn),
-  { type: 'session.warning', kind: 'turn_error', message: reasonOf(error) },
+  { type: 'session.warning', kind: 'turn_error', message: reason },
   { type: 'turn.completed', stopReason: 'error', usage: turn.usage ?? NO_USAGE },
 ]
 

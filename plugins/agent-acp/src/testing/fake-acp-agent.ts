@@ -171,10 +171,10 @@ const crashMidTurn = async (): Promise<PromptResponse> => {
   return never
 }
 
-// Answers the prompt with an error once it has said hello, as an agent whose model failed does
+// Answers the prompt with an error once it has said hello, as an agent whose model failed does; the error names the key it was given
 const refusePrompt = async (): Promise<PromptResponse> => {
   await Promise.resolve()
-  throw new Error('the model is overloaded')
+  throw new Error(`the model is overloaded for ${API_KEY ?? 'nobody'}`)
 }
 
 // Ends the turn as hello does, then dies while idle
@@ -221,7 +221,7 @@ const fake = agent({ name: 'fake-acp-agent' })
   .onRequest('authenticate', () => ({}))
   .onRequest('session/new', ({ params }) => {
     if (SCRIPT === 'auth-required') {
-      throw RequestError.authRequired()
+      throw RequestError.authRequired({ details: `no login for ${API_KEY ?? 'nobody'}` })
     }
     state.cwd = params.cwd
     return { sessionId: 'fake-acp-1' }

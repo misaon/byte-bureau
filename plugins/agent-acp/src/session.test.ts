@@ -139,7 +139,7 @@ describe('a session of an ACP agent at work', () => {
       {
         type: 'session.warning',
         kind: 'turn_error',
-        message: 'Internal error: the model is overloaded',
+        message: 'Internal error: the model is overloaded for nobody',
       },
       { type: TURN_END, stopReason: 'error', usage: { inputTokens: 0, outputTokens: 0 } },
     ])
@@ -198,6 +198,20 @@ describe('the agent an ACP session starts', () => {
 })
 
 describe('the key of an ACP session', () => {
+  it('is redacted from an error the agent answers a prompt with', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const providerConfig = customOf('refuse-prompt', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
+    const session = await sessionOf(
+      { workspace: { path: workspaceOf() }, providerConfig, env },
+      run,
+    )
+    const told = JSON.stringify([await prompted(session, 'Create src/hello.ts'), run.logged])
+    expect(told).toContain('Internal error: the model is overloaded for [redacted]')
+    expect(told).not.toContain(CANARY_KEY)
+  })
+
   it('hands the API key to the agent alone: no event or log line holds it', async () => {
     expect.hasAssertions()
     const run = harness()

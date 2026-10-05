@@ -5,7 +5,7 @@ import type {
   ExternalSessionRef,
   PromptInput,
 } from '@bytebureau/plugin-api'
-import { secretsOf, startAgent, type Setup } from './agent-start.js'
+import { startAgent, toldReason, type Setup } from './agent-start.js'
 import { readTextFile, writeTextFile } from './client-fs.js'
 import { Terminals } from './client-terminal.js'
 import type { ClientHandlers, Running } from './connection.js'
@@ -176,7 +176,7 @@ export class AcpSession implements AgentSession {
 
   private async crashed(running: Running, midTurn: boolean): Promise<void> {
     const exit = await running.process.exited
-    const ending = endingOf(running.process, exit, secretsOf(this.setup))
+    const ending = endingOf(running.process, exit)
     const reason = crashMessageOf(ending, midTurn)
     const named = { sessionId: this.setup.request.sessionId, ref: running.sessionId, reason }
     this.setup.deps.logger.warn('the ACP agent of a session exited', named)
@@ -192,7 +192,7 @@ export class AcpSession implements AgentSession {
       await endProcess(running.process.child, running.process.exited)
       return
     }
-    this.ended(turn, refusalOf(turn, error))
+    this.ended(turn, refusalOf(turn, toldReason(error, this.setup)))
   }
 
   private ended(turn: Turn, events: readonly AgentEvent[]): void {

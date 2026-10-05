@@ -4,7 +4,7 @@ import type { AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import type { PresetId } from './presets.js'
 import { AcpAgentProvider } from './provider.js'
-import { sessionRequest, tempDir } from './testing/requests.js'
+import { CANARY_KEY, sessionRequest, tempDir } from './testing/requests.js'
 import { fakeAgentCommand } from './testing/run-fake.js'
 import { harness, started, type Harness } from './testing/session-harness.js'
 
@@ -39,6 +39,15 @@ describe('an ACP agent that does not open a session', () => {
     await expect(session).rejects.toThrow(/^the agent exited with code 3: not logged in$/u)
   })
 
+  it('redacts a key that the cut of a long last word runs through', async () => {
+    expect.hasAssertions()
+    const script = String.raw`process.stderr.write('x'.repeat(1995) + process.env.FAKE_ACP_API_KEY + 'tail', () => process.exit(3))`
+    const entry = { command: node, args: ['-e', script], apiKeyEnv: 'FAKE_ACP_API_KEY' }
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
+    const { session } = starting('custom', entry, { env })
+    await expect(session).rejects.toThrow(/^the agent exited with code 3: x{1995}\[redacted\]$/u)
+  })
+
   it('keeps a last word that never ends its line to its first 2000 characters', async () => {
     expect.hasAssertions()
     const script = String.raw`process.stderr.write('x'.repeat(100000), () => process.exit(3))`
@@ -46,10 +55,14 @@ describe('an ACP agent that does not open a session', () => {
     await expect(session).rejects.toThrow(/^the agent exited with code 3: x{2000}$/u)
   })
 
-  it('is refused with the login to perform, when it asks for one', async () => {
+  it('is refused with the login to perform, when it asks for one, the key it echoes redacted', async () => {
     expect.hasAssertions()
-    const { session, run } = starting('codex', fakeAgentCommand('auth-required'))
-    await expect(session).rejects.toThrow(/^Authentication required; log in with: codex login$/u)
+    const codex = { ...fakeAgentCommand('auth-required'), apiKeyEnv: 'FAKE_ACP_API_KEY' }
+    const env = { PATH: '/usr/bin:/bin', OPENAI_API_KEY: CANARY_KEY }
+    const { session, run } = starting('codex', codex, { env })
+    await expect(session).rejects.toThrow(
+      /^Authentication required: no login for \[redacted\]; log in with: codex login$/u,
+    )
     expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual(['SIGINT'])
   })
 

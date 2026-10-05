@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import type { Logger, ProcessSpawner } from '@bytebureau/plugin-api'
 import type { Preset } from './presets.js'
+import { cutRedacted } from './redaction.js'
 import { withinLimit } from './within-limit.js'
 
 // The spawn of node:child_process as the adapter calls it, with the three pipes it needs
@@ -35,21 +36,22 @@ const STDERR_LINES = 50
 // A line is kept to its first 2000 characters, so a progress bar that never ends its line holds no more
 const LINE_LIMIT = 2000
 const STDERR_GRACE_MS = 250
-const REDACTED = '[redacted]'
 
-// The last lines of stderr, kept for the message of a crash and never logged
-const keepLines = (stderr: Readable, lines: string[]): void => {
+// The last lines of stderr, kept for the message of a crash and never logged; a secret is redacted as a line comes in
+const keepLines = (stderr: Readable, lines: string[], secrets: readonly string[]): void => {
   let partial = ''
   const keep = (line: string): void => {
-    if (line.trim() !== '') {
-      lines.push(line.slice(0, LINE_LIMIT).trimEnd())
+    const told = cutRedacted(line, LINE_LIMIT, secrets).trimEnd()
+    if (told.trim() !== '') {
+      lines.push(told)
       lines.splice(0, Math.max(0, lines.length - STDERR_LINES))
     }
   }
   stderr.setEncoding('utf8')
   stderr.on('data', (chunk: string) => {
     const parts = `${partial}${chunk}`.split('\n')
-    partial = (parts.pop() ?? '').slice(0, LINE_LIMIT)
+    // One character past the limit tells keep() that the line ran on past the cut
+    partial = (parts.pop() ?? '').slice(0, LINE_LIMIT + 1)
     for (const line of parts) {
       keep(line)
     }
@@ -99,7 +101,11 @@ const startedOf = async (child: ChildProcessWithoutNullStreams, preset: Preset):
 export const spawnAgent = async (
   spawn: SpawnFn,
   preset: Preset,
-  options: { readonly cwd: string; readonly env: Readonly<Record<string, string>> },
+  options: {
+    readonly cwd: string
+    readonly env: Readonly<Record<string, string>>
+    readonly secrets: readonly string[]
+  },
 ): Promise<AgentProcess> => {
   if (!existsSync(options.cwd)) {
     throw new Error(`the workspace ${options.cwd} does not exist`)
@@ -109,7 +115,7 @@ export const spawnAgent = async (
     env: { ...options.env, ...preset.env },
   })
   const lines: string[] = []
-  keepLines(child.stderr, lines)
+  keepLines(child.stderr, lines, options.secrets)
   child.stdin.on('error', () => {
     // The exit of the agent tells it
   })
@@ -118,21 +124,12 @@ export const spawnAgent = async (
   return { child, exited, recentStderr: () => [...lines] }
 }
 
-const redacted = (line: string, secrets: readonly string[]): string => {
-  let told = line
-  for (const secret of secrets) {
-    told = told.replaceAll(secret, REDACTED)
-  }
-  return told
-}
-
-// How the agent ended, with its last word on stderr; a secret it repeats there is not repeated
-export const endingOf = (agent: AgentProcess, exit: Exit, secrets: readonly string[]): string => {
+// How the agent ended, with its last word on stderr
+export const endingOf = (agent: AgentProcess, exit: Exit): string => {
   const how =
     exit.code === null
       ? `was killed by ${exit.signal ?? 'a signal'}`
       : `exited with code ${exit.code}`
   const last = agent.recentStderr().at(-1)
-  const said = last === undefined ? '' : `: ${redacted(last, secrets)}`
-  return `the agent ${how}${said}`
+  return `the agent ${how}${last === undefined ? '' : `: ${last}`}`
 }

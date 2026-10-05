@@ -11,6 +11,7 @@ import {
 import { endProcess } from './kill-ladder.js'
 import type { Preset } from './presets.js'
 import { endingOf, spawnAgent, type AcpDeps, type AgentProcess } from './process.js'
+import { redacted } from './redaction.js'
 import { withinLimit } from './within-limit.js'
 
 // What a session starts its agents from
@@ -32,6 +33,10 @@ export const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[]
     const value = name === undefined ? undefined : request.env[name]
     return value === undefined || value === '' ? [] : [value]
   })
+
+// What an error the agent answered says, with no secret of the session in it
+export const toldReason = (error: unknown, setup: Setup): string =>
+  redacted(reasonOf(error), secretsOf(setup))
 
 // A key the kernel handed under the variable the provider declares travels under the one the preset names, when that is another
 const movedKey = (
@@ -64,9 +69,9 @@ const failureOf = async (agent: AgentProcess, error: unknown, setup: Setup): Pro
   const exit = answered ? null : await withinLimit(agent.exited, EXIT_WAIT_MS)
   await endProcess(agent.child, agent.exited)
   if (exit !== null) {
-    return new Error(endingOf(agent, exit, secretsOf(setup)))
+    return new Error(endingOf(agent, exit))
   }
-  const reason = reasonOf(error)
+  const reason = toldReason(error, setup)
   const login = answered && error.code === AUTH_REQUIRED
   return new Error(login ? `${reason}; log in with: ${setup.preset.loginHint}` : reason)
 }
@@ -112,7 +117,8 @@ export const startAgent = async (
   resume: string | undefined,
 ): Promise<Running> => {
   const cwd = setup.request.workspace.path
-  const agent = await spawnAgent(setup.deps.spawn, setup.preset, { cwd, env: envOf(setup) })
+  const options = { cwd, env: envOf(setup), secrets: secretsOf(setup) }
+  const agent = await spawnAgent(setup.deps.spawn, setup.preset, options)
   try {
     const started = sessionOf(agent, handlers, { cwd, resume })
     const running = await whileStarting(setup.request.signal, agent, started)
