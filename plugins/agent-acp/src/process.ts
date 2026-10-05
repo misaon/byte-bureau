@@ -117,6 +117,8 @@ export const spawnAgent = async (
     cwd: options.cwd,
     env: { ...options.env, ...preset.env },
     detached: true,
+    // No console window of its own on Windows; ignored elsewhere
+    windowsHide: true,
   })
   const lines: string[] = []
   keepLines(child.stderr, lines, options.secrets)

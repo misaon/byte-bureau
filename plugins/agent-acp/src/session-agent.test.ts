@@ -17,7 +17,7 @@ import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.j
 const CUSTOM = 'acp:custom'
 
 describe('the agent an ACP session starts', () => {
-  it('runs in the workspace with the environment of the request, the preset and the login directory', async () => {
+  it('runs in the workspace with the environment of the request, the preset and the login directory, in a group of its own with no window', async () => {
     expect.hasAssertions()
     const workspace = workspaceOf()
     const run = harness()
@@ -34,9 +34,13 @@ describe('the agent an ACP session starts', () => {
       BYTEBUREAU_FAKE_ACP_SCRIPT: 'hello',
       FAKE_ACP_HOME: '/h/p',
     }
-    expect(run.spawned.map(({ options }) => [options.cwd, options.env])).toStrictEqual([
-      [workspace, env],
+    const spawnedWith = run.spawned.map(({ options }) => [
+      options.cwd,
+      options.env,
+      options.detached,
+      options.windowsHide,
     ])
+    expect(spawnedWith).toStrictEqual([[workspace, env, true, true]])
   })
 
   it('loads the session a resume names when the agent can, and starts a new one for a resume of another provider', async () => {
