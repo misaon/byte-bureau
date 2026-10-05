@@ -42,16 +42,15 @@ interface Released {
   readonly codes: readonly number[]
 }
 
-// The stopped session is resumed and completed, which lets go of its profile; then fake/key goes, fake/work with its directory, and fake/work once more
+// The stopped session is completed as it is, which lets go of its profile; then fake/key goes, fake/work with its directory, and fake/work once more
 async function releasedAndRemoved({ home, env }: Bench): Promise<Released> {
   const id = await sessionIdIn(home, [])
   const shown = await runCli(['sessions', 'show', id], env)
-  const resumed = await runCli(['sessions', 'resume', id], env)
   const completed = await runCli(['sessions', 'complete', id], env)
   const key = await runCli(['profiles', 'rm', 'fake/key'], env)
   const work = await runCli(['profiles', 'rm', 'fake/work', '--purge'], env)
   const again = await runCli(['profiles', 'rm', 'fake/work'], env)
-  const codes = [resumed.code, completed.code, key.code, work.code, again.code]
+  const codes = [completed.code, key.code, work.code, again.code]
   return { id, shown: shown.stdout, completed: completed.stdout, codes }
 }
 
@@ -117,7 +116,7 @@ describe('bytebureau profiles and the sessions that run under them', () => {
     expect([released.shown, released.completed, released.codes]).toStrictEqual([
       expect.stringMatching(/^profile\s+fake\/work$/mu),
       `Completed ${released.id}\n`,
-      [0, 0, 0, 0, 1],
+      [0, 0, 0, 1],
     ])
     await bench.daemon.stop()
   })

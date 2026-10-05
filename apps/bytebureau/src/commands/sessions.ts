@@ -128,7 +128,7 @@ export const sessionsCommand = defineCommand({
     resume: steer('resume', 'Resume a stopped or errored session'),
     complete: steer(
       'complete',
-      'Complete a ready session: it ends for good, and lets go of its profile',
+      'Complete a ready, stopped or errored session: it ends for good, and lets go of its profile',
     ),
   },
 })
