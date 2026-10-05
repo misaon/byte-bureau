@@ -117,6 +117,9 @@ const limitOf = (requested: number | null | undefined): number =>
 const closedError = (): RequestError =>
   RequestError.invalidRequest(undefined, 'the session is closed')
 
+const goneError = (): RequestError =>
+  RequestError.invalidRequest(undefined, 'the agent that asked for the terminal is gone')
+
 const envOf = (env: readonly EnvVariable[] | undefined): Record<string, string> =>
   Object.fromEntries((env ?? []).map(({ name, value }) => [name, value]))
 
@@ -133,6 +136,8 @@ export class Terminals {
   private readonly terminals = new Map<string, Terminal>()
   private created = 0
   private closed = false
+  // Counts the releases of every terminal: a create under way across one belongs to an agent that is gone
+  private released = 0
 
   public constructor(
     spawner: ProcessSpawner,
@@ -144,12 +149,11 @@ export class Terminals {
     this.env = env
   }
 
+  // The command starts, then is admitted and registered in one step, so no close or release can come between the two
   public async create(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
+    const { released } = this
     const handle = await this.started(params)
-    this.created += 1
-    const terminalId = `term-${this.created}`
-    this.terminals.set(terminalId, terminalOf(handle, limitOf(params.outputByteLimit)))
-    return { terminalId }
+    return this.registered(handle, limitOf(params.outputByteLimit), released)
   }
 
   public output({ terminalId }: TerminalOutputRequest): TerminalOutputResponse {
@@ -179,6 +183,7 @@ export class Terminals {
   }
 
   public releaseAll(): void {
+    this.released += 1
     for (const terminal of this.terminals.values()) {
       endTerminal(terminal)
     }
@@ -191,7 +196,7 @@ export class Terminals {
     this.releaseAll()
   }
 
-  // A command started in the workspace; one that started while its session closed is ended at once
+  // A command started in the workspace
   private async started(params: CreateTerminalRequest): Promise<ExecHandle> {
     if (this.closed) {
       throw closedError()
@@ -200,15 +205,19 @@ export class Terminals {
     const env = { ...this.env, ...envOf(params.env) }
     const args = params.args ?? []
     const handle = await this.spawner.spawn({ command: params.command, args, cwd, env })
-    return this.admitted(handle)
+    return handle
   }
 
-  private admitted(handle: ExecHandle): ExecHandle {
-    if (this.closed) {
+  // A command that started while its session closed, or while the terminals of its agent were released, is ended at once
+  private registered(handle: ExecHandle, limit: number, released: number): CreateTerminalResponse {
+    if (this.closed || released !== this.released) {
       handle.kill('SIGTERM')
-      throw closedError()
+      throw this.closed ? closedError() : goneError()
     }
-    return handle
+    this.created += 1
+    const terminalId = `term-${this.created}`
+    this.terminals.set(terminalId, terminalOf(handle, limit))
+    return { terminalId }
   }
 
   private terminalOf(terminalId: string): Terminal {

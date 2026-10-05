@@ -147,20 +147,22 @@ async function* nothing(): AsyncIterable<string> {
   yield* []
 }
 
-// A spawner whose process comes once the gate opens, and records the signals it is sent
+// A process that runs until it is killed, recording the signals it is sent
+const recordingHandle = (signals: string[]): ExecHandle => ({
+  pid: 4242,
+  stdout: nothing(),
+  stderr: nothing(),
+  exited: Promise.withResolvers<never>().promise,
+  kill(signal = 'SIGTERM') {
+    signals.push(signal)
+  },
+})
+
+// A spawner whose process comes once the gate opens
 const heldSpawner = (gate: Promise<null>, signals: string[]): ProcessSpawner => ({
   async spawn() {
     await gate
-    const handle: ExecHandle = {
-      pid: 4242,
-      stdout: nothing(),
-      stderr: nothing(),
-      exited: Promise.withResolvers<never>().promise,
-      kill(signal = 'SIGTERM') {
-        signals.push(signal)
-      },
-    }
-    return handle
+    return recordingHandle(signals)
   },
 })
 
@@ -174,6 +176,51 @@ describe('a terminal still starting when its session closes', () => {
     terminals.close()
     gate.resolve(null)
     await expect(creating).rejects.toThrow('Invalid request: the session is closed')
+    expect(signals).toStrictEqual(['SIGTERM'])
+  })
+})
+
+// The action, once the turns of the microtask queue given have passed
+const afterTurns = async (turns: number, action: () => void): Promise<void> => {
+  if (turns === 0) {
+    action()
+    return
+  }
+  await Promise.resolve()
+  await afterTurns(turns - 1, action)
+}
+
+describe('a terminal whose session closes as its command starts', () => {
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8])(
+    'is ended, never left registered and running, when the close comes %i turns after the start',
+    async (turns) => {
+      expect.hasAssertions()
+      const signals: string[] = []
+      const spawner = heldSpawner(Promise.resolve(null), signals)
+      const terminals = new Terminals(spawner, workspaceDir(), {})
+      const creating = terminals.create({ sessionId: SESSION, command: node })
+      await afterTurns(turns, () => {
+        terminals.close()
+      })
+      await Promise.allSettled([creating])
+      expect(signals).toStrictEqual(['SIGTERM'])
+    },
+  )
+})
+
+describe('a terminal still starting when the agent that asked for it dies', () => {
+  it('is ended and refused once the terminals of that agent are released, and the next agent still gets one', async () => {
+    expect.hasAssertions()
+    const gate = Promise.withResolvers<null>()
+    const signals: string[] = []
+    const terminals = new Terminals(heldSpawner(gate.promise, signals), workspaceDir(), {})
+    const creating = terminals.create({ sessionId: SESSION, command: node })
+    terminals.releaseAll()
+    gate.resolve(null)
+    await expect(creating).rejects.toThrow('the agent that asked for the terminal is gone')
+    await expect(terminals.create({ sessionId: SESSION, command: node })).resolves.toStrictEqual({
+      terminalId: 'term-1',
+    })
     expect(signals).toStrictEqual(['SIGTERM'])
   })
 })
