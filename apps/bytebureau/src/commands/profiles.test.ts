@@ -150,3 +150,31 @@ describe('bytebureau profiles in the process of the command', () => {
     ])
   })
 })
+
+const TYPED = 'sk-typed-123'
+
+describe('bytebureau profiles add and a key typed as an argument', () => {
+  it('refuses it before anything is read or sent, never repeating it, and adds nothing', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const before = await runCli(
+      ['profiles', 'add', 'fake', '--api-key', TYPED, 'key', NO_DAEMON],
+      env,
+    )
+    const after = await runCli(
+      ['profiles', 'add', 'fake', 'key', '--api-key', TYPED, NO_DAEMON],
+      env,
+    )
+    const listed = await runCli(['profiles', 'ls', '--json', NO_DAEMON], env)
+    const refusal =
+      'The API key is never an argument: pass --api-key alone and type it at the prompt, or pipe it on stdin\n'
+    expect([before.code, before.stderr, after.code, after.stderr]).toStrictEqual([
+      1,
+      refusal,
+      1,
+      refusal,
+    ])
+    expect([before.stdout, after.stdout].join('')).not.toContain(TYPED)
+    expect(listedUnder(listed.stdout, 'profiles')).toStrictEqual([])
+  })
+})

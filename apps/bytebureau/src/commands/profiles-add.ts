@@ -93,6 +93,30 @@ export async function tellAdded(
   await checkedAfterLogin(bureau, profile.id, telling)
 }
 
+interface KeyArgs {
+  readonly provider: string
+  readonly name: string
+  readonly 'api-key': boolean
+}
+
+// The key of the profile, if it takes one, or why the command ends before anything is read or sent
+interface KeyRead {
+  readonly apiKey?: string | undefined
+  readonly refusal?: string | undefined
+}
+
+// A positional beyond the provider and the name is a key typed as an argument, which the shell's history and the process list keep
+async function keyRead(args: KeyArgs, positionals: number): Promise<KeyRead> {
+  if (positionals > 2) {
+    return { refusal: m.profiles_key_argument() }
+  }
+  if (!args['api-key']) {
+    return {}
+  }
+  const apiKey = await apiKeyOf(`${args.provider}/${args.name}`)
+  return apiKey === undefined ? { refusal: m.profiles_key_missing() } : { apiKey }
+}
+
 export const addCommand = defineCommand({
   meta: {
     name: 'add',
@@ -102,9 +126,9 @@ export const addCommand = defineCommand({
   async run({ args }) {
     const context = processContext(args)
     const flags = bureauFlags(args)
-    const apiKey = args['api-key'] ? await apiKeyOf(`${args.provider}/${args.name}`) : undefined
-    if (args['api-key'] && apiKey === undefined) {
-      context.output.warn(m.profiles_key_missing())
+    const { apiKey, refusal } = await keyRead(args, args._.length)
+    if (refusal !== undefined) {
+      context.output.warn(refusal)
       process.exitCode = 1
       return
     }
