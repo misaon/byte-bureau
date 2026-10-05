@@ -45,6 +45,7 @@ jobs:
             plugin-api
             protocol
             tsconfig
+            agent-claude
             workspace-local
             cli
             deps
