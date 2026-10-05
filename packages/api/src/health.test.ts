@@ -13,7 +13,7 @@ it.layer(ApiTestLayer())('GET /api/v1/health over the test kernel', (suite) => {
         status: 'ok',
         version: '0.0.0-test',
         startedAt: '2026-10-04T00:00:00.000Z',
-        checks: { store: 'ok', plugins: { loaded: 2, failed: 0 } },
+        checks: { store: 'ok', plugins: { loaded: 4, failed: 0 } },
       })
     }),
   )

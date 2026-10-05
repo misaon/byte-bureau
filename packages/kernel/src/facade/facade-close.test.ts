@@ -13,6 +13,16 @@ const failing: Plugin = {
   },
 }
 
+const BUNDLED_PROVIDERS = [
+  'fake',
+  'claude',
+  'acp:codex',
+  'acp:gemini',
+  'acp:opencode',
+  'acp:pi',
+  'acp:custom',
+]
+
 const offering: Plugin = {
   manifest: manifestOf('offering'),
   setup: () => ({ agentProviders: [providerOf('offered')] }),
@@ -62,7 +72,7 @@ describe('starting the kernel', () => {
     expect.hasAssertions()
     const kernel = await openKernel({ extraPlugins: [failing, offering] })
     const ids = kernel.providers.list().map((provider) => provider.id)
-    expect(ids).toStrictEqual(['fake', 'offered'])
+    expect(ids).toStrictEqual([...BUNDLED_PROVIDERS, 'offered'])
   })
 
   it('lists the plugin that cannot load among its plugins and reports itself degraded', async () => {
@@ -72,6 +82,8 @@ describe('starting the kernel', () => {
     expect(states).toStrictEqual([
       ['workspace-local', 'loaded'],
       ['agent-fake', 'loaded'],
+      ['agent-claude', 'loaded'],
+      ['agent-acp', 'loaded'],
       ['failing', 'failed'],
     ])
     await expect(kernel.health.check()).resolves.toMatchObject({ status: 'degraded' })

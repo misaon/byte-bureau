@@ -66,7 +66,7 @@ it.layer(ApiTestLayer())('the projects and the daemon through @bytebureau/client
       const plugins = yield* awaited(api.plugins.list())
       assert.deepStrictEqual(
         plugins.map((plugin) => plugin.state),
-        ['loaded', 'loaded'],
+        ['loaded', 'loaded', 'loaded', 'loaded'],
       )
       assert.containSubset(yield* awaited(api.plugins.providers()), [{ id: 'fake' }])
       const health = yield* awaited(api.health.check())

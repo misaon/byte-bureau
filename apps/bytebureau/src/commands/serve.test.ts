@@ -60,7 +60,7 @@ describe('bytebureau serve --no-daemonize', () => {
     await expect(health.json()).resolves.toMatchObject({
       status: 'ok',
       startedAt: daemon.info.startedAt,
-      checks: { plugins: { loaded: 2, failed: 0 } },
+      checks: { plugins: { loaded: 4, failed: 0 } },
     })
     const denied = await fetch(`${daemon.url}/api/v1/projects`)
     const allowed = await fetch(`${daemon.url}/api/v1/projects`, bearer(daemon.info.token))

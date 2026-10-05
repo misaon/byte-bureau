@@ -15,6 +15,9 @@ import {
   worktreesOf,
 } from '../testing/workbench.js'
 
+// The agent providers of the bundled plugins, as a refusal names them
+const AVAILABLE = 'fake, claude, acp:codex, acp:gemini, acp:opencode, acp:pi, acp:custom'
+
 describe('bytebureau run (fake provider, no daemon)', () => {
   it('provisions a worktree, streams NDJSON events with increasing seq, answers the ask with --yes and exits 0', async () => {
     expect.hasAssertions()
@@ -75,7 +78,7 @@ describe('bytebureau run when it cannot start', () => {
     expect(result.code).toBe(4)
     expect(existsSync(path.join(repo, '.bytebureau'))).toBe(false)
     expect(jsonLines(result.stderr)).toStrictEqual([
-      { level: 'warn', message: 'Provider "nope" is not available. Available: fake' },
+      { level: 'warn', message: `Provider "nope" is not available. Available: ${AVAILABLE}` },
     ])
     const projects = await runCli(['projects', 'ls', '--json', NO_DAEMON], env)
     expect(jsonLines(projects.stdout)).toStrictEqual([{ command: 'projects.ls', projects: [] }])
@@ -90,7 +93,7 @@ describe('bytebureau run when it cannot start', () => {
     })
     expect(result.code).toBe(4)
     expect(result.stderr).toContain(
-      'SessionError: provider "nope" is not available; available: fake (provider_missing)',
+      `SessionError: provider "nope" is not available; available: ${AVAILABLE} (provider_missing)`,
     )
     expect(existsSync(worktreesOf(repo))).toBe(false)
   })

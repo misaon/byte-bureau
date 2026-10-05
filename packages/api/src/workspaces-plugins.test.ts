@@ -7,6 +7,11 @@ import { createdSession } from './testing-sessions.js'
 // A worktree is kept for seven days after its session ended, unless the project says otherwise
 const EIGHT_DAYS = 8 * 24 * 60 * 60 * 1000
 
+// The ACP plugin offers one agent provider per preset
+const ACP_PORTS = ['codex', 'gemini', 'opencode', 'pi', 'custom'].map(
+  (preset) => `agentProviders:acp:${preset}`,
+)
+
 it.layer(ApiTestLayer())('GET /api/v1/workspaces and POST /api/v1/workspaces/prune', (suite) => {
   suite.effect('lists the worktree of a session, of its project and of every project', () =>
     Effect.gen(function* lists() {
@@ -54,6 +59,13 @@ it.layer(ApiTestLayer())('GET /api/v1/plugins and GET /api/v1/providers', (suite
           ports: ['workspaceRuntimes:local'],
         },
         { name: 'agent-fake', version: '0.0.0', state: 'loaded', ports: ['agentProviders:fake'] },
+        {
+          name: 'agent-claude',
+          version: '0.0.0',
+          state: 'loaded',
+          ports: ['agentProviders:claude'],
+        },
+        { name: 'agent-acp', version: '0.0.0', state: 'loaded', ports: ACP_PORTS },
       ])
     }),
   )
@@ -64,6 +76,12 @@ it.layer(ApiTestLayer())('GET /api/v1/plugins and GET /api/v1/providers', (suite
       assert.strictEqual(listed.status, 200)
       assert.deepStrictEqual(listed.body, [
         { id: 'fake', displayName: 'Fake agent (tests and CI)', supportsApiKey: true },
+        { id: 'claude', displayName: 'Claude Code (Agent SDK)', supportsApiKey: true },
+        { id: 'acp:codex', displayName: 'Codex (ACP)', supportsApiKey: true },
+        { id: 'acp:gemini', displayName: 'Gemini CLI (ACP)', supportsApiKey: true },
+        { id: 'acp:opencode', displayName: 'OpenCode (ACP)', supportsApiKey: false },
+        { id: 'acp:pi', displayName: 'pi (ACP)', supportsApiKey: false },
+        { id: 'acp:custom', displayName: 'Custom agent (ACP)', supportsApiKey: false },
       ])
     }),
   )
