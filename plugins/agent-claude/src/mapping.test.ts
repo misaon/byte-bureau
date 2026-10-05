@@ -134,3 +134,19 @@ describe('the messages a session does not show', () => {
     expect(HIDDEN.flatMap((message) => mapMessage(message, state))).toStrictEqual([])
   })
 })
+
+// What a Task subagent says and does: its messages name the tool use of the Task that started it
+const OF_SUBAGENT: readonly SDKMessage[] = [
+  { ...textDelta, parent_tool_use_id: 'toolu_task' },
+  { ...assistantWithTool, parent_tool_use_id: 'toolu_task' },
+  { ...toolResult, parent_tool_use_id: 'toolu_task' },
+]
+
+describe('the messages of a subagent', () => {
+  it('are left out, deltas, messages and tools alike; the result of the Task tells what it did', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    expect(OF_SUBAGENT.flatMap((message) => mapMessage(message, state))).toStrictEqual([])
+    expect(state.turnStarted).toBe(false)
+  })
+})

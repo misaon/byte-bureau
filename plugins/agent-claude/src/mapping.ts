@@ -179,6 +179,10 @@ const run = <Type extends SDKMessage['type']>(
   return handler === undefined ? [] : handler(message, state)
 }
 
+// A Task subagent's own messages are left out until a later phase shows subagents; the Task's result tells what it did
+const ofSubagent = (message: SDKMessage): boolean =>
+  'parent_tool_use_id' in message && message.parent_tool_use_id !== null
+
 // The canonical events of one message of the SDK
 export const mapMessage = (message: SDKMessage, state: MapState): readonly AgentEvent[] =>
-  run(message.type, message, state)
+  ofSubagent(message) ? [] : run(message.type, message, state)
