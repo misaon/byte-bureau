@@ -8,6 +8,7 @@ import {
   rateLimitedOnOverage,
   resultApiError,
   resultInterrupted,
+  resultMaxTurns,
   resultSuccess,
   textDelta,
 } from './testing/sdk-fixtures.js'
@@ -150,6 +151,34 @@ describe('a turn that failed on the API', () => {
       { type: 'usage.updated' },
       { type: TURN_END, stopReason: 'error' },
     ])
+  })
+})
+
+const NO_ERRORS: SDKMessage = { ...resultMaxTurns, subtype: 'error_max_budget_usd', errors: [''] }
+
+describe('a turn that ended on an error result', () => {
+  it('warns with the errors the result names, and with its subtype where it names none', () => {
+    expect.hasAssertions()
+    expect(mapMessage(resultMaxTurns, newMapState())).toMatchObject([
+      {
+        type: 'session.warning',
+        kind: 'turn_error',
+        message: 'Reached maximum number of turns (1)',
+      },
+      { type: 'usage.updated' },
+      { type: TURN_END, stopReason: 'error_max_turns' },
+    ])
+    expect(mapMessage(NO_ERRORS, newMapState()).at(0)).toStrictEqual({
+      type: 'session.warning',
+      kind: 'turn_error',
+      message: 'the turn ended with error_max_budget_usd',
+    })
+  })
+
+  it('warns of nothing for an interrupt', () => {
+    expect.hasAssertions()
+    const types = mapMessage(resultInterrupted, newMapState()).map((event) => event.type)
+    expect(types).toStrictEqual(['usage.updated', TURN_END])
   })
 })
 

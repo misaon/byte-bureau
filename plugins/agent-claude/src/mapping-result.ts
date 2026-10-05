@@ -99,13 +99,26 @@ const stopReasonOf = (message: SDKResultMessage): string => {
     : (message.stop_reason ?? 'end_turn')
 }
 
-// A turn the API failed is a success that is an error, and its text says why; the session stays for a retry
+const turnError = (text: string): AgentEvent => ({
+  type: 'session.warning',
+  kind: 'turn_error',
+  message: text,
+})
+
+// A failed turn says why, and the session stays for a retry: an error result by its errors, a turn the API failed by its text
+// An interrupt is no failure
 const failureOf = (message: SDKResultMessage): readonly AgentEvent[] => {
-  if (message.subtype !== 'success' || !message.is_error || isAborted(message)) {
+  if (isAborted(message)) {
     return []
   }
-  const text = message.result === '' ? 'the turn ended on an error' : message.result
-  return [{ type: 'session.warning', kind: 'turn_error', message: text }]
+  if (message.subtype !== 'success') {
+    const errors = message.errors.filter((error) => error !== '').join('; ')
+    return [turnError(errors === '' ? `the turn ended with ${message.subtype}` : errors)]
+  }
+  if (!message.is_error) {
+    return []
+  }
+  return [turnError(message.result === '' ? 'the turn ended on an error' : message.result)]
 }
 
 // The first turn of a resumed query is told by its own usage; from then on the totals are known
