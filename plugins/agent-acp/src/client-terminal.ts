@@ -114,6 +114,9 @@ const limitOf = (requested: number | null | undefined): number =>
     ? Math.min(Math.max(Math.floor(requested), 0), MAX_LIMIT)
     : DEFAULT_LIMIT
 
+const closedError = (): RequestError =>
+  RequestError.invalidRequest(undefined, 'the session is closed')
+
 const envOf = (env: readonly EnvVariable[] | undefined): Record<string, string> =>
   Object.fromEntries((env ?? []).map(({ name, value }) => [name, value]))
 
@@ -142,13 +145,7 @@ export class Terminals {
   }
 
   public async create(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
-    if (this.closed) {
-      throw RequestError.invalidRequest(undefined, 'the session is closed')
-    }
-    const cwd = confined(this.workspace, params.cwd ?? this.workspace)
-    const env = { ...this.env, ...envOf(params.env) }
-    const args = params.args ?? []
-    const handle = await this.spawner.spawn({ command: params.command, args, cwd, env })
+    const handle = await this.started(params)
     this.created += 1
     const terminalId = `term-${this.created}`
     this.terminals.set(terminalId, terminalOf(handle, limitOf(params.outputByteLimit)))
@@ -192,6 +189,26 @@ export class Terminals {
   public close(): void {
     this.closed = true
     this.releaseAll()
+  }
+
+  // A command started in the workspace; one that started while its session closed is ended at once
+  private async started(params: CreateTerminalRequest): Promise<ExecHandle> {
+    if (this.closed) {
+      throw closedError()
+    }
+    const cwd = confined(this.workspace, params.cwd ?? this.workspace)
+    const env = { ...this.env, ...envOf(params.env) }
+    const args = params.args ?? []
+    const handle = await this.spawner.spawn({ command: params.command, args, cwd, env })
+    return this.admitted(handle)
+  }
+
+  private admitted(handle: ExecHandle): ExecHandle {
+    if (this.closed) {
+      handle.kill('SIGTERM')
+      throw closedError()
+    }
+    return handle
   }
 
   private terminalOf(terminalId: string): Terminal {

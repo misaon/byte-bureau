@@ -1,8 +1,16 @@
 import type { ChildProcess } from 'node:child_process'
-import type { AgentSession } from '@bytebureau/plugin-api'
+import type { AgentSession, ExecHandle, ProcessSpawner } from '@bytebureau/plugin-api'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { sessionRequest } from './testing/requests.js'
-import { goneWithin, harness, until } from './testing/session-harness.js'
+import { AcpAgentProvider } from './provider.js'
+import {
+  goneWithin,
+  harness,
+  rest,
+  started,
+  until,
+  type Harness,
+} from './testing/session-harness.js'
 import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.js'
 
 const CUSTOM = 'acp:custom'
@@ -127,5 +135,69 @@ describe('what an ACP agent starts', () => {
     await session.close()
     await prompting
     await expect(allGone([own, firstPid(run.terminals)])).resolves.toStrictEqual([true, true])
+  })
+})
+
+// The process port of a harness that holds the start of every terminal until it is released
+const holding = (
+  run: Harness,
+): {
+  readonly provider: AcpAgentProvider
+  readonly asked: Promise<null>
+  readonly release: () => void
+  readonly spawned: Promise<ExecHandle>
+} => {
+  const asked = Promise.withResolvers<null>()
+  const gate = Promise.withResolvers<null>()
+  const spawned = Promise.withResolvers<ExecHandle>()
+  const held: ProcessSpawner = {
+    async spawn(spec) {
+      asked.resolve(null)
+      await gate.promise
+      const handle = await run.deps.process.spawn(spec)
+      spawned.resolve(handle)
+      return handle
+    },
+  }
+  const release = (): void => {
+    gate.resolve(null)
+  }
+  const provider = new AcpAgentProvider('custom', { ...run.deps, process: held })
+  return { provider, asked: asked.promise, release, spawned: spawned.promise }
+}
+
+// Every agent of the harness dies, as a crash kills it
+const crash = (run: Harness): void => {
+  for (const { child } of run.spawned) {
+    child.kill('SIGKILL')
+  }
+}
+
+// The children script's agent killed while the start of its terminal is held, and the session ended by the crash
+const crashedWithTerminalHeld = async (): Promise<{
+  readonly release: () => void
+  readonly spawned: Promise<ExecHandle>
+  readonly prompting: Promise<void>
+}> => {
+  const run = harness()
+  const { provider, asked, release, spawned } = holding(run)
+  const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('children') }
+  const session = await started(provider, sessionRequest(request))
+  const ending = rest(session)
+  const prompting = session.prompt({ text: 'Start some work' })
+  await asked
+  crash(run)
+  await ending
+  return { release, spawned, prompting }
+}
+
+describe('a terminal of an agent that crashed', () => {
+  it('is ended once it has started, when its start was under way at the crash', async () => {
+    expect.hasAssertions()
+    const { release, spawned, prompting } = await crashedWithTerminalHeld()
+    release()
+    await prompting
+    const { pid } = await spawned
+    await expect(goneWithin(pid, 3000)).resolves.toBe(true)
   })
 })

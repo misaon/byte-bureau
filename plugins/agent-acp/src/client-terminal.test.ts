@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
+import type { ExecHandle, ProcessSpawner } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import { Terminals } from './client-terminal.js'
 import { tempDir } from './testing/requests.js'
@@ -8,10 +9,15 @@ import { harness } from './testing/session-harness.js'
 const SESSION = 'fake-acp-1'
 const node = process.execPath
 
-// Terminals over the process port of the tests, in a workspace of their own, with a variable of the session
-const terminalsIn = (): { readonly terminals: Terminals; readonly workspace: string } => {
+const workspaceDir = (): string => {
   const workspace = path.join(tempDir('bb-acp-term-'), 'ws')
   mkdirSync(workspace)
+  return workspace
+}
+
+// Terminals over the process port of the tests, in a workspace of their own, with a variable of the session
+const terminalsIn = (): { readonly terminals: Terminals; readonly workspace: string } => {
+  const workspace = workspaceDir()
   const { deps } = harness()
   const terminals = new Terminals(deps.process, workspace, { FROM_SESSION: 'session' })
   return { terminals, workspace }
@@ -133,5 +139,41 @@ describe('the terminals of a closed session', () => {
     await expect(terminals.waitForExit({ sessionId: SESSION, terminalId })).rejects.toThrow(
       `no terminal ${terminalId}`,
     )
+  })
+})
+
+async function* nothing(): AsyncIterable<string> {
+  await Promise.resolve()
+  yield* []
+}
+
+// A spawner whose process comes once the gate opens, and records the signals it is sent
+const heldSpawner = (gate: Promise<null>, signals: string[]): ProcessSpawner => ({
+  async spawn() {
+    await gate
+    const handle: ExecHandle = {
+      pid: 4242,
+      stdout: nothing(),
+      stderr: nothing(),
+      exited: Promise.withResolvers<never>().promise,
+      kill(signal = 'SIGTERM') {
+        signals.push(signal)
+      },
+    }
+    return handle
+  },
+})
+
+describe('a terminal still starting when its session closes', () => {
+  it('is ended as soon as it has started, and refused', async () => {
+    expect.hasAssertions()
+    const gate = Promise.withResolvers<null>()
+    const signals: string[] = []
+    const terminals = new Terminals(heldSpawner(gate.promise, signals), workspaceDir(), {})
+    const creating = terminals.create({ sessionId: SESSION, command: node })
+    terminals.close()
+    gate.resolve(null)
+    await expect(creating).rejects.toThrow('Invalid request: the session is closed')
+    expect(signals).toStrictEqual(['SIGTERM'])
   })
 })

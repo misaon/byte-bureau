@@ -207,6 +207,7 @@ export class AcpSession implements AgentSession {
       return
     }
     this.closed = true
+    this.terminals.close()
     await this.crashed(running, midTurn)
   }
 
