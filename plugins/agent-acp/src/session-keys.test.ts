@@ -18,6 +18,21 @@ describe('the key of an ACP session', () => {
     expect(told).not.toContain(CANARY_KEY)
   })
 
+  it('keeps the key, and any variable named as a key or a token, out of the terminals of the agent', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('terminal', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY, GITHUB_TOKEN: 'ghp-canary' }
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, env })
+    const seen = await prompted(session, 'Run node')
+    expect(seen).toContainEqual({
+      type: 'message.delta',
+      kind: 'text',
+      text: 'hello; api key present',
+    })
+    expect(seen).toContainEqual({ type: 'message.delta', kind: 'text', text: 'terminal said ok' })
+    expect(JSON.stringify(seen)).not.toContain(CANARY_KEY)
+  })
+
   it('hands the API key to the agent alone: no event or log line holds it', async () => {
     expect.hasAssertions()
     const run = harness()

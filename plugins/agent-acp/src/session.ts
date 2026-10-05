@@ -5,7 +5,7 @@ import type {
   ExternalSessionRef,
   PromptInput,
 } from '@bytebureau/plugin-api'
-import { startAgent, toldReason, type Setup } from './agent-start.js'
+import { startAgent, terminalEnvOf, toldReason, type Setup } from './agent-start.js'
 import { readTextFile, writeTextFile } from './client-fs.js'
 import { Terminals } from './client-terminal.js'
 import type { ClientHandlers, Running } from './connection.js'
@@ -50,7 +50,7 @@ export class AcpSession implements AgentSession {
     this.asks = new PermissionBroker(request.sessionId, (event) => {
       this.output.push(event)
     })
-    this.terminals = new Terminals(deps.process, request.workspace.path, request.env)
+    this.terminals = new Terminals(deps.process, request.workspace.path, terminalEnvOf(setup))
   }
 
   // The session of a request: its agent started, the session it resumes loaded when that is one of this provider

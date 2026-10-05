@@ -26,6 +26,8 @@ export interface Setup {
 
 const AUTH_REQUIRED = -32_000
 const EXIT_WAIT_MS = 2000
+// A variable named as a key or a token is the agent's to hold, never a terminal's
+const SECRET_NAME = /_(?:API_KEY|TOKEN)$/iu
 
 // The values a session never repeats: the key of an API-key profile, under either variable it can travel in
 const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[] =>
@@ -33,6 +35,18 @@ const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[] =>
     const value = name === undefined ? undefined : request.env[name]
     return value === undefined || value === '' ? [] : [value]
   })
+
+// The environment of the agent's terminals: the session's without the key of the profile or anything named as a key or a token
+export const terminalEnvOf = ({
+  request,
+  preset,
+  keyEnv,
+}: Setup): Readonly<Record<string, string>> =>
+  Object.fromEntries(
+    Object.entries(request.env).filter(
+      ([name]) => name !== keyEnv && name !== preset.apiKeyEnv && !SECRET_NAME.test(name),
+    ),
+  )
 
 // What an error the agent answered says, with no secret of the session in it
 export const toldReason = (error: unknown, setup: Setup): string =>

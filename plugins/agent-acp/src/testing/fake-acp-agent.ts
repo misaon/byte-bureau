@@ -36,6 +36,9 @@ interface Turn {
 const SCRIPT = process.env['BYTEBUREAU_FAKE_ACP_SCRIPT'] ?? 'hello'
 const API_KEY = process.env['FAKE_ACP_API_KEY']
 const HELLO = "export function hello(): string {\n  return 'hello'\n}\n"
+// A command that prints ok and the names of the variables of its environment that look like a key or a token
+const LIST_KEYS =
+  'console.log(["ok", ...Object.keys(process.env).filter((name) => /KEY|TOKEN/.test(name))].join(" "))'
 const END_TURN: PromptResponse = { stopReason: 'end_turn' }
 const INITIALIZED: InitializeResponse = {
   protocolVersion: PROTOCOL_VERSION,
@@ -157,7 +160,7 @@ const terminal = async (turn: Turn): Promise<PromptResponse> => {
   const { terminalId } = await client.request('terminal/create', {
     sessionId,
     command: process.execPath,
-    args: ['-e', 'console.log("ok")'],
+    args: ['-e', LIST_KEYS],
   })
   await client.request('terminal/wait_for_exit', { sessionId, terminalId })
   const { output } = await client.request('terminal/output', { sessionId, terminalId })
