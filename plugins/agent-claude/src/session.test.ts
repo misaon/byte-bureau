@@ -1,9 +1,8 @@
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentEvent, CreateSessionRequest } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import { ClaudeSession } from './session.js'
-import { fakeQuery, subagentHook, type FakeQuery, type FakeScript } from './testing/fake-query.js'
-import { CANARY_KEY, recordingLogger, sessionRequest } from './testing/requests.js'
+import { subagentHook } from './testing/fake-query.js'
+import { CANARY_KEY, sessionRequest } from './testing/requests.js'
 import {
   SESSION,
   assistantWithTool,
@@ -13,45 +12,9 @@ import {
   textDelta,
   toolResult,
 } from './testing/sdk-fixtures.js'
+import { rest, start, until } from './testing/session-harness.js'
 
 const TURN_END = 'turn.completed'
-
-interface Started {
-  readonly session: ClaudeSession
-  readonly fake: FakeQuery
-  readonly logged: ReturnType<typeof recordingLogger>['entries']
-}
-
-const start = (script: FakeScript, request: CreateSessionRequest = sessionRequest()): Started => {
-  const fake = fakeQuery(script)
-  const { logger, entries } = recordingLogger()
-  return {
-    session: new ClaudeSession({ query: fake.query, logger }, request, undefined),
-    fake,
-    logged: entries,
-  }
-}
-
-// The events of a session up to the first of the type, that one included
-const until = async (session: ClaudeSession, type: AgentEvent['type']): Promise<AgentEvent[]> => {
-  const seen: AgentEvent[] = []
-  for await (const event of session.events()) {
-    seen.push(event)
-    if (event.type === type) {
-      break
-    }
-  }
-  return seen
-}
-
-// Every event a session still has to tell, up to its end
-const rest = async (session: ClaudeSession): Promise<AgentEvent[]> => {
-  const seen: AgentEvent[] = []
-  for await (const event of session.events()) {
-    seen.push(event)
-  }
-  return seen
-}
 
 const PROMPTED: SDKUserMessage = {
   type: 'user',
