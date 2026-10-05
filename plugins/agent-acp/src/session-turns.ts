@@ -2,18 +2,45 @@ import type { PromptResponse, SessionNotification } from '@agentclientprotocol/s
 import type { AgentEvent, Usage } from '@bytebureau/protocol'
 import { settled, type Running } from './connection.js'
 import { mapUpdate } from './mapping.js'
+import { withinLimit } from './within-limit.js'
 
 // What a turn has gathered: the text the agent said and the last usage it reported; an interrupt, from the moment of the prompt
+// Once its prompt is out, whether the agent answered it: true when the answer came, false when the request failed
 export interface Turn {
   text: string
   usage: Usage | undefined
   interrupted: boolean
+  answered: Promise<boolean> | undefined
 }
 
 export const MAX_RESTARTS = 3
+const ANSWER_WAIT_MS = 1000
 const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 
-export const newTurn = (): Turn => ({ text: '', usage: undefined, interrupted: false })
+export const newTurn = (): Turn => ({
+  text: '',
+  usage: undefined,
+  interrupted: false,
+  answered: undefined,
+})
+
+const outcomeOf = async (answer: Promise<unknown>): Promise<boolean> => {
+  try {
+    await answer
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Whether the agent answered its turn; an answer it wrote before it died is read up to the end of its output, a second at most
+export const answeredIn = async (turn: Turn): Promise<boolean> => {
+  if (turn.answered === undefined) {
+    return false
+  }
+  const answered = await withinLimit(turn.answered, ANSWER_WAIT_MS)
+  return answered === true
+}
 
 // The end of a piece of work, whichever way it ends; whoever awaits the work itself hears how
 export const quietly = async (work: Promise<unknown>): Promise<void> => {
@@ -68,6 +95,7 @@ export const promptOf = async (
     sessionId: running.sessionId,
     prompt: [{ type: 'text', text }],
   })
+  turn.answered = outcomeOf(answer)
   if (turn.interrupted) {
     await cancelTurn(running)
   }

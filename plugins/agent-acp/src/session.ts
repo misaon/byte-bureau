@@ -14,6 +14,7 @@ import { endingOf } from './process.js'
 import { Queue } from './queue.js'
 import { clientOf } from './session-client.js'
 import {
+  answeredIn,
   cancelTurn,
   completionOf,
   crashMessageOf,
@@ -149,6 +150,7 @@ export class AcpSession implements AgentSession {
       await this.died(running)
     }
     if (!this.closed && this.running === undefined) {
+      this.restarts += 1
       this.output.push(restartOf(this.restarts))
       await this.launch()
     }
@@ -191,21 +193,30 @@ export class AcpSession implements AgentSession {
     if (running.gone || this.closed) {
       return
     }
+    running.gone = true
+    this.running = undefined
+    const midTurn = await this.owedBy(running)
     this.release(running)
-    const { owing } = this
-    const midTurn = owing !== undefined && owing.running === running
-    if (!midTurn && this.restarts < MAX_RESTARTS) {
-      this.restarts += 1
+    await this.afterDeath(running, midTurn)
+  }
+
+  // The next prompt starts another agent, unless the session closed meanwhile, or the agent died mid-turn or once too often
+  private async afterDeath(running: Running, midTurn: boolean): Promise<void> {
+    if (this.closed || (!midTurn && this.restarts < MAX_RESTARTS)) {
       return
     }
     this.closed = true
     await this.crashed(running, midTurn)
   }
 
-  // What the agent held is let go: its connection, what it asked, its terminals
+  // Whether the agent died owing the turn it was sent, which the turn's own answer decides: an answer that came is no crash, however close the death
+  private async owedBy(running: Running): Promise<boolean> {
+    const { owing } = this
+    return owing !== undefined && owing.running === running && !(await answeredIn(owing.turn))
+  }
+
+  // What the agent held is let go, once its last answer is read: what is left of its group, its connection, what it asked, its terminals
   private release(running: Running): void {
-    running.gone = true
-    this.running = undefined
     sweepGroup(running.process.child)
     running.connection.close()
     this.asks.cancelAll()

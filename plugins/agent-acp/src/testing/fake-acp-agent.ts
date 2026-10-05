@@ -29,6 +29,7 @@ export type FakeScript =
   | 'load-fails'
   | 'no-load'
   | 'children'
+  | 'quick-exit'
 
 interface Turn {
   readonly client: AgentContext
@@ -198,6 +199,15 @@ const children = async (turn: Turn): Promise<PromptResponse> => {
   return ended
 }
 
+// Answers and exits at once, its answer and its exit reaching the client together
+const quickExit = async (): Promise<PromptResponse> => {
+  setImmediate(() => {
+    die(0, 'the fake agent answered and left')
+  })
+  await Promise.resolve()
+  return END_TURN
+}
+
 // Ends the turn as hello does, then dies while idle
 const crashIdle = async (turn: Turn): Promise<PromptResponse> => {
   const ended = await hello(turn)
@@ -220,6 +230,7 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'load-fails': hello,
   'no-load': hello,
   children,
+  'quick-exit': quickExit,
 }
 
 const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, name)

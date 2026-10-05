@@ -77,6 +77,19 @@ describe('an ACP agent that dies while it is idle', () => {
   })
 })
 
+describe('an ACP agent that answers and exits at once', () => {
+  it('ends its turn and is started again by the next prompt, its death no crash of the turn it answered', async () => {
+    expect.hasAssertions()
+    const { session, run } = await startedWith('quick-exit')
+    await turnThenDeath(session, run)
+    const reading = until(session, TURN_END)
+    await session.prompt({ text: 'Again' })
+    const events = await reading
+    expect(events.map((event) => event.type)).not.toContain('session.error')
+    expect(events[0]).toMatchObject({ type: 'session.warning', kind: 'restart' })
+  })
+})
+
 describe('a session whose agent is being started again', () => {
   it('cancels the turn of a prompt interrupted while its agent was being started again', async () => {
     expect.hasAssertions()
