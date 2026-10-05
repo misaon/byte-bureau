@@ -96,7 +96,7 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 - On Windows an ACP agent is signalled alone, not with its process group.
 - The nightly workflow that runs the real-agent smoke scripts (`bun run smoke:claude`, `bun run smoke:acp`) on the owner's machine; until then they run by hand only.
 - The `^0` host API semver policy is settled, and `publint` and `arethetypeswrong` run, before the first publish.
-- One shared test-support package replaces the copies of the test helpers: the `testing` export of the kernel serves the API now, and the CLI and the workspace plugin keep their copies until a fifth copy would appear; the two agent plugins each keep a copy of `Queue` and `within-limit.ts`, as a plugin cannot import another.
+- One shared test-support package replaces the copies of the test helpers: the `testing` export of the kernel serves the API now, and the CLI and the workspace plugin keep their copies until a fifth copy would appear; the two agent plugins each keep a copy of `Queue`, `within-limit.ts` and `shellWord` (in `auth.ts` of the Claude plugin, in `login-hint.ts` of the ACP one), as a plugin cannot import another.
 - A Scalar UI for the OpenAPI document comes later, for development only.
 - CORS for origins beyond the empty list arrives with the web UI of SP2.
 - An `extends` key, for configuration files built on presets, comes later.

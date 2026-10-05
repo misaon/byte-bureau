@@ -28,7 +28,7 @@ const reasonOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
 // One query spans the session: prompts are user messages pushed into its input, its messages become the events
-// A follow-up while a turn runs steers it, as the SDK queues user messages
+// No follow-up reaches a running turn: the kernel refuses a prompt while one runs (409), though the SDK would queue it
 export class ClaudeSession implements AgentSession {
   private readonly input = new Queue<SDKUserMessage>()
   private readonly output = new Queue<AgentEvent>()
