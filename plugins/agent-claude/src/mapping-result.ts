@@ -131,7 +131,8 @@ export const mapRateLimit = (info: SDKRateLimitInfo, state: MapState): readonly 
     state.rateLimit = { ...state.rateLimit, ...window }
     told.push({ type: 'ratelimit.updated', rateLimit: state.rateLimit })
   }
-  if (info.status === 'rejected') {
+  // A subscriber past the limit whose extra usage serves the turns goes on: the CLI says isUsingOverage
+  if (info.status === 'rejected' && info.isUsingOverage !== true) {
     told.push(LIMIT_REACHED)
   }
   return told

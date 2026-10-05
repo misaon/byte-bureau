@@ -199,6 +199,17 @@ export const rateLimited: SDKRateLimitEvent = {
   uuid: uuid(7),
 }
 
+// A window used up while extra usage serves the turns, as the CLI tells it: rejected, and using the overage
+export const rateLimitedOnOverage: SDKRateLimitEvent = {
+  ...rateLimited,
+  rate_limit_info: {
+    ...rateLimited.rate_limit_info,
+    overageStatus: 'allowed',
+    isUsingOverage: true,
+  },
+  uuid: uuid(15),
+}
+
 export const compacted: SDKCompactBoundaryMessage = {
   type: 'system',
   subtype: 'compact_boundary',

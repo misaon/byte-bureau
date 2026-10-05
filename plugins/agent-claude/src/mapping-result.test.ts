@@ -5,6 +5,7 @@ import {
   assistantWithTool,
   modelUsage,
   rateLimited,
+  rateLimitedOnOverage,
   resultApiError,
   resultInterrupted,
   resultSuccess,
@@ -102,5 +103,27 @@ describe('the usage of a session', () => {
     mapMessage({ ...assistantWithTool, context_usage: CONTEXT_USAGE }, state)
     expect(mapMessage(resultSuccess, state).at(-1)).toHaveProperty('usage.contextPct', 25)
     expect(mapMessage(resultSuccess, state).at(-1)).not.toHaveProperty('usage.contextPct')
+  })
+})
+
+describe('a rate limit that is reached', () => {
+  it('lets the session go on when extra usage serves the turns past the limit', () => {
+    expect.hasAssertions()
+    expect(mapMessage(rateLimitedOnOverage, newMapState())).toStrictEqual([
+      { type: 'ratelimit.updated', rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT } },
+    ])
+  })
+
+  it('stops the session when nothing covers the turns past the limit', () => {
+    expect.hasAssertions()
+    expect(mapMessage(rateLimited, newMapState())).toStrictEqual([
+      { type: 'ratelimit.updated', rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT } },
+      {
+        type: 'session.error',
+        kind: 'ratelimit',
+        message: 'the usage limit is reached',
+        retryable: true,
+      },
+    ])
   })
 })
