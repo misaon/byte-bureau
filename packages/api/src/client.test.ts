@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { ApiError, createBureauClient, type BureauClient } from '@bytebureau/client'
 import type { EventLog } from '@bytebureau/kernel'
 import { createTempRepo, writeConfig } from '@bytebureau/kernel/testing'
@@ -190,6 +191,8 @@ const KEYED = {
   apiKey: 'sk-canary-client',
 } as const
 
+const EMPTY_USAGE = { profileId: 'fake/checked', rateLimit: {}, observedAt: null }
+
 // The id of each profile the daemon lists, with whether it is the default of its provider
 const defaultsOf = (profiles: readonly ProfileDto[]): [string, boolean][] =>
   profiles.map((profile) => [profile.id, profile.isDefault])
@@ -199,8 +202,10 @@ it.layer(ApiTestLayer())('the profiles of the API through @bytebureau/client', (
     Effect.gen(function* manages() {
       const api = yield* client
       yield* awaited(api.profiles.add({ providerId: 'fake', name: 'work', kind: 'login' }))
-      yield* awaited(api.profiles.add(KEYED))
-      const before = defaultsOf(yield* awaited(api.profiles.list()))
+      const keyed = yield* awaited(api.profiles.add(KEYED))
+      const listed = yield* awaited(api.profiles.list())
+      assert.notInclude(JSON.stringify([keyed, listed]), KEYED.apiKey)
+      const before = defaultsOf(listed)
       assert.deepStrictEqual(before, [
         ['fake/work', true],
         ['fake/key', false],
@@ -220,13 +225,17 @@ it.layer(ApiTestLayer())('the profiles of the API through @bytebureau/client', (
       Effect.gen(function* checks() {
         const api = yield* client
         const body = { providerId: 'fake', name: 'checked', kind: 'login' } as const
-        const { id } = yield* awaited(api.profiles.add(body))
-        assert.containSubset(yield* awaited(api.profiles.status(id)), { state: 'loggedIn' })
-        const empty = { profileId: 'fake/checked', rateLimit: {}, observedAt: null }
-        assert.deepStrictEqual(yield* awaited(api.usage.profile(id)), empty)
+        const { id, configDir } = yield* awaited(api.profiles.add(body))
+        const directory = configDir ?? ''
+        const told = [
+          yield* awaited(api.profiles.status(id)),
+          yield* awaited(api.usage.profile(id)),
+          existsSync(directory),
+        ]
+        assert.containSubset(told, [{ state: 'loggedIn' }, EMPTY_USAGE, true])
         yield* awaited(api.profiles.remove(id, { purge: true }))
-        const gone = yield* refused(api.profiles.status(id))
-        assert.containSubset(gone, { status: 404, problem: { code: 'profile_not_found' } })
+        const gone = [yield* refused(api.profiles.status(id)), existsSync(directory)]
+        assert.containSubset(gone, [{ status: 404, problem: { code: 'profile_not_found' } }, false])
       }),
   )
 })
