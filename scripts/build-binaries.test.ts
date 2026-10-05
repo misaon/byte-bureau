@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { assert, constantFrom, oneof, property, stringMatching } from 'fast-check'
@@ -6,10 +6,12 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
   TARGETS,
   artifactName,
+  buildAll,
   compileArgs,
   compileWithFallback,
   hostTarget,
   parseArgs,
+  removeStaleArtifacts,
   withoutStrayRuntimes,
   type Compile,
   type CompileJob,
@@ -190,5 +192,75 @@ describe(withoutStrayRuntimes, () => {
       }),
     ).toThrow('compile crashed')
     expect(readdirSync(dir)).toStrictEqual([])
+  })
+})
+
+function touch(dir: string, names: readonly string[]): void {
+  for (const name of names) {
+    writeFileSync(path.join(dir, name), '')
+  }
+}
+
+describe(removeStaleArtifacts, () => {
+  it('removes the artefacts of earlier builds and leaves the rest', () => {
+    const dir = tempDir()
+    touch(dir, ['bytebureau-0.0.0-linux-x64', 'bytebureau-0.1.0-darwin-arm64', 'notes.txt'])
+    expect(removeStaleArtifacts(dir)).toStrictEqual([
+      'bytebureau-0.0.0-linux-x64',
+      'bytebureau-0.1.0-darwin-arm64',
+    ])
+    expect(readdirSync(dir)).toStrictEqual(['notes.txt'])
+  })
+
+  it('knows every target and version that artifactName makes, and the map of each', () => {
+    const dir = tempDir()
+    const names = ['0.1.0', '2.0.0-rc.1'].flatMap((version) =>
+      TARGETS.flatMap((target) => [
+        artifactName(target, version),
+        `${artifactName(target, version)}.map`,
+      ]),
+    )
+    touch(dir, names)
+    expect(removeStaleArtifacts(dir)).toStrictEqual(names.toSorted())
+    expect(readdirSync(dir)).toStrictEqual([])
+  })
+})
+
+describe('removeStaleArtifacts and a name that only resembles an artefact', () => {
+  it('leaves it, and every directory, where it is', () => {
+    const dir = tempDir()
+    const kept = [
+      'bytebureau-latest-linux-x64',
+      'bytebureau-0.1.0-plan9-x64',
+      'bytebureau-0.1.0-linux-x64.exe',
+      'bytebureau-0.1.0-linux-x64.map.bak',
+      'bytebureau-0.1.0-linux-x64.sigstore.json',
+      'bytebureau-0.1.0',
+      'bytebureau-notes.txt',
+      'old-bytebureau-0.1.0-linux-x64',
+      'SHA256SUMS',
+    ]
+    touch(dir, kept)
+    mkdirSync(path.join(dir, 'bytebureau-0.1.0-darwin-x64'))
+    expect(removeStaleArtifacts(dir)).toStrictEqual([])
+    expect(readdirSync(dir)).toHaveLength(kept.length + 1)
+  })
+})
+
+describe(buildAll, () => {
+  it('removes and names the artefacts of earlier builds before it builds', async () => {
+    expect.hasAssertions()
+    const outdir = path.join(tempDir(), 'out')
+    mkdirSync(outdir)
+    touch(outdir, ['bytebureau-0.0.0-linux-x64', 'bytebureau-0.0.0-linux-x64.map', 'notes.txt'])
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    await expect(
+      buildAll({ targets: [], outdir, version: '1.2.3', bytecode: true }),
+    ).resolves.toStrictEqual([])
+    expect(log.mock.calls).toStrictEqual([
+      ['removed bytebureau-0.0.0-linux-x64'],
+      ['removed bytebureau-0.0.0-linux-x64.map'],
+    ])
+    expect(readdirSync(outdir)).toStrictEqual(['notes.txt'])
   })
 })

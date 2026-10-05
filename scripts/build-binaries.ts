@@ -42,12 +42,24 @@ const ENTRY = 'apps/bytebureau/src/main.ts'
 const STRAY_RUNTIME_SUFFIX = '.bun-build'
 const OS_BY_PLATFORM: Readonly<Record<string, string>> = { darwin: 'darwin', win32: 'windows' }
 
-export function artifactName(target: Target, version: string): string {
+function platformOf(target: Target): string {
   const [, os, arch, libc] = target.split('-')
   const suffix = libc === 'musl' ? '-musl' : ''
   const extension = os === 'windows' ? '.exe' : ''
-  return `bytebureau-${version}-${os}-${arch}${suffix}${extension}`
+  return `${os}-${arch}${suffix}${extension}`
 }
+
+export function artifactName(target: Target, version: string): string {
+  return `bytebureau-${version}-${platformOf(target)}`
+}
+
+// The grammar of artifactName for any version, with or without the .map of its source map
+const SEMVER = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`
+const PLATFORMS = TARGETS.map((target) => platformOf(target).replaceAll('.', String.raw`\.`))
+const ARTIFACT = new RegExp(
+  String.raw`^bytebureau-${SEMVER}-(?:${PLATFORMS.join('|')})(?:\.map)?$`,
+  'u',
+)
 
 function isTarget(value: string): value is Target {
   return (TARGETS as readonly string[]).includes(value)
@@ -172,6 +184,18 @@ export function withoutStrayRuntimes<Result>(dir: string, action: () => Result):
   }
 }
 
+// The binaries and source maps of earlier builds, of any version: nothing else ever removes them
+export function removeStaleArtifacts(outdir: string): string[] {
+  const stale = readdirSync(outdir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && ARTIFACT.test(entry.name))
+    .map((entry) => entry.name)
+    .toSorted()
+  for (const name of stale) {
+    rmSync(path.join(outdir, name))
+  }
+  return stale
+}
+
 function buildTarget(target: Target, outdir: string, options: BuildOptions): string {
   const name = artifactName(target, options.version)
   const outfile = path.join(outdir, name)
@@ -186,6 +210,9 @@ export async function buildAll(options: BuildOptions): Promise<string[]> {
   // Relative to the caller's cwd: dist/ at the root, apps/bytebureau/dist for the app's build script
   const outdir = path.resolve(options.outdir)
   await mkdir(outdir, { recursive: true })
+  for (const name of removeStaleArtifacts(outdir)) {
+    console.log(`removed ${name}`)
+  }
   return options.targets.map((target) => buildTarget(target, outdir, options))
 }
 
