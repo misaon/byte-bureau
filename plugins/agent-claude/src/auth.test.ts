@@ -135,7 +135,7 @@ describe('a login check that fails', () => {
   })
 })
 
-const ALLOWED = /^(?:PATH|HOME|USER|LANG|TMPDIR|TERM|SSH_AUTH_SOCK|LC_\w+)$/u
+const ALLOWED = /^(?:PATH|HOME|USER|LANG|TMPDIR|TERM|SSH_AUTH_SOCK|TRACEPARENT|LC_\w+)$/u
 
 // The names of the variables the probe was given that the allowlist does not hold
 const unexpectedNames = (fake: FakeQuery): readonly string[] => {
@@ -145,17 +145,36 @@ const unexpectedNames = (fake: FakeQuery): readonly string[] => {
 }
 
 describe('the environment of the login check', () => {
-  it('passes the allowlisted variables of the daemon and the user name, never its key or anything else', async () => {
+  it("passes the variables of the kernel's allowlist, the user name among them, never a key or anything else", async () => {
     expect.hasAssertions()
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-of-the-daemon')
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', 'sdk-ts')
     vi.stubEnv('USER', 'dev')
+    vi.stubEnv('TRACEPARENT', '00-a-b-01')
     try {
       const { fake } = await checked({ account: NOBODY })
-      expect(fake.options[0]).toHaveProperty('env.USER', 'dev')
+      expect(fake.options[0]).toMatchObject({ env: { USER: 'dev', TRACEPARENT: '00-a-b-01' } })
       expect(unexpectedNames(fake)).toStrictEqual([])
     } finally {
       vi.unstubAllEnvs()
     }
+  })
+})
+
+const SPACED = {
+  id: 'claude/spaced',
+  providerId: 'claude',
+  kind: 'login',
+  configDir: "/nonexistent/My Profiles/dev's claude",
+} as const
+
+describe('the command that logs a profile in', () => {
+  it('quotes a directory a shell would split, so the command can be pasted as it is', async () => {
+    expect.hasAssertions()
+    const { status } = await checked({}, SPACED)
+    expect(status).toStrictEqual({
+      state: 'loggedOut',
+      hint: String.raw`CLAUDE_CONFIG_DIR='/nonexistent/My Profiles/dev'\''s claude' claude /login`,
+    })
   })
 })

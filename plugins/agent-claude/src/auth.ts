@@ -16,7 +16,7 @@ const PROBE_LIMIT_MS = 20_000
 const TOO_SLOW = 'the Claude login check did not answer within 20 s'
 const API_KEY_HINT = 'run a session to check an API-key profile'
 const LOGGED_OUT = /login|auth|credential|unauthorized|unauthorised|401|expired/iu
-// The variables of the daemon the check passes on, as the kernel does; Claude Code finds a login in the macOS keychain by USER
+// The variables of the daemon the check passes on, the fixed ones of the kernel's allowlist; Claude Code finds a login in the macOS keychain by USER
 const PASSED: ReadonlySet<string> = new Set([
   'PATH',
   'HOME',
@@ -25,13 +25,18 @@ const PASSED: ReadonlySet<string> = new Set([
   'TMPDIR',
   'TERM',
   'SSH_AUTH_SOCK',
+  'TRACEPARENT',
 ])
+
+// A word a shell would split or expand is quoted, so a command can be pasted as it is
+const shellWord = (value: string): string =>
+  /^[\w./:@%+=,-]+$/u.test(value) ? value : `'${value.replaceAll("'", String.raw`'\''`)}'`
 
 // The command that logs a login profile in, which the CLI prints after "Log in with:"
 const loginHint = (profile: ProfileRef): string =>
   profile.configDir === undefined
     ? 'claude /login'
-    : `CLAUDE_CONFIG_DIR=${profile.configDir} claude /login`
+    : `CLAUDE_CONFIG_DIR=${shellWord(profile.configDir)} claude /login`
 
 const envOf = (profile: ProfileRef): Record<string, string> => {
   const env: Record<string, string> = {}
