@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
 import { statSync } from 'node:fs'
+import path from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { onTestFinished } from 'vitest'
@@ -14,6 +15,19 @@ const BASE_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
 }
+
+const isFile = (file: string): boolean => {
+  const stats = statSync(file, { throwIfNoEntry: false })
+  return stats !== undefined && stats.isFile()
+}
+
+// Bun by the absolute path that the PATH of the tests gives it: a PATH or a working directory that a test gives its daemon never runs another program in its place
+export const BUN: string =
+  (process.env['PATH'] ?? '')
+    .split(path.delimiter)
+    .filter((directory) => path.isAbsolute(directory))
+    .map((directory) => path.join(directory, 'bun'))
+    .find((file) => isFile(file)) ?? 'bun'
 
 // A home that is empty or no directory is refused before any command runs: it could reach the home of the person who runs the tests
 function existingHome(home: string): string {

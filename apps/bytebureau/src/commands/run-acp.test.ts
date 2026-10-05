@@ -3,10 +3,11 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
 import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
+import { startDaemonProcess } from '../testing/daemon.js'
 import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
 import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
 import { commitExecutable, configureHome, trustProject } from '../testing/temp-repo.js'
-import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
+import { PROMPT, sessionIdIn, workbench, worktreesOf } from '../testing/workbench.js'
 
 const CUSTOM = 'acp:custom'
 
@@ -185,15 +186,18 @@ const trustWarningsOf = (run: CliResult): readonly string[] =>
 const IMPOSTOR = '#!/bin/sh\necho ran > impostor-ran\nexit 1\n'
 
 // A daemon whose home trusts bun, and a repository that names bun with a PATH of its own, holding its own bin/bun
+// The daemon runs in the repository with a relative bin first on its PATH: a lookup of bun that took a relative entry would find the impostor
 async function onTrustedBun(): Promise<Bench> {
-  const bench = await benchWithDaemon()
-  configureHome(bench.home, { trust: { commands: ['bun'] } })
-  commitExecutable(bench.repo, 'bin/bun', IMPOSTOR)
+  const { repo, home } = workbench()
+  configureHome(home, { trust: { commands: ['bun'] } })
+  commitExecutable(repo, 'bin/bun', IMPOSTOR)
   const preset = fakeAcpPreset()
-  writeConfig(bench.repo, {
+  writeConfig(repo, {
     providers: { [CUSTOM]: { ...preset, env: { ...preset.env, PATH: 'bin' } } },
   })
-  return bench
+  const PATH = ['bin', process.env['PATH'] ?? ''].join(path.delimiter)
+  const daemon = await startDaemonProcess(home, ['--port', '0'], { cwd: repo, env: { PATH } })
+  return { repo, home, env: { BYTEBUREAU_HOME: home }, daemon }
 }
 
 describe('bytebureau run on a command the user trusts and the environment a project names', () => {
