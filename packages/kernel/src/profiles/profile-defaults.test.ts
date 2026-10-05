@@ -82,12 +82,13 @@ const leavesKeyBehind = Effect.gen(function* leavesKeyBehind() {
     records.map((record) => [record.message[0], record.properties['key']]),
     [['a removed profile left its key in the secret store', KERNEL_KEY]],
   )
+  assert.notInclude(JSON.stringify(records), 'sk-canary-sticky')
   assert.include(yield* typesInLog, 'profile.removed')
 })
 
 it.layer(sticky.layer)('ProfileService over a secret store that cannot delete', (suite) => {
   suite.effect(
-    'removes the profile and passes the default all the same, and warns of the key it leaves',
+    'removes the profile and passes the default all the same, and warns of the key it leaves without its value',
     () => leavesKeyBehind,
   )
 })

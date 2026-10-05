@@ -143,7 +143,7 @@ it.layer(checking.layer)('ProfileService status', (suite) => {
     () => tellsUnknown,
   )
   suite.effect(
-    'tells an api_key profile whose key is gone from the secret store as logged out, without asking its provider',
+    'tells an api_key profile whose key is gone from the secret store as logged out, where its provider says logged in',
     () => tellsLostKey,
   )
 })
