@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream'
-import type { AgentSession } from '@bytebureau/plugin-api'
+import type { AgentEvent, AgentSession } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import type { SpawnFn } from './process.js'
 import { AcpAgentProvider } from './provider.js'
@@ -79,6 +79,40 @@ describe('an ACP agent that dies while it is idle', () => {
       { type: 'session.closed' },
     ])
     expect(run.spawned).toHaveLength(4)
+  })
+})
+
+// One hello turn, its ask answered, and the agent that ran it killed afterwards, its end waited for
+const turnThenKilled = async (session: AgentSession, run: Harness): Promise<void> => {
+  const reading = until(session, TURN_END, ALLOW)
+  await session.prompt({ text: 'Create src/hello.ts' })
+  await reading
+  const last = run.spawned.at(-1)
+  if (last !== undefined) {
+    last.child.kill('SIGKILL')
+    await endOf(last.child)
+  }
+}
+
+// The kind and the message of every warning among the events
+const warningsOf = (events: readonly AgentEvent[]): readonly (readonly [string, string])[] =>
+  events.flatMap((event) =>
+    event.type === 'session.warning' ? [[event.kind, event.message] as const] : [],
+  )
+
+describe('an ACP agent started again after it died idle', () => {
+  it('is asked to load the session of the one before it, and a load it refuses is told', async () => {
+    expect.hasAssertions()
+    const { session, run } = await startedWith('load-fails')
+    await turnThenKilled(session, run)
+    const again = until(session, TURN_END, ALLOW)
+    await session.prompt({ text: 'Again' })
+    const events = await again
+    expect(warningsOf(events)).toStrictEqual([
+      [FIRST_RESTART.kind, FIRST_RESTART.message],
+      ['resume', expect.stringMatching(/^the agent could not load session fake-acp-1 \(/u)],
+    ])
+    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
   })
 })
 

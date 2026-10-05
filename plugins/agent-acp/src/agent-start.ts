@@ -166,6 +166,12 @@ interface Starting {
 // What a session asks of a start; the signal is its own
 export type Launching = Omit<Starting, 'signal'>
 
+// An agent started again for a session gets the start limit, and the session the one before had, to load
+export const relaunchOf = (setup: Setup, ref: string | undefined): Launching => ({
+  limitMs: setup.deps.startLimitMs ?? START_LIMIT_MS,
+  resume: ref,
+})
+
 // An agent of the preset in an ACP session: loaded when the session to resume is known, else new; one that fails is ended, and says why
 export const startAgent = async (
   setup: Setup,

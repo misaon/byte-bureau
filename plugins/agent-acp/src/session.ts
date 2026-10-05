@@ -7,7 +7,7 @@ import type {
   PromptInput,
 } from '@bytebureau/plugin-api'
 import {
-  START_LIMIT_MS,
+  relaunchOf,
   startAgent,
   terminalEnvOf,
   toldReason,
@@ -186,11 +186,11 @@ export class AcpSession implements AgentSession {
     return this.closed ? undefined : this.running
   }
 
-  // An agent that cannot be started again, in its time or at all, ends the session as a crash a resume may retry
-  // One that close() gave up on ends nothing more: the session has closed
+  // The agent started again loads the session of the one that died, where it loads sessions, else starts another and says so
+  // One that cannot be started again ends the session as a crash a resume may retry; one that close() gave up on ends nothing more
   private async relaunched(): Promise<void> {
     try {
-      await this.launch({ limitMs: this.setup.deps.startLimitMs ?? START_LIMIT_MS })
+      await this.launch(relaunchOf(this.setup, this.ref))
     } catch (error) {
       if (!this.closed) {
         this.crashedWith('the ACP agent of a session could not start again', reasonOf(error), true)
