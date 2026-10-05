@@ -92,7 +92,7 @@ async function statusAfterAdd(
 const loginHintOf = (status: ProfileStatusDto | undefined): string | undefined =>
   status !== undefined && status.state === 'loggedOut' ? status.hint : undefined
 
-// Once the person says they have logged in, the status is checked again and told
+// Once the person says they have logged in, the status is checked again and told; a check that fails says so
 async function checkedAfterLogin(
   bureau: Bureau,
   id: string,
@@ -101,8 +101,12 @@ async function checkedAfterLogin(
   if (wait === undefined || !(await wait())) {
     return
   }
-  const checked = await statusOf(bureau, id)
-  tellStatuses(context.output, checked === undefined ? [] : [checked])
+  try {
+    tellStatuses(context.output, [await bureau.profiles.status(id)])
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    context.output.warn(m.profiles_recheck_failed({ id, reason }))
+  }
 }
 
 // A logged-out profile is told where to log in, and waited for at a terminal; any other status is told as its row
@@ -135,9 +139,23 @@ interface KeyRead {
   readonly refusal?: string | undefined
 }
 
-// A positional beyond the provider and the name is a key typed as an argument, which the shell's history and the process list keep
-async function keyRead(args: KeyArgs, positionals: number): Promise<KeyRead> {
-  if (positionals > 2) {
+// A key typed as an argument stays in the shell's history: a third positional, an --api-key=<value> citty drops, an sk- provider or name
+const typedKey = (args: KeyArgs, positionals: number, rawArgs: readonly string[]): boolean => {
+  const end = rawArgs.indexOf('--')
+  const flags = end === -1 ? rawArgs : rawArgs.slice(0, end)
+  return (
+    positionals > 2 ||
+    flags.some((arg) => /^--api-?key=/iu.test(arg)) ||
+    [args.provider, args.name].some((word) => word.startsWith('sk-'))
+  )
+}
+
+async function keyRead(
+  args: KeyArgs,
+  positionals: number,
+  rawArgs: readonly string[],
+): Promise<KeyRead> {
+  if (typedKey(args, positionals, rawArgs)) {
     return { refusal: m.profiles_key_argument() }
   }
   if (!args['api-key']) {
@@ -153,10 +171,10 @@ export const addCommand = defineCommand({
     description: 'Add a profile: a login directory, or an API key read from the prompt or stdin',
   },
   args: ADD_ARGS,
-  async run({ args }) {
+  async run({ args, rawArgs }) {
     const context = processContext(args)
     const flags = bureauFlags(args)
-    const { apiKey, refusal } = await keyRead(args, args._.length)
+    const { apiKey, refusal } = await keyRead(args, args._.length, rawArgs)
     if (refusal !== undefined) {
       context.output.warn(refusal)
       process.exitCode = 1

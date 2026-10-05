@@ -160,6 +160,8 @@ describe('bytebureau profiles in the process of the command', () => {
 })
 
 const TYPED = 'sk-typed-123'
+const KEY_ARGUMENT =
+  'The API key is never an argument: the shell history and the process list keep it, so replace a key you typed there; pass --api-key alone and type it at the prompt, or pipe it on stdin'
 
 describe('bytebureau profiles add and a key typed as an argument', () => {
   it('refuses it before anything is read or sent, never repeating it, and adds nothing', async () => {
@@ -174,8 +176,7 @@ describe('bytebureau profiles add and a key typed as an argument', () => {
       env,
     )
     const listed = await runCli(['profiles', 'ls', '--json', NO_DAEMON], env)
-    const refusal =
-      'The API key is never an argument: pass --api-key alone and type it at the prompt, or pipe it on stdin\n'
+    const refusal = `${KEY_ARGUMENT}\n`
     expect([before.code, before.stderr, after.code, after.stderr]).toStrictEqual([
       1,
       refusal,
@@ -184,5 +185,18 @@ describe('bytebureau profiles add and a key typed as an argument', () => {
     ])
     expect([before.stdout, after.stdout].join('')).not.toContain(TYPED)
     expect(listedUnder(listed.stdout, 'profiles')).toStrictEqual([])
+  })
+
+  it.each([
+    ['as the value of --api-key=', ['fake', 'key', `--api-key=${TYPED}`]],
+    ['in place of the name', ['fake', TYPED, '--api-key']],
+    ['in place of the provider', [TYPED, 'key']],
+  ])('refuses one typed %s, before anything is read or sent', async (_where, args) => {
+    expect.hasAssertions()
+    const refused = await runCli(['profiles', 'add', ...args, NO_DAEMON], {
+      BYTEBUREAU_HOME: testHome(),
+    })
+    expect([refused.code, refused.stderr]).toStrictEqual([1, `${KEY_ARGUMENT}\n`])
+    expect(refused.stdout).not.toContain(TYPED)
   })
 })

@@ -90,7 +90,7 @@ $ bytebureau profiles add claude work
 Profile claude/work added. Log in with: CLAUDE_CONFIG_DIR=/Users/me/.bytebureau/profiles/claude/work claude /login
 ```
 
-At a terminal, without `--yes` and `--json`, the command then waits until you say you have logged in and checks again; any other status is printed as its row. The directory reaches the agent in `CLAUDE_CONFIG_DIR` for Claude Code and in `CODEX_HOME` for Codex, and the login command of a profile carries it, so that the login lands where the agent will look. An ACP agent has no status to ask, so a Codex profile is `unknown` and the CLI prints its status row, whose hint is that command (or the install command, while `codex-acp` is not on the daemon's `PATH`):
+At a terminal, without `--yes` and `--json`, the command then waits until you say you have logged in and checks again, warning when that check fails; any other status is printed as its row. The directory reaches the agent in `CLAUDE_CONFIG_DIR` for Claude Code and in `CODEX_HOME` for Codex, and the login command of a profile carries it, so that the login lands where the agent will look. An ACP agent has no status to ask, so a Codex profile is `unknown` and the CLI prints its status row, whose hint is that command (or the install command, while `codex-acp` is not on the daemon's `PATH`):
 
 ```text
 $ bytebureau profiles add acp:codex home
@@ -114,7 +114,7 @@ bytebureau run "Create src/hello.ts exporting hello()" --provider acp:codex --pr
 bytebureau profiles add claude ci --api-key < anthropic.key
 ```
 
-The key is never an argument, which the shell's history and the process list keep: a key typed after the name is refused, and so is an empty one, both with exit 1 before anything is sent. Only `claude`, `acp:codex` and `acp:gemini` (and `fake`) take an API-key profile, as `supportsApiKey` of `GET /api/v1/providers` says; for another provider it is refused. The key is stored in the secret store as `@bytebureau/profiles/<id>/api_key` and leaves it only into the environment of the agent, under the provider's variable (moved to the one `apiKeyEnv` names, if it does). It never appears in an event, a log, a problem, `--json` output or `profiles ls`.
+The key is never an argument, which the shell's history and the process list keep: a key typed after the name, given as `--api-key=<key>` or typed in place of the provider or the name (a word that starts with `sk-`) is refused, and so is an empty one, all with exit 1 before anything is sent, and the refusal says to replace a key typed there. Only `claude`, `acp:codex` and `acp:gemini` (and `fake`) take an API-key profile, as `supportsApiKey` of `GET /api/v1/providers` says; for another provider it is refused. The key is stored in the secret store as `@bytebureau/profiles/<id>/api_key` and leaves it only into the environment of the agent, under the provider's variable (moved to the one `apiKeyEnv` names, if it does). It never appears in an event, a log, a problem, `--json` output or `profiles ls`.
 
 ### The profile of a session
 

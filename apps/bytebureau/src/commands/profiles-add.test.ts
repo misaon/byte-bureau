@@ -8,6 +8,7 @@ import { tellAdded } from './profiles-add.js'
 const HINT = 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/fake/work claude /login'
 const LOGGED_OUT: ProfileStatusDto = { ...PROFILE_STATUS, state: 'loggedOut', hint: HINT }
 const ADDED_LOGIN = `Profile fake/work added. Log in with: ${HINT}`
+const STORE_DOWN = problemError(503, 'store_unavailable', 'the store is unavailable')
 
 interface Statuses {
   readonly bureau: Bureau
@@ -25,6 +26,21 @@ function answering(...statuses: ProfileStatusDto[]): Statuses {
     return statuses[asked.length - 1] ?? PROFILE_STATUS
   }
   return { bureau: { ...bureau, profiles: { ...bureau.profiles, status } }, asked }
+}
+
+// A Bureau whose first status is logged out and whose next one fails, as a store that went down meanwhile
+function failingOnRecheck(): Bureau {
+  const { bureau } = scripted([])
+  const state = { calls: 0 }
+  const status = async (): Promise<ProfileStatusDto> => {
+    state.calls += 1
+    await Promise.resolve()
+    if (state.calls > 1) {
+      throw STORE_DOWN
+    }
+    return LOGGED_OUT
+  }
+  return { ...bureau, profiles: { ...bureau.profiles, status } }
 }
 
 const saying = (done: boolean) => async (): Promise<boolean> => {
@@ -51,6 +67,20 @@ describe(tellAdded, () => {
     await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(true) })
     expect(printed.out()).toStrictEqual([ADDED_LOGIN, 'fake/work  loggedIn  me@example.com'])
     expect(asked).toStrictEqual(['fake/work', 'fake/work'])
+  })
+
+  it('warns when the login cannot be checked again once the person says they have logged in', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    await tellAdded(failingOnRecheck(), PROFILE, { context: contextOf(), wait: saying(true) })
+    expect([printed.out(), printed.err()]).toStrictEqual([
+      [ADDED_LOGIN],
+      [
+        expect.stringContaining(
+          'The login of fake/work could not be checked again: the store is unavailable (store_unavailable)',
+        ),
+      ],
+    ])
   })
 
   it('checks nothing more when the person does not say they have logged in', async () => {
