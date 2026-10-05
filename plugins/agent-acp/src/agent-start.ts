@@ -8,7 +8,7 @@ import {
   type ClientHandlers,
   type Running,
 } from './connection.js'
-import { endProcess } from './kill-ladder.js'
+import { endProcess, sweepGroup } from './kill-ladder.js'
 import type { Preset } from './presets.js'
 import { endingOf, spawnAgent, type AcpDeps, type AgentProcess } from './process.js'
 import { redacted } from './redaction.js'
@@ -110,13 +110,15 @@ const sessionOf = async (
   return { process: agent, connection: connected.connection, sessionId, gone: false, ...why }
 }
 
-// The work of a start, which the kernel may give up on: the agent is killed then, so nothing waits on it
+// The work of a start, which the kernel may give up on: the agent is killed then with its whole group, so nothing waits on it
+// A wrapper's agent that holds the pipes would otherwise keep the start waiting
 const whileStarting = async <Value>(
   signal: AbortSignal,
   agent: AgentProcess,
   work: Promise<Value>,
 ): Promise<Value> => {
   const abandon = (): void => {
+    sweepGroup(agent.child)
     agent.child.kill('SIGKILL')
   }
   signal.addEventListener('abort', abandon, { once: true })

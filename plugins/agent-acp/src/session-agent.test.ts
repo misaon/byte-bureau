@@ -1,11 +1,12 @@
 import type { ChildProcess } from 'node:child_process'
 import type { AgentSession, ExecHandle, ProcessSpawner } from '@bytebureau/plugin-api'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { sessionRequest } from './testing/requests.js'
 import { AcpAgentProvider } from './provider.js'
 import {
   goneWithin,
   harness,
+  killedAtEnd,
   rest,
   started,
   until,
@@ -110,17 +111,6 @@ const allGone = async (pids: readonly number[]): Promise<boolean[]> => {
 const firstPid = (children: readonly ChildProcess[]): number => {
   const [first] = children
   return first === undefined || first.pid === undefined ? 0 : first.pid
-}
-
-// A process the test learnt of is killed when it ends, should it outlive what the test checks
-const killedAtEnd = (pid: number): void => {
-  onTestFinished(() => {
-    try {
-      process.kill(pid, 'SIGKILL')
-    } catch {
-      // Gone already
-    }
-  })
 }
 
 describe('what an ACP agent starts', () => {

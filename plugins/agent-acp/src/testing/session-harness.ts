@@ -81,6 +81,30 @@ async function* linesOf(stream: Readable): AsyncIterable<string> {
   }
 }
 
+// A process the test learnt of is killed when the test ends, should it outlive what the test checks
+export const killedAtEnd = (pid: number): void => {
+  onTestFinished(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Gone already
+    }
+  })
+}
+
+// The first line the first agent of a harness writes to stderr
+export const firstWordOf = async ({ spawned }: Harness): Promise<string> => {
+  const { promise, resolve } = Promise.withResolvers<string>()
+  const [agent] = spawned
+  if (agent !== undefined && agent.child.stderr !== null) {
+    agent.child.stderr.once('data', (chunk: string) => {
+      resolve(chunk.split('\n')[0] ?? '')
+    })
+  }
+  const line = await promise
+  return line
+}
+
 // The exit of a child that has started; the listener is set before anything can end it
 export const exitOf = async (child: ChildProcess): Promise<Awaited<ExecHandle['exited']>> => {
   const { promise, resolve } = Promise.withResolvers<Awaited<ExecHandle['exited']>>()

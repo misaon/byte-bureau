@@ -5,10 +5,25 @@ import type { PresetId } from './presets.js'
 import { AcpAgentProvider } from './provider.js'
 import { CANARY_KEY, sessionRequest, tempDir } from './testing/requests.js'
 import { fakeAgentCommand } from './testing/run-fake.js'
-import { harness, started, type Harness } from './testing/session-harness.js'
+import {
+  firstWordOf,
+  goneWithin,
+  harness,
+  killedAtEnd,
+  started,
+  type Harness,
+} from './testing/session-harness.js'
 import { workspaceOf } from './testing/sessions.js'
 
 const node = process.execPath
+// A wrapper whose agent inherits its pipes, as a shell script's does; it tells the agent's pid on stderr and never answers
+const WRAPPER = {
+  command: node,
+  args: [
+    '-e',
+    String.raw`const inner = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' }); process.stderr.write(inner.pid + '\n'); setInterval(() => {}, 1000)`,
+  ],
+}
 
 // The start of a session whose preset runs what the entry says, with every agent it starts recorded
 const starting = (
@@ -71,13 +86,15 @@ describe('an ACP agent that does not open a session', () => {
 })
 
 describe('a start that cannot go on', () => {
-  it('kills the agent of a start the kernel gives up on', async () => {
+  it('kills the agent of a start the kernel gives up on, what it started holding its pipes as well', async () => {
     expect.hasAssertions()
     const controller = new AbortController()
-    const silent = { command: node, args: ['-e', 'setInterval(() => {}, 1000)'] }
-    const { session } = starting('custom', silent, { signal: controller.signal })
+    const { session, run } = starting('custom', WRAPPER, { signal: controller.signal })
+    const inner = Number(await firstWordOf(run))
+    killedAtEnd(inner)
     controller.abort()
     await expect(session).rejects.toThrow('the agent was killed by SIGKILL')
+    await expect(goneWithin(inner, 3000)).resolves.toBe(true)
   })
 
   it('refuses a workspace that is not there, and starts nothing', async () => {
