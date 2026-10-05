@@ -6,7 +6,7 @@ import { resolved } from '../plugins/plugin-call-fixtures.js'
 import { Secrets } from '../secrets/secrets.js'
 import { UsageService } from '../usage/usage-service.js'
 import { loadedProfiles, profileWorld } from './profile-fixtures.js'
-import { settleDefault } from './profile-records.js'
+import { claimProfile, settleDefault } from './profile-records.js'
 import type { Profile } from './profile-service.js'
 
 const KERNEL_KEY = '@bytebureau/profiles/fake/key/api_key'
@@ -87,16 +87,37 @@ const keepsDefaultOfGone = Effect.gen(function* keepsDefaultOfGone() {
   yield* Effect.forEach(['a', 'b'], (name) =>
     profiles.add({ providerId: 'fake', name, kind: 'login' }),
   )
-  yield* settleDefault(yield* SqlClient.SqlClient, GONE, true)
-  assert.deepStrictEqual(defaultsOf(yield* profiles.list()), ['fake/a'])
+  const answered = yield* settleDefault(yield* SqlClient.SqlClient, GONE, true)
+  assert.deepStrictEqual([answered, defaultsOf(yield* profiles.list())], [false, ['fake/a']])
+})
+
+// A profile claimed while the default of its provider is removed, which passes the default to it before its own settling
+const answersPassedDefault = Effect.gen(function* answersPassedDefault() {
+  const profiles = yield* loadedProfiles
+  const sql = yield* SqlClient.SqlClient
+  yield* profiles.add({ providerId: 'fake', name: 'old', kind: 'login' })
+  yield* claimProfile(sql, { ...GONE, id: 'fake/new', name: 'new' })
+  yield* profiles.remove('fake/old')
+  const answered = yield* settleDefault(sql, { ...GONE, id: 'fake/new', name: 'new' }, false)
+  assert.deepStrictEqual([answered, defaultsOf(yield* profiles.list())], [true, ['fake/new']])
 })
 
 it.layer(profileWorld().layer)(
   'ProfileService default meant for a profile that is gone',
   (suite) => {
     suite.effect(
-      'leaves the default of the provider as it is when the profile meant to take it is gone',
+      'leaves the default of the provider as it is when the profile meant to take it is gone, and answers no default',
       () => keepsDefaultOfGone,
+    )
+  },
+)
+
+it.layer(profileWorld().layer)(
+  'ProfileService default passed while a profile is added',
+  (suite) => {
+    suite.effect(
+      'answers the default the profile holds as stored, though it did not ask for it',
+      () => answersPassedDefault,
     )
   },
 )

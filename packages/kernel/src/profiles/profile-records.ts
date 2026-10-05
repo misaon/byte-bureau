@@ -129,6 +129,7 @@ export const makeDefault = (
   )
 
 // A profile just claimed becomes the default of its provider when asked to, or when the provider has none, decided in one transaction
+// What it answers is the flag as stored once that is done: a removal in between may have made the profile the default, or taken it away
 export const settleDefault = (
   sql: SqlClient.SqlClient,
   profile: Profile,
@@ -138,11 +139,11 @@ export const settleDefault = (
     sql,
     Effect.gen(function* settlesDefault() {
       const current = yield* defaultProfileOf(sql, profile.providerId)
-      const becomes = asked || current === undefined
-      if (becomes) {
+      if (asked || current === undefined) {
         yield* markDefault(sql, profile.providerId, profile.id)
       }
-      return becomes
+      const stored = yield* loadProfile(sql, profile.id)
+      return stored !== undefined && stored.isDefault
     }),
   )
 
