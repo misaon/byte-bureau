@@ -124,19 +124,20 @@ describe('the end of a Claude session', () => {
     expect(fake.calls.close).toBe(1)
   })
 
-  it('tells a query that fails as a crash of the session, then ends', async () => {
+  it('tells a query that fails as a crash of the session, then ends, and names the session in its warning', async () => {
     expect.hasAssertions()
-    const { session, logged } = start({
-      turns: [[init, textDelta, { fail: new Error('the CLI exited with 1') }]],
-    })
+    const request = sessionRequest()
+    const crashing = [[init, textDelta, { fail: new Error('the CLI exited with 1') }]]
+    const { session, logged } = start({ turns: crashing }, request)
     await session.prompt({ text: 'Hello' })
     const events = await rest(session)
     expect(events.slice(-2)).toStrictEqual([
       { type: 'session.error', kind: 'crash', message: 'the CLI exited with 1', retryable: true },
       { type: 'session.closed' },
     ])
-    expect(logged).toMatchObject([
-      { level: 'warn', message: 'the Claude query ended with an error' },
+    const named = { sessionId: request.sessionId, ref: SESSION, reason: 'the CLI exited with 1' }
+    expect(logged).toStrictEqual([
+      { level: 'warn', message: 'the Claude query ended with an error', properties: named },
     ])
   })
 })

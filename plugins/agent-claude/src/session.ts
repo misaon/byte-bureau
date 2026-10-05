@@ -36,6 +36,8 @@ export class ClaudeSession implements AgentSession {
   private readonly state: MapState
   private readonly asks: AskBroker
   private readonly logger: Logger
+  // The kernel's id of the session, which a warning names beside the reference of Claude's session
+  private readonly sessionId: string
   private readonly query: AgentQuery
   // Settles once every message of the query is read and the events have ended
   public readonly ended: Promise<void>
@@ -48,6 +50,7 @@ export class ClaudeSession implements AgentSession {
   ) {
     this.asks = new AskBroker(request.sessionId)
     this.logger = deps.logger
+    this.sessionId = request.sessionId
     this.state = newMapState(claudeResumeOf(request) !== undefined)
     const parts = {
       request,
@@ -195,7 +198,9 @@ export class ClaudeSession implements AgentSession {
     if (!this.closed) {
       const message = reasonOf(error)
       this.output.push({ type: 'session.error', kind: 'crash', message, retryable: true })
-      this.logger.warn('the Claude query ended with an error', { reason: message })
+      const ref = this.state.sessionId === undefined ? {} : { ref: this.state.sessionId }
+      const named = { sessionId: this.sessionId, ...ref, reason: message }
+      this.logger.warn('the Claude query ended with an error', named)
     }
   }
 }
