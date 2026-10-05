@@ -28,7 +28,7 @@ const AUTH_REQUIRED = -32_000
 const EXIT_WAIT_MS = 2000
 
 // The values a session never repeats: the key of an API-key profile, under either variable it can travel in
-export const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[] =>
+const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[] =>
   [keyEnv, preset.apiKeyEnv].flatMap((name) => {
     const value = name === undefined ? undefined : request.env[name]
     return value === undefined || value === '' ? [] : [value]
