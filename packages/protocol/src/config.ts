@@ -86,9 +86,14 @@ const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
 const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
 
+// A path from the root, POSIX or Windows: a relative one would name a different project from every working directory
+const AbsolutePath = Schema.String.check(
+  Schema.isPattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/u, { expected: 'an absolute path' }),
+)
+
 // What a project's own files may run: the commands of providers.<id> run for a project listed by its path, or a command listed by its exact name or path
 const TrustSection = Schema.Struct({
-  projects: Schema.optionalKey(Schema.Array(Schema.String)),
+  projects: Schema.optionalKey(Schema.Array(AbsolutePath)),
   commands: Schema.optionalKey(Schema.Array(Schema.String)),
 })
 

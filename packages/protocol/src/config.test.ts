@@ -83,3 +83,13 @@ describe(decodeUserConfig, () => {
     expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
   })
 })
+
+describe('the projects the user trusts', () => {
+  it('refuses a trusted project named by a relative path, saying an absolute one is expected', () => {
+    expect(() => decodeUserConfig({ trust: { projects: ['code/app'] } })).toThrow(
+      /Expected an absolute path\n {2}at \["trust"\]\["projects"\]\[0\]/u,
+    )
+    const windows = { projects: [String.raw`C:\code\app`, String.raw`\\server\share\app`] }
+    expect(decodeUserConfig({ trust: windows }).trust).toStrictEqual(windows)
+  })
+})
