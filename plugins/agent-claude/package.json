@@ -1,0 +1,47 @@
+{
+  "name": "@bytebureau/agent-claude",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau agent provider: Claude Code through the Agent SDK",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.288",
+    "@anthropic-ai/sdk": "0.131.0",
+    "@bytebureau/plugin-api": "workspace:*",
+    "@bytebureau/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  },
+  "bytebureau": {
+    "name": "agent-claude",
+    "hostApi": "^0",
+    "kind": "in-process",
+    "capabilities": [
+      "process",
+      "net",
+      "secrets"
+    ],
+    "contributes": {
+      "agentProviders": [
+        "claude"
+      ]
+    }
+  }
+}
