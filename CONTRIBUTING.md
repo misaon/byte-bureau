@@ -39,7 +39,7 @@ Export `GH_TOKEN="$(gh auth token)"` before `bun run lint:actions` to let zizmor
 
 `node_modules` is most of a checkout and stays. Three other things grow until someone removes them:
 
-- `.turbo/cache`: Turborepo's local cache keeps the output of every task it runs, and evicts an entry only when `cacheMaxAge` or `cacheMaxSize` is set in `turbo.json` (neither is).
+- `.turbo/cache`: Turborepo's local cache keeps the output of every task it runs, and evicts an entry only when `cacheMaxAge` or `cacheMaxSize` is set in `turbo.json`: `cacheMaxAge` is `7d`, so an entry older than a week goes at the next `turbo run` (a cache hit does not refresh its age).
 - `dist/` (`bun run build:binaries`) and `apps/bytebureau/dist` (`bun run build`): a compiled binary is 60 MB or more. A build removes the binaries and source maps of earlier builds (`bytebureau-<version>-<target>` and its `.map`) from its output directory before it writes, so a directory holds the artefacts of one build.
 - `coverage/`, `apps/docs/dist` and `apps/docs/.astro`: the output of `bun run test:coverage` and `bun run docs:build`, which the next run replaces.
 
