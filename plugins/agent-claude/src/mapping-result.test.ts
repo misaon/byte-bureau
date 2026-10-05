@@ -1,4 +1,4 @@
-import type { SDKMessage, SDKRateLimitEvent } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKMessage, SDKRateLimitEvent, SDKResultError } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import { mapMessage, newMapState, unreadResult } from './mapping.js'
 import {
@@ -154,7 +154,11 @@ describe('a turn that failed on the API', () => {
   })
 })
 
-const NO_ERRORS: SDKMessage = { ...resultMaxTurns, subtype: 'error_max_budget_usd', errors: [''] }
+const NO_ERRORS: SDKResultError = {
+  ...resultMaxTurns,
+  subtype: 'error_max_budget_usd',
+  errors: [''],
+}
 
 describe('a turn that ended on an error result', () => {
   it('warns with the errors the result names, and with its subtype where it names none', () => {
