@@ -5,6 +5,8 @@ import { sessionRequest } from './testing/requests.js'
 import { goneWithin, harness, until } from './testing/session-harness.js'
 import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.js'
 
+const CUSTOM = 'acp:custom'
+
 describe('the agent an ACP session starts', () => {
   it('runs in the workspace with the environment of the request, the preset and the login directory', async () => {
     expect.hasAssertions()
@@ -12,7 +14,7 @@ describe('the agent an ACP session starts', () => {
     const run = harness()
     const profile = {
       id: 'acp:custom/work',
-      providerId: 'acp:custom',
+      providerId: CUSTOM,
       kind: 'login',
       configDir: '/h/p',
     } as const
@@ -31,7 +33,7 @@ describe('the agent an ACP session starts', () => {
   it('loads the session a resume names when the agent can, and starts a new one for a resume of another provider', async () => {
     expect.hasAssertions()
     const base = { workspace: { path: workspaceOf() }, providerConfig: customOf('hello') }
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
     const loaded = await sessionOf({ ...base, resume })
     expect(loaded.externalRef).toStrictEqual(resume)
     const [first] = await prompted(loaded, 'Go on')
@@ -40,7 +42,7 @@ describe('the agent an ACP session starts', () => {
       ...base,
       resume: { providerId: 'claude', ref: 'session-0001' },
     })
-    expect(fresh.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    expect(fresh.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
   })
 })
 
@@ -54,10 +56,10 @@ const notLoaded = (why: string): unknown => ({
 describe('a session to resume that the agent cannot load', () => {
   it('starts a new session, and says so, when the agent answers the load with an error', async () => {
     expect.hasAssertions()
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
     const providerConfig = customOf('load-fails')
     const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
-    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    expect(session.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
     await expect(until(session, 'session.warning')).resolves.toStrictEqual([
       notLoaded('Resource not found: fake-acp-earlier'),
     ])
@@ -65,10 +67,10 @@ describe('a session to resume that the agent cannot load', () => {
 
   it('starts a new session, and says so, when the agent does not load sessions', async () => {
     expect.hasAssertions()
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
     const providerConfig = customOf('no-load')
     const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
-    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    expect(session.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
     await expect(until(session, 'session.warning')).resolves.toStrictEqual([
       notLoaded('it does not load sessions'),
     ])
