@@ -8,10 +8,10 @@ import {
   type FoundationServices,
   type UsageLayer,
 } from './kernel-foundation.js'
-import { PluginHostLive, type PluginHost, type PluginHostOptions } from './plugins/plugin-host.js'
+import { PluginHostLive, type PluginHostOptions } from './plugins/plugin-host.js'
+import { ProfileServiceLive, type ProfileService } from './profiles/profile-service.js'
 import { ProjectRegistryLive, type ProjectRegistry } from './projects/project-registry.js'
 import { SessionManagerLive, type SessionManager } from './sessions/session-manager.js'
-import type { WorkspaceRuntimes } from './workspace/runtimes.js'
 import { WorkspaceManagerLive, type WorkspaceManager } from './workspace/workspace-manager.js'
 
 export interface KernelLayerOptions
@@ -20,13 +20,16 @@ export interface KernelLayerOptions
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
 }
 
+// The plugin host and the workspace runtimes its plugins bring
+type PluginServices = Layer.Success<ReturnType<typeof PluginHostLive>>
+
 export type KernelServices =
   | FoundationServices
   | ProjectRegistry
-  | PluginHost
-  | WorkspaceRuntimes
+  | PluginServices
   | WorkspaceManager
   | AskService
+  | ProfileService
   | SessionManager
   | Health
 
@@ -45,6 +48,7 @@ export const composeKernel = (
     WorkspaceManagerLive,
     AskServiceLive,
     HealthLive,
+    ProfileServiceLive({ home: options.home }),
   ).pipe(Layer.provideMerge(plugins))
   return SessionManagerLive({ env: options.env }).pipe(Layer.provideMerge(registry))
 }

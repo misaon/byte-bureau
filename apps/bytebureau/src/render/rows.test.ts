@@ -1,14 +1,27 @@
-import type { SessionDto } from '@bytebureau/protocol'
+import type { ProfileDto, SessionDto } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import { askOf, option, question } from '../testing/events.js'
-import { ASK, SESSION } from '../testing/records.js'
-import { askRows, pendingAskLines, pluginRows, sessionFields, sessionRows } from './rows.js'
+import { ASK, PROFILE, PROFILE_STATUS, SESSION } from '../testing/records.js'
+import {
+  askRows,
+  pendingAskLines,
+  pluginRows,
+  profileRows,
+  profileStatusRows,
+  sessionFields,
+  sessionRows,
+} from './rows.js'
 
-// A session whose worktree is not made yet: the wire tells it as null, which JSON text keeps out of the CLI sources
-function withoutWorktree(session: SessionDto): SessionDto {
-  const bare = { ...session }
-  Reflect.set(bare, 'workspace', JSON.parse('null'))
+// A field the wire tells as null, which JSON text keeps out of the CLI sources
+function withNull<Record extends object>(record: Record, field: keyof Record): Record {
+  const bare = { ...record }
+  Reflect.set(bare, field, JSON.parse('null'))
   return bare
+}
+
+// A session whose worktree is not made yet
+function withoutWorktree(session: SessionDto): SessionDto {
+  return withNull(session, 'workspace')
 }
 
 describe(sessionRows, () => {
@@ -27,6 +40,7 @@ describe(sessionFields, () => {
       ['project', 'p1'],
       ['employee', 'developer'],
       ['provider', 'fake'],
+      ['profile', 'fake/work'],
       ['worktree', '/repo/.bytebureau/worktrees/s1'],
       ['created', '2026-10-02T12:00:00.000Z'],
     ])
@@ -35,6 +49,37 @@ describe(sessionFields, () => {
   it('has a dash for the worktree of a session that has none yet', () => {
     const fields = sessionFields(withoutWorktree({ ...SESSION, status: 'created' }))
     expect(fields).toContainEqual(['worktree', '-'])
+  })
+
+  it('has a dash for the profile of a session that runs under the nameless login', () => {
+    expect(sessionFields(withNull(SESSION, 'profileId'))).toContainEqual(['profile', '-'])
+  })
+})
+
+// An API-key profile that is not the default; it has no login directory
+const KEY: ProfileDto = withNull(
+  { ...PROFILE, id: 'fake/key', name: 'key', kind: 'api_key', isDefault: false },
+  'configDir',
+)
+
+describe(profileRows, () => {
+  it('has the id, the provider, the kind, the marker of the default and the directory of every profile', () => {
+    expect(profileRows([PROFILE, KEY], 'default')).toStrictEqual([
+      ['fake/work', 'fake', 'login', 'default', '/home/me/.bytebureau/profiles/fake/work'],
+      ['fake/key', 'fake', 'api_key', '', '-'],
+    ])
+    expect(profileRows([], 'default')).toStrictEqual([])
+  })
+})
+
+describe(profileStatusRows, () => {
+  it('has the profile, the state, the account and the hint of every status, a dash for no account', () => {
+    const out = { ...PROFILE_STATUS, state: 'loggedOut', hint: 'log in first' } as const
+    const known = { ...PROFILE_STATUS, account: 'me@example.com' }
+    expect(profileStatusRows([out, known])).toStrictEqual([
+      ['fake/work', 'loggedOut', '-', 'log in first'],
+      ['fake/work', 'loggedIn', 'me@example.com', ''],
+    ])
   })
 })
 

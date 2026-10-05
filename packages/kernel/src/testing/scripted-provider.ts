@@ -32,6 +32,8 @@ export interface ScriptedSession extends AgentSession {
 export interface Behaviour {
   // The reference its sessions report
   readonly externalRef?: ExternalSessionRef | undefined
+  // The variable the key of an API-key profile is handed in; without it the provider takes no such profile
+  readonly apiKeyEnv?: string | undefined
   // Whether the provider says its agents can be interrupted; they can unless the test says otherwise
   readonly interruptible?: boolean | undefined
   // Makes the interruption of its sessions fail
@@ -177,6 +179,7 @@ export const scriptedProvider = (id: string, behaviour: Behaviour = {}): Scripte
   const base = providerOf(id)
   const provider: AgentProvider = {
     ...base,
+    apiKeyEnv: behaviour.apiKeyEnv,
     capabilities: { ...base.capabilities, interrupt: behaviour.interruptible ?? true },
     createSession: async (request) => {
       requests.push(request)

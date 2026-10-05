@@ -27,10 +27,10 @@
 
 ## Stav
 
-Fáze pre-alfa. Základ (nástroje, CI, pipeline pro vydávání verzí, licence) a jádro kanceláře (fáze A: relace v izolovaných git worktrees, trvalý záznam událostí, otázky s doporučenou volbou, hostitel pro pluginy) jsou hotové. Hotová je i fáze B: `bytebureau serve` spouští démona s HTTP API, SSE a RPC; CLI s ním komunikuje (nebo s přepínačem `--no-daemon` spustí jádro přímo ve svém procesu). Testovací zaměstnanec už přijme zadání příkazem `bytebureau run --provider fake`, odpracuje ho ve vlastním worktree a odevzdá výsledek bez grafického rozhraní, aniž byste potřebovali předplatné agenta. Skuteční zaměstnanci, uživatelské rozhraní chatu a simulace kanceláře následují. Postup podle dílčích projektů:
+Fáze pre-alfa. Základ (nástroje, CI, pipeline pro vydávání verzí, licence) a jádro kanceláře (fáze A: relace v izolovaných git worktrees, trvalý záznam událostí, otázky s doporučenou volbou, hostitel pro pluginy) jsou hotové. Hotová je i fáze B: `bytebureau serve` spouští démona s HTTP API, SSE a RPC; CLI s ním komunikuje (nebo s přepínačem `--no-daemon` spustí jádro přímo ve svém procesu). Fáze C hotová: skuteční agenti přes Claude Agent SDK a libovolný ACP agent, pod pojmenovanými přihlašovacími profily s klíči v klíčence, a kde žádná není, v soukromém souboru. Testovací zaměstnanec přijme zadání příkazem `bytebureau run --provider fake`, odpracuje ho ve vlastním worktree a odevzdá výsledek bez grafického rozhraní, aniž byste potřebovali předplatné agenta; s přepínačem `--provider claude` nebo `--provider acp:<preset>` zadání převezme skutečný agent. Uživatelské rozhraní chatu a simulace kanceláře následují. Postup podle dílčích projektů:
 
 - [x] 0 · Základ
-- [ ] 1 · Jádro a běhové prostředí agentů (hotové je jádro, démon i API; adaptéry agentů následují)
+- [ ] 1 · Jádro a běhové prostředí agentů (hotové je jádro, démon, API i adaptéry agentů; diagnostika a instalace následují)
 - [ ] 2 · UI pro chat a dashboard
 - [ ] 3 · Simulace kanceláře
 - [ ] 4 · Workflow engine a integrace (Jira, GitHub, Slack)

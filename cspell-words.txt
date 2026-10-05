@@ -109,3 +109,10 @@ tokenem
 bunfs
 refusable
 lstart
+unstub
+toolu
+modelcontextprotocol
+agentclientprotocol
+earendil
+libsecret
+napi

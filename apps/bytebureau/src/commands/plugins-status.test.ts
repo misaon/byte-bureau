@@ -38,6 +38,8 @@ describe('bytebureau plugins ls', () => {
         plugins: [
           { name: 'workspace-local', state: 'loaded', ports: ['workspaceRuntimes:local'] },
           { name: 'agent-fake', state: 'loaded', ports: ['agentProviders:fake'] },
+          { name: 'agent-claude', state: 'loaded' },
+          { name: 'agent-acp', state: 'loaded' },
         ],
       },
     ])

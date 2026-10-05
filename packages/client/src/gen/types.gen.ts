@@ -53,6 +53,7 @@ export type Problem401 = {
 export type Provider = {
     id: string;
     displayName: string;
+    supportsApiKey: boolean;
 };
 
 /**
@@ -225,6 +226,20 @@ export type WorkspaceInfo = {
 };
 
 /**
+ * UsageSnapshot
+ */
+export type UsageSnapshot = {
+    profileId: string;
+    rateLimit: {
+        fiveHourPct?: number;
+        fiveHourResetsAt?: string;
+        sevenDayPct?: number;
+        sevenDayResetsAt?: string;
+    };
+    observedAt: string | null;
+};
+
+/**
  * SessionUsage
  */
 export type SessionUsage = {
@@ -370,6 +385,56 @@ export type CreateSession = {
     env?: {
         [key: string]: string;
     };
+};
+
+/**
+ * ProfileStatus
+ */
+export type ProfileStatus = {
+    profileId: string;
+    state: 'loggedIn' | 'loggedOut' | 'expired' | 'unknown';
+    hint?: string;
+    account?: string;
+    /**
+     * Timestamp
+     *
+     * ISO-8601 UTC
+     */
+    checkedAt: string;
+};
+
+/**
+ * Profile
+ */
+export type Profile = {
+    id: string;
+    providerId: string;
+    name: string;
+    kind: 'login' | 'api_key';
+    configDir: string | null;
+    isDefault: boolean;
+    /**
+     * Timestamp
+     *
+     * ISO-8601 UTC
+     */
+    createdAt: string;
+};
+
+/**
+ * AddProfile
+ */
+export type AddProfile = {
+    providerId: string;
+    /**
+     * ProfileName
+     *
+     * Lower-case letters, digits and dashes, 1 to 32 characters
+     */
+    name: string;
+    kind: 'login' | 'api_key';
+    apiKey?: string;
+    makeDefault?: boolean;
 };
 
 /**
@@ -846,6 +911,323 @@ export type ProjectsGetResponses = {
 };
 
 export type ProjectsGetResponse = ProjectsGetResponses[keyof ProjectsGetResponses];
+
+export type ProfilesListData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/profiles';
+};
+
+export type ProfilesListErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type ProfilesListError = ProfilesListErrors[keyof ProfilesListErrors];
+
+export type ProfilesListResponses = {
+    /**
+     * Success
+     */
+    200: Array<Profile>;
+};
+
+export type ProfilesListResponse = ProfilesListResponses[keyof ProfilesListResponses];
+
+export type ProfilesAddData = {
+    body: AddProfile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/profiles';
+};
+
+export type ProfilesAddErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    429: Problem429;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type ProfilesAddError = ProfilesAddErrors[keyof ProfilesAddErrors];
+
+export type ProfilesAddResponses = {
+    /**
+     * Success
+     */
+    201: Profile;
+};
+
+export type ProfilesAddResponse = ProfilesAddResponses[keyof ProfilesAddResponses];
+
+export type ProfilesRemoveData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        purge?: 'true' | 'false';
+    };
+    url: '/api/v1/profiles/{id}';
+};
+
+export type ProfilesRemoveErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    429: Problem429;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type ProfilesRemoveError = ProfilesRemoveErrors[keyof ProfilesRemoveErrors];
+
+export type ProfilesRemoveResponses = {
+    /**
+     * <No Content>
+     */
+    204: void;
+};
+
+export type ProfilesRemoveResponse = ProfilesRemoveResponses[keyof ProfilesRemoveResponses];
+
+export type ProfilesSetDefaultData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/profiles/{id}/default';
+};
+
+export type ProfilesSetDefaultErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    413: Problem413;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    429: Problem429;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type ProfilesSetDefaultError = ProfilesSetDefaultErrors[keyof ProfilesSetDefaultErrors];
+
+export type ProfilesSetDefaultResponses = {
+    /**
+     * <No Content>
+     */
+    204: void;
+};
+
+export type ProfilesSetDefaultResponse = ProfilesSetDefaultResponses[keyof ProfilesSetDefaultResponses];
+
+export type ProfilesStatusData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/profiles/{id}/status';
+};
+
+export type ProfilesStatusErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type ProfilesStatusError = ProfilesStatusErrors[keyof ProfilesStatusErrors];
+
+export type ProfilesStatusResponses = {
+    /**
+     * ProfileStatus
+     */
+    200: ProfileStatus;
+};
+
+export type ProfilesStatusResponse = ProfilesStatusResponses[keyof ProfilesStatusResponses];
 
 export type SessionsListData = {
     body?: never;
@@ -1782,6 +2164,65 @@ export type UsageSessionResponses = {
 };
 
 export type UsageSessionResponse = UsageSessionResponses[keyof UsageSessionResponses];
+
+export type UsageProfileData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/usage/profiles/{id}';
+};
+
+export type UsageProfileErrors = {
+    /**
+     * RFC 9457 problem details
+     */
+    400: Problem400;
+    /**
+     * RFC 9457 problem details
+     */
+    401: Problem401;
+    /**
+     * RFC 9457 problem details
+     */
+    403: Problem403;
+    /**
+     * RFC 9457 problem details
+     */
+    404: Problem404;
+    /**
+     * RFC 9457 problem details
+     */
+    409: Problem409;
+    /**
+     * RFC 9457 problem details
+     */
+    422: Problem422;
+    /**
+     * RFC 9457 problem details
+     */
+    500: Problem500;
+    /**
+     * RFC 9457 problem details
+     */
+    502: Problem502;
+    /**
+     * RFC 9457 problem details
+     */
+    503: Problem503;
+};
+
+export type UsageProfileError = UsageProfileErrors[keyof UsageProfileErrors];
+
+export type UsageProfileResponses = {
+    /**
+     * UsageSnapshot
+     */
+    200: UsageSnapshot;
+};
+
+export type UsageProfileResponse = UsageProfileResponses[keyof UsageProfileResponses];
 
 export type WorkspacesListData = {
     body?: never;

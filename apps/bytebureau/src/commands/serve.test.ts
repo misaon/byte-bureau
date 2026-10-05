@@ -7,9 +7,11 @@ import { daemonLogPath } from '../daemon/daemon-log.js'
 import { startDaemonProcess, stopDaemonOf } from '../testing/daemon.js'
 import { jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
-import { tempDir, testHome } from '../testing/temp-repo.js'
+import { configureHome, testHome } from '../testing/temp-repo.js'
 
 const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+const PARSE_ERROR = 'CloseBraceExpected at line 1, column 34'
 
 const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } })
 
@@ -41,7 +43,7 @@ const stoppedWithTheTest = (home: string): Record<string, string> => {
 describe('bytebureau serve --no-daemonize', () => {
   it('writes server.json for the user alone, on the loopback, and removes it on SIGTERM', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const daemon = await startDaemonProcess(home)
     expect(modeOf(serverInfoPath(home))).toBe(0o600)
     expect(daemon.info.token).toMatch(/^[0-9a-f]{64}$/u)
@@ -55,13 +57,13 @@ describe('bytebureau serve --no-daemonize', () => {
 
   it('answers health to anyone and the rest of the API only with the token', async () => {
     expect.hasAssertions()
-    const daemon = await startDaemonProcess(tempDir('bb-home-'))
+    const daemon = await startDaemonProcess(testHome())
     const health = await fetch(`${daemon.url}/api/v1/health`)
     // The plugins have loaded before the server answers anything
     await expect(health.json()).resolves.toMatchObject({
       status: 'ok',
       startedAt: daemon.info.startedAt,
-      checks: { plugins: { loaded: 2, failed: 0 } },
+      checks: { plugins: { loaded: 4, failed: 0 } },
     })
     const denied = await fetch(`${daemon.url}/api/v1/projects`)
     const allowed = await fetch(`${daemon.url}/api/v1/projects`, bearer(daemon.info.token))
@@ -72,7 +74,7 @@ describe('bytebureau serve --no-daemonize', () => {
 
   it('keeps the token across a restart', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const first = await startDaemonProcess(home)
     await expect(first.stop()).resolves.toBe(0)
     const second = await startDaemonProcess(home)
@@ -84,7 +86,7 @@ describe('bytebureau serve --no-daemonize', () => {
 describe('bytebureau serve --no-daemonize refusals', () => {
   it('refuses a second daemon on the same home with exit 1 and the pid of the first', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const daemon = await startDaemonProcess(home)
     const second = await runCli(['serve', '--no-daemonize', '--port', '0'], {
       BYTEBUREAU_HOME: home,
@@ -96,10 +98,10 @@ describe('bytebureau serve --no-daemonize refusals', () => {
 
   it('refuses a port that is taken with exit 1 and one line', async () => {
     expect.hasAssertions()
-    const daemon = await startDaemonProcess(tempDir('bb-home-'))
+    const daemon = await startDaemonProcess(testHome())
     const port = String(daemon.info.port)
     const other = await runCli(['serve', '--no-daemonize', '--port', port], {
-      BYTEBUREAU_HOME: tempDir('bb-home-'),
+      BYTEBUREAU_HOME: testHome(),
     })
     expect([other.code, other.stderr.trim()]).toStrictEqual([1, cannotListen(port)])
     await expect(daemon.stop()).resolves.toBe(0)
@@ -116,7 +118,7 @@ describe('bytebureau serve --no-daemonize refusals', () => {
 describe('bytebureau serve (detached) and serve --stop', () => {
   it('starts the daemon detached on the loopback and reports its url, pid and version as JSON', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const started = await runCli(['serve', '--port', '0', '--json'], stoppedWithTheTest(home))
     expect(started.code).toBe(0)
     expect(jsonLines(started.stdout)).toStrictEqual([describedDaemon(home)])
@@ -125,7 +127,7 @@ describe('bytebureau serve (detached) and serve --stop', () => {
 
   it('names the daemon that serves the home already instead of starting another', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const env = stoppedWithTheTest(home)
     await expect(runCli(['serve', '--port', '0'], env)).resolves.toMatchObject({ code: 0 })
     const { url, pid } = describedDaemon(home)
@@ -136,7 +138,7 @@ describe('bytebureau serve (detached) and serve --stop', () => {
 
   it('ends the daemon with --stop, and then finds none to stop', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
+    const home = testHome()
     const env = stoppedWithTheTest(home)
     await expect(runCli(['serve', '--port', '0'], env)).resolves.toMatchObject({ code: 0 })
     const { pid } = describedDaemon(home)
@@ -155,8 +157,8 @@ describe('bytebureau serve (detached) and serve --stop', () => {
 describe('bytebureau serve (detached) that cannot start', () => {
   it('tells at once that the daemon failed to start, naming the log that says why', async () => {
     expect.hasAssertions()
-    const daemon = await startDaemonProcess(tempDir('bb-home-'))
-    const home = tempDir('bb-home-')
+    const daemon = await startDaemonProcess(testHome())
+    const home = testHome()
     const port = String(daemon.info.port)
     const since = Date.now()
     const started = await runCli(['serve', '--port', port], stoppedWithTheTest(home))
@@ -183,10 +185,24 @@ describe('bytebureau serve and the user configuration', () => {
     await expect(daemon.stop()).resolves.toBe(0)
   })
 
+  it('refuses to start, naming the user file, where it cannot be parsed, and so does a command in-process', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    writeFileSync(path.join(home, 'config.json'), '{ "secrets": { "backend": "file" ')
+    const serve = await runCli(['serve', '--no-daemonize', '--port', '0'], {
+      BYTEBUREAU_HOME: home,
+    })
+    const local = await runCli(['projects', 'ls', '--no-daemon'], { BYTEBUREAU_HOME: home })
+    const file = path.join(home, 'config.json')
+    expect([serve.code, serve.stderr]).toStrictEqual([2, `ConfigError: ${file}: ${PARSE_ERROR}\n`])
+    expect([local.code, local.stderr]).toStrictEqual([1, `${file}: ${PARSE_ERROR}\n`])
+    expect(existsSync(path.join(home, 'secrets.backend'))).toBe(false)
+  })
+
   it('starts on the flags and says so when the configuration of the home cannot be read', async () => {
     expect.hasAssertions()
-    const home = tempDir('bb-home-')
-    writeFileSync(path.join(home, 'config.json'), '{ "server": { "port": "not a port" } }\n')
+    const home = testHome()
+    configureHome(home, { server: { port: 'not a port' } })
     const daemon = await startDaemonProcess(home)
     await vi.waitFor(() => {
       expect(daemon.stderr()).toContain(

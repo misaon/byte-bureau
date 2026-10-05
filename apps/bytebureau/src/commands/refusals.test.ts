@@ -15,10 +15,16 @@ const COMMANDS: readonly (readonly [string, readonly string[]])[] = [
   ['sessions interrupt', ['sessions', 'interrupt', 's1']],
   ['sessions stop', ['sessions', 'stop', 's1']],
   ['sessions resume', ['sessions', 'resume', 's1']],
+  ['sessions complete', ['sessions', 'complete', 's1']],
   ['sessions prompt', ['sessions', 'prompt', 's1', 'go']],
   ['ask ls', ['ask', 'ls']],
   ['ask answer', ['ask', 'answer', 'a1', '--yes']],
   ['plugins ls', ['plugins', 'ls']],
+  ['profiles ls', ['profiles', 'ls']],
+  ['profiles add', ['profiles', 'add', 'fake', 'work']],
+  ['profiles rm', ['profiles', 'rm', 'fake/work']],
+  ['profiles use', ['profiles', 'use', 'fake/work']],
+  ['profiles status', ['profiles', 'status', 'fake/work']],
   ['the bare status', []],
 ]
 
@@ -40,6 +46,7 @@ const RUN_REFUSALS = [
   ['workspace_git_failed', 'git worktree add failed'],
   ['session_provider_missing', 'provider "claude" is not available'],
   ['provider_missing', 'provider "claude" is not available'],
+  ['profile_invalid', 'profile "claude/work" belongs to provider "claude", not "fake"'],
 ] as const
 
 describe('a request that the daemon refuses with a problem that a run ends with exit code 4', () => {

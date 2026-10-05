@@ -8,6 +8,8 @@ import { exportQuestion } from './fake-ask.js'
 export type Script = 'hello' | 'slow'
 
 const SLOW_MS = 10_000
+// The variable the key of an api_key profile is handed in, as the provider declares it
+export const FAKE_API_KEY_ENV = 'BYTEBUREAU_FAKE_API_KEY'
 const NAMED_EXPORT = "export function hello(): string {\n  return 'hello'\n}\n"
 const DEFAULT_EXPORT = "export default function hello(): string {\n  return 'hello'\n}\n"
 const HELLO_USAGE: Usage = { inputTokens: 120, outputTokens: 40, costUsd: 0.002, contextPct: 3 }
@@ -20,6 +22,7 @@ const wantsNamedExport = (answer: AskAnswer): boolean =>
 
 // A scripted agent: it works in the workspace and reports what it does through its event queue
 // The hello script writes src/hello.ts after one question; the slow script runs until it is interrupted or ten seconds are over
+// Every turn starts with a warning that tells whether the key variable is set and a raw event with the provider options
 export class FakeSession implements AgentSession {
   public readonly externalRef = null
   private readonly queue = new EventQueue()
@@ -40,6 +43,7 @@ export class FakeSession implements AgentSession {
   public async prompt(input: PromptInput): Promise<void> {
     if (!this.closed) {
       this.turnRunning = true
+      this.announceStart()
       await (this.script === 'slow' ? this.runSlow() : this.runHello(input))
     }
   }
@@ -83,6 +87,15 @@ export class FakeSession implements AgentSession {
     if (clock !== null) {
       clock()
     }
+  }
+
+  // Each turn tells whether the key variable is set, never its value, and the options the provider got
+  private announceStart(): void {
+    const key = this.request.env[FAKE_API_KEY_ENV] === undefined ? 'absent' : 'present'
+    this.queue.push(
+      { type: 'session.warning', kind: 'env', message: `api key: ${key}` },
+      { type: 'raw', providerEvent: { providerConfig: this.request.providerConfig } },
+    )
   }
 
   // A turn ends once, with the first reason that comes

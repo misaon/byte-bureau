@@ -7,9 +7,10 @@ import { onTestFinished } from 'vitest'
 import { isAlive, lockHolder, readServerInfo } from '../daemon/server-info.js'
 import { stopDaemon } from '../daemon/stop.js'
 import { listening } from './listening.js'
-import { childEnv } from './run-cli.js'
+import { BUN, childEnv } from './run-cli.js'
 
 const CLI_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url))
+const MAIN = fileURLToPath(new URL('../main.ts', import.meta.url))
 
 export interface DaemonProcess {
   readonly info: ServerInfo
@@ -108,16 +109,23 @@ function endedWithTheTest(child: ChildProcess, home: string): void {
   stoppedWithTheTest(home)
 }
 
+// What a test may give its daemon beside the home: variables of its environment, PATH among them, and the directory it runs in
+export interface DaemonLaunch {
+  readonly env?: Readonly<Record<string, string>>
+  readonly cwd?: string
+}
+
 // A foreground daemon of the home, run from source; killed when the test ends if it is still there
 // A command that finds it gone starts another on demand, which ends with the test as well
 // The flags follow serve --no-daemonize: --port 0 unless the test names its own, as a daemon that reads its port from the home does
 export async function startDaemonProcess(
   home: string,
   flags: readonly string[] = ['--port', '0'],
+  launch: DaemonLaunch = {},
 ): Promise<DaemonProcess> {
-  const child = spawn('bun', ['run', 'src/main.ts', 'serve', '--no-daemonize', ...flags], {
-    cwd: CLI_DIRECTORY,
-    env: childEnv({ BYTEBUREAU_HOME: home }),
+  const child = spawn(BUN, ['run', MAIN, 'serve', '--no-daemonize', ...flags], {
+    cwd: launch.cwd ?? CLI_DIRECTORY,
+    env: childEnv({ ...launch.env, BYTEBUREAU_HOME: home }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   endedWithTheTest(child, home)

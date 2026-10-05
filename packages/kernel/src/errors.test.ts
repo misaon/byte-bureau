@@ -6,6 +6,7 @@ import {
   ConfigError,
   configErrorLine,
   PluginError,
+  ProfileError,
   ProviderError,
   SessionError,
   StoreError,
@@ -19,6 +20,7 @@ const provider = new ProviderError({ kind: 'auth', reason: 'not logged in', retr
 const ask = new AskError({ code: 'not_found', reason: 'no such ask' })
 const plugin = new PluginError({ plugin: 'demo', reason: 'setup failed' })
 const session = new SessionError({ code: 'not_found', reason: 'no such session' })
+const profile = new ProfileError({ code: 'in_use', reason: 'a session runs under it' })
 
 describe('the tagged errors of the kernel', () => {
   test.each([
@@ -34,6 +36,12 @@ describe('the tagged errors of the kernel', () => {
     { name: 'AskError', error: ask, type: AskError, message: 'no such ask' },
     { name: 'PluginError', error: plugin, type: PluginError, message: 'setup failed' },
     { name: 'SessionError', error: session, type: SessionError, message: 'no such session' },
+    {
+      name: 'ProfileError',
+      error: profile,
+      type: ProfileError,
+      message: 'a session runs under it',
+    },
   ])(
     '$name is an Error of its class whose message is $message',
     ({ name, error, type, message }) => {
@@ -69,6 +77,7 @@ type KernelFailure =
   | AskError
   | PluginError
   | SessionError
+  | ProfileError
 
 // What the handler of its own tag makes of a failure
 const handled = (error: KernelFailure): Effect.Effect<string> =>
@@ -81,12 +90,13 @@ const handled = (error: KernelFailure): Effect.Effect<string> =>
       AskError: (failure) => Effect.succeed(failure.code),
       PluginError: (failure) => Effect.succeed(failure.plugin),
       SessionError: (failure) => Effect.succeed(failure.code),
+      ProfileError: (failure) => Effect.succeed(failure.code),
     }),
   )
 
 it.effect('is caught by its tag and by nothing else', () =>
   Effect.gen(function* catchesByTag() {
-    const all = [config, store, workspace, provider, ask, plugin, session]
+    const all = [config, store, workspace, provider, ask, plugin, session, profile]
     const each = yield* Effect.all(all.map((error) => handled(error)))
     assert.deepStrictEqual(each, [
       '/repo/bytebureau.json',
@@ -96,6 +106,7 @@ it.effect('is caught by its tag and by nothing else', () =>
       'not_found',
       'demo',
       'not_found',
+      'in_use',
     ])
     const failing: Effect.Effect<never, WorkspaceError | SessionError> = Effect.fail(workspace)
     const uncaught = yield* Effect.flip(

@@ -4,12 +4,19 @@ import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { countOf, helloFileOf, refusalOf, workspaceOf } from './session-helper-fixtures.js'
+import {
+  countOf,
+  freeWorktree,
+  helloFileOf,
+  refusalOf,
+  workspaceOf,
+} from './session-helper-fixtures.js'
 import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
 const READY = 'session.ready'
+const STOPPED = 'session.stopped'
 
 it.layer(sessionLayer())('SessionManager prompts', (suite) => {
   suite.effect('refuses a second prompt while a turn is running and records only the first', () =>
@@ -97,7 +104,7 @@ it.layer(sessionLayer())('SessionManager stop', (suite) => {
       assert.strictEqual((yield* sessionOf(session.id)).status, 'stopped')
       assert.ok(existsSync(workspaceOf(session)))
       const types = yield* typesOf(session.id)
-      assert.deepStrictEqual(types.slice(-2), [READY, 'session.stopped'])
+      assert.deepStrictEqual(types.slice(-2), [READY, STOPPED])
     }),
   )
 
@@ -108,7 +115,7 @@ it.layer(sessionLayer())('SessionManager stop', (suite) => {
       yield* sessions.stop(session.id)
       const refused = yield* refusalOf(sessions.stop(session.id))
       assert.strictEqual(refused, 'invalid_transition: cannot stop a stopped session')
-      assert.strictEqual(countOf(yield* typesOf(session.id), 'session.stopped'), 1)
+      assert.strictEqual(countOf(yield* typesOf(session.id), STOPPED), 1)
     }),
   )
 })
@@ -130,7 +137,7 @@ it.layer(sessionLayer())('SessionManager stop a question', (suite) => {
           'session.waiting',
           'turn.interrupted',
           'ask.cancelled',
-          'session.stopped',
+          STOPPED,
         ])
         assert.ok(existsSync(workspaceOf(session)))
       }),
@@ -173,6 +180,25 @@ it.layer(sessionLayer())('SessionManager complete', (suite) => {
   )
 })
 
+it.layer(sessionLayer())('SessionManager complete a stopped session', (suite) => {
+  suite.effect(
+    'completes a stopped session without its agent, and frees its worktree as for a ready one',
+    () =>
+      Effect.gen(function* completesStopped() {
+        const sessions = yield* SessionManager
+        const session = yield* startSession({ env: SLOW })
+        yield* sessions.prompt(session.id, { text: 'take your time' })
+        yield* sessions.stop(session.id)
+        yield* sessions.complete(session.id)
+        const completed = yield* sessionOf(session.id)
+        assert.ok(completed.status === 'completed' && completed.endedAt !== null)
+        const types = yield* typesOf(session.id)
+        assert.deepStrictEqual(types.slice(-2), [STOPPED, 'session.completed'])
+        assert.ok(yield* freeWorktree(session))
+      }),
+  )
+})
+
 it.layer(sessionLayer())('SessionManager resume', (suite) => {
   suite.effect('refuses to resume a session that is ready', () =>
     Effect.gen(function* refusesResume() {
@@ -191,7 +217,7 @@ it.layer(sessionLayer())('SessionManager resume', (suite) => {
       const resumed = yield* sessions.resume(session.id)
       assert.deepStrictEqual([resumed.status, resumed.endedAt], ['ready', null])
       const types = yield* typesOf(session.id)
-      assert.deepStrictEqual(types.slice(-3), [READY, 'session.stopped', 'session.resumed'])
+      assert.deepStrictEqual(types.slice(-3), [READY, STOPPED, 'session.resumed'])
     }),
   )
 })

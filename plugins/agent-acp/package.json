@@ -1,0 +1,50 @@
+{
+  "name": "@bytebureau/agent-acp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ByteBureau agent providers: any ACP v1 agent over stdio",
+  "license": "FSL-1.1-MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0",
+    "@bytebureau/plugin-api": "workspace:*",
+    "@bytebureau/protocol": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  },
+  "bytebureau": {
+    "name": "agent-acp",
+    "hostApi": "^0",
+    "kind": "in-process",
+    "capabilities": [
+      "process",
+      "fs:read",
+      "fs:write",
+      "net"
+    ],
+    "contributes": {
+      "agentProviders": [
+        "acp:codex",
+        "acp:gemini",
+        "acp:opencode",
+        "acp:pi",
+        "acp:custom"
+      ]
+    }
+  }
+}

@@ -4,15 +4,19 @@ import { ConfigLive, type Config } from './config/config.js'
 import { EventLogLive, type EventLog } from './events/event-log.js'
 import { EffectLoggerLive, EffectLogLevelLive, type KernelLogLevel } from './logging/logging.js'
 import { SupervisorLive, type Supervisor } from './process/supervisor.js'
+import { InMemorySecretStore } from './secrets/in-memory-secret-store.js'
+import { Secrets, type SecretsShape } from './secrets/secrets.js'
 import { UsageServiceLive, type UsageService } from './usage/usage-service.js'
 
 export interface FoundationOptions {
   readonly home: string
   // Effect drops its own logs below this level; info when absent
   readonly logLevel?: KernelLogLevel | undefined
+  // Where the secrets are kept; in memory when absent, as in the test kernels
+  readonly secrets?: SecretsShape | undefined
 }
 
-export type FoundationServices = Config | EventLog | Supervisor | UsageService
+export type FoundationServices = Config | EventLog | Supervisor | UsageService | Secrets
 
 export type UsageLayer = Layer.Layer<UsageService, never, SqlClient.SqlClient>
 
@@ -29,4 +33,5 @@ export const FoundationLive = (
     usage,
     EffectLoggerLive,
     EffectLogLevelLive(options.logLevel ?? 'info'),
+    Layer.sync(Secrets, () => options.secrets ?? new InMemorySecretStore()),
   )

@@ -148,3 +148,10 @@ export const called = (
     client.send(request(envelope))
     return client.next
   })
+
+// What the exit of a procedure that went through, or that the kernel refused with a problem of the code, holds
+export const SUCCEEDED = { exit: { _tag: 'Success' } }
+
+export const refusedWith = (code: string): object => ({
+  exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: { code } }] },
+})

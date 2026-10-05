@@ -9,7 +9,11 @@ export const frame = (seq: number, type: string): string => {
 }
 
 interface Seen {
+  readonly method: string
+  // The request target as it came over the wire, percent-encoding intact; url is the same decoded
+  readonly target: string
   readonly url: string
+  readonly body: string
   readonly lastEventId: string | undefined
   readonly authorization: string | undefined
 }
@@ -27,8 +31,11 @@ const headerOf = (request: IncomingMessage, name: string): string | undefined =>
   return typeof value === 'string' ? value : undefined
 }
 
-const seenOf = (request: IncomingMessage): Seen => ({
+const seenOf = (request: IncomingMessage, body: string): Seen => ({
+  method: request.method ?? '',
+  target: request.url ?? '',
   url: decodeURIComponent(request.url ?? ''),
+  body,
   lastEventId: headerOf(request, 'last-event-id'),
   authorization: headerOf(request, 'authorization'),
 })
@@ -44,11 +51,17 @@ const portOf = (address: ReturnType<ReturnType<typeof createServer>['address']>)
 export const serve = async (script: readonly Step[]): Promise<Served> => {
   const requests: Seen[] = []
   const server = createServer((request, response) => {
-    requests.push(seenOf(request))
-    const step = script[Math.min(requests.length, script.length) - 1]
-    if (step !== undefined) {
-      step(response)
-    }
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => {
+      chunks.push(chunk)
+    })
+    request.on('end', () => {
+      requests.push(seenOf(request, Buffer.concat(chunks).toString('utf8')))
+      const step = script[Math.min(requests.length, script.length) - 1]
+      if (step !== undefined) {
+        step(response)
+      }
+    })
   })
   const listening = Promise.withResolvers<boolean>()
   server.listen(0, '127.0.0.1', () => {
@@ -87,6 +100,14 @@ export const status =
     }
     response.writeHead(code, { 'content-type': 'application/problem+json' })
     response.end(JSON.stringify(problem))
+  }
+
+// An answer with a status and a JSON body
+export const json =
+  (code: number, body: object): Step =>
+  (response) => {
+    response.writeHead(code, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(body))
   }
 
 // A connection that breaks before any answer

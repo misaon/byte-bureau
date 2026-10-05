@@ -31,6 +31,11 @@ describe('the RPC envelopes a client sends', () => {
     })
   })
 
+  it('encodes a request without a payload with null, as effect/rpc encodes void', () => {
+    const request = { id: '2', tag: 'profiles.list', payload: undefined, token: 'tok' }
+    expect(encodeRequest(request)).toContain('"payload":null')
+  })
+
   it('encodes the ack, the interrupt and the ping', () => {
     expect(JSON.parse(encodeAck('1'))).toStrictEqual({ _tag: 'Ack', requestId: '1' })
     expect(JSON.parse(encodeInterrupt('1'))).toStrictEqual({ _tag: 'Interrupt', requestId: '1' })

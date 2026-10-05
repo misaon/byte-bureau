@@ -13,6 +13,7 @@ const PROMPT = 'Create src/hello.ts exporting hello()\r\nwith čeština and an e
 const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
 
 // Everything a session publishes from creation to completion, in order; the ephemeral deltas are not part of it
+// The fake tells at the start of its turn whether its key variable is set: the warning before the turn
 const EXPECTED_TYPES = [
   'session.created',
   'session.provisioning',
@@ -20,6 +21,7 @@ const EXPECTED_TYPES = [
   'session.ready',
   'session.running',
   'message.user',
+  'session.warning',
   'turn.started',
   'tool.started',
   'ask.requested',

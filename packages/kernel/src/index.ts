@@ -66,6 +66,10 @@ export {
 export { HookBus } from './plugins/hooks.js'
 export { BUNDLED_PLUGINS, HOST_API_VERSION } from './plugins/bundled.js'
 export { InMemorySecretStore } from './secrets/in-memory-secret-store.js'
+export { Secrets, type SecretBackend, type SecretsShape } from './secrets/secrets.js'
+export { FileSecretStore } from './secrets/file-secret-store.js'
+export { BunSecretStore } from './secrets/bun-secret-store.js'
+export { secretStoreFor } from './secrets/secret-store-for.js'
 export {
   AskService,
   AskServiceLive,
@@ -74,6 +78,15 @@ export {
   type AskServiceShape,
 } from './asks/ask-service.js'
 export { recommendForPermission, parseDuration } from './asks/policy.js'
+export {
+  ProfileService,
+  ProfileServiceLive,
+  type AddProfileInput,
+  type Profile,
+  type ProfileServiceShape,
+  type ProfileStatus,
+  type ResolvedProfile,
+} from './profiles/profile-service.js'
 export {
   SessionManager,
   SessionManagerLive,
@@ -87,6 +100,7 @@ export {
   type SessionUsage,
   type UsageSnapshot,
 } from './usage/usage-service.js'
+export { profileUsage } from './usage/profile-usage.js'
 export { KernelLayer, type KernelLayerOptions, type KernelServices } from './kernel-live.js'
 export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 export { configReader, type ConfigReader } from './facade/config-reader.js'

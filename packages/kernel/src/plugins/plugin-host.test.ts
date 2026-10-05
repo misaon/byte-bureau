@@ -74,7 +74,12 @@ it.layer(hostOver({ extraPlugins: [good, broken, incompatible] }))('PluginHost r
       const bundled = host.plugins().slice(0, BUNDLED)
       assert.deepStrictEqual(
         bundled.map((status) => [status.name, status.state]),
-        BUNDLED_PLUGINS.map((plugin) => [plugin.manifest.name, 'loaded']),
+        [
+          ['workspace-local', 'loaded'],
+          ['agent-fake', 'loaded'],
+          ['agent-claude', 'loaded'],
+          ['agent-acp', 'loaded'],
+        ],
       )
       assert.deepStrictEqual(host.plugins().slice(BUNDLED), [
         { name: 'good', version: '1.0.0', state: 'loaded', ports: ['agentProviders:good'] },

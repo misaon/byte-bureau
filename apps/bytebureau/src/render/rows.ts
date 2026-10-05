@@ -1,5 +1,11 @@
 import { m } from '@bytebureau/i18n'
-import type { AskRecord, PluginStatusDto, SessionDto } from '@bytebureau/protocol'
+import type {
+  AskRecord,
+  PluginStatusDto,
+  ProfileDto,
+  ProfileStatusDto,
+  SessionDto,
+} from '@bytebureau/protocol'
 import { flat } from './tables.js'
 
 // The rows a listing is told in, for table(): one row to a record, a cell to each of its columns
@@ -7,7 +13,7 @@ import { flat } from './tables.js'
 export const sessionRows = (sessions: readonly SessionDto[]): string[][] =>
   sessions.map((session) => [session.id, session.status, session.title, session.projectId])
 
-// The fields of one session: a label and a value to each; a session that has no worktree yet has a dash
+// The fields of one session: a label and a value to each; a session that has no worktree yet, or runs under the nameless login, has a dash
 export const sessionFields = (session: SessionDto): string[][] => [
   ['id', session.id],
   ['status', session.status],
@@ -15,6 +21,7 @@ export const sessionFields = (session: SessionDto): string[][] => [
   ['project', session.projectId],
   ['employee', session.employee.id],
   ['provider', session.providerId],
+  ['profile', session.profileId ?? '-'],
   ['worktree', session.workspace === null ? '-' : session.workspace.path],
   ['created', session.createdAt],
 ]
@@ -41,4 +48,22 @@ export const pluginRows = (plugins: readonly PluginStatusDto[]): string[][] =>
     plugin.version,
     plugin.state,
     plugin.state === 'failed' ? (plugin.reason ?? '') : plugin.ports.join(','),
+  ])
+
+// The default of its provider carries the marker; an API-key profile has no login directory
+export const profileRows = (profiles: readonly ProfileDto[], marker: string): string[][] =>
+  profiles.map((profile) => [
+    profile.id,
+    profile.providerId,
+    profile.kind,
+    profile.isDefault ? marker : '',
+    profile.configDir ?? '-',
+  ])
+
+export const profileStatusRows = (statuses: readonly ProfileStatusDto[]): string[][] =>
+  statuses.map((status) => [
+    status.profileId,
+    status.state,
+    status.account ?? '-',
+    status.hint ?? '',
   ])

@@ -7,6 +7,9 @@ export type Services = KernelServices | SqlClient.SqlClient
 
 export type Runtime = ManagedRuntime.ManagedRuntime<Services, never>
 
+// The services of a kernel captured once, for what runs outside the runtime or is read without a promise
+export type Captured = Context.Context<Services>
+
 // A call of a service as a function that returns a promise
 export type Promised = <Id extends Services, Shape, Args extends readonly unknown[], Value>(
   service: Context.Service<Id, Shape>,

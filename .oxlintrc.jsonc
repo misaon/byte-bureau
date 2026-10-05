@@ -156,13 +156,14 @@
       "rules": { "typescript/method-signature-style": "off" },
     },
     {
-      // The protocol's wire types and SQLite columns carry null for "absent"; the kernel side has to produce it
+      // The protocol's wire types and SQLite columns carry null for "absent"; the kernel side has to produce it, and so does the client's RPC codec for a void payload
       "files": [
         "packages/protocol/src/**",
         "packages/kernel/src/**",
         "packages/api/src/**",
         "packages/plugin-api/src/**",
         "plugins/*/src/**",
+        "packages/client/src/rpc/codec.ts",
       ],
       "rules": { "unicorn/no-null": "off" },
     },

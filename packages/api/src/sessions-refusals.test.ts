@@ -27,7 +27,8 @@ const REFUSALS: Refusal[] = [
     body: { providerId: 'nobody' },
     status: 422,
     code: 'session_provider_missing',
-    detail: 'provider "nobody" is not available; available: fake',
+    detail:
+      'provider "nobody" is not available; available: fake, claude, acp:codex, acp:gemini, acp:opencode, acp:pi, acp:custom',
   },
   {
     title: 'an employee the project does not have',

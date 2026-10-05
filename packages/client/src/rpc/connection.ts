@@ -12,10 +12,10 @@ export interface RpcOptions {
 }
 
 export interface RpcConnection {
-  // Runs a procedure: the value of its exit, or its problem as an ApiError
-  readonly call: (tag: string, payload: unknown) => Promise<unknown>
+  // Runs a procedure: the value of its exit, or its problem as an ApiError; one that takes no payload is called without one
+  readonly call: (tag: string, payload?: unknown) => Promise<unknown>
   // Runs a streaming procedure: every value of every chunk, until the daemon ends it or the signal aborts
-  readonly stream: (tag: string, payload: unknown, signal?: AbortSignal) => AsyncIterable<unknown>
+  readonly stream: (tag: string, payload?: unknown, signal?: AbortSignal) => AsyncIterable<unknown>
   // Closes the socket; a request still open fails
   readonly close: () => void
 }

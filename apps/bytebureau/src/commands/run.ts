@@ -14,6 +14,10 @@ export const runCommand = defineCommand({
     branch: { type: 'string', description: 'Base branch (default: the project default branch)' },
     employee: { type: 'string', description: 'Employee id from bytebureau.json' },
     provider: { type: 'string', description: 'Agent provider id (fake, claude, acp:<preset>)' },
+    profile: {
+      type: 'string',
+      description: 'Profile id of the provider (default: its default profile)',
+    },
   },
   async run({ args }) {
     const context = processContext(args)
@@ -22,6 +26,7 @@ export const runCommand = defineCommand({
       // The daemon would resolve a relative path in its own working directory
       project: path.resolve(args.project ?? process.cwd()),
       provider: args.provider,
+      profile: args.profile,
       yes: args.yes,
       ...sessionChoices(args, context.env),
     }

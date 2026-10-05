@@ -5,7 +5,7 @@ import type {
   AuthStatus,
   CreateSessionRequest,
 } from '@bytebureau/plugin-api'
-import { FakeSession, type Script } from './fake-agent-session.js'
+import { FAKE_API_KEY_ENV, FakeSession, type Script } from './fake-agent-session.js'
 
 const CAPABILITIES: AgentCapabilities = {
   resume: false,
@@ -22,9 +22,11 @@ const CAPABILITIES: AgentCapabilities = {
   attachments: false,
 }
 
-// The session environment picks the script: BYTEBUREAU_FAKE_SCRIPT=slow, anything else is hello
+// The session environment picks the script, else the flavour of the provider options: slow, anything else is hello
 const scriptOf = (request: CreateSessionRequest): Script =>
-  request.env['BYTEBUREAU_FAKE_SCRIPT'] === 'slow' ? 'slow' : 'hello'
+  (request.env['BYTEBUREAU_FAKE_SCRIPT'] ?? request.providerConfig['flavour']) === 'slow'
+    ? 'slow'
+    : 'hello'
 
 const loggedIn = async (): Promise<AuthStatus> => {
   const state = await Promise.resolve('loggedIn' as const)
@@ -41,6 +43,7 @@ export class FakeAgentProvider implements AgentProvider {
   public readonly id = 'fake'
   public readonly displayName = 'Fake agent (tests and CI)'
   public readonly capabilities = CAPABILITIES
+  public readonly apiKeyEnv = FAKE_API_KEY_ENV
   public readonly authStatus = loggedIn
   public readonly createSession = startSession
 }

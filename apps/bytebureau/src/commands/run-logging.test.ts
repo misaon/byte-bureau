@@ -1,8 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { eventLines, jsonLines } from '../testing/json-lines.js'
 import { runCli } from '../testing/run-cli.js'
+import { configureHome } from '../testing/temp-repo.js'
 import { FAKE, PROMPT, workbench, type Workbench } from '../testing/workbench.js'
 
 // The levels of the log records a run wrote to stderr, where every record goes
@@ -46,10 +47,7 @@ describe('bytebureau run log level', () => {
   it('logs at debug when the user file says so, and the --log-level flag wins over both', async () => {
     expect.hasAssertions()
     const bench = workbench()
-    writeFileSync(
-      path.join(bench.home, 'config.json'),
-      JSON.stringify({ logging: { level: 'debug' } }),
-    )
+    configureHome(bench.home, { logging: { level: 'debug' } })
     const byFile = await fakeRunWith(bench, [])
     const byFlag = await fakeRunWith(bench, ['--log-level', 'warn'], {
       BYTEBUREAU_LOG_LEVEL: 'debug',

@@ -8,6 +8,7 @@ import { kernelLogger } from './logging/logging.js'
 import { SessionManager } from './sessions/session-manager.js'
 
 export type { Kernel, KernelOptions } from './facade/types.js'
+export type { Services } from './facade/promised.js'
 
 // The steps that can fail while a kernel starts; the sessions a previous process left at work are stopped once the plugins have loaded
 async function boot(runtime: Runtime, options: KernelOptions): Promise<Kernel> {

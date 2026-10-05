@@ -21,5 +21,6 @@ Fourteen parallel research agents, each restricted to online verification (offic
 | 14 | Competitive landscape | ~60 pixel-office projects, orchestration UIs, vendor moves |
 | 15 | SP1 Phase A stack (Effect 4, SQLite drivers, Drizzle, c12, LogTape, git worktree) | verified 2026-10-02 with executed probes; §0 lists blockers (install cooldown, isolatedDeclarations, Drizzle on Effect 4) |
 | 16 | SP1 Phase B stack (Effect 4 `http-api`, `@effect/platform-bun`, SSE, `effect/rpc`, hey-api, `eventsource-parser`, daemonising) | verified 2026-10-04 with executed probes on Bun 1.4.2, Node 24 and Node 26; §0 lists blockers and surprises, "Recommendations for the plan" one choice per topic |
+| 17 | SP1 Phase C stack (Claude Agent SDK 0.3.x, ACP v1 `@agentclientprotocol/sdk`, codex-acp, Gemini CLI `--acp`, OpenCode, pi-acp, `Bun.secrets`) | verified 2026-10-04 from the docs, changelogs and the packages' own type declarations, with a local `Bun.secrets` probe; §0 lists the daily SDK releases under the install cooldown, the missing `authStatus()`, the moved codex-acp and the `permissionMode` change |
 
 Caveat: the session's web-search budget ran out part-way; later clusters relied on direct fetches of documentation, release pages and registry APIs rather than search discovery.

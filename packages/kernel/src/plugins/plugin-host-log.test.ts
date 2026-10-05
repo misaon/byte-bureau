@@ -6,7 +6,7 @@ import { SupervisorLive } from '../process/supervisor.js'
 import { StoreTest } from '../store/store-test.js'
 import { BUNDLED_PLUGINS } from './bundled.js'
 import { warnings } from './log-fixtures.js'
-import { loadedHost, statusOf } from './plugin-fixtures.js'
+import { loadedHost, SecretsInMemory, statusOf } from './plugin-fixtures.js'
 import { PluginHostLive } from './plugin-host.js'
 
 const DOWN = 'the store is down'
@@ -21,7 +21,9 @@ const unreachable = Layer.succeed(
   }),
 )
 
-const Deps = Layer.mergeAll(unreachable, SupervisorLive).pipe(Layer.provideMerge(StoreTest))
+const Deps = Layer.mergeAll(unreachable, SupervisorLive, SecretsInMemory).pipe(
+  Layer.provideMerge(StoreTest),
+)
 
 it.layer(PluginHostLive().pipe(Layer.provideMerge(Deps)))('PluginHost without a log', (suite) => {
   suite.effect('keeps a plugin loaded when its announcement cannot be recorded, and says so', () =>

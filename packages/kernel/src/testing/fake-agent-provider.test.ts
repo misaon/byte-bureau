@@ -23,19 +23,21 @@ const employee: CreateSessionRequest['employee'] = {
 }
 
 const ASKED = 'ask.requested'
+const STARTED = 'turn.started'
 const ASK_ID = 'fake-ask-session-1'
-const SLOW = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+const SLOW = { env: { BYTEBUREAU_FAKE_SCRIPT: 'slow' } }
 
-const openSession = async (
-  workspace: string,
-  env: Readonly<Record<string, string>> = {},
-): Promise<AgentSession> => {
+type Given = Partial<Pick<CreateSessionRequest, 'env' | 'providerConfig'>>
+
+const openSession = async (workspace: string, given: Given = {}): Promise<AgentSession> => {
   const session = await provider.createSession({
     sessionId: 'session-1',
     workspace: { path: workspace },
     employee,
     profile: { id: 'default', providerId: 'fake', kind: 'login' },
-    env,
+    providerConfig: given.providerConfig ?? {},
+    trust: { project: true, withheld: [], hint: '' },
+    env: given.env ?? {},
     signal: new AbortController().signal,
     logger: kernelLogger(['bb', 'test']),
   })
@@ -96,6 +98,10 @@ describe(FakeAgentProvider, () => {
     expect(provider.capabilities).toMatchObject({ askUser: true, interrupt: true, usage: true })
   })
 
+  it('names the variable an API key is handed in, so a profile of that kind can be given to it', () => {
+    expect(provider.apiKeyEnv).toBe('BYTEBUREAU_FAKE_API_KEY')
+  })
+
   it('starts a session without an external reference', async () => {
     expect.hasAssertions()
     const session = await openSession(tempDir('bb-fake-'))
@@ -139,12 +145,19 @@ describe('the hello script', () => {
 })
 
 describe('the hello script events', () => {
-  it('opens a turn with a delta and a started tool call before it asks', async () => {
+  it('tells of its key and its options, then opens a turn with a delta and a started tool call before it asks', async () => {
     expect.hasAssertions()
     const session = await openSession(tempDir('bb-fake-'))
     const running = session.prompt({ text: 'go' })
     const events = await readUntil(session, ASKED)
-    expect(typesOf(events)).toStrictEqual(['turn.started', 'message.delta', 'tool.started', ASKED])
+    expect(typesOf(events)).toStrictEqual([
+      'session.warning',
+      'raw',
+      STARTED,
+      'message.delta',
+      'tool.started',
+      ASKED,
+    ])
     await session.close()
     await running
   })
@@ -184,7 +197,7 @@ describe('the slow script interrupted', () => {
     expect.hasAssertions()
     const session = await openSession(tempDir('bb-fake-'), SLOW)
     const running = session.prompt({ text: 'take your time' })
-    await readUntil(session, 'turn.started')
+    await readUntil(session, STARTED)
     await session.interrupt()
     await running
     await session.close()
@@ -211,7 +224,7 @@ describe('the slow script closed', () => {
     expect.hasAssertions()
     const session = await openSession(tempDir('bb-fake-'), SLOW)
     const running = session.prompt({ text: 'take your time' })
-    await readUntil(session, 'turn.started')
+    await readUntil(session, STARTED)
     await session.close()
     await expect(running).resolves.toBeUndefined()
   })
@@ -226,11 +239,52 @@ describe('the slow script closed', () => {
 
   it('falls back to the hello script for any other value of the variable', async () => {
     expect.hasAssertions()
-    const session = await openSession(tempDir('bb-fake-'), { BYTEBUREAU_FAKE_SCRIPT: 'other' })
+    const session = await openSession(tempDir('bb-fake-'), {
+      env: { BYTEBUREAU_FAKE_SCRIPT: 'other' },
+    })
     const running = session.prompt({ text: 'go' })
     const events = await readUntil(session, ASKED)
     expect(typesOf(events)).toContain(ASKED)
     await session.close()
     await running
+  })
+})
+
+describe('the start of a turn', () => {
+  it('tells whether its key variable is set, never its value, and the options it was given', async () => {
+    expect.hasAssertions()
+    const canary = 'sk-canary-fake'
+    const options = { flavour: 'mild' }
+    const session = await openSession(tempDir('bb-fake-'), {
+      env: { BYTEBUREAU_FAKE_API_KEY: canary },
+      providerConfig: options,
+    })
+    const running = session.prompt({ text: 'go' })
+    const events = await readUntil(session, STARTED)
+    expect(events.slice(0, 2)).toStrictEqual([
+      { type: 'session.warning', kind: 'env', message: 'api key: present' },
+      { type: 'raw', providerEvent: { providerConfig: options } },
+    ])
+    expect(JSON.stringify(events)).not.toContain(canary)
+    await session.close()
+    await running
+  })
+
+  it('takes the slow script from its options, unless the variable names a script', async () => {
+    expect.hasAssertions()
+    const slow = await openSession(tempDir('bb-fake-'), { providerConfig: { flavour: 'slow' } })
+    const named = await openSession(tempDir('bb-fake-'), {
+      env: { BYTEBUREAU_FAKE_SCRIPT: 'hello' },
+      providerConfig: { flavour: 'slow' },
+    })
+    const running = [slow.prompt({ text: 'wait' }), named.prompt({ text: 'go' })]
+    await readUntil(slow, STARTED)
+    await slow.interrupt()
+    const asked = await readUntil(named, ASKED)
+    await Promise.all([slow.close(), named.close(), ...running])
+    expect([typesOf(await readAll(slow)), typesOf(asked).at(-1)]).toStrictEqual([
+      ['turn.completed'],
+      ASKED,
+    ])
   })
 })

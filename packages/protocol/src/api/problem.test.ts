@@ -20,6 +20,13 @@ describe('problem details', () => {
     expect(Schema.decodeUnknownSync(Problem)(located)).toStrictEqual(located)
   })
 
+  it.each(['profile_not_found', 'profile_exists', 'profile_invalid', 'profile_in_use'])(
+    'lists %s among the well-known codes',
+    (code) => {
+      expect(PROBLEM_CODES).toContain(code)
+    },
+  )
+
   it('lists the well-known codes once each, in snake case', () => {
     expect.hasAssertions()
     expect(new Set(PROBLEM_CODES).size).toBe(PROBLEM_CODES.length)

@@ -1,7 +1,26 @@
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { HealthDto, PluginStatusDto, SessionDto, TurnDto, WorkspaceInfoDto } from './dto.js'
-import { CreateSessionBody, EventsFilter, EventsQuery } from './requests.js'
+import {
+  HealthDto,
+  PluginStatusDto,
+  ProfileDto,
+  ProfileStatusDto,
+  ProviderDto,
+  SessionDto,
+  TurnDto,
+  UsageSnapshotDto,
+  WorkspaceInfoDto,
+} from './dto.js'
+import {
+  AddProfileBody,
+  CreateSessionBody,
+  EventsFilter,
+  EventsQuery,
+  ProfileIdParam,
+  RemoveProfileQuery,
+} from './requests.js'
+
+const PROFILE_ID = 'claude/work'
 
 const employee = {
   id: 'developer',
@@ -81,6 +100,47 @@ describe('the API DTO schemas', () => {
   })
 })
 
+describe('the profile DTOs', () => {
+  it('decodes a profile, a profile status and a usage snapshot, and refuses a kind outside the two', () => {
+    const profile = Schema.decodeUnknownSync(ProfileDto)({
+      id: PROFILE_ID,
+      providerId: 'claude',
+      name: 'work',
+      kind: 'login',
+      configDir: '/home/me/.bytebureau/profiles/claude/work',
+      isDefault: true,
+      createdAt: '2026-10-04T12:00:00.000Z',
+    })
+    expect(profile.kind).toBe('login')
+    expect(() => Schema.decodeUnknownSync(ProfileDto)({ ...profile, kind: 'oauth' })).toThrow(
+      /kind/u,
+    )
+    const status = Schema.decodeUnknownSync(ProfileStatusDto)({
+      profileId: PROFILE_ID,
+      state: 'loggedOut',
+      hint: 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/claude/work claude /login',
+      checkedAt: '2026-10-04T12:00:01.000Z',
+    })
+    expect(status.state).toBe('loggedOut')
+    const snapshot = Schema.decodeUnknownSync(UsageSnapshotDto)({
+      profileId: PROFILE_ID,
+      rateLimit: { fiveHourPct: 12.5 },
+      observedAt: null,
+    })
+    expect(snapshot.observedAt).toBeNull()
+  })
+
+  it('tells whether a provider takes API-key profiles', () => {
+    expect(
+      Schema.decodeUnknownSync(ProviderDto)({
+        id: 'claude',
+        displayName: 'Claude Code',
+        supportsApiKey: true,
+      }).supportsApiKey,
+    ).toBe(true)
+  })
+})
+
 describe('the worktree DTO', () => {
   const worktree = {
     sessionId: session.id,
@@ -135,4 +195,58 @@ describe('the API request schemas', () => {
     expect(Schema.decodeUnknownSync(EventsQuery)({ since: '0' })).toStrictEqual({ since: 0 })
     expect(Schema.decodeUnknownSync(EventsFilter)({ since: 0 })).toStrictEqual({ since: 0 })
   })
+})
+
+describe('the profile request schemas', () => {
+  it('decodes the body that adds a profile, with the key and the default optional', () => {
+    const body = Schema.decodeUnknownSync(AddProfileBody)({
+      providerId: 'claude',
+      name: 'work',
+      kind: 'login',
+    })
+    expect(body).toStrictEqual({ providerId: 'claude', name: 'work', kind: 'login' })
+    expect(
+      Schema.decodeUnknownSync(AddProfileBody)({
+        providerId: 'acp:codex',
+        name: 'key',
+        kind: 'api_key',
+        apiKey: 'sk-test',
+        makeDefault: true,
+      }).makeDefault,
+    ).toBe(true)
+    expect(() =>
+      Schema.decodeUnknownSync(AddProfileBody)({
+        providerId: 'claude',
+        name: 'Work Profile',
+        kind: 'login',
+      }),
+    ).toThrow(/name/u)
+  })
+
+  it('reads the profile of a path and the purge of a query as the text they are', () => {
+    expect(Schema.decodeUnknownSync(ProfileIdParam)({ id: PROFILE_ID })).toStrictEqual({
+      id: PROFILE_ID,
+    })
+    expect(Schema.decodeUnknownSync(RemoveProfileQuery)({})).toStrictEqual({})
+    expect(Schema.decodeUnknownSync(RemoveProfileQuery)({ purge: 'true' })).toStrictEqual({
+      purge: 'true',
+    })
+    expect(() => Schema.decodeUnknownSync(RemoveProfileQuery)({ purge: 'yes' })).toThrow(/purge/u)
+  })
+})
+
+describe('the name of a profile', () => {
+  it.each(['a', '0', 'work-2', 'a'.repeat(32)])('takes %j', (name) => {
+    const body = { providerId: 'claude', name, kind: 'login' }
+    expect(Schema.decodeUnknownSync(AddProfileBody)(body)).toStrictEqual(body)
+  })
+
+  it.each(['', '-work', 'a'.repeat(33), 'under_score'])(
+    'refuses %j, since it is a path segment',
+    (name) => {
+      expect(() =>
+        Schema.decodeUnknownSync(AddProfileBody)({ providerId: 'claude', name, kind: 'login' }),
+      ).toThrow(/name/u)
+    },
+  )
 })

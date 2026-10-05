@@ -1,6 +1,12 @@
 import type { EventEnvelope } from '@bytebureau/protocol'
 import { Effect, Stream, type Cause } from 'effect'
-import type { ConfigError, SessionError, StoreError, WorkspaceError } from '../errors.js'
+import type {
+  ConfigError,
+  ProfileError,
+  SessionError,
+  StoreError,
+  WorkspaceError,
+} from '../errors.js'
 import { EventLog } from '../events/event-log.js'
 import { PluginHost } from '../plugins/plugin-host.js'
 import { ProjectRegistry, type Project } from '../projects/project-registry.js'
@@ -10,7 +16,7 @@ import { SessionManager } from './session-manager.js'
 import type { CreateSessionInput, Session } from './types.js'
 
 type RegisterFailure = WorkspaceError | ConfigError | StoreError
-type CreateFailure = SessionError | RegisterFailure
+type CreateFailure = SessionError | ProfileError | RegisterFailure
 
 // A fresh repository registered as a project, with the project file it is given; the plugins are loaded first
 export const registerRepo = (

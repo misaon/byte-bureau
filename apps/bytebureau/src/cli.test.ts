@@ -43,6 +43,7 @@ describe('bytebureau CLI', () => {
       'sessions',
       'ask',
       'plugins',
+      'profiles',
     ]) {
       expect(commands, name).toMatch(new RegExp(`^\\s+${name}\\s+\\S`, 'mu'))
     }

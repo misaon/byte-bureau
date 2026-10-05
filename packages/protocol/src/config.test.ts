@@ -68,4 +68,28 @@ describe(decodeUserConfig, () => {
     expect(() => decodeUserConfig({ ...userConfig, extra: true })).toThrow(/extra/u)
     expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
   })
+
+  it('accepts the projects and the commands the user trusts, and refuses anything else there', () => {
+    const trust = { projects: ['/home/me/app'], commands: ['bun', '/opt/codex/bin/codex-acp'] }
+    expect(decodeUserConfig({ trust }).trust).toStrictEqual(trust)
+    expect(() => decodeUserConfig({ trust: { commands: 'bun' } })).toThrow(/commands/u)
+    expect(() => decodeUserConfig({ trust: { everything: true } })).toThrow(/everything/u)
+  })
+
+  it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
+    expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({
+      backend: 'file',
+    })
+    expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
+  })
+})
+
+describe('the projects the user trusts', () => {
+  it('refuses a trusted project named by a relative path, saying an absolute one is expected', () => {
+    expect(() => decodeUserConfig({ trust: { projects: ['code/app'] } })).toThrow(
+      /Expected an absolute path\n {2}at \["trust"\]\["projects"\]\[0\]/u,
+    )
+    const windows = { projects: [String.raw`C:\code\app`, String.raw`\\server\share\app`] }
+    expect(decodeUserConfig({ trust: windows }).trust).toStrictEqual(windows)
+  })
 })

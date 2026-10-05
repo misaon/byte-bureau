@@ -2,6 +2,7 @@ import {
   AskError,
   ConfigError,
   PluginError,
+  ProfileError,
   ProviderError,
   SessionError,
   StoreError,
@@ -80,6 +81,30 @@ const KERNEL_FAILURES: {
     status: 422,
     code: 'provider_missing',
     detail: 'x',
+  },
+  {
+    failure: new ProfileError({ code: 'not_found', reason: 'no profile "fake/nope"' }),
+    status: 404,
+    code: 'profile_not_found',
+    detail: 'no profile "fake/nope"',
+  },
+  {
+    failure: new ProfileError({ code: 'exists', reason: 'x' }),
+    status: 409,
+    code: 'profile_exists',
+    detail: 'x',
+  },
+  {
+    failure: new ProfileError({ code: 'in_use', reason: 'x' }),
+    status: 409,
+    code: 'profile_in_use',
+    detail: 'x',
+  },
+  {
+    failure: new ProfileError({ code: 'invalid', reason: 'a login profile takes no key' }),
+    status: 422,
+    code: 'profile_invalid',
+    detail: 'a login profile takes no key',
   },
   {
     failure: new WorkspaceError({ code: 'dirty', reason: 'x' }),
@@ -174,6 +199,15 @@ describe('problem details of the API', () => {
 
   it.each(KERNEL_FAILURES)('maps $failure to $status $code', ({ failure, ...told }) => {
     expect(toProblem(failure)).toMatchObject(told)
+  })
+
+  it('tells the reason of a refused profile with any run of text shaped like a key hidden', () => {
+    const reason = `${API_KEY} is no key of the provider`
+    expect(toProblem(new ProfileError({ code: 'invalid', reason }))).toMatchObject({
+      status: 422,
+      code: 'profile_invalid',
+      detail: '[REDACTED] is no key of the provider',
+    })
   })
 
   it('tells nothing of an unknown failure beyond that it was unexpected', () => {

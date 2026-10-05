@@ -27,6 +27,9 @@
             '.vscode/**',
             '.editorconfig',
           ]
+'area: agents':
+  - changed-files:
+      - any-glob-to-any-file: ['plugins/agent-*/**']
 'area: api':
   - changed-files:
       - any-glob-to-any-file: ['packages/api/**']

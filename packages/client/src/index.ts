@@ -1,4 +1,5 @@
 import type {
+  AddProfileBody,
   AskAnswer,
   AskRecord,
   CreateSessionBody,
@@ -6,6 +7,8 @@ import type {
   EventsFilter,
   HealthDto,
   PluginStatusDto,
+  ProfileDto,
+  ProfileStatusDto,
   ProjectDto,
   PromptInput,
   ProviderDto,
@@ -14,6 +17,7 @@ import type {
   SessionDto,
   SessionUsageDto,
   TurnDto,
+  UsageSnapshotDto,
   WorkspaceInfoDto,
 } from '@bytebureau/protocol'
 import {
@@ -23,6 +27,11 @@ import {
   healthCheck,
   pluginsList,
   pluginsProviders,
+  profilesAdd,
+  profilesList,
+  profilesRemove,
+  profilesSetDefault,
+  profilesStatus,
   projectsGet,
   projectsList,
   projectsRegister,
@@ -35,6 +44,7 @@ import {
   sessionsPrompt,
   sessionsResume,
   sessionsStop,
+  usageProfile,
   usageSession,
   workspacesList,
   workspacesPrune,
@@ -61,6 +71,11 @@ export interface EventsOptions {
   readonly retryFor?: number | undefined
 }
 
+export interface RemoveProfileOptions {
+  // The login directory of the profile goes as well; without it a profile added again under the name finds its login
+  readonly purge?: boolean | undefined
+}
+
 // The API of the daemon in ByteBureau's names and the protocol's types; a refusal is thrown as an ApiError
 export interface BureauClient {
   readonly projects: {
@@ -85,7 +100,19 @@ export interface BureauClient {
     readonly get: (id: string) => Promise<AskRecord | undefined>
     readonly answer: (id: string, answer: AskAnswer) => Promise<void>
   }
-  readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsageDto> }
+  readonly profiles: {
+    readonly list: () => Promise<readonly ProfileDto[]>
+    readonly add: (body: AddProfileBody) => Promise<ProfileDto>
+    // A profile id is <provider>/<name>; the client sends it as one path segment
+    readonly remove: (id: string, options?: RemoveProfileOptions) => Promise<void>
+    readonly setDefault: (id: string) => Promise<void>
+    readonly status: (id: string) => Promise<ProfileStatusDto>
+  }
+  readonly usage: {
+    readonly session: (sessionId: string) => Promise<SessionUsageDto>
+    // The last rate limit seen under the profile: empty, with no observedAt, before any
+    readonly profile: (id: string) => Promise<UsageSnapshotDto>
+  }
   readonly workspaces: {
     // The worktrees of one project or of all
     readonly list: (projectId?: string) => Promise<readonly WorkspaceInfoDto[]>
@@ -113,6 +140,21 @@ const projectsOf = ({ client, data, lookup, done }: Http): BureauClient['project
   register: data(projectsRegister, (body: RegisterProjectBody) => ({ client, body })),
   get: lookup(projectsGet, (id: string) => ({ client, path: { id } })),
   remove: done(projectsRemove, (id: string) => ({ client, path: { id } })),
+})
+
+// The query string carries the purge as text
+const purgeText = (purge: boolean): 'true' | 'false' => (purge ? 'true' : 'false')
+
+const profilesOf = ({ client, data, done }: Http): BureauClient['profiles'] => ({
+  list: data(profilesList, () => ({ client })),
+  add: data(profilesAdd, (body: AddProfileBody) => ({ client, body })),
+  remove: done(profilesRemove, (id: string, { purge }: RemoveProfileOptions = {}) => ({
+    client,
+    path: { id },
+    ...(purge === undefined ? {} : { query: { purge: purgeText(purge) } }),
+  })),
+  setDefault: done(profilesSetDefault, (id: string) => ({ client, path: { id } })),
+  status: data(profilesStatus, (id: string) => ({ client, path: { id } })),
 })
 
 const sessionsOf = ({ client, data, lookup, done }: Http): BureauClient['sessions'] => ({
@@ -148,7 +190,10 @@ const daemonOf = ({
   client,
   data,
 }: Http): Pick<BureauClient, 'health' | 'plugins' | 'usage' | 'workspaces'> => ({
-  usage: { session: data(usageSession, (id: string) => ({ client, path: { id } })) },
+  usage: {
+    session: data(usageSession, (id: string) => ({ client, path: { id } })),
+    profile: data(usageProfile, (id: string) => ({ client, path: { id } })),
+  },
   workspaces: {
     list: data(workspacesList, (projectId?: string) => ({
       client,
@@ -188,6 +233,7 @@ export function createBureauClient(options: ClientOptions): BureauClient {
   const calls = http({ ...options, baseUrl })
   return {
     projects: projectsOf(calls),
+    profiles: profilesOf(calls),
     sessions: sessionsOf(calls),
     asks: asksOf(calls),
     ...daemonOf(calls),

@@ -1,8 +1,10 @@
 import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
+import { ProfileService } from '../profiles/profile-service.js'
 import { SessionManager } from '../sessions/session-manager.js'
+import { profileUsage } from '../usage/profile-usage.js'
 import { UsageService } from '../usage/usage-service.js'
-import type { Promised } from './promised.js'
+import type { Captured, Promised } from './promised.js'
 import type { Kernel } from './types.js'
 
 export const sessionsApi = (promised: Promised): Kernel['sessions'] => ({
@@ -26,6 +28,10 @@ export const asksApi = (promised: Promised): Kernel['asks'] => ({
   answer: promised(AskService, (asks, ...args) => Effect.asVoid(asks.answer(...args))),
 })
 
-export const usageApi = (promised: Promised): Kernel['usage'] => ({
+// The usage of a profile as the API tells it: it reads the profiles and the snapshots, from the captured services
+export const usageApi = (promised: Promised, services: Captured): Kernel['usage'] => ({
   session: promised(UsageService, (usage, sessionId) => usage.sessionUsage(sessionId)),
+  profile: promised(ProfileService, (_profiles, id: string) =>
+    Effect.provide(profileUsage(id), services),
+  ),
 })

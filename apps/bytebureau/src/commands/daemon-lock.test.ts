@@ -1,12 +1,11 @@
-import { readFileSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { lockPath, readServerInfo } from '../daemon/server-info.js'
 import { daemonLogPath } from '../daemon/daemon-log.js'
 import { stoppedWithTheTest, watchedPort } from '../testing/daemon.js'
 import { daemonOfSkewedLock, oldLock, silentLine } from '../testing/old-lock.js'
 import { runCli } from '../testing/run-cli.js'
-import { testHome } from '../testing/temp-repo.js'
+import { configureHome, testHome } from '../testing/temp-repo.js'
 
 // The pid of the daemon that serves the home, by its record
 const daemonPid = (home: string): number | undefined => {
@@ -18,7 +17,7 @@ const daemonPid = (home: string): number | undefined => {
 const homeOnPort = (port: number): string => {
   const home = testHome()
   stoppedWithTheTest(home)
-  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify({ server: { port } })}\n`)
+  configureHome(home, { server: { port } })
   return home
 }
 

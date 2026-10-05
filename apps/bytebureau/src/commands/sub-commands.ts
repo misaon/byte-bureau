@@ -2,6 +2,7 @@ import { askCommand } from './ask.js'
 import { configCommand } from './config.js'
 import { helloCommand } from './hello.js'
 import { pluginsCommand } from './plugins.js'
+import { profilesCommand } from './profiles.js'
 import { projectsCommand } from './projects.js'
 import { runCommand } from './run.js'
 import { serveCommand } from './serve.js'
@@ -19,4 +20,5 @@ export const subCommands = {
   sessions: sessionsCommand,
   ask: askCommand,
   plugins: pluginsCommand,
+  profiles: profilesCommand,
 }

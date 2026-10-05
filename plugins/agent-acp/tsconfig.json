@@ -1,0 +1,5 @@
+{
+  "extends": "@bytebureau/tsconfig/effect.json",
+  "compilerOptions": { "types": ["bun"], "allowImportingTsExtensions": true },
+  "include": ["src/**/*.ts"]
+}

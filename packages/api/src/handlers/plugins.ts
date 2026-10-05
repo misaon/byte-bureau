@@ -7,9 +7,11 @@ export const PluginsHandlers = HttpApiBuilder.group(BureauApi, 'plugins', (handl
     .handle('list', () => PluginHost.useSync((host) => host.plugins()))
     .handle('providers', () =>
       PluginHost.useSync((host) =>
-        host
-          .agentProviders()
-          .map((provider) => ({ id: provider.id, displayName: provider.displayName })),
+        host.agentProviders().map((provider) => ({
+          id: provider.id,
+          displayName: provider.displayName,
+          supportsApiKey: provider.apiKeyEnv !== undefined,
+        })),
       ),
     ),
 )

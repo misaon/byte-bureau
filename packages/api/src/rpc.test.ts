@@ -12,7 +12,9 @@ import {
   connected,
   envelopesOf,
   readUntil,
+  refusedWith,
   request,
+  SUCCEEDED,
   tagOf,
   type WsClient,
   type WsMessage,
@@ -92,13 +94,6 @@ const prunedOver = (
     payload: { projectId },
     token: TEST_TOKEN,
   }).pipe(Effect.map((answer) => Schema.decodeUnknownSync(Pruned)(answer).exit.value))
-
-const SUCCEEDED = { exit: { _tag: 'Success' } }
-
-// The failure of a procedure the kernel refused, told by the code of its problem
-const refusedWith = (code: string): object => ({
-  exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: { code } }] },
-})
 
 // The other procedures on a ready session, in an order the kernel accepts, and what each answers
 const lifecycle = (sessionId: string): [string, object, object][] => [

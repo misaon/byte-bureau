@@ -19,6 +19,8 @@ export const AskStatus = Schema.Literals(['pending', 'answered', 'expired', 'can
 export const PermissionMode = Schema.Literals(['supervised', 'autonomous', 'yolo'])
 export const Effort = Schema.Literals(['low', 'medium', 'high', 'xhigh', 'max'])
 export const AnsweredVia = Schema.Literals(['cli', 'api', 'timeout', 'policy'])
+// How a profile signs its provider in: a login of its own, or an API key in the secret store
+export const ProfileKind = Schema.Literals(['login', 'api_key'])
 
 export type Id = typeof Id.Type
 export type Timestamp = typeof Timestamp.Type
@@ -28,3 +30,4 @@ export type AskStatus = typeof AskStatus.Type
 export type PermissionMode = typeof PermissionMode.Type
 export type Effort = typeof Effort.Type
 export type AnsweredVia = typeof AnsweredVia.Type
+export type ProfileKind = typeof ProfileKind.Type

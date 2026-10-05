@@ -1,5 +1,6 @@
 import { assert, it } from '@effect/vitest'
 import { Effect } from 'effect'
+import { allowlistEnv } from '../process/env-allowlist.js'
 import { messagesOf, turnsOf } from './session-db-fixtures.js'
 import { payloadsOf, sessionOf, startSession } from './session-fixtures.js'
 import { workspaceOf } from './session-helper-fixtures.js'
@@ -35,7 +36,7 @@ const KERNEL_OWN = {
 const plain = driven()
 
 it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
-  suite.effect('hands over the workspace, the employee and the profile', () =>
+  suite.effect('hands over the workspace, the employee, the profile and no provider options', () =>
     Effect.gen(function* handsOver() {
       const session = yield* startSession({ providerId: 'scripted' })
       const { agent } = yield* prompted(plain, session)
@@ -47,6 +48,7 @@ it.layer(plain.layer)('SessionManager starts the provider session', (suite) => {
         providerId: 'scripted',
         kind: 'login',
       })
+      assert.deepStrictEqual(request.providerConfig, {})
       assert.strictEqual(request.resume, undefined)
     }),
   )
@@ -88,9 +90,10 @@ it.layer(plain.layer)('SessionManager environment the caller adds', (suite) => {
       const { agent } = yield* prompted(plain, session)
       const names = Object.keys(FORGED).filter((name) => !name.startsWith('BYTEBUREAU_'))
       const given = names.map((name) => agent.request.env[name])
+      const daemon = allowlistEnv(process.env)
       assert.deepStrictEqual(
         given,
-        names.map((name) => process.env[name]),
+        names.map((name) => daemon[name]),
       )
     }),
   )

@@ -3,6 +3,7 @@ import { Effect } from 'effect'
 import { ProviderError } from '../errors.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { payloadsOf, sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
+import { freeWorktree } from './session-helper-fixtures.js'
 import { FINISH } from './session-push-fixtures.js'
 import { SessionManager } from './session-manager.js'
 import { prompted } from './session-prompted-fixtures.js'
@@ -119,6 +120,40 @@ it.layer(plain.layer)('SessionManager agent that reports an error', (suite) => {
   )
 })
 
+const FIRST = { providerId: 'scripted', ref: 'first' }
+const RESTARTED = { providerId: 'scripted', ref: 'restarted' }
+const referenced = driven({ externalRef: FIRST })
+const unreferenced = driven()
+
+it.layer(referenced.layer)(
+  'SessionManager agent whose reference changes before its error',
+  (suite) => {
+    suite.effect('keeps the reference the agent gave last, for a resume', () =>
+      Effect.gen(function* keepsLastReference() {
+        const session = yield* startSession(AGENT)
+        const { agent } = yield* prompted(referenced, session)
+        agent.externalRef = RESTARTED
+        agent.queue.push(AUTH)
+        yield* waitFor(session.id, ERRORED)
+        assert.deepStrictEqual((yield* sessionOf(session.id)).externalRef, RESTARTED)
+      }),
+    )
+  },
+)
+
+it.layer(unreferenced.layer)('SessionManager agent that errors in its first turn', (suite) => {
+  suite.effect('keeps the reference the agent gave meanwhile', () =>
+    Effect.gen(function* keepsFirstReference() {
+      const session = yield* startSession(AGENT)
+      const { agent } = yield* prompted(unreferenced, session)
+      agent.externalRef = FIRST
+      agent.queue.push(AUTH)
+      yield* waitFor(session.id, ERRORED)
+      assert.deepStrictEqual((yield* sessionOf(session.id)).externalRef, FIRST)
+    }),
+  )
+})
+
 const broken = driven({ eventsFailure: new Error('stream broke') })
 
 it.layer(broken.layer)('SessionManager agent whose events fail', (suite) => {
@@ -145,6 +180,25 @@ it.layer(withoutEvents.layer)('SessionManager agent that cannot give its events'
       assert.deepStrictEqual(yield* payloadsOf(session.id, ERRORED), [
         { status: 'errored', kind: 'protocol', message: 'no events for you', retryable: true },
       ])
+    }),
+  )
+})
+
+const erroring = driven()
+
+it.layer(erroring.layer)('SessionManager errored session', (suite) => {
+  suite.effect('completes the errored session without its agent, and frees its worktree', () =>
+    Effect.gen(function* completesErrored() {
+      const sessions = yield* SessionManager
+      const session = yield* startSession({ providerId: 'scripted' })
+      const { agent } = yield* prompted(erroring, session)
+      agent.queue.push(AUTH)
+      yield* waitFor(session.id, ERRORED)
+      yield* sessions.complete(session.id)
+      const completed = yield* sessionOf(session.id)
+      assert.ok(completed.status === 'completed' && completed.endedAt !== null)
+      assert.deepStrictEqual((yield* typesOf(session.id)).slice(-2), [ERRORED, 'session.completed'])
+      assert.ok(yield* freeWorktree(session))
     }),
   )
 })

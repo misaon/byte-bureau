@@ -141,6 +141,16 @@ it.effect('loads the user layer and the defaults when no project path is given',
   }),
 )
 
+it.effect('carries the secrets backend of the user file and keeps it out of the project', () =>
+  Effect.gen(function* carriesSecretsBackend() {
+    const { config, home } = yield* workspace()
+    write(home, USER_FILE, { secrets: { backend: 'keychain' } })
+    const resolved = yield* config.load({})
+    assert.deepStrictEqual(resolved.user.secrets, { backend: 'keychain' })
+    assert.notProperty(resolved.project, 'secrets')
+  }),
+)
+
 it.effect('reports absolute file paths for a relative home directory', () =>
   Effect.gen(function* resolvesRelativeHome() {
     const { home } = yield* workspace()

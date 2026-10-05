@@ -69,14 +69,15 @@ const logger = kernelLogger(['bb', 'api'])
 
 const formattedAddress = HttpServer.addressFormattedWith((address) => Effect.succeed(address))
 
-// The kernel is given what it reads, and never the token
+// The kernel is given what it reads, and never the token; it chooses its secret store itself unless a test gives one
 const kernelOptionsOf = ({
   home,
   env,
   logging,
   extraPlugins,
   pluginConfig,
-}: DaemonOptions): KernelOptions => ({ home, env, logging, extraPlugins, pluginConfig })
+  secrets,
+}: DaemonOptions): KernelOptions => ({ home, env, logging, extraPlugins, pluginConfig, secrets })
 
 // The server section of the user configuration; one that cannot be read leaves the address to the flags and the defaults, and says so
 const configuredServer = (env: KernelOptions['env']): Effect.Effect<ServerSection, never, Config> =>

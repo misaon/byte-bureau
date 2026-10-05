@@ -23,6 +23,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@bytebureau/agent-acp": "workspace:*",
+    "@bytebureau/agent-claude": "workspace:*",
     "@bytebureau/plugin-api": "workspace:*",
     "@bytebureau/protocol": "workspace:*",
     "@bytebureau/workspace-local": "workspace:*",

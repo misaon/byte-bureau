@@ -33,6 +33,8 @@
     "check": "bun run lint && bun run format:check && bun run spell && bun run lint:md && bun run lint:ls && bun run knip && bun run depcruise && bun run typecheck && bun run test:coverage && bun run lint:long-tail",
     "build:binaries": "bun run build:i18n && bun run scripts/build-binaries.ts",
     "docs:build": "turbo run docs:build",
+    "smoke:claude": "SMOKE_REAL_AGENTS=1 bun scripts/smoke-claude.ts",
+    "smoke:acp": "SMOKE_REAL_AGENTS=1 bun scripts/smoke-acp.ts",
     "release": "changelogen --release --no-push --no-tag --no-github"
   },
   "devDependencies": {

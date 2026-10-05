@@ -2,6 +2,7 @@ import { ApiError } from '@bytebureau/client'
 import {
   AskError,
   ConfigError,
+  ProfileError,
   ProviderError,
   SessionError,
   StoreError,
@@ -70,6 +71,13 @@ describe('refusable and the kernel in the process of the command', () => {
     [
       'a workspace',
       new WorkspaceError({ code: 'has_sessions', reason: 'project repo still has 1 session' }),
+    ],
+    [
+      'a profile',
+      new ProfileError({
+        code: 'in_use',
+        reason: 'profile "fake/work" is in use: 1 session(s) still run under it or can resume',
+      }),
     ],
   ])(
     'tells the reason of the kernel refusing %s, and ends with exit code 1',

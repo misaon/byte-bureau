@@ -20,7 +20,7 @@
     "CODE_OF_CONDUCT.md",
     ".github/workflows/*.yml"
   ],
-  "ignoreRegExpList": ["/\\b[0-9a-f]{40}\\b/g", "/sha256-[A-Za-z0-9+/=]+/g"],
+  "ignoreRegExpList": ["/\\b[0-9a-f]{40}\\b/g", "/sha256-[A-Za-z0-9+/=]+/g", "/%[0-9A-Fa-f]{2}/g"],
   "overrides": [
     { "filename": "**/messages/cs.json", "language": "en,cs" },
     { "filename": "**/*.test.ts", "language": "en,cs" },

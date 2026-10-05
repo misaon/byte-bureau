@@ -54,6 +54,7 @@ export const localBureau = (kernel: Kernel, version: string): Bureau => {
   return {
     projects: kernel.projects,
     sessions: kernel.sessions,
+    profiles: kernel.profiles,
     asks: {
       pending: kernel.asks.pending,
       get: kernel.asks.get,
@@ -82,7 +83,7 @@ export const localBureau = (kernel: Kernel, version: string): Bureau => {
     health: {
       check: async () => {
         const report = await kernel.health.check()
-        return { ...report, version, startedAt }
+        return { status: report.status, version, startedAt, checks: report.checks }
       },
     },
     where: { kind: 'in-process' },

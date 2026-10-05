@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { Effort, PermissionMode } from './common.js'
+import { Effort, PermissionMode, ProfileKind } from './common.js'
 import { Appearance, ToolPolicy } from './employee.js'
 
 export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
@@ -72,7 +72,7 @@ const UserDefaults = Schema.Struct({
 const UserProfile = Schema.Struct({
   providerId: Schema.String,
   name: Schema.String,
-  kind: Schema.Literals(['login', 'api_key']),
+  kind: ProfileKind,
   configDir: Schema.optionalKey(Schema.String),
 })
 const ProfilesSection = Schema.Record(Schema.String, UserProfile)
@@ -82,6 +82,21 @@ const TelemetrySection = Schema.Struct({
 })
 const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 
+// Where the daemon keeps secrets: the OS keychain through Bun.secrets, a 0600 file under the home, or whichever of the two works (auto)
+export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
+const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
+
+// A path from the root, POSIX or Windows: a relative one would name a different project from every working directory
+const AbsolutePath = Schema.String.check(
+  Schema.isPattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/u, { expected: 'an absolute path' }),
+)
+
+// What a project's own files may run: the commands of providers.<id> run for a project listed by its path, or a command listed by its exact name or path
+const TrustSection = Schema.Struct({
+  projects: Schema.optionalKey(Schema.Array(AbsolutePath)),
+  commands: Schema.optionalKey(Schema.Array(Schema.String)),
+})
+
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
   profiles: Schema.optionalKey(ProfilesSection),
@@ -89,6 +104,8 @@ export const UserConfig = Schema.Struct({
   locale: Schema.optionalKey(Schema.String),
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
+  secrets: Schema.optionalKey(SecretsSection),
+  trust: Schema.optionalKey(TrustSection),
   ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
@@ -96,6 +113,7 @@ export type LogLevel = typeof LogLevel.Type
 export type EmployeeConfig = typeof EmployeeConfig.Type
 export type PluginRef = typeof PluginRef.Type
 export type ProjectConfig = typeof ProjectConfig.Type
+export type SecretsBackend = typeof SecretsBackend.Type
 export type UserConfig = typeof UserConfig.Type
 
 const STRICT = { onExcessProperty: 'error', errors: 'all' } as const

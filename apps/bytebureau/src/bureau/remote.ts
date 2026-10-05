@@ -11,6 +11,7 @@ export const remoteBureau = (client: BureauClient, url: string): Bureau => ({
     },
   },
   sessions: client.sessions,
+  profiles: client.profiles,
   asks: client.asks,
   // A run gives up on a daemon that stays unreachable for fifteen seconds; the next start of the daemon stops the session
   events: {

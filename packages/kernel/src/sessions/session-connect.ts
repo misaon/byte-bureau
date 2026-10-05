@@ -1,9 +1,9 @@
 import { Effect } from 'effect'
-import { SessionError, type ProviderError } from '../errors.js'
+import { SessionError } from '../errors.js'
 import type { Live } from './live-sessions.js'
 import type { SessionDeps } from './session-deps.js'
 import { requireProvider } from './session-provider.js'
-import { startAgent } from './session-start.js'
+import { startAgent, type StartFailure } from './session-start.js'
 import type { Session } from './types.js'
 
 // A session works in the workspace that provisioning made
@@ -15,10 +15,7 @@ const workspacePathOf = (session: Session): Effect.Effect<string, SessionError> 
     : Effect.succeed(session.workspace.path)
 
 // Starts the provider session of a session; its events are not pumped yet
-export const connect = (
-  deps: SessionDeps,
-  session: Session,
-): Effect.Effect<Live, SessionError | ProviderError> =>
+export const connect = (deps: SessionDeps, session: Session): Effect.Effect<Live, StartFailure> =>
   Effect.gen(function* connects() {
     const provider = yield* requireProvider(deps.host, session.providerId)
     const workspacePath = yield* workspacePathOf(session)

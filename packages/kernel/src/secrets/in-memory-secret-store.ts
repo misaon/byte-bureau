@@ -1,7 +1,8 @@
-import type { SecretStore } from '@bytebureau/plugin-api'
+import type { SecretsShape } from './secrets.js'
 
-// Phase A placeholder; Phase C replaces it with the keychain and the age-encrypted fallback
-export class InMemorySecretStore implements SecretStore {
+// Secrets for as long as the process lives: the store of a kernel that is given none, as the test kernels are
+export class InMemorySecretStore implements SecretsShape {
+  public readonly backend = 'memory' as const
   private readonly values = new Map<string, string>()
 
   public async get(key: string): Promise<string | undefined> {

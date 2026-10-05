@@ -80,6 +80,15 @@ export const AskError = described(
 )
 export type AskError = InstanceType<typeof AskError>
 
+export const ProfileError = described(
+  Data.TaggedError('ProfileError')<{
+    readonly code: 'not_found' | 'exists' | 'invalid' | 'in_use'
+    readonly reason: string
+  }>,
+  reasonMessage,
+)
+export type ProfileError = InstanceType<typeof ProfileError>
+
 export const PluginError = described(
   Data.TaggedError('PluginError')<{
     readonly plugin: string

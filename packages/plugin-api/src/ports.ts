@@ -42,11 +42,25 @@ export interface ExternalSessionRef {
   readonly ref: string
 }
 
+// What the user configuration trusts of the project a session runs in (its trust.projects and trust.commands)
+export interface ProjectTrust {
+  // The project is trusted as a whole: an adapter may load what the project configures for its agent, such as Claude Code's project settings
+  readonly project: boolean
+  // The keys of providerConfig the kernel withheld: a command, its arguments or environment, or a hint, that the project names without the user's trust
+  readonly withheld: readonly string[]
+  // Why a withheld command was withheld, and how the person trusts it, for the refusal it causes
+  readonly hint: string
+}
+
 export interface CreateSessionRequest {
   readonly sessionId: string
   readonly workspace: { readonly path: string }
   readonly employee: EmployeeSpec
   readonly profile: ProfileRef
+  // The providers.<id> section of the project's configuration, without passEnv (the kernel's) and without what trust withheld; {} when there is none
+  // A command trusted by its name arrives as the absolute path the daemon's PATH gives it
+  readonly providerConfig: Readonly<Record<string, unknown>>
+  readonly trust: ProjectTrust
   readonly resume?: ExternalSessionRef | undefined
   readonly env: Readonly<Record<string, string>>
   readonly signal: AbortSignal
@@ -68,6 +82,8 @@ export interface AgentProvider {
   readonly id: string
   readonly displayName: string
   readonly capabilities: AgentCapabilities
+  // The environment variable an API-key profile's key is handed in; a provider without it takes no API-key profiles
+  readonly apiKeyEnv?: string | undefined
   authStatus(profile: ProfileRef): Promise<AuthStatus>
   listModels?(profile: ProfileRef): Promise<ModelInfo[]>
   createSession(request: CreateSessionRequest): Promise<AgentSession>
