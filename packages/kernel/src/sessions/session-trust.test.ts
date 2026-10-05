@@ -102,7 +102,7 @@ describe('gateProviderConfig and a command the user trusts that cannot be found'
     ])
   })
 
-  it('runs a trusted absolute path as it is, and trusts no relative one by its name', () => {
+  it('runs a trusted absolute path as it is, and trusts no relative one by its name, saying what a trusted command is', () => {
     const absolute = gateProviderConfig(
       question({ command: '/opt/agent/bin/agent' }, { commands: ['/opt/agent/bin/agent'] }),
     )
@@ -112,6 +112,9 @@ describe('gateProviderConfig and a command the user trusts that cannot be found'
     expect([absolute.providerConfig, relative.providerConfig]).toStrictEqual([
       { command: '/opt/agent/bin/agent' },
       {},
+    ])
+    expect(relative.warnings).toStrictEqual([
+      `not using providers["acp:custom"].command of the project ${PROJECT}: the command "./bin/agent" that trust.commands names is a relative path: a trusted command is a bare name or an absolute path; or add the project to trust.projects in ${USER_FILE}`,
     ])
   })
 

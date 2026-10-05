@@ -87,12 +87,16 @@ export const resolveOnPath = (name: string, searchPath: string): string | undefi
     .flatMap((directory) => SUFFIXES.map((suffix) => path.join(directory, `${name}${suffix}`)))
     .find((candidate) => isExecutable(candidate))
 
+// A path that is not absolute: it would name a program wherever the agent happens to start
+const isRelativePath = (name: string): boolean =>
+  !path.isAbsolute(name) && (name.includes('/') || name.includes(path.sep))
+
 // What a trusted command runs as: an absolute path as it is, a bare name as the PATH finds it; a relative path is trusted by no name
 const resolvedCommand = (name: string, searchPath: string): string | undefined => {
   if (path.isAbsolute(name)) {
     return name
   }
-  return name.includes('/') || name.includes(path.sep) ? undefined : resolveOnPath(name, searchPath)
+  return isRelativePath(name) ? undefined : resolveOnPath(name, searchPath)
 }
 
 export const trustHintOf = (userFile: string): string =>
@@ -101,6 +105,12 @@ export const trustHintOf = (userFile: string): string =>
 const projectOnlyHintOf = (userFile: string): string =>
   `only a project the user configuration trusts sets them: add the project to trust.projects in ${userFile}`
 
+// Why a command that trust.commands names cannot run: a relative path, which no name trusts, or a bare name the daemon's PATH does not hold
+const unresolvedOf = (name: string, userFile: string): string =>
+  isRelativePath(name)
+    ? `the command ${JSON.stringify(name)} that trust.commands names is a relative path: a trusted command is a bare name or an absolute path; or add the project to trust.projects in ${userFile}`
+    : `the command ${JSON.stringify(name)} that trust.commands names is not on the daemon's PATH: install it there, or add the project to trust.projects in ${userFile}`
+
 // The naming keys of a trusted command, each as the absolute path it runs as, or why one of them cannot run
 const resolvedTrustOf = (question: TrustQuestion, naming: readonly string[]): CommandTrust => {
   const resolved = naming.map(
@@ -108,8 +118,7 @@ const resolvedTrustOf = (question: TrustQuestion, naming: readonly string[]): Co
   )
   const missing = resolved.find(([, found]) => found === undefined)
   if (missing !== undefined) {
-    const name = JSON.stringify(question.section[missing[0]])
-    const refusal = `the command ${name} that trust.commands names is not on the daemon's PATH: install it there, or add the project to trust.projects in ${question.userFile}`
+    const refusal = unresolvedOf(String(question.section[missing[0]]), question.userFile)
     return { resolved: {}, refusal }
   }
   return { resolved: Object.fromEntries(resolved.map(([key, found]) => [key, found ?? ''])) }
