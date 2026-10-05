@@ -1,4 +1,3 @@
-import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import type { AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
@@ -7,14 +6,9 @@ import { AcpAgentProvider } from './provider.js'
 import { CANARY_KEY, sessionRequest, tempDir } from './testing/requests.js'
 import { fakeAgentCommand } from './testing/run-fake.js'
 import { harness, started, type Harness } from './testing/session-harness.js'
+import { workspaceOf } from './testing/sessions.js'
 
 const node = process.execPath
-
-const workspaceOf = (): string => {
-  const workspace = path.join(tempDir('bb-acp-start-'), 'ws')
-  mkdirSync(workspace)
-  return workspace
-}
 
 // The start of a session whose preset runs what the entry says, with every agent it starts recorded
 const starting = (

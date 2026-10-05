@@ -1,26 +1,17 @@
-import { mkdirSync } from 'node:fs'
-import path from 'node:path'
 import type { AgentSession } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
-import { AcpAgentProvider } from './provider.js'
 import type { FakeScript } from './testing/fake-acp-agent.js'
-import { sessionRequest, tempDir } from './testing/requests.js'
-import { fakeAgentCommand } from './testing/run-fake.js'
-import { endOf, harness, rest, started, until, type Harness } from './testing/session-harness.js'
+import { endOf, harness, rest, until, type Harness } from './testing/session-harness.js'
+import { customOf, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
-const TURN_END = 'turn.completed'
 const ALLOW = { selected: ['allow'] }
 
 const startedWith = async (
   script: FakeScript,
 ): Promise<{ readonly session: AgentSession; readonly run: Harness }> => {
-  const workspace = path.join(tempDir('bb-acp-crash-'), 'ws')
-  mkdirSync(workspace)
   const run = harness()
-  const provider = new AcpAgentProvider('custom', run.deps)
-  const providerConfig = fakeAgentCommand(script)
-  const request = sessionRequest({ workspace: { path: workspace }, providerConfig })
-  const session = await started(provider, request)
+  const providerConfig = customOf(script)
+  const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig }, run)
   return { session, run }
 }
 

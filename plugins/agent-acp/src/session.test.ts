@@ -1,20 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import type {
-  AgentEvent,
-  AgentSession,
-  AskAnswer,
-  CreateSessionRequest,
-} from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
-import { AcpAgentProvider } from './provider.js'
-import type { FakeScript } from './testing/fake-acp-agent.js'
-import { CANARY_KEY, sessionRequest, tempDir } from './testing/requests.js'
-import { fakeAgentCommand } from './testing/run-fake.js'
-import { harness, started, until, type Harness } from './testing/session-harness.js'
+import { until } from './testing/session-harness.js'
+import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
-const TURN_END = 'turn.completed'
-const ALLOW: AskAnswer = { selected: ['allow'] }
 const HELLO_TYPES = [
   'turn.started',
   'message.delta',
@@ -26,41 +15,6 @@ const HELLO_TYPES = [
   'message.completed',
   TURN_END,
 ]
-
-// A workspace with a parent of its own, so a file above it is the test's too
-const workspaceOf = (): string => {
-  const workspace = path.join(tempDir('bb-acp-ws-'), 'ws')
-  mkdirSync(workspace)
-  return workspace
-}
-
-// The providers["acp:custom"] section that runs the fake agent
-const customOf = (
-  script: FakeScript,
-  extra: Readonly<Record<string, unknown>> = {},
-): Readonly<Record<string, unknown>> => ({ ...fakeAgentCommand(script), ...extra })
-
-// A session of the custom provider over the fake agent, closed when the test ends
-const sessionOf = async (
-  request: Partial<CreateSessionRequest>,
-  run: Harness = harness(),
-): Promise<AgentSession> => {
-  const provider = new AcpAgentProvider('custom', run.deps)
-  const session = await started(provider, sessionRequest(request))
-  return session
-}
-
-// The events of a prompt up to the first of the type, its asks allowed as they come
-const prompted = async (
-  session: AgentSession,
-  text: string,
-  last: AgentEvent['type'] = TURN_END,
-): Promise<AgentEvent[]> => {
-  const reading = until(session, last, ALLOW)
-  await session.prompt({ text })
-  const seen = await reading
-  return seen
-}
 
 describe('a session of an ACP agent', () => {
   it('runs a prompt through a real ACP agent: thinking, text, a permission brokered as an ask, the file written inside the workspace, usage from _meta', async () => {
@@ -155,109 +109,5 @@ describe('a session of an ACP agent at work', () => {
       kind: 'text',
       text: 'terminal said ok',
     })
-  })
-})
-
-describe('the agent an ACP session starts', () => {
-  it('runs in the workspace with the environment of the request, the preset and the login directory', async () => {
-    expect.hasAssertions()
-    const workspace = workspaceOf()
-    const run = harness()
-    const profile = {
-      id: 'acp:custom/work',
-      providerId: 'acp:custom',
-      kind: 'login',
-      configDir: '/h/p',
-    } as const
-    const providerConfig = customOf('hello', { configDirEnv: 'FAKE_ACP_HOME' })
-    await sessionOf({ workspace: { path: workspace }, providerConfig, profile }, run)
-    const env = {
-      ...sessionRequest().env,
-      BYTEBUREAU_FAKE_ACP_SCRIPT: 'hello',
-      FAKE_ACP_HOME: '/h/p',
-    }
-    expect(run.spawned.map(({ options }) => [options.cwd, options.env])).toStrictEqual([
-      [workspace, env],
-    ])
-  })
-
-  it('loads the session a resume names when the agent can, and starts a new one for a resume of another provider', async () => {
-    expect.hasAssertions()
-    const base = { workspace: { path: workspaceOf() }, providerConfig: customOf('hello') }
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
-    const loaded = await sessionOf({ ...base, resume })
-    expect(loaded.externalRef).toStrictEqual(resume)
-    const [first] = await prompted(loaded, 'Go on')
-    expect(first).toStrictEqual({ type: 'turn.started' })
-    const fresh = await sessionOf({
-      ...base,
-      resume: { providerId: 'claude', ref: 'session-0001' },
-    })
-    expect(fresh.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
-  })
-})
-
-// The warning of a resume the agent could not load, for the reason it gives
-const notLoaded = (why: string): unknown => ({
-  type: 'session.warning',
-  kind: 'resume',
-  message: `the agent could not load session fake-acp-earlier (${why}); a new session was started`,
-})
-
-describe('a session to resume that the agent cannot load', () => {
-  it('starts a new session, and says so, when the agent answers the load with an error', async () => {
-    expect.hasAssertions()
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
-    const providerConfig = customOf('load-fails')
-    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
-    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
-    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
-      notLoaded('Resource not found: fake-acp-earlier'),
-    ])
-  })
-
-  it('starts a new session, and says so, when the agent does not load sessions', async () => {
-    expect.hasAssertions()
-    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
-    const providerConfig = customOf('no-load')
-    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
-    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
-    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
-      notLoaded('it does not load sessions'),
-    ])
-  })
-})
-
-describe('the key of an ACP session', () => {
-  it('is redacted from an error the agent answers a prompt with', async () => {
-    expect.hasAssertions()
-    const run = harness()
-    const providerConfig = customOf('refuse-prompt', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
-    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
-    const session = await sessionOf(
-      { workspace: { path: workspaceOf() }, providerConfig, env },
-      run,
-    )
-    const told = JSON.stringify([await prompted(session, 'Create src/hello.ts'), run.logged])
-    expect(told).toContain('Internal error: the model is overloaded for [redacted]')
-    expect(told).not.toContain(CANARY_KEY)
-  })
-
-  it('hands the API key to the agent alone: no event or log line holds it', async () => {
-    expect.hasAssertions()
-    const run = harness()
-    const providerConfig = customOf('crash-mid-turn', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
-    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
-    const session = await sessionOf(
-      { workspace: { path: workspaceOf() }, providerConfig, env },
-      run,
-    )
-    const told = JSON.stringify([
-      await prompted(session, 'Show me the key', 'session.closed'),
-      run.logged,
-    ])
-    expect(told).toContain('hello; api key present')
-    expect(told).toContain('the fake agent crashed mid-turn holding [redacted]')
-    expect(told).not.toContain(CANARY_KEY)
   })
 })
