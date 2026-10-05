@@ -36,7 +36,7 @@ describe(optionsOf, () => {
       mcpServers: {},
     })
     expect(options.env).toStrictEqual({ PATH: '/usr/bin', HOME: '/home/dev' })
-    expect(Object.keys(options)).not.toStrictEqual(expect.arrayContaining(['resume']))
+    expect(options).not.toHaveProperty('resume')
   })
 
   it('leaves out what the employee does not set, and lets an autonomous one run on the classifier', () => {

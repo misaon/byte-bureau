@@ -1,8 +1,9 @@
+import type { AskUserQuestionInput } from '@anthropic-ai/claude-agent-sdk/sdk-tools'
 import { describe, expect, it } from 'vitest'
 import { AskBroker } from './asks.js'
 
 // The input of AskUserQuestion as the SDK declares it: questions with a header, two to four options and multiSelect
-const exportQuestion = {
+const exportQuestion: AskUserQuestionInput = {
   questions: [
     {
       question: 'Which export?',
@@ -49,7 +50,7 @@ describe('the asks of a permission prompt', () => {
     expect.hasAssertions()
     const broker = new AskBroker()
     const ids = { requestId: 'req-1', toolUseID: 'toolu_9' }
-    const pending = broker.ask('AskUserQuestion', exportQuestion, ids)
+    const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
     const [requested] = broker.drain()
     expect(requested).toMatchObject(EXPORT_ASK)
     broker.answer('req-1', { selected: ['Named (Recommended)'] })
@@ -100,7 +101,7 @@ describe('the answers an ask passes on', () => {
     expect.hasAssertions()
     const broker = new AskBroker('session-1')
     const ids = { requestId: 'req-5', toolUseID: 'toolu_5' }
-    const pending = broker.ask('AskUserQuestion', exportQuestion, ids)
+    const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
     expect(broker.drain()).toMatchObject([PENDING_QUESTION])
     broker.answer('req-5', { selected: 'other', otherText: 'Both' })
     await expect(pending).resolves.toMatchObject({
@@ -119,7 +120,7 @@ describe('the answers an ask passes on', () => {
   })
 })
 
-const UNMARKED = {
+const UNMARKED: AskUserQuestionInput = {
   questions: [
     {
       question: 'Which?',
@@ -142,10 +143,14 @@ describe('the questions an agent did not mark or could not ask', () => {
   it('recommends nothing when no option is marked, asks a malformed question as a permission, and ignores an answer to nothing', async () => {
     expect.hasAssertions()
     const broker = new AskBroker()
-    const asked = broker.ask('AskUserQuestion', UNMARKED, {
-      requestId: 'req-7',
-      toolUseID: 'toolu_7',
-    })
+    const asked = broker.ask(
+      'AskUserQuestion',
+      { ...UNMARKED },
+      {
+        requestId: 'req-7',
+        toolUseID: 'toolu_7',
+      },
+    )
     const malformed = broker.ask(
       'AskUserQuestion',
       { questions: 'none' },
