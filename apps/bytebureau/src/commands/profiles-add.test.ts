@@ -1,8 +1,8 @@
 import type { ProfileStatusDto } from '@bytebureau/protocol'
 import { describe, expect, it } from 'vitest'
 import type { Bureau } from '../bureau/bureau.js'
-import { PROFILE, PROFILE_STATUS } from '../testing/records.js'
-import { captureConsole, contextOf, scripted } from '../testing/scripted-kernel.js'
+import { PROFILE, PROFILE_STATUS, problemError } from '../testing/records.js'
+import { captureConsole, contextOf, rejecting, scripted } from '../testing/scripted-kernel.js'
 import { tellAdded } from './profiles-add.js'
 
 const HINT = 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/fake/work claude /login'
@@ -71,7 +71,11 @@ describe('tellAdded and a profile that needs no login', () => {
     await tellAdded(login.bureau, PROFILE, { context: contextOf(), wait: saying(true) })
     const keyed = { ...PROFILE, id: 'fake/key', kind: 'api_key' } as const
     await tellAdded(key.bureau, keyed, { context: contextOf(), wait: saying(true) })
-    expect(printed.out()).toStrictEqual(['Profile fake/work added', 'Profile fake/key added'])
+    expect(printed.out()).toStrictEqual([
+      'Profile fake/work added',
+      'fake/work  loggedIn  -',
+      'Profile fake/key added',
+    ])
     expect([login.asked, key.asked]).toStrictEqual([['fake/work'], []])
   })
 
@@ -83,5 +87,32 @@ describe('tellAdded and a profile that needs no login', () => {
     expect(printed.out()).toStrictEqual([
       JSON.stringify({ command: 'profiles.status', statuses: [LOGGED_OUT] }),
     ])
+  })
+})
+
+describe('tellAdded and a status that tells no login to perform', () => {
+  it('tells a state other than logged out as added with its status row, never as a login, and waits for nothing', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const reason = 'claude is not installed; install it first'
+    const { bureau, asked } = answering({ ...PROFILE_STATUS, state: 'unknown', hint: reason })
+    await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(true) })
+    expect(printed.out()).toStrictEqual([
+      'Profile fake/work added',
+      `fake/work  unknown  -  ${reason}`,
+    ])
+    expect(asked).toStrictEqual(['fake/work'])
+  })
+
+  it('ends as added when the status cannot be had after the add, which a retry would refuse as existing', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([])
+    const status = rejecting(problemError(503, 'store_unavailable', 'the store is unavailable'))
+    const failing = { ...bureau, profiles: { ...bureau.profiles, status } }
+    await expect(
+      tellAdded(failing, PROFILE, { context: contextOf(), wait: saying(true) }),
+    ).resolves.toBeUndefined()
+    expect([printed.out(), printed.err()]).toStrictEqual([['Profile fake/work added'], []])
   })
 })

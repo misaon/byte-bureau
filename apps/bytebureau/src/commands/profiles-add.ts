@@ -1,5 +1,5 @@
 import { m } from '@bytebureau/i18n'
-import type { AddProfileBody, ProfileDto } from '@bytebureau/protocol'
+import type { AddProfileBody, ProfileDto, ProfileStatusDto } from '@bytebureau/protocol'
 import { confirm } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
@@ -59,6 +59,39 @@ export interface Telling {
   readonly wait: (() => Promise<boolean>) | undefined
 }
 
+// The status of the profile, or none when it cannot be had: the profile is added all the same, and a retry would find it exists
+async function statusOf(bureau: Bureau, id: string): Promise<ProfileStatusDto | undefined> {
+  try {
+    const status = await bureau.profiles.status(id)
+    return status
+  } catch {
+    return undefined
+  }
+}
+
+const tellStatuses = (output: Context['output'], statuses: readonly ProfileStatusDto[]): void => {
+  for (const line of table(profileStatusRows(statuses))) {
+    output.print(line)
+  }
+}
+
+// The status of a login profile, told as a JSON record; an API-key profile has none to check
+async function statusAfterAdd(
+  bureau: Bureau,
+  profile: ProfileDto,
+  output: Context['output'],
+): Promise<ProfileStatusDto | undefined> {
+  const status = profile.kind === 'login' ? await statusOf(bureau, profile.id) : undefined
+  if (status !== undefined) {
+    output.emit({ command: 'profiles.status', statuses: [status] })
+  }
+  return status
+}
+
+// Only a logged-out profile is told to log in; the hint of another state, such as the reason of an unknown one, is no login
+const loginHintOf = (status: ProfileStatusDto | undefined): string | undefined =>
+  status !== undefined && status.state === 'loggedOut' ? status.hint : undefined
+
 // Once the person says they have logged in, the status is checked again and told
 async function checkedAfterLogin(
   bureau: Bureau,
@@ -68,28 +101,25 @@ async function checkedAfterLogin(
   if (wait === undefined || !(await wait())) {
     return
   }
-  const checked = await bureau.profiles.status(id)
-  for (const line of table(profileStatusRows([checked]))) {
-    context.output.print(line)
-  }
+  const checked = await statusOf(bureau, id)
+  tellStatuses(context.output, checked === undefined ? [] : [checked])
 }
 
-// A login profile is told where to log in, which its status hints; at a terminal the command waits for the login and tells what it finds
+// A logged-out profile is told where to log in, and waited for at a terminal; any other status is told as its row
 export async function tellAdded(
   bureau: Bureau,
   profile: ProfileDto,
   telling: Telling,
 ): Promise<void> {
   const { output } = telling.context
-  const status = profile.kind === 'login' ? await bureau.profiles.status(profile.id) : undefined
-  if (status !== undefined) {
-    output.emit({ command: 'profiles.status', statuses: [status] })
-  }
-  if (status === undefined || status.hint === undefined) {
+  const status = await statusAfterAdd(bureau, profile, output)
+  const hint = loginHintOf(status)
+  if (hint === undefined) {
     output.print(m.profiles_added({ id: profile.id }))
+    tellStatuses(output, status === undefined ? [] : [status])
     return
   }
-  output.print(m.profiles_added_login({ id: profile.id, hint: status.hint }))
+  output.print(m.profiles_added_login({ id: profile.id, hint }))
   await checkedAfterLogin(bureau, profile.id, telling)
 }
 

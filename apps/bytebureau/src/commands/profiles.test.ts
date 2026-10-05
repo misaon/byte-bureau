@@ -135,7 +135,10 @@ describe('bytebureau profiles in the process of the command', () => {
       'Žádné profily\n',
       'No profiles to check\n',
     ])
-    expect([added.code, added.stdout]).toStrictEqual([0, 'Profile fake/work added\n'])
+    expect([added.code, added.stdout]).toStrictEqual([
+      0,
+      'Profile fake/work added\nfake/work  loggedIn  -\n',
+    ])
     expect([missing.code, missing.stderr]).toStrictEqual([1, 'no profile "fake/nope"\n'])
   })
 

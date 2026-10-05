@@ -85,7 +85,7 @@ async function profileIds(bureau: Bureau, id: string | undefined): Promise<reado
   return profiles.map((profile) => profile.id)
 }
 
-// The providers are asked about their profiles side by side
+// Asked side by side; a status that fails refuses the command, as one a provider cannot give is unknown already
 async function statusesOf(
   bureau: Bureau,
   id: string | undefined,
