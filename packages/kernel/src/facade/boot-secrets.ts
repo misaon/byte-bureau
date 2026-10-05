@@ -3,12 +3,9 @@ import { Effect, Schema } from 'effect'
 import { readLayer, type LoadedFile } from '../config/files.js'
 import { isPlain } from '../config/merge.js'
 import { ConfigError } from '../errors.js'
-import { kernelLogger } from '../logging/logging.js'
 import { secretStoreFor } from '../secrets/secret-store-for.js'
 import type { SecretsShape } from '../secrets/secrets.js'
 import type { KernelOptions } from './types.js'
-
-const logger = kernelLogger(['bb', 'secrets'])
 
 const isBackend = Schema.is(SecretsBackend)
 
@@ -43,16 +40,11 @@ const userFile = async (home: string): Promise<UserFile> => {
 }
 
 // The secrets section of the user file on its own, so that a mistake in another section does not move the secrets elsewhere
-// A file that cannot be parsed leaves the choice to auto, and says so, as the daemon does for its server section
+// A file that cannot be read or parsed refuses the start as an unknown backend does: auto would probe the keychain and record it, where the file may say file
 async function configuredBackend(home: string): Promise<SecretsBackend> {
   const read = await userFile(home)
   if ('failure' in read) {
-    const { file, reason } = read.failure
-    logger.warn('the user configuration cannot be read: its secrets section is not applied', {
-      file,
-      reason,
-    })
-    return 'auto'
+    throw read.failure
   }
   return read.loaded === null ? 'auto' : backendIn(read.loaded)
 }

@@ -1,9 +1,8 @@
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigError } from '../errors.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
-import { capturedLogs, linesOf } from '../testing/captured-logs.js'
 import { withoutBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { bootSecrets } from './boot-secrets.js'
@@ -63,14 +62,12 @@ describe('bootSecrets and a secrets section it cannot go by', () => {
     await expect(refused).rejects.toHaveProperty('pointer', '/secrets')
   })
 
-  it('leaves the choice to auto where the user file cannot be parsed, and says so', async () => {
+  it('refuses the start where the user file cannot be parsed, naming the file, and records no backend', async () => {
     expect.hasAssertions()
-    const home = homeWith('{ "secrets": ')
-    const logs = await capturedLogs()
-    await expect(bootSecrets({ home, env: {} })).resolves.toHaveProperty('backend', 'file')
-    expect(linesOf(logs, 'bb.secrets')[0]).toStrictEqual([
-      'warning',
-      'the user configuration cannot be read: its secrets section is not applied',
-    ])
+    const home = homeWith('{ "secrets": { "backend": "file" ')
+    const refused = bootSecrets({ home, env: {} })
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('file', path.join(home, 'config.json'))
+    expect(existsSync(path.join(home, 'secrets.backend'))).toBe(false)
   })
 })

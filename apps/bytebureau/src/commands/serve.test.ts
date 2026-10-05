@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { serverUrl } from '@bytebureau/protocol'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { readServerInfo, serverInfoPath } from '../daemon/server-info.js'
@@ -9,6 +10,8 @@ import { runCli } from '../testing/run-cli.js'
 import { configureHome, testHome } from '../testing/temp-repo.js'
 
 const modeOf = (file: string): number => statSync(file).mode % 0o1000
+
+const PARSE_ERROR = 'CloseBraceExpected at line 1, column 34'
 
 const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } })
 
@@ -180,6 +183,20 @@ describe('bytebureau serve and the user configuration', () => {
     const health = await fetch(`${daemon.url}/api/v1/health`)
     expect(health.status).toBe(200)
     await expect(daemon.stop()).resolves.toBe(0)
+  })
+
+  it('refuses to start, naming the user file, where it cannot be parsed, and so does a command in-process', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    writeFileSync(path.join(home, 'config.json'), '{ "secrets": { "backend": "file" ')
+    const serve = await runCli(['serve', '--no-daemonize', '--port', '0'], {
+      BYTEBUREAU_HOME: home,
+    })
+    const local = await runCli(['projects', 'ls', '--no-daemon'], { BYTEBUREAU_HOME: home })
+    const file = path.join(home, 'config.json')
+    expect([serve.code, serve.stderr]).toStrictEqual([2, `ConfigError: ${file}: ${PARSE_ERROR}\n`])
+    expect([local.code, local.stderr]).toStrictEqual([1, `${file}: ${PARSE_ERROR}\n`])
+    expect(existsSync(path.join(home, 'secrets.backend'))).toBe(false)
   })
 
   it('starts on the flags and says so when the configuration of the home cannot be read', async () => {
