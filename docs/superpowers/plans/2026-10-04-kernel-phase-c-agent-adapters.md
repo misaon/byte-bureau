@@ -9229,8 +9229,8 @@ git commit -m "feat(agent-acp): run any acp v1 agent over stdio as a bytebureau 
 ### Task 8: Bundling and the end-to-end runs through the daemon
 
 **Files:**
-- Modify: `packages/kernel/src/plugins/bundled.ts` (`claudeAgentPlugin`, `acpAgentPlugin`), `packages/kernel/package.json` (dependencies on the two plugin workspaces), `packages/kernel/src/plugins/plugin-host.test.ts` (four bundled plugins), `apps/bytebureau/src/commands/run-session.ts` (`isRefusal`: a `provider_crash` whose reason says "is not installed" or "is not configured" is a refusal → exit 4, so Review Focus 5 holds), `apps/bytebureau/src/testing/repo-config.ts` or the test that writes the project config (the custom preset pointing at the fake agent)
-- Create: `apps/bytebureau/src/commands/run-acp.test.ts`, `apps/bytebureau/src/commands/plugins-bundled.test.ts`
+- Modify: `packages/kernel/src/plugins/bundled.ts` (`claudeAgentPlugin`, `acpAgentPlugin`), `packages/kernel/package.json` and `bun.lock` (the two plugin workspaces), `packages/kernel/src/plugins/plugin-host.test.ts` (the four bundled plugins pinned by name and order), `apps/bytebureau/src/testing/session-bench.ts` (`asksWaiting` exported); `apps/bytebureau/src/commands/run-session.ts` unchanged — a run already treats every `provider_*` problem and every `ProviderError` as a refusal (exit 4 with the reason); the tests that pinned the two-plugin bundle widened to four plugins and seven providers: `apps/bytebureau/src/commands/{plugins-status,run,serve}.test.ts`, `packages/api/src/{client,health,sessions-refusals,workspaces-plugins}.test.ts`, `packages/kernel/src/facade/facade-close.test.ts`, `packages/kernel/src/health/health.test.ts`
+- Create: `apps/bytebureau/src/commands/run-acp.test.ts`, `apps/bytebureau/src/commands/plugins-bundled.test.ts`, `apps/bytebureau/src/testing/repo-config.ts` (`writeConfig(repo, config)` and `fakeAcpPreset(script)` — the fake ACP agent run by `bun` from PATH, its script in the preset's `env`)
 - Test: the two new daemon-backed test files
 
 **Interfaces:**
@@ -9244,40 +9244,168 @@ Config shape (ruled after Task 7, per spec §10): the project section is keyed b
 `apps/bytebureau/src/commands/run-acp.test.ts`:
 
 ```ts
-const customPreset = { command: 'bun', args: [fakeAcpAgentPath()] }
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
+import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
+import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
+import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
+import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
 
-it('runs a prompt through an ACP agent over the daemon: the permission is answered by --yes, the file lands in the worktree, exit 0', async () => {
-  expect.hasAssertions()
-  const home = testHome()
-  const daemon = await startDaemonProcess(home)
-  const repo = createTempRepo()
-  writeConfig(repo, { providers: { 'acp:custom': customPreset } })
-  const run = await runCli(['run', 'Create src/hello.ts exporting hello()', '--project', repo, '--provider', 'acp:custom', '--json', '--yes'], { home })
-  expect(run.code).toBe(0)
-  const types = jsonLines(run.stdout).map((event) => event['type'])
-  expect(types).toContain('ask.requested')
-  expect(types).toContain('ask.answered')
-  expect(types.at(-1)).toBe('session.completed')
-  expect(existsSync(path.join(repo, '.bytebureau', 'worktrees', worktreeOf(run.stdout), 'src', 'hello.ts'))).toBe(true)
-  await daemon.stop()
+// A run on the custom ACP agent through the daemon of the home, its events as JSON lines
+const ON_CUSTOM = ['--provider', 'acp:custom', '--json']
+
+// What a run prints once the agent asks for its permission
+const ASKED = '"type":"ask.requested"'
+
+// What to install and how to log in, as the codex preset tells them
+const CODEX_HINTS =
+  'install it with: npm install -g @agentclientprotocol/codex-acp; then log in with: codex login'
+
+const CANARY = 'sk-acp-canary-5d81e0b4'
+
+// A daemon for the home of a test, and a repository whose project file configures the providers
+async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Bench> {
+  const bench = await benchWithDaemon()
+  writeConfig(bench.repo, { providers })
+  return bench
+}
+
+// The custom provider runs the fake ACP agent, whose hello script asks one permission and then writes src/hello.ts
+async function onTheFake(): Promise<Bench> {
+  const bench = await benchOn({ 'acp:custom': fakeAcpPreset() })
+  return bench
+}
+
+// The file the agent writes, in the one worktree of the repository
+function helloIn(repo: string): string {
+  const [worktree = ''] = readdirSync(worktreesOf(repo))
+  return path.join(worktreesOf(repo), worktree, 'src', 'hello.ts')
+}
+
+const typesOf = (run: CliResult): readonly unknown[] =>
+  jsonLines(run.stdout).map((event) => event['type'])
+
+// The events of a run from the permission its agent asked for on
+function fromTheAsk(run: CliResult): readonly unknown[] {
+  const types = typesOf(run)
+  return types.slice(types.indexOf('ask.requested'))
+}
+
+// A run whose agent waits on its permission: off a terminal and without --yes nobody answers it
+interface Waiting extends Bench {
+  readonly run: Promise<CliResult>
+  readonly sessionId: string
+}
+
+async function waitingOnPermission(): Promise<Waiting> {
+  const bench = await onTheFake()
+  const run = runCli(['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM], bench.env)
+  const listed = await asksWaiting(bench.env, Date.now() + 15_000)
+  return { ...bench, run, sessionId: firstField(listed, 'asks', 'sessionId') }
+}
+
+describe('bytebureau run on an ACP agent through the daemon', () => {
+  it('runs a prompt through an ACP agent over the daemon: the permission is answered by --yes, the file lands in the worktree, exit 0', async () => {
+    expect.hasAssertions()
+    const bench = await onTheFake()
+    const args = ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM, '--yes']
+    const run = await runCli(args, bench.env)
+    expect([run.code, run.stderr]).toStrictEqual([0, ''])
+    expect(typesOf(run)).toStrictEqual(expect.arrayContaining(['ask.requested', 'ask.answered']))
+    expect(typesOf(run).at(-1)).toBe('session.completed')
+    expect(readFileSync(helloIn(bench.repo), 'utf8')).toContain('export function hello()')
+    await bench.daemon.stop()
+  })
 })
 
-it('ends with exit 3 and a ready session when the run is interrupted while the agent waits for a permission', async () => { /* script hello without --yes, non-TTY: the ask waits; Interruption after ask.requested with SIGINT → exit 3; sessions show says ready */ })
+describe('bytebureau run on an ACP agent that waits for a permission', () => {
+  it('ends with exit 3 and a ready session when the run is interrupted while the agent waits for a permission', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingOnPermission()
+    const interrupted = await runCli(['sessions', 'interrupt', waiting.sessionId], waiting.env)
+    const run = await waiting.run
+    const shown = await untilStatus({ env: waiting.env, id: waiting.sessionId }, 'ready')
+    const left = await runCli(['ask', 'ls', '--json'], waiting.env)
+    // The ask is cancelled first; the agent, told so, ends its turn as interrupted
+    expect([interrupted.code, run.code, fromTheAsk(run)]).toStrictEqual([
+      0,
+      3,
+      [
+        'ask.requested',
+        'session.waiting',
+        'ask.cancelled',
+        'tool.failed',
+        'message.assistant.completed',
+        'turn.interrupted',
+        'session.ready',
+      ],
+    ])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    expect([listedUnder(left.stdout, 'asks'), existsSync(helloIn(waiting.repo))]).toStrictEqual([
+      [],
+      false,
+    ])
+    await waiting.daemon.stop()
+  })
 
-it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
-  expect.hasAssertions()
-  const home = testHome()
-  const daemon = await startDaemonProcess(home)
-  const repo = createTempRepo()
-  const unconfigured = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:custom'], { home })
-  expect([unconfigured.code, unconfigured.stderr]).toStrictEqual([4, expect.stringContaining('providers["acp:custom"].command')])
-  writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
-  const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], { home })
-  expect([missing.code, missing.stderr]).toStrictEqual([4, expect.stringContaining('npm install -g @agentclientprotocol/codex-acp')])
-  await daemon.stop()
+  it('ends with exit 3 and a stopped session, with no ask left, when Ctrl-C stops the run while the agent waits', async () => {
+    expect.hasAssertions()
+    const bench = await onTheFake()
+    const args = ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM]
+    const run = await runCli(args, bench.env, { signal: 'SIGINT', afterStdout: ASKED })
+    const id = await sessionIdIn(bench.home, [])
+    const shown = await runCli(['sessions', 'show', id], bench.env)
+    const left = await runCli(['ask', 'ls', '--json'], bench.env)
+    expect([run.code, fromTheAsk(run), listedUnder(left.stdout, 'asks')]).toStrictEqual([
+      3,
+      ['ask.requested', 'session.waiting', 'turn.interrupted', 'ask.cancelled', 'session.stopped'],
+      [],
+    ])
+    expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
+    await bench.daemon.stop()
+  })
 })
 
-it('hands an API-key profile of an ACP provider to the agent as the preset names it', async () => { /* profiles add acp:codex key --api-key with the codex preset's command overridden to the fake agent and apiKeyEnv honoured: the fake agent says 'api key present' (FAKE_ACP_API_KEY is what the test's override sets as apiKeyEnv through presets.codex.apiKeyEnv) */ })
+describe('bytebureau run on an ACP agent that cannot be started', () => {
+  it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
+    expect.hasAssertions()
+    const { repo, env, daemon } = await benchWithDaemon()
+    const withoutCommand = await runCli(
+      ['run', 'x', '--project', repo, '--provider', 'acp:custom'],
+      env,
+    )
+    writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
+    const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
+    expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
+      4,
+      'providers["acp:custom"].command is not configured (provider_crash)\n',
+    ])
+    expect([missing.code, missing.stderr]).toStrictEqual([
+      4,
+      `codex-acp-definitely-missing is not installed; ${CODEX_HINTS} (provider_crash)\n`,
+    ])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent under an API-key profile', () => {
+  it('hands an API-key profile of an ACP provider to the agent as the preset names it', async () => {
+    expect.hasAssertions()
+    const bench = await benchOn({
+      'acp:codex': { ...fakeAcpPreset(), apiKeyEnv: 'FAKE_ACP_API_KEY' },
+    })
+    const add = ['profiles', 'add', 'acp:codex', 'key', '--api-key']
+    const added = await runCliWithStdin(add, bench.env, `${CANARY}\n`)
+    const args = ['run', PROMPT, '--project', bench.repo, '--provider', 'acp:codex']
+    const run = await runCli([...args, '--profile', 'acp:codex/key', '--json', '--yes'], bench.env)
+    expect([added.code, run.code]).toStrictEqual([0, 0])
+    expect(run.stdout).toContain('hello; api key present')
+    expect([added.stdout, added.stderr, run.stdout, run.stderr].join('\n')).not.toContain(CANARY)
+    await bench.daemon.stop()
+  })
+})
 ```
 
 `plugins-bundled.test.ts`: `plugins ls --json` lists the four plugins loaded; `plugins providers` (if the CLI exposes it; else through the client) lists the seven providers; `profiles add claude work` on a daemon prints the `CLAUDE_CONFIG_DIR=… claude /login` hint (the Claude provider's `authStatus` for a fresh directory runs the probe — on CI `claude` is absent, so the SDK's bundled binary would run: refuse the probe when `BYTEBUREAU_TEST_NO_CLAUDE=1`? No — make the probe honest: without an installed `claude` and without a login, the probe ends `loggedOut` or `unknown` quickly; the test only asserts the hint text, not the state).
@@ -9300,10 +9428,270 @@ import { fakeAgentPlugin } from '../testing/fake-agent-plugin.js'
 
 export const HOST_API_VERSION = '0.0.0'
 // The fake agent ships on purpose: it is the documented way to smoke-test an installation without an agent subscription
-export const BUNDLED_PLUGINS: readonly Plugin[] = [localWorkspacePlugin, fakeAgentPlugin, claudeAgentPlugin, acpAgentPlugin]
+export const BUNDLED_PLUGINS: readonly Plugin[] = [
+  localWorkspacePlugin,
+  fakeAgentPlugin,
+  claudeAgentPlugin,
+  acpAgentPlugin,
+]
 ```
 
 `packages/kernel/package.json`: `"@bytebureau/agent-acp": "workspace:*"`, `"@bytebureau/agent-claude": "workspace:*"` (check `.dependency-cruiser.cjs`: the kernel may import `plugins/*` entry points as it does `@bytebureau/workspace-local`). `run-session.ts` `isRefusal`: a `ProviderError`/`ApiError` of kind `crash` whose reason matches `/is not installed|is not configured/u` counts as a refusal (exit 4). Run the tests; then `bun run check`.
+
+**Added files (as shipped):**
+
+`apps/bytebureau/src/testing/repo-config.ts` (as shipped):
+
+```ts
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// The fake ACP agent of the agent-acp tests, a file its package does not export
+const FAKE_ACP_AGENT = fileURLToPath(
+  new URL('../../../../plugins/agent-acp/src/testing/fake-acp-agent.ts', import.meta.url),
+)
+
+export interface AcpPreset {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly env: Readonly<Record<string, string>>
+}
+
+// The project file of a test repository, as given: the kernel merges it over its defaults
+export function writeConfig(repo: string, config: Readonly<Record<string, unknown>>): void {
+  writeFileSync(path.join(repo, 'bytebureau.json'), JSON.stringify(config))
+}
+
+// An ACP preset that runs the fake ACP agent under Bun from PATH, playing the script its env names
+export function fakeAcpPreset(script = 'hello'): AcpPreset {
+  return { command: 'bun', args: [FAKE_ACP_AGENT], env: { BYTEBUREAU_FAKE_ACP_SCRIPT: script } }
+}
+```
+
+`apps/bytebureau/src/commands/run-acp.test.ts` (as shipped):
+
+```ts
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
+import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
+import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
+import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
+import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
+
+// A run on the custom ACP agent through the daemon of the home, its events as JSON lines
+const ON_CUSTOM = ['--provider', 'acp:custom', '--json']
+
+// What a run prints once the agent asks for its permission
+const ASKED = '"type":"ask.requested"'
+
+// What to install and how to log in, as the codex preset tells them
+const CODEX_HINTS =
+  'install it with: npm install -g @agentclientprotocol/codex-acp; then log in with: codex login'
+
+const CANARY = 'sk-acp-canary-5d81e0b4'
+
+// A daemon for the home of a test, and a repository whose project file configures the providers
+async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Bench> {
+  const bench = await benchWithDaemon()
+  writeConfig(bench.repo, { providers })
+  return bench
+}
+
+// The custom provider runs the fake ACP agent, whose hello script asks one permission and then writes src/hello.ts
+async function onTheFake(): Promise<Bench> {
+  const bench = await benchOn({ 'acp:custom': fakeAcpPreset() })
+  return bench
+}
+
+// The file the agent writes, in the one worktree of the repository
+function helloIn(repo: string): string {
+  const [worktree = ''] = readdirSync(worktreesOf(repo))
+  return path.join(worktreesOf(repo), worktree, 'src', 'hello.ts')
+}
+
+const typesOf = (run: CliResult): readonly unknown[] =>
+  jsonLines(run.stdout).map((event) => event['type'])
+
+// The events of a run from the permission its agent asked for on
+function fromTheAsk(run: CliResult): readonly unknown[] {
+  const types = typesOf(run)
+  return types.slice(types.indexOf('ask.requested'))
+}
+
+// A run whose agent waits on its permission: off a terminal and without --yes nobody answers it
+interface Waiting extends Bench {
+  readonly run: Promise<CliResult>
+  readonly sessionId: string
+}
+
+async function waitingOnPermission(): Promise<Waiting> {
+  const bench = await onTheFake()
+  const run = runCli(['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM], bench.env)
+  const listed = await asksWaiting(bench.env, Date.now() + 15_000)
+  return { ...bench, run, sessionId: firstField(listed, 'asks', 'sessionId') }
+}
+
+describe('bytebureau run on an ACP agent through the daemon', () => {
+  it('runs a prompt through an ACP agent over the daemon: the permission is answered by --yes, the file lands in the worktree, exit 0', async () => {
+    expect.hasAssertions()
+    const bench = await onTheFake()
+    const args = ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM, '--yes']
+    const run = await runCli(args, bench.env)
+    expect([run.code, run.stderr]).toStrictEqual([0, ''])
+    expect(typesOf(run)).toStrictEqual(expect.arrayContaining(['ask.requested', 'ask.answered']))
+    expect(typesOf(run).at(-1)).toBe('session.completed')
+    expect(readFileSync(helloIn(bench.repo), 'utf8')).toContain('export function hello()')
+    await bench.daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent that waits for a permission', () => {
+  it('ends with exit 3 and a ready session when the run is interrupted while the agent waits for a permission', async () => {
+    expect.hasAssertions()
+    const waiting = await waitingOnPermission()
+    const interrupted = await runCli(['sessions', 'interrupt', waiting.sessionId], waiting.env)
+    const run = await waiting.run
+    const shown = await untilStatus({ env: waiting.env, id: waiting.sessionId }, 'ready')
+    const left = await runCli(['ask', 'ls', '--json'], waiting.env)
+    // The ask is cancelled first; the agent, told so, ends its turn as interrupted
+    expect([interrupted.code, run.code, fromTheAsk(run)]).toStrictEqual([
+      0,
+      3,
+      [
+        'ask.requested',
+        'session.waiting',
+        'ask.cancelled',
+        'tool.failed',
+        'message.assistant.completed',
+        'turn.interrupted',
+        'session.ready',
+      ],
+    ])
+    expect(shown.stdout).toMatch(/^status\s+ready$/mu)
+    expect([listedUnder(left.stdout, 'asks'), existsSync(helloIn(waiting.repo))]).toStrictEqual([
+      [],
+      false,
+    ])
+    await waiting.daemon.stop()
+  })
+
+  it('ends with exit 3 and a stopped session, with no ask left, when Ctrl-C stops the run while the agent waits', async () => {
+    expect.hasAssertions()
+    const bench = await onTheFake()
+    const args = ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM]
+    const run = await runCli(args, bench.env, { signal: 'SIGINT', afterStdout: ASKED })
+    const id = await sessionIdIn(bench.home, [])
+    const shown = await runCli(['sessions', 'show', id], bench.env)
+    const left = await runCli(['ask', 'ls', '--json'], bench.env)
+    expect([run.code, fromTheAsk(run), listedUnder(left.stdout, 'asks')]).toStrictEqual([
+      3,
+      ['ask.requested', 'session.waiting', 'turn.interrupted', 'ask.cancelled', 'session.stopped'],
+      [],
+    ])
+    expect(shown.stdout).toMatch(/^status\s+stopped$/mu)
+    await bench.daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent that cannot be started', () => {
+  it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
+    expect.hasAssertions()
+    const { repo, env, daemon } = await benchWithDaemon()
+    const withoutCommand = await runCli(
+      ['run', 'x', '--project', repo, '--provider', 'acp:custom'],
+      env,
+    )
+    writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
+    const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
+    expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
+      4,
+      'providers["acp:custom"].command is not configured (provider_crash)\n',
+    ])
+    expect([missing.code, missing.stderr]).toStrictEqual([
+      4,
+      `codex-acp-definitely-missing is not installed; ${CODEX_HINTS} (provider_crash)\n`,
+    ])
+    await daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent under an API-key profile', () => {
+  it('hands an API-key profile of an ACP provider to the agent as the preset names it', async () => {
+    expect.hasAssertions()
+    const bench = await benchOn({
+      'acp:codex': { ...fakeAcpPreset(), apiKeyEnv: 'FAKE_ACP_API_KEY' },
+    })
+    const add = ['profiles', 'add', 'acp:codex', 'key', '--api-key']
+    const added = await runCliWithStdin(add, bench.env, `${CANARY}\n`)
+    const args = ['run', PROMPT, '--project', bench.repo, '--provider', 'acp:codex']
+    const run = await runCli([...args, '--profile', 'acp:codex/key', '--json', '--yes'], bench.env)
+    expect([added.code, run.code]).toStrictEqual([0, 0])
+    expect(run.stdout).toContain('hello; api key present')
+    expect([added.stdout, added.stderr, run.stdout, run.stderr].join('\n')).not.toContain(CANARY)
+    await bench.daemon.stop()
+  })
+})
+```
+
+`apps/bytebureau/src/commands/plugins-bundled.test.ts` (as shipped):
+
+```ts
+import { createBureauClient } from '@bytebureau/client'
+import { describe, expect, it } from 'vitest'
+import { startDaemonProcess } from '../testing/daemon.js'
+import { jsonLines } from '../testing/json-lines.js'
+import { runCli } from '../testing/run-cli.js'
+import { testHome } from '../testing/temp-repo.js'
+
+// The ACP plugin offers one agent provider per preset
+const ACP_PORTS = ['codex', 'gemini', 'opencode', 'pi', 'custom'].map(
+  (preset) => `agentProviders:acp:${preset}`,
+)
+
+describe('the plugins a daemon bundles', () => {
+  it('are listed as loaded: the local worktrees, the fake agent, Claude Code and the ACP agents', async () => {
+    expect.hasAssertions()
+    const home = testHome()
+    const daemon = await startDaemonProcess(home)
+    const listed = await runCli(['plugins', 'ls', '--json'], { BYTEBUREAU_HOME: home })
+    expect(jsonLines(listed.stdout)).toMatchObject([
+      {
+        command: 'plugins.ls',
+        plugins: [
+          { name: 'workspace-local', state: 'loaded', ports: ['workspaceRuntimes:local'] },
+          { name: 'agent-fake', state: 'loaded', ports: ['agentProviders:fake'] },
+          { name: 'agent-claude', state: 'loaded', ports: ['agentProviders:claude'] },
+          { name: 'agent-acp', state: 'loaded', ports: ACP_PORTS },
+        ],
+      },
+    ])
+    await daemon.stop()
+  })
+})
+
+describe('the agent providers a daemon offers', () => {
+  it('are the seven of the bundled plugins, each saying whether it takes an API key', async () => {
+    expect.hasAssertions()
+    const daemon = await startDaemonProcess(testHome())
+    const client = createBureauClient({ baseUrl: daemon.url, token: daemon.info.token })
+    await expect(client.plugins.providers()).resolves.toStrictEqual([
+      { id: 'fake', displayName: 'Fake agent (tests and CI)', supportsApiKey: true },
+      { id: 'claude', displayName: 'Claude Code (Agent SDK)', supportsApiKey: true },
+      { id: 'acp:codex', displayName: 'Codex (ACP)', supportsApiKey: true },
+      { id: 'acp:gemini', displayName: 'Gemini CLI (ACP)', supportsApiKey: true },
+      { id: 'acp:opencode', displayName: 'OpenCode (ACP)', supportsApiKey: false },
+      { id: 'acp:pi', displayName: 'pi (ACP)', supportsApiKey: false },
+      { id: 'acp:custom', displayName: 'Custom agent (ACP)', supportsApiKey: false },
+    ])
+    await daemon.stop()
+  })
+})
+```
+
+**Semantics (as shipped, commits 88882ed, fcc651e):** `BUNDLED_PLUGINS = [localWorkspacePlugin, fakeAgentPlugin, claudeAgentPlugin, acpAgentPlugin]`: a daemon loads four plugins and offers seven providers (`fake`, `claude`, `acp:codex`, `acp:gemini`, `acp:opencode`, `acp:pi`, `acp:custom`); loading the Claude plugin spawns nothing and writes nothing (its `setup` registers the provider; a probe under a throwaway HOME created no `.claude` file and no child); the kernel's dependency on the plugin workspaces is how `workspace-local` was bundled already, so dependency-cruiser needed no change. `run-acp.test.ts` (five tests on a real Bun daemon, the fake ACP agent run by `bun` from PATH as the custom preset's command, its script in the preset's `env` because the daemon strips the test's `BYTEBUREAU_*` variables): `--yes` answers the hello script's permission, `src/hello.ts` lands in the worktree, stderr is empty, the run exits 0 on `session.completed`; `sessions interrupt` while the agent waits for its permission → exit 3, the events `ask.requested, session.waiting, ask.cancelled, tool.failed, message.assistant.completed, turn.interrupted, session.ready`, the session `ready`, no ask left, no file written (Review Focus 3); SIGINT while waiting → exit 3, `ask.requested, session.waiting, turn.interrupted, ask.cancelled, session.stopped`, the session `stopped` (a signal stops the session by Phase B's design, so the brief's one test became two); the refusals exit 4 with the exact line — `providers["acp:custom"].command is not configured (provider_crash)` without config, and `codex-acp-definitely-missing is not installed; install it with: npm install -g @agentclientprotocol/codex-acp; then log in with: codex login (provider_crash)` with `providers["acp:codex"].command` overridden (Review Focus 5) — `isRefusal` needed no branch, as every `provider_*` problem and every `ProviderError` is a refusal of a run already; `profiles add acp:codex key --api-key` with the key on stdin, then `run --profile acp:codex/key` with the codex preset's command overridden to the fake and its `apiKeyEnv` to `FAKE_ACP_API_KEY`: the kernel hands the key as `OPENAI_API_KEY`, the adapter moves it to the preset's variable, the fake says `hello; api key present`, and the canary is absent from everything the CLI printed. `plugins-bundled.test.ts`: `plugins ls --json` through a daemon lists the four plugins with their exact ports, and the client's `plugins.providers()` returns the seven DTOs exactly (`supportsApiKey` as each declares). `profiles add claude work` is not in the e2e (its status check would run the machine's `claude`; the owner's smoke covers it). Nothing differed under Bun 1.4.2: `Readable.toWeb`/`Writable.toWeb` over the child's pipes, the `spawn` event, the ENOENT code, the detached group, the interrupt, the stop and the end of a session all worked at the first run; this was the first run of the ACP adapter and its fake under Bun through a daemon, and CI's Linux unit job is their first Linux run. Deferred to the final wave: the e2e's API-key canary scans the CLI output only (not the daemon's output under `--debug`, the home or the repository); `createTempRepo()` will write a minimal configuration whose default employee runs on `fake`, so a test that forgets `--provider` can never drive the developer's installed `claude`; the kernel index re-exporting `bundled.ts` loads both SDKs in every process (about 60 ms warm, 85–105 ms cold on an M4 — Task 9 measures the compiled binary's start, lazy loading only if it shows); `@bytebureau/agent-acp` exports the fake agent's path under a `testing` subpath instead of the four-level relative path in `repo-config.ts`; the duplicated provider lists and `writeConfig`; the kernel logging tests' JSON noise in the full run.
 
 - [ ] **Step 4: Run the whole suite and the gates**
 
