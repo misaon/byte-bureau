@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 import type { AgentEvent, AgentSession } from '@bytebureau/plugin-api'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
 import type { SpawnFn } from './process.js'
 import { AcpAgentProvider } from './provider.js'
 import type { FakeScript } from './testing/fake-acp-agent.js'
@@ -184,14 +184,42 @@ const silentFrom = (spawn: SpawnFn, start: number): SpawnFn => {
   }
 }
 
+// A session whose first agent dies idle after its turn, and whose next one never answers its start within 300 ms
+const notStartedAgainInTime = async (): Promise<{
+  readonly session: AgentSession
+  readonly run: Harness
+}> => {
+  const run = harness()
+  const deps = { ...run.deps, spawn: silentFrom(run.deps.spawn, 2), startLimitMs: 300 }
+  const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('crash-idle') }
+  const session = await started(new AcpAgentProvider('custom', deps), sessionRequest(request))
+  await turnThenDeath(session, run)
+  return { session, run }
+}
+
+// The calls of process.kill from now on, each going through as it would
+const watchedKills = (): MockInstance<typeof process.kill> => {
+  const kills = vi.spyOn(process, 'kill')
+  onTestFinished(() => {
+    kills.mockRestore()
+  })
+  return kills
+}
+
+// The signals sent to the process group of the last agent started
+const groupSignalsOfLast = (kills: MockInstance<typeof process.kill>, run: Harness): unknown[] => {
+  const [last] = run.spawned.slice(-1)
+  const group = last === undefined ? undefined : last.child.pid
+  return kills.mock.calls
+    .filter(([pid]) => group !== undefined && pid === -group)
+    .map(([, signal]) => signal)
+}
+
 describe('an ACP agent that is not started again in time', () => {
-  it('ends the session with a retryable crash that names the time, its group killed', async () => {
+  it('ends the session with a retryable crash that names the time, its group killed and never interrupted after the kill', async () => {
     expect.hasAssertions()
-    const run = harness()
-    const deps = { ...run.deps, spawn: silentFrom(run.deps.spawn, 2), startLimitMs: 300 }
-    const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('crash-idle') }
-    const session = await started(new AcpAgentProvider('custom', deps), sessionRequest(request))
-    await turnThenDeath(session, run)
+    const { session, run } = await notStartedAgainInTime()
+    const kills = watchedKills()
     const ending = rest(session)
     await session.prompt({ text: 'Again' })
     await expect(ending).resolves.toStrictEqual([
@@ -204,7 +232,9 @@ describe('an ACP agent that is not started again in time', () => {
       },
       { type: 'session.closed' },
     ])
+    // A SIGINT still pending beside the SIGKILL would be taken first on macOS, the lower signal, and end the agent as interrupted
     expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual([null, 'SIGKILL'])
+    expect(groupSignalsOfLast(kills, run)).not.toContain('SIGINT')
   })
 })
 

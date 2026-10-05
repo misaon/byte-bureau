@@ -143,6 +143,7 @@ const limitText = (limitMs: number): string =>
   limitMs % 1000 === 0 ? `${limitMs / 1000} s` : `${limitMs} ms`
 
 // A start within its time; one that is not done by then is killed with its group and refused as too slow
+// The refusal waits for the kill to land, so the ladder that ends a failed start finds the agent gone and sends no SIGINT after the SIGKILL
 const inTime = async (
   agent: AgentProcess,
   started: Promise<Running>,
@@ -151,6 +152,7 @@ const inTime = async (
   const running = await withinLimit(started, limitMs)
   if (running === null) {
     killAll(agent)
+    await withinLimit(agent.exited, EXIT_WAIT_MS)
     throw new RefusedAgentError(`the agent did not start a session within ${limitText(limitMs)}`)
   }
   return running
