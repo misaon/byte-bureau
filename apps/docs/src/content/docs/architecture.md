@@ -85,7 +85,7 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 
 ## Deferred to later phases
 
-- A project trust that covers every key of a project file: the trust of phase C gates the commands, environments and hints of provider sections (`trust.projects`, `trust.commands`), while a project's `passEnv`, a preset's `apiKeyEnv` and `configDirEnv`, and its employees' `tools.allow` and `permissionMode` are used without it until phase D.
+- A project trust that covers every key of a project file: the trust of phase C gates the commands, environments and hints of provider sections (`trust.projects`, `trust.commands`), while a project's `passEnv`, a preset's `apiKeyEnv` and `configDirEnv`, and its employees' `tools.allow` and `permissionMode` are used without it until phase D, and an ACP agent loads its own project-local settings from the worktree (MCP server definitions and the like) whatever the trust.
 - A restart with backoff (spec §14): `restartSchedule` of the supervisor stays unused, as the ACP adapter starts an agent again only for the next prompt, and Claude Code runs as a process of the SDK, whose failure errors the session.
 - A Claude session that reaches its usage limit is errored rather than paused until the limit resets (spec §14), and resumed by hand.
 - Steering (spec §8.1): a prompt sent while a turn runs is refused with `409 session_invalid_transition`, as only a `ready` session takes one; follow-ups queued to steer a running turn come later.
