@@ -4,6 +4,7 @@ import {
   AskError,
   ConfigError,
   configErrorLine,
+  ProfileError,
   ProviderError,
   SessionError,
   WorkspaceError,
@@ -44,7 +45,9 @@ function refusalOf(error: unknown, named: boolean): string | undefined {
   if (error instanceof WorkspaceError) {
     return DAEMON_FAILURES.has(error.code) ? undefined : error.reason
   }
-  return error instanceof SessionError || error instanceof AskError ? error.reason : undefined
+  const refused =
+    error instanceof SessionError || error instanceof AskError || error instanceof ProfileError
+  return refused ? error.reason : undefined
 }
 
 // A request that is refused, by the daemon with a 4xx problem or by the kernel in-process, ends the command with exit code 1 and its reason in one line

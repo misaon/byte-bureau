@@ -96,13 +96,11 @@ const DONE = {
   interrupt: m.sessions_interrupted,
   stop: m.sessions_stopped,
   resume: m.sessions_resumed,
+  complete: m.sessions_completed,
 } as const
 
-// Interrupt, stop and resume: one request, one line
-const steer = (
-  name: 'interrupt' | 'stop' | 'resume',
-  description: string,
-): CommandDef<typeof sessionArgs> =>
+// Interrupt, stop, resume and complete: one request, one line
+const steer = (name: keyof typeof DONE, description: string): CommandDef<typeof sessionArgs> =>
   defineCommand({
     meta: { name, description },
     args: sessionArgs,
@@ -128,5 +126,9 @@ export const sessionsCommand = defineCommand({
     interrupt: steer('interrupt', 'Interrupt the running turn of a session'),
     stop: steer('stop', 'Stop a session (resumable later)'),
     resume: steer('resume', 'Resume a stopped or errored session'),
+    complete: steer(
+      'complete',
+      'Complete a ready session: it ends for good, and lets go of its profile',
+    ),
   },
 })

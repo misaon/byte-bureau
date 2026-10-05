@@ -44,7 +44,7 @@ export const SESSION: SessionDto = {
   title: 'Fix the build',
   employee: EMPLOYEE,
   providerId: 'fake',
-  profileId: 'default',
+  profileId: 'fake/work',
   workspace: {
     id: 's1',
     runtimeId: 'local',

@@ -54,6 +54,7 @@ export const localBureau = (kernel: Kernel, version: string): Bureau => {
   return {
     projects: kernel.projects,
     sessions: kernel.sessions,
+    profiles: kernel.profiles,
     asks: {
       pending: kernel.asks.pending,
       get: kernel.asks.get,

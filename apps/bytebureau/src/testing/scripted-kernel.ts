@@ -109,21 +109,30 @@ function projectsOf(calls: string[], overrides: Overrides): Bureau['projects'] {
 }
 
 // The rest of a Bureau, which a run asks nothing of but the providers
-const unscripted: Pick<Bureau, 'health' | 'plugins' | 'usage' | 'workspaces' | 'where' | 'close'> =
-  {
-    workspaces: { list: notScripted(), prune: notScripted() },
-    usage: { session: notScripted() },
-    plugins: {
-      list: notScripted(),
-      providers: async () => {
-        await Promise.resolve()
-        return [{ id: 'fake', displayName: 'Fake agent', supportsApiKey: true }]
-      },
+const unscripted: Pick<
+  Bureau,
+  'health' | 'plugins' | 'profiles' | 'usage' | 'workspaces' | 'where' | 'close'
+> = {
+  profiles: {
+    list: notScripted(),
+    add: notScripted(),
+    remove: notScripted(),
+    setDefault: notScripted(),
+    status: notScripted(),
+  },
+  workspaces: { list: notScripted(), prune: notScripted() },
+  usage: { session: notScripted(), profile: notScripted() },
+  plugins: {
+    list: notScripted(),
+    providers: async () => {
+      await Promise.resolve()
+      return [{ id: 'fake', displayName: 'Fake agent', supportsApiKey: true }]
     },
-    health: { check: notScripted() },
-    where: { kind: 'in-process' },
-    close: notScripted(),
-  }
+  },
+  health: { check: notScripted() },
+  where: { kind: 'in-process' },
+  close: notScripted(),
+}
 
 // A Bureau that records what it is asked and tells the events of the script, whatever the run does
 export function scripted(events: readonly EventEnvelope[], overrides: Overrides = {}): Scripted {

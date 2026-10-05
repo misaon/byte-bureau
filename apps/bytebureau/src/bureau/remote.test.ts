@@ -16,6 +16,11 @@ describe('problems of the daemon in the CLI', () => {
     expect(isRefusal(problemError(503, 'store_unavailable', 'x'))).toBe(false)
   })
 
+  it('counts a profile the kernel does not know or cannot use as a refusal', () => {
+    expect(isRefusal(problemError(404, 'profile_not_found', 'x'))).toBe(true)
+    expect(isRefusal(problemError(422, 'profile_invalid', 'x'))).toBe(true)
+  })
+
   it('counts no answer, or an answer without a problem, as no refusal', () => {
     expect(isRefusal(new ApiError(0, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(false)
     expect(isRefusal(new ApiError(502, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(
@@ -44,6 +49,7 @@ interface Passed {
 
 const ANSWER = { selected: ['yes'] }
 const BODY = { projectId: 'p1', title: 'Fix the build' }
+const PROFILE_BODY = { providerId: 'fake', name: 'key', kind: 'api_key', apiKey: 'sk-1' } as const
 
 // The path of a project goes in the body the API registers it by; everything else goes on as it is
 const PASSED: readonly Passed[] = [
@@ -153,6 +159,41 @@ const PASSED: readonly Passed[] = [
     },
   },
   {
+    name: 'profiles.list',
+    args: [],
+    ask: async (bureau) => {
+      await bureau.profiles.list()
+    },
+  },
+  {
+    name: 'profiles.add',
+    args: [PROFILE_BODY],
+    ask: async (bureau) => {
+      await bureau.profiles.add(PROFILE_BODY)
+    },
+  },
+  {
+    name: 'profiles.remove',
+    args: ['fake/work', { purge: true }],
+    ask: async (bureau) => {
+      await bureau.profiles.remove('fake/work', { purge: true })
+    },
+  },
+  {
+    name: 'profiles.setDefault',
+    args: ['fake/work'],
+    ask: async (bureau) => {
+      await bureau.profiles.setDefault('fake/work')
+    },
+  },
+  {
+    name: 'profiles.status',
+    args: ['fake/work'],
+    ask: async (bureau) => {
+      await bureau.profiles.status('fake/work')
+    },
+  },
+  {
     name: 'workspaces.list',
     args: ['p1'],
     ask: async (bureau) => {
@@ -171,6 +212,13 @@ const PASSED: readonly Passed[] = [
     args: ['s1'],
     ask: async (bureau) => {
       await bureau.usage.session('s1')
+    },
+  },
+  {
+    name: 'usage.profile',
+    args: ['fake/work'],
+    ask: async (bureau) => {
+      await bureau.usage.profile('fake/work')
     },
   },
   {

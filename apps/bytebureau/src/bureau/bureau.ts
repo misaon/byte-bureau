@@ -1,4 +1,5 @@
 import type {
+  AddProfileBody,
   AskAnswer,
   AskRecord,
   CreateSessionBody,
@@ -6,6 +7,8 @@ import type {
   EventsFilter,
   HealthDto,
   PluginStatusDto,
+  ProfileDto,
+  ProfileStatusDto,
   ProjectDto,
   PromptInput,
   ProviderDto,
@@ -13,6 +16,7 @@ import type {
   SessionDto,
   SessionUsageDto,
   TurnDto,
+  UsageSnapshotDto,
   WorkspaceInfoDto,
 } from '@bytebureau/protocol'
 
@@ -34,6 +38,15 @@ export interface Bureau {
     readonly list: () => Promise<readonly SessionDto[]>
     readonly get: (id: string) => Promise<SessionDto | undefined>
   }
+  readonly profiles: {
+    readonly list: () => Promise<readonly ProfileDto[]>
+    // The key of an API-key profile travels in the body, and nowhere else
+    readonly add: (body: AddProfileBody) => Promise<ProfileDto>
+    // Purge removes the login directory of the profile as well
+    readonly remove: (id: string, options?: { readonly purge?: boolean }) => Promise<void>
+    readonly setDefault: (id: string) => Promise<void>
+    readonly status: (id: string) => Promise<ProfileStatusDto>
+  }
   readonly asks: {
     readonly pending: (sessionId?: string) => Promise<readonly AskRecord[]>
     readonly get: (id: string) => Promise<AskRecord | undefined>
@@ -47,7 +60,10 @@ export interface Bureau {
     readonly list: (projectId?: string) => Promise<readonly WorkspaceInfoDto[]>
     readonly prune: (projectId?: string) => Promise<PruneReportDto>
   }
-  readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsageDto> }
+  readonly usage: {
+    readonly session: (sessionId: string) => Promise<SessionUsageDto>
+    readonly profile: (id: string) => Promise<UsageSnapshotDto>
+  }
   readonly plugins: {
     readonly list: () => Promise<readonly PluginStatusDto[]>
     readonly providers: () => Promise<readonly ProviderDto[]>

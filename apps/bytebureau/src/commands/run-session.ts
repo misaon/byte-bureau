@@ -1,6 +1,6 @@
 import { ApiError } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
-import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
+import { ProfileError, ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
 import type { CreateSessionBody } from '@bytebureau/protocol'
 import type { Bureau } from '../bureau/bureau.js'
 import type { Context } from '../context.js'
@@ -18,7 +18,7 @@ const RUN_ENDS: Ends = {
 }
 
 // Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
-const REMOTE_REFUSALS = /^(?:workspace_|provider_|session_provider_missing$)/u
+const REMOTE_REFUSALS = /^(?:workspace_|provider_|profile_|session_provider_missing$)/u
 
 export interface RunOptions {
   readonly prompt: string
@@ -27,17 +27,19 @@ export interface RunOptions {
   readonly branch?: string | undefined
   readonly employee?: string | undefined
   readonly provider?: string | undefined
+  // A profile of the provider; the kernel takes the provider's default where none is named
+  readonly profile?: string | undefined
   // The BYTEBUREAU_* variables of the command, for the agent: a daemon does not read the environment of the command
   readonly env: Readonly<Record<string, string>>
   readonly yes: boolean
 }
 
-// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider that is missing or fails
+// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider or a profile that is missing or fails
 export function isRefusal(error: unknown): boolean {
   if (error instanceof ApiError) {
     return error.problem !== undefined && REMOTE_REFUSALS.test(error.problem.code)
   }
-  if (error instanceof WorkspaceError) {
+  if (error instanceof WorkspaceError || error instanceof ProfileError) {
     return true
   }
   if (error instanceof SessionError) {
@@ -68,6 +70,7 @@ function sessionBody(projectId: string, options: RunOptions): CreateSessionBody 
     title: titleOf(options.prompt),
     ...(options.employee === undefined ? {} : { employeeId: options.employee }),
     ...(options.provider === undefined ? {} : { providerId: options.provider }),
+    ...(options.profile === undefined ? {} : { profileId: options.profile }),
     ...(options.branch === undefined ? {} : { branch: options.branch }),
     env: options.env,
   }

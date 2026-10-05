@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { onTestFinished } from 'vitest'
 import { testHome } from './temp-repo.js'
@@ -34,7 +34,9 @@ export interface Interruption {
   readonly target?: ChildProcess | undefined
 }
 
-type Child = ChildProcessByStdio<null, Readable, Readable>
+type Child = ChildProcessByStdio<Writable | null, Readable, Readable>
+
+type Env = Readonly<Record<string, string>>
 
 interface Captured {
   stdout: string
@@ -62,17 +64,26 @@ function capture(child: Child, interruption: Interruption | undefined): Captured
   return captured
 }
 
-// Runs the CLI from source in a Bun process; a process still alive when the test ends is killed
-export async function runCli(
-  args: readonly string[],
-  env: Readonly<Record<string, string>> = {},
-  interruption?: Interruption,
-): Promise<CliResult> {
-  const child = spawn('bun', ['run', 'src/main.ts', ...args], {
-    cwd: CLI_DIRECTORY,
-    env: childEnv(env),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+function ignoreClosedPipe(): void {
+  // Nothing to do: the result of the CLI tells what it read
+}
+
+// The CLI from source in a Bun process; with input its stdin is a pipe that gives the text and ends, else it has none
+function spawnCli(args: readonly string[], env: Env, input?: string): Child {
+  const command = ['run', 'src/main.ts', ...args]
+  const options = { cwd: CLI_DIRECTORY, env: childEnv(env) }
+  if (input === undefined) {
+    return spawn('bun', command, { ...options, stdio: ['ignore', 'pipe', 'pipe'] })
+  }
+  const child = spawn('bun', command, { ...options, stdio: ['pipe', 'pipe', 'pipe'] })
+  // A CLI that ends before it reads its stdin closes the pipe: what it did not read is no failure of the test
+  child.stdin.on('error', ignoreClosedPipe)
+  child.stdin.end(input)
+  return child
+}
+
+// What the CLI printed and its exit code; a process still alive when the test ends is killed
+async function ended(child: Child, interruption?: Interruption): Promise<CliResult> {
   onTestFinished(() => {
     child.kill('SIGKILL')
   })
@@ -83,5 +94,25 @@ export async function runCli(
     resolve({ code: code ?? -1, stdout: captured.stdout, stderr: captured.stderr })
   })
   const result = await promise
+  return result
+}
+
+// Runs the CLI from source in a Bun process, with nothing on its stdin
+export async function runCli(
+  args: readonly string[],
+  env: Env = {},
+  interruption?: Interruption,
+): Promise<CliResult> {
+  const result = await ended(spawnCli(args, env), interruption)
+  return result
+}
+
+// Runs the CLI with the text on its stdin, as a pipe gives it to a command
+export async function runCliWithStdin(
+  args: readonly string[],
+  env: Env,
+  stdin: string,
+): Promise<CliResult> {
+  const result = await ended(spawnCli(args, env, stdin))
   return result
 }

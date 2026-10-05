@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { ApiError } from '@bytebureau/client'
-import { ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
+import { ProfileError, ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
 import { describe, expect, it } from 'vitest'
 import { problemError, TURN } from '../testing/records.js'
 import {
@@ -47,6 +47,23 @@ describe('runSession when the provider is missing or fails', () => {
     const { bureau } = scripted([COMPLETED], { prompt: rejecting(crash) })
     await expect(runSession(bureau, OPTIONS, contextOf())).resolves.toBe(4)
     expect(printed.err()).toStrictEqual(['ProviderError: claude exited (crash)'])
+  })
+})
+
+describe('runSession when the profile is refused', () => {
+  it('exits 4 with the reason when the kernel or the daemon knows no such profile', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const missing = new ProfileError({ code: 'not_found', reason: 'no profile "fake/nope"' })
+    const gone = problemError(404, 'profile_not_found', 'no profile "fake/nope"')
+    const local = scripted([COMPLETED], { create: rejecting(missing) })
+    const remote = scripted([COMPLETED], { create: rejecting(gone) })
+    await expect(runSession(local.bureau, OPTIONS, contextOf())).resolves.toBe(4)
+    await expect(runSession(remote.bureau, OPTIONS, contextOf())).resolves.toBe(4)
+    expect(printed.err()).toStrictEqual([
+      'ProfileError: no profile "fake/nope" (not_found)',
+      'no profile "fake/nope" (profile_not_found)',
+    ])
   })
 })
 

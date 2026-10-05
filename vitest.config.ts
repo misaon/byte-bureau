@@ -36,6 +36,8 @@ export default defineConfig({
         'apps/bytebureau/src/commands/refusable.ts',
         'apps/bytebureau/src/commands/sessions-prompt.ts',
         'apps/bytebureau/src/commands/ask-answer.ts',
+        'apps/bytebureau/src/commands/api-key-input.ts',
+        'apps/bytebureau/src/commands/profiles-add.ts',
         'apps/bytebureau/src/drain.ts',
         // The Bureau as the tests run it in-process; a daemon is started on demand, and the kernel of --no-daemon opened, only in CLI subprocesses
         'apps/bytebureau/src/bureau/ensure-daemon.ts',

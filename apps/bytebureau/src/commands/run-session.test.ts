@@ -62,9 +62,17 @@ describe('runSession and the session it creates', () => {
       },
     })
     const env = { BYTEBUREAU_FAKE_SCRIPT: 'slow' }
-    await runSession(bureau, { ...OPTIONS, employee: 'reviewer', branch: 'dev', env }, contextOf())
+    const named = { employee: 'reviewer', profile: 'fake/work', branch: 'dev', env }
+    await runSession(bureau, { ...OPTIONS, ...named }, contextOf())
     expect(bodies).toStrictEqual([
-      { projectId: 'p1', title: 'Fix the build', employeeId: 'reviewer', branch: 'dev', env },
+      {
+        projectId: 'p1',
+        title: 'Fix the build',
+        employeeId: 'reviewer',
+        profileId: 'fake/work',
+        branch: 'dev',
+        env,
+      },
     ])
   })
 })

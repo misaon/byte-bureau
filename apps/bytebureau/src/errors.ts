@@ -3,6 +3,7 @@ import {
   ConfigError,
   configErrorLine,
   PluginError,
+  ProfileError,
   ProviderError,
   SessionError,
   StoreError,
@@ -16,6 +17,7 @@ const KERNEL_ERRORS = [
   ProviderError,
   AskError,
   PluginError,
+  ProfileError,
   SessionError,
 ] as const
 
