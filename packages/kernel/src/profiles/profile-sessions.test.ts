@@ -6,7 +6,7 @@ import { SessionManager } from '../sessions/session-manager.js'
 import { codeOf, loadedProfiles } from './profile-fixtures.js'
 
 const IN_USE =
-  'profile "fake/work" is in use: 1 session(s) still run under it or can resume; complete or remove them first'
+  'profile "fake/work" is in use: 1 session(s) still run under it or can resume; complete them first'
 
 // The repository of the session goes with the test, so the whole life of the session is one test
 const heldUntilCompleted = Effect.gen(function* heldUntilCompleted() {

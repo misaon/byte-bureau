@@ -130,7 +130,7 @@ The first profile of a provider becomes its default; `--default` or `profiles us
 
 ### Removing a profile
 
-`profiles rm <id>` is refused while a session that runs or can still resume refers to the profile, which is every session but a completed one: `profile "claude/work" is in use: 1 session(s) still run under it or can resume; complete or remove them first`. `bytebureau sessions complete <id>` completes a ready, stopped or errored session, an end on the books that starts no agent, and then the profile can go. Its key goes with it, while the login directory stays unless `--purge` is given.
+`profiles rm <id>` is refused while a session that runs or can still resume refers to the profile, which is every session but a completed one: `profile "claude/work" is in use: 1 session(s) still run under it or can resume; complete them first`. `bytebureau sessions complete <id>` completes a ready, stopped or errored session, an end on the books that starts no agent, and then the profile can go. Its key goes with it, while the login directory stays unless `--purge` is given.
 
 ### Output and exit codes
 

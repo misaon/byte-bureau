@@ -116,9 +116,7 @@ describe('bytebureau profiles and the sessions that run under them', () => {
     expect([run.code, held.code, held.stderr]).toStrictEqual([
       3,
       1,
-      expect.stringContaining(
-        '1 session(s) still run under it or can resume; complete or remove them first',
-      ),
+      expect.stringContaining('1 session(s) still run under it or can resume; complete them first'),
     ])
     const released = await releasedAndRemoved(bench)
     expect([released.shown, released.completed, released.codes]).toStrictEqual([

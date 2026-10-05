@@ -38,6 +38,7 @@ const discard = (deps: ProfileDeps, profile: Profile, removal: Removal): Effect.
   })
 
 // The row goes, and the default with it to the next profile, in one transaction; the removal is told once that holds
+// What it kept outside its row is discarded whether or not the telling went through: the profile is gone either way
 export const removeProfile = (
   deps: ProfileDeps,
   id: string,
@@ -45,6 +46,7 @@ export const removeProfile = (
 ): Effect.Effect<void, ProfileError | StoreError> =>
   Effect.gen(function* removesProfile() {
     const removed = yield* deleteProfile(deps.sql, id)
-    yield* deps.log.publish({ type: 'profile.removed', payload: { profileId: id } })
-    yield* discard(deps, removed, removal)
+    yield* deps.log
+      .publish({ type: 'profile.removed', payload: { profileId: id } })
+      .pipe(Effect.ensuring(discard(deps, removed, removal)))
   })

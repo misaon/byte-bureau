@@ -5,7 +5,7 @@ import { requireProvider } from '../sessions/session-provider.js'
 import { ensureProfileDir, profileDirOf } from './profile-dirs.js'
 import { isProfileName, profileIdOf } from './profile-ids.js'
 import { writeKey } from './profile-keys.js'
-import { claimProfile, defaultProfileOf, forgetProfile, markDefault } from './profile-records.js'
+import { claimProfile, forgetProfile, settleDefault } from './profile-records.js'
 import type { AddProfileInput, Profile, ProfileDeps } from './profile-types.js'
 
 const invalid = (reason: string): ProfileError => new ProfileError({ code: 'invalid', reason })
@@ -72,6 +72,7 @@ const claim = (
           ),
   )
 
+// The profile claims its row before the default is decided, which a removal in between cannot then leave the provider without
 // The first profile of a provider becomes its default, and makeDefault moves the default to the new one
 export const addProfile = (
   deps: ProfileDeps,
@@ -79,22 +80,19 @@ export const addProfile = (
 ): Effect.Effect<Profile, ProfileError | SessionError | StoreError> =>
   Effect.gen(function* addsProfile() {
     const id = yield* checkedId(deps, input)
-    const first = (yield* defaultProfileOf(deps.sql, input.providerId)) === undefined
-    const profile: Profile = {
+    const claimed: Profile = {
       id,
       providerId: input.providerId,
       name: input.name,
       kind: input.kind,
       configDir:
         input.kind === 'login' ? profileDirOf(deps.home, input.providerId, input.name) : null,
-      isDefault: first || input.makeDefault === true,
+      isDefault: false,
       createdAt: nowIso(),
     }
-    yield* claim(deps, profile, input.apiKey)
-    if (profile.isDefault) {
-      yield* markDefault(deps.sql, profile.providerId, id)
-    }
-    const payload = { profileId: id, providerId: profile.providerId }
+    yield* claim(deps, claimed, input.apiKey)
+    const isDefault = yield* settleDefault(deps.sql, claimed, input.makeDefault === true)
+    const payload = { profileId: id, providerId: claimed.providerId }
     yield* deps.log.publish({ type: 'profile.added', payload })
-    return profile
+    return { ...claimed, isDefault }
   })

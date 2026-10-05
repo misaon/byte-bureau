@@ -98,21 +98,53 @@ export const forgetProfile = (
   sql`DELETE FROM profiles WHERE id = ${id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
 
 // One default per provider: the one statement sets the flag on this profile and clears it on every other
-export const markDefault = (
+// A profile that is gone by now changes nothing, so the provider never loses its default to it
+const markDefault = (
   sql: SqlClient.SqlClient,
   providerId: string,
   id: string,
 ): Effect.Effect<void, StoreError> =>
-  sql`UPDATE profiles SET is_default = (id = ${id}) WHERE provider_id = ${providerId}`.pipe(
+  sql`UPDATE profiles SET is_default = (id = ${id}) WHERE provider_id = ${providerId}
+    AND EXISTS (SELECT 1 FROM profiles WHERE id = ${id} AND provider_id = ${providerId})`.pipe(
     Effect.asVoid,
     Effect.mapError(toStoreError),
   )
+
+// A transaction's own failure is the store's
+const inTransaction = <Value, Failure>(
+  sql: SqlClient.SqlClient,
+  work: Effect.Effect<Value, Failure>,
+): Effect.Effect<Value, Failure | StoreError> =>
+  sql
+    .withTransaction(work)
+    .pipe(Effect.catchTag('SqlError', (failure) => Effect.fail(toStoreError(failure))))
 
 export const makeDefault = (
   sql: SqlClient.SqlClient,
   id: string,
 ): Effect.Effect<void, ProfileError | StoreError> =>
-  Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id))
+  inTransaction(
+    sql,
+    Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id)),
+  )
+
+// A profile just claimed becomes the default of its provider when asked to, or when the provider has none, decided in one transaction
+export const settleDefault = (
+  sql: SqlClient.SqlClient,
+  profile: Profile,
+  asked: boolean,
+): Effect.Effect<boolean, StoreError> =>
+  inTransaction(
+    sql,
+    Effect.gen(function* settlesDefault() {
+      const current = yield* defaultProfileOf(sql, profile.providerId)
+      const becomes = asked || current === undefined
+      if (becomes) {
+        yield* markDefault(sql, profile.providerId, profile.id)
+      }
+      return becomes
+    }),
+  )
 
 // The sessions under a profile that run or can still resume: every one but a completed session, as a stopped or errored one resumes
 const holdingSessionsOf = (
@@ -129,7 +161,7 @@ const holdingSessionsOf = (
 const inUse = (id: string, holding: number): ProfileError =>
   new ProfileError({
     code: 'in_use',
-    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete or remove them first`,
+    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete them first`,
   })
 
 // The default passes to the oldest profile left of the provider, when the removed one held it
@@ -144,6 +176,7 @@ const passDefault = (
     : Effect.void
 
 // A session that runs or can resume keeps its profile; the completed ones let go of it, as the store refers to no profile that is gone
+// Its usage snapshots go with it, so a profile added again under the id starts with none
 // The count, the release, the delete and the passing of the default share one transaction: a session created in between cannot slip past, and two removals cannot leave a provider without its default
 export const deleteProfile = (
   sql: SqlClient.SqlClient,
@@ -157,6 +190,9 @@ export const deleteProfile = (
           return yield* inUse(id, holding)
         }
         yield* sql`UPDATE sessions SET profile_id = NULL WHERE profile_id = ${id} AND status = 'completed'`.pipe(
+          Effect.mapError(toStoreError),
+        )
+        yield* sql`DELETE FROM usage_snapshots WHERE profile_id = ${id}`.pipe(
           Effect.mapError(toStoreError),
         )
         const deleted = yield* sql<Row>`DELETE FROM profiles WHERE id = ${id} RETURNING *`.pipe(
