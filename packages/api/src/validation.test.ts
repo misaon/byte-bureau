@@ -7,7 +7,12 @@ import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/h
 import { baseUrl, bodyOf, fetched } from './testing.js'
 import { RequestValidation, RequestValidationLive } from './validation.js'
 
-// An endpoint that reads a number from its query, and one whose answer its own schema refuses
+// A check whose own message would repeat the value it refused
+const Key = Schema.String.check(
+  Schema.makeFilter((value: string) => value.startsWith('x') || `not a key: ${value}`),
+)
+
+// An endpoint that reads a number from its query, one that reads a key, and one whose answer its own schema refuses
 const Probe = HttpApi.make('probe').add(
   HttpApiGroup.make('probe')
     .add(
@@ -15,6 +20,7 @@ const Probe = HttpApi.make('probe').add(
         query: { since: Schema.FiniteFromString },
         success: Schema.Finite,
       }),
+      HttpApiEndpoint.get('keyed', '/keyed', { query: { key: Key }, success: Schema.String }),
       HttpApiEndpoint.get('broken', '/broken', { success: Schema.Int }),
     )
     .middleware(RequestValidation),
@@ -23,6 +29,7 @@ const Probe = HttpApi.make('probe').add(
 const ProbeHandlers = HttpApiBuilder.group(Probe, 'probe', (handlers) =>
   handlers
     .handle('since', ({ query }) => Effect.succeed(query.since))
+    .handle('keyed', ({ query }) => Effect.succeed(query.key))
     .handle('broken', () => Effect.succeed(0.5)),
 )
 
@@ -53,6 +60,20 @@ it.layer(ProbeServer)('RequestValidation', (suite) => {
       assert.containSubset(yield* bodyOf(response), {
         code: 'request_invalid',
         detail: 'Query: Expected a finite number\n  at ["since"]',
+      })
+    }),
+  )
+
+  suite.effect('names the place and the shape it expected, never a value the request held', () =>
+    Effect.gen(function* refusesWithoutValue() {
+      const base = yield* baseUrl
+      const response = yield* fetched(`${base}/keyed?key=sk-canary-validation`)
+      const body = yield* bodyOf(response)
+      assert.strictEqual(response.status, 400)
+      assert.notInclude(JSON.stringify(body), 'sk-canary-validation')
+      assert.containSubset(body, {
+        code: 'request_invalid',
+        detail: 'Query: Expected a valid value\n  at ["key"]',
       })
     }),
   )

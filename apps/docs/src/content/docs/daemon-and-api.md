@@ -128,7 +128,7 @@ The OpenAPI document has one problem schema for each status an endpoint declares
 
 | Status | Codes |
 | --- | --- |
-| 400 | `request_invalid`: a body, query, path parameter or header that its schema refuses, named in the detail |
+| 400 | `request_invalid`: a body, query, path parameter or header that its schema refuses, named in the detail with each place and the shape it expected (`Query: Expected a finite number` at `["since"]`), never with a value the request held |
 | 401 | `unauthorized` |
 | 403 | `session_yolo_refused` |
 | 404 | `not_found` (a project), `session_not_found`, `ask_not_found`, `profile_not_found`, `workspace_not_found` (a project removed while the request was on its way) |
