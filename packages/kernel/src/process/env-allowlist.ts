@@ -1,4 +1,14 @@
-const FIXED = new Set(['PATH', 'HOME', 'LANG', 'TMPDIR', 'TERM', 'SSH_AUTH_SOCK', 'TRACEPARENT'])
+// USER is how Claude Code finds its login in the macOS keychain
+const FIXED = new Set([
+  'PATH',
+  'HOME',
+  'USER',
+  'LANG',
+  'TMPDIR',
+  'TERM',
+  'SSH_AUTH_SOCK',
+  'TRACEPARENT',
+])
 
 const BYTEBUREAU = 'BYTEBUREAU_'
 

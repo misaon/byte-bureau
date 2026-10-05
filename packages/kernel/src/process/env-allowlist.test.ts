@@ -1,25 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { allowlistEnv, bytebureauEnv } from './env-allowlist.js'
 
+// A daemon's environment: the documented variables, an extra one, and what must not reach an agent
+const DAEMON_ENV = {
+  PATH: '/bin',
+  HOME: '/h',
+  USER: 'dev',
+  LANG: 'cs_CZ.UTF-8',
+  LC_ALL: 'C',
+  TMPDIR: '/t',
+  TERM: 'xterm',
+  SSH_AUTH_SOCK: '/tmp/agent.sock',
+  ANTHROPIC_API_KEY: 'not-a-real-key',
+  AWS_SECRET: 'y',
+  BYTEBUREAU_HOME: '/bb',
+  TRACEPARENT: '00-a-b-01',
+  CUSTOM: 'c',
+}
+
 describe(allowlistEnv, () => {
   it('keeps only the documented variables and explicit extras', () => {
-    const env = allowlistEnv(
-      {
-        PATH: '/bin',
-        HOME: '/h',
-        LANG: 'cs_CZ.UTF-8',
-        LC_ALL: 'C',
-        TMPDIR: '/t',
-        TERM: 'xterm',
-        SSH_AUTH_SOCK: '/tmp/agent.sock',
-        ANTHROPIC_API_KEY: 'not-a-real-key',
-        AWS_SECRET: 'y',
-        BYTEBUREAU_HOME: '/bb',
-        TRACEPARENT: '00-a-b-01',
-        CUSTOM: 'c',
-      },
-      ['CUSTOM'],
-    )
+    const env = allowlistEnv(DAEMON_ENV, ['CUSTOM'])
     expect(Object.keys(env).toSorted()).toStrictEqual([
       'BYTEBUREAU_HOME',
       'CUSTOM',
@@ -31,6 +32,7 @@ describe(allowlistEnv, () => {
       'TERM',
       'TMPDIR',
       'TRACEPARENT',
+      'USER',
     ])
   })
 
@@ -42,6 +44,7 @@ describe(allowlistEnv, () => {
         LC: 'x',
         BYTEBUREAU: 'y',
         SSH_AUTH_SOCKET: '/z',
+        USERNAME: 'dev',
         HOME: undefined,
         LANG: 'C',
       },
