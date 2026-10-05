@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { readIfPresent, writePrivate } from './private-file.js'
+import { readIfPresent, sweepDrafts, writePrivate } from './private-file.js'
 import type { SecretsShape } from './secrets.js'
 
 type Values = Readonly<Record<string, string>>
@@ -42,8 +42,10 @@ export class FileSecretStore implements SecretsShape {
   public readonly backend = 'file' as const
   private readonly file: string
 
+  // A draft a process left when it died mid-write holds secrets too: it goes when the store starts
   public constructor(file: string) {
     this.file = file
+    sweepDrafts(file)
   }
 
   public async get(key: string): Promise<string | undefined> {

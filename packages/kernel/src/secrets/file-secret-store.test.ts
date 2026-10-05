@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -11,6 +12,23 @@ const REFUSED = /secrets\.json does not hold a secret store/u
 // The secrets file in a fresh directory removed after the test, or in a subdirectory of it that is not there yet
 const fileIn = (directory = ''): string =>
   path.join(tempDir('bb-secrets-'), directory, 'secrets.json')
+
+describe('the file store and the drafts beside its file', () => {
+  it('removes the draft a process that died mid-write left, and keeps the one of a live process', () => {
+    const file = fileIn()
+    const { pid: dead } = spawnSync(process.execPath, ['-e', ''])
+    const deadDraft = `${file}.${dead}.tmp`
+    const liveDraft = `${file}.${process.ppid}.tmp`
+    writeFileSync(deadDraft, '{ "k": "left behind" }')
+    writeFileSync(liveDraft, '{}')
+    const store = new FileSecretStore(file)
+    expect([store.backend, existsSync(deadDraft), existsSync(liveDraft)]).toStrictEqual([
+      'file',
+      false,
+      true,
+    ])
+  })
+})
 
 describe(FileSecretStore, () => {
   it('keeps a value across stores of the same file, in a file only the user can read', async () => {

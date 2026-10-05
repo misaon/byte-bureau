@@ -4,12 +4,14 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import { isAlive } from '../process/pid-alive.js'
 
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && 'code' in error && error.code === 'ENOENT'
@@ -45,6 +47,31 @@ const writeDraft = (draft: string, text: string): void => {
     fsyncSync(fd)
   } finally {
     closeSync(fd)
+  }
+}
+
+// The pid in the name of a draft of the file, as writePrivate names it
+const draftPid = (name: string, base: string): number | undefined => {
+  const middle = name.startsWith(`${base}.`) ? name.slice(base.length + 1) : ''
+  const digits = /^(?<pid>\d+)\.tmp$/u.exec(middle)
+  return digits === null || digits.groups === undefined ? undefined : Number(digits.groups['pid'])
+}
+
+// The drafts of the file that processes which have died left behind, removed best effort; a live process may be writing its own
+export const sweepDrafts = (file: string): void => {
+  const directory = path.dirname(file)
+  const base = path.basename(file)
+  let names: readonly string[] = []
+  try {
+    names = readdirSync(directory)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const pid = draftPid(name, base)
+    if (pid !== undefined && pid !== process.pid && !isAlive(pid)) {
+      discard(path.join(directory, name))
+    }
   }
 }
 
