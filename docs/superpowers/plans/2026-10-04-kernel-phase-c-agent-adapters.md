@@ -4221,8 +4221,8 @@ git commit -m "feat(client): add the profiles area and the usage snapshot of a p
 ### Task 5: The CLI — `profiles ls|add|rm|use|status`, `run --profile`, the Bureau, the messages, the key canary
 
 **Files:**
-- Create: `apps/bytebureau/src/commands/profiles.ts`, `apps/bytebureau/src/commands/profiles-add.ts`, `apps/bytebureau/src/commands/api-key-input.ts`, `apps/bytebureau/src/commands/api-key-input.test.ts`, `apps/bytebureau/src/commands/profiles.test.ts`, `apps/bytebureau/src/commands/profiles-canary.test.ts`
-- Modify: `apps/bytebureau/src/bureau/bureau.ts` (`profiles` area, `usage.profile`), `apps/bytebureau/src/bureau/local.ts`, `apps/bytebureau/src/bureau/remote.ts`, `apps/bytebureau/src/bureau/remote.test.ts`, `apps/bytebureau/src/testing/scripted-kernel.ts`, `apps/bytebureau/src/testing/recording-client.ts`, `apps/bytebureau/src/commands/run.ts` (`--profile`), `apps/bytebureau/src/commands/run-session.ts` (`profileId` in the body, `RunOptions.profile`), `apps/bytebureau/src/commands/sub-commands.ts`, `apps/bytebureau/src/render/rows.ts` (`profileRows`, `profileStatusRows`), `apps/bytebureau/src/commands/sessions.ts` (`sessions show` prints the profile; `sessions complete <id>` joins `interrupt|stop|resume` in `steer`, with the message `sessions_completed` — "Completed {id}" / "Dokončeno {id}" — as the way out of `profile_in_use`, ruled after Task 3), `packages/i18n/messages/{en,cs}.json`, `vitest.config.ts` (coverage include for `commands/api-key-input.ts`, `commands/profiles-add.ts`)
+- Create: `apps/bytebureau/src/commands/profiles.ts`, `apps/bytebureau/src/commands/profiles-add.ts`, `apps/bytebureau/src/commands/api-key-input.ts` (the pure `apiKeyFrom` and the process glue: the hidden prompt on stderr, `stdinIsTerminal()`), `apps/bytebureau/src/commands/api-key-input.test.ts`, `apps/bytebureau/src/commands/profiles.test.ts`, `apps/bytebureau/src/commands/profiles-canary.test.ts`, `apps/bytebureau/src/commands/profiles-add.test.ts` (the terminal path no subprocess reaches)
+- Modify: `apps/bytebureau/src/bureau/{bureau,local,remote,remote.test}.ts` (`profiles` area, `usage.profile`), `apps/bytebureau/src/commands/{run,run-session,run-session.test,run-session-failures.test}.ts` (`--profile`; a profile refusal exits 4), `apps/bytebureau/src/commands/{sessions,sub-commands,refusable,refusable.test,refusals.test}.ts` (`sessions complete`; `ProfileError` a refusal in-process), `apps/bytebureau/src/{errors,cli.test}.ts`, `apps/bytebureau/src/render/{rows,rows.test}.ts` (`profileRows`, `profileStatusRows`, the `profile` field), `apps/bytebureau/src/testing/{run-cli,scripted-kernel,records}.ts` (`runCliWithStdin`; the fixtures), `packages/i18n/messages/{en,cs}.json`, `packages/kernel/src/facade/{types,sessions,facade-areas.test}.ts` (`Kernel.usage.profile`), `packages/kernel/src/profiles/profile-records.ts` (`missingProfile` exported), `packages/kernel/src/sessions/{state-machine,state-machine.test,session-lifecycle.test,session-failures.test,session-helper-fixtures}.ts` (`complete` from `stopped` and `errored`), `vitest.config.ts` (coverage include)
 - Test: the new test files (the daemon-backed ones on `testHome()`, whose daemons use the file backend)
 
 **Interfaces:**
@@ -4240,17 +4240,50 @@ import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { apiKeyFrom } from './api-key-input.js'
 
+const never = async (): Promise<string> => {
+  await Promise.resolve()
+  return 'never'
+}
+
+// A terminal at which the text is typed; nothing typed is a cancelled prompt
+const typing = (typed?: string) => async (): Promise<string | undefined> => {
+  await Promise.resolve()
+  return typed
+}
+
 describe(apiKeyFrom, () => {
   it('reads the first line of stdin where there is no terminal, trimmed, and refuses an empty one', async () => {
     expect.hasAssertions()
-    await expect(apiKeyFrom({ tty: false, stdin: Readable.from(['sk-test-key\nignored\n']), prompt: async () => 'never' })).resolves.toBe('sk-test-key')
-    await expect(apiKeyFrom({ tty: false, stdin: Readable.from(['\n']), prompt: async () => 'never' })).resolves.toBeUndefined()
+    const piped = Readable.from(['sk-test-key\nignored\n'])
+    await expect(apiKeyFrom({ tty: false, stdin: piped, prompt: never })).resolves.toBe(
+      'sk-test-key',
+    )
+    const empty = Readable.from(['\n'])
+    await expect(apiKeyFrom({ tty: false, stdin: empty, prompt: never })).resolves.toBeUndefined()
+  })
+
+  it('joins the chunks of the line, and takes a last line without its newline', async () => {
+    expect.hasAssertions()
+    const chunked = Readable.from(['sk-', 'split\r\n'])
+    await expect(apiKeyFrom({ tty: false, stdin: chunked, prompt: never })).resolves.toBe(
+      'sk-split',
+    )
+    const unended = Readable.from(['  sk-last  '])
+    await expect(apiKeyFrom({ tty: false, stdin: unended, prompt: never })).resolves.toBe('sk-last')
+    const nothing = Readable.from([])
+    await expect(apiKeyFrom({ tty: false, stdin: nothing, prompt: never })).resolves.toBeUndefined()
   })
 
   it('asks at a terminal, and takes a cancelled prompt as no key', async () => {
     expect.hasAssertions()
-    await expect(apiKeyFrom({ tty: true, stdin: Readable.from([]), prompt: async () => 'sk-typed' })).resolves.toBe('sk-typed')
-    await expect(apiKeyFrom({ tty: true, stdin: Readable.from([]), prompt: async () => undefined })).resolves.toBeUndefined()
+    const stdin = Readable.from([])
+    await expect(apiKeyFrom({ tty: true, stdin, prompt: typing('sk-typed') })).resolves.toBe(
+      'sk-typed',
+    )
+    const cancelled = apiKeyFrom({ tty: true, stdin, prompt: typing() })
+    await expect(cancelled).resolves.toBeUndefined()
+    const blank = apiKeyFrom({ tty: true, stdin, prompt: typing('   ') })
+    await expect(blank).resolves.toBeUndefined()
   })
 })
 ```
@@ -4258,56 +4291,194 @@ describe(apiKeyFrom, () => {
 `apps/bytebureau/src/commands/profiles.test.ts` — daemon-backed, on one `testHome()` with a daemon started by `startDaemonProcess(home)` (the fake provider takes keys):
 
 ```ts
-describe('the profiles commands', () => {
-  it('adds a login profile, prints its login hint, lists it as the default and shows its status', async () => {
+import { describe, expect, it } from 'vitest'
+import { jsonLines, listedUnder } from '../testing/json-lines.js'
+import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
+import { benchWithDaemon, type Bench, type Env } from '../testing/session-bench.js'
+import { testHome } from '../testing/temp-repo.js'
+import { NO_DAEMON, ON_FAKE, sessionIdIn, workbench } from '../testing/workbench.js'
+
+// The JSON record a command printed under its name
+function recordOf(stdout: string, command: string): Record<string, unknown> | undefined {
+  return jsonLines(stdout).find((line) => line['command'] === command)
+}
+
+interface TwoProfiles {
+  readonly codes: readonly number[]
+  // The defaults the listing tells: once the API-key profile is added with --default, then once use gives the default back
+  readonly defaults: readonly (readonly unknown[])[]
+}
+
+// The ids of the profiles listed as the default of their provider
+async function defaultsIn(env: Env): Promise<readonly unknown[]> {
+  const listed = await runCli(['profiles', 'ls', '--json'], env)
+  return listedUnder(listed.stdout, 'profiles')
+    .filter((profile) => profile['isDefault'] === true)
+    .map((profile) => profile['id'])
+}
+
+// The login profile fake/work, the API-key profile fake/key added as the default, then fake/work made the default again
+async function twoProfiles(env: Env): Promise<TwoProfiles> {
+  const work = await runCli(['profiles', 'add', 'fake', 'work'], env)
+  const add = ['profiles', 'add', 'fake', 'key', '--api-key', '--default']
+  const key = await runCliWithStdin(add, env, 'sk-1\n')
+  const keyFirst = await defaultsIn(env)
+  const used = await runCli(['profiles', 'use', 'fake/work'], env)
+  const workAgain = await defaultsIn(env)
+  return { codes: [work.code, key.code, used.code], defaults: [keyFirst, workAgain] }
+}
+
+// A run of the slow script under the profile, which Ctrl-C stops once its turn works: its session can resume
+async function stoppedRunUnder(bench: Bench, profile: string): Promise<CliResult> {
+  const args = ['run', 'wait', '--project', bench.repo, ...ON_FAKE, '--profile', profile, '--json']
+  const env = { ...bench.env, BYTEBUREAU_FAKE_SCRIPT: 'slow' }
+  const run = await runCli(args, env, { afterStdout: '"turn.started"', signal: 'SIGINT' })
+  return run
+}
+
+interface Released {
+  readonly id: string
+  readonly shown: string
+  readonly completed: string
+  readonly codes: readonly number[]
+}
+
+// The stopped session is completed as it is, which lets go of its profile; then fake/key goes, fake/work with its directory, and fake/work once more
+async function releasedAndRemoved({ home, env }: Bench): Promise<Released> {
+  const id = await sessionIdIn(home, [])
+  const shown = await runCli(['sessions', 'show', id], env)
+  const completed = await runCli(['sessions', 'complete', id], env)
+  const key = await runCli(['profiles', 'rm', 'fake/key'], env)
+  const work = await runCli(['profiles', 'rm', 'fake/work', '--purge'], env)
+  const again = await runCli(['profiles', 'rm', 'fake/work'], env)
+  const codes = [completed.code, key.code, work.code, again.code]
+  return { id, shown: shown.stdout, completed: completed.stdout, codes }
+}
+
+describe('bytebureau profiles through the daemon', () => {
+  it('adds a login profile, lists it as the default and tells its status', async () => {
     expect.hasAssertions()
-    const home = testHome()
-    const daemon = await startDaemonProcess(home)
-    const added = await runCli(['profiles', 'add', 'fake', 'work', '--json'], { home })
+    const { env, daemon } = await benchWithDaemon()
+    const added = await runCli(['profiles', 'add', 'fake', 'work', '--json'], env)
+    const listed = await runCli(['profiles', 'ls'], env)
+    const status = await runCli(['profiles', 'status', 'fake/work', '--json'], env)
     expect(added.code).toBe(0)
-    const record = jsonLines(added.stdout).find((line) => line['command'] === 'profiles.add')
-    expect(record).toMatchObject({ profile: { id: 'fake/work', kind: 'login', isDefault: true } })
-    const listed = await runCli(['profiles', 'ls'], { home })
-    expect(listed.stdout).toContain('fake/work')
-    expect(listed.stdout).toContain('default')
-    const status = await runCli(['profiles', 'status', 'fake/work', '--json'], { home })
-    expect(jsonLines(status.stdout).find((line) => line['command'] === 'profiles.status')).toMatchObject({ statuses: [{ profileId: 'fake/work', state: 'loggedIn' }] })
+    expect(recordOf(added.stdout, 'profiles.add')).toMatchObject({
+      profile: { id: 'fake/work', kind: 'login', isDefault: true },
+    })
+    expect(listed.stdout).toMatch(/^fake\/work {2}fake {2}login {2}default {2}\S/mu)
+    expect(recordOf(status.stdout, 'profiles.status')).toMatchObject({
+      statuses: [{ profileId: 'fake/work', state: 'loggedIn' }],
+    })
     await daemon.stop()
   })
 
   it('reads an API key from stdin, never from the arguments, and refuses an empty one', async () => {
     expect.hasAssertions()
-    const home = testHome()
-    const daemon = await startDaemonProcess(home)
-    const keyed = await runCli(['profiles', 'add', 'fake', 'key', '--api-key', '--json'], { home, stdin: 'sk-from-stdin\n' })
-    expect(keyed.code).toBe(0)
+    const { env, daemon } = await benchWithDaemon()
+    const args = ['profiles', 'add', 'fake', 'key', '--api-key', '--json']
+    const keyed = await runCliWithStdin(args, env, 'sk-from-stdin\n')
+    const empty = await runCliWithStdin(
+      ['profiles', 'add', 'fake', 'other', '--api-key'],
+      env,
+      '\n',
+    )
+    expect([keyed.code, recordOf(keyed.stdout, 'profiles.add')]).toMatchObject([
+      0,
+      { profile: { id: 'fake/key', kind: 'api_key' } },
+    ])
     expect(keyed.stdout).not.toContain('sk-from-stdin')
-    const empty = await runCli(['profiles', 'add', 'fake', 'other', '--api-key'], { home, stdin: '\n' })
-    expect([empty.code, empty.stderr]).toStrictEqual([1, expect.stringContaining('--api-key needs a key')])
+    expect([empty.code, empty.stderr]).toStrictEqual([
+      1,
+      expect.stringContaining('--api-key needs a key'),
+    ])
     await daemon.stop()
   })
+})
 
-  it('moves the default, refuses to remove the profile of a running session, and removes it afterwards', async () => {
+describe('bytebureau profiles and the sessions that run under them', () => {
+  it('moves the default, refuses to remove the profile of a session that can resume, and removes it once the session is completed', async () => {
     expect.hasAssertions()
-    const home = testHome()
-    const daemon = await startDaemonProcess(home)
-    await runCli(['profiles', 'add', 'fake', 'work'], { home })
-    await runCli(['profiles', 'add', 'fake', 'key', '--api-key'], { home, stdin: 'sk-1\n' })
-    expect((await runCli(['profiles', 'use', 'fake/key'], { home })).code).toBe(0)
-    const repo = createTempRepo()
-    const run = await runCli(['run', 'wait', '--project', repo, '--provider', 'fake', '--profile', 'fake/work', '--json'], { home, env: { BYTEBUREAU_FAKE_SCRIPT: 'slow' }, interruption: { afterStdout: '"turn.started"', signal: 'SIGINT' } })
-    expect(run.code).toBe(3)
-    const held = await runCli(['profiles', 'rm', 'fake/work'], { home })
-    expect(held.code).toBe(1)
-    expect(held.stderr).toContain('1 session(s) still run under it or can resume; complete or remove them first')
-    const listed = await runCli(['sessions', 'ls', '--json'], { home })
-    const sessionId = sessionsOf(listed.stdout)[0].id // decode `{ command: 'sessions.ls', sessions }` as the other CLI tests decode `--json` output
-    expect((await runCli(['sessions', 'complete', sessionId], { home })).code).toBe(0)
-    expect((await runCli(['profiles', 'rm', 'fake/key'], { home })).code).toBe(0)
-    const removedWork = await runCli(['profiles', 'rm', 'fake/work', '--purge'], { home })
-    expect(removedWork.code).toBe(0)
-    expect((await runCli(['profiles', 'rm', 'fake/work'], { home })).code).toBe(1)
-    await daemon.stop()
+    const bench = await benchWithDaemon()
+    await expect(twoProfiles(bench.env)).resolves.toStrictEqual({
+      codes: [0, 0, 0],
+      defaults: [['fake/key'], ['fake/work']],
+    })
+    const run = await stoppedRunUnder(bench, 'fake/work')
+    const held = await runCli(['profiles', 'rm', 'fake/work'], bench.env)
+    expect([run.code, held.code, held.stderr]).toStrictEqual([
+      3,
+      1,
+      expect.stringContaining(
+        '1 session(s) still run under it or can resume; complete or remove them first',
+      ),
+    ])
+    const released = await releasedAndRemoved(bench)
+    expect([released.shown, released.completed, released.codes]).toStrictEqual([
+      expect.stringMatching(/^profile\s+fake\/work$/mu),
+      `Completed ${released.id}\n`,
+      [0, 0, 0, 1],
+    ])
+    await bench.daemon.stop()
+  })
+})
+
+describe('bytebureau profiles in the process of the command', () => {
+  it('tells that there is nothing, adds a profile and refuses one nobody holds in the words of the kernel', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const none = await runCli(['profiles', 'ls', '--lang', 'cs', NO_DAEMON], env)
+    const unchecked = await runCli(['profiles', 'status', NO_DAEMON], env)
+    const added = await runCli(['profiles', 'add', 'fake', 'work', NO_DAEMON], env)
+    const missing = await runCli(['profiles', 'rm', 'fake/nope', NO_DAEMON], env)
+    expect([none.stdout, unchecked.stdout]).toStrictEqual([
+      'Žádné profily\n',
+      'No profiles to check\n',
+    ])
+    expect([added.code, added.stdout]).toStrictEqual([
+      0,
+      'Profile fake/work added\nfake/work  loggedIn  -\n',
+    ])
+    expect([missing.code, missing.stderr]).toStrictEqual([1, 'no profile "fake/nope"\n'])
+  })
+
+  it('refuses a run under a profile nobody holds with exit code 4', async () => {
+    expect.hasAssertions()
+    const { repo, home } = workbench()
+    const args = ['run', 'x', '--project', repo, ...ON_FAKE, '--profile', 'fake/nope', '--yes']
+    const run = await runCli([...args, NO_DAEMON], { BYTEBUREAU_HOME: home })
+    expect([run.code, run.stderr]).toStrictEqual([
+      4,
+      'ProfileError: no profile "fake/nope" (not_found)\n',
+    ])
+  })
+})
+
+const TYPED = 'sk-typed-123'
+
+describe('bytebureau profiles add and a key typed as an argument', () => {
+  it('refuses it before anything is read or sent, never repeating it, and adds nothing', async () => {
+    expect.hasAssertions()
+    const env = { BYTEBUREAU_HOME: testHome() }
+    const before = await runCli(
+      ['profiles', 'add', 'fake', '--api-key', TYPED, 'key', NO_DAEMON],
+      env,
+    )
+    const after = await runCli(
+      ['profiles', 'add', 'fake', 'key', '--api-key', TYPED, NO_DAEMON],
+      env,
+    )
+    const listed = await runCli(['profiles', 'ls', '--json', NO_DAEMON], env)
+    const refusal =
+      'The API key is never an argument: pass --api-key alone and type it at the prompt, or pipe it on stdin\n'
+    expect([before.code, before.stderr, after.code, after.stderr]).toStrictEqual([
+      1,
+      refusal,
+      1,
+      refusal,
+    ])
+    expect([before.stdout, after.stdout].join('')).not.toContain(TYPED)
+    expect(listedUnder(listed.stdout, 'profiles')).toStrictEqual([])
   })
 })
 ```
@@ -4317,21 +4488,81 @@ describe('the profiles commands', () => {
 `apps/bytebureau/src/commands/profiles-canary.test.ts` — Review Focus 1:
 
 ```ts
-it('hands an API key to the agent and nowhere else: not to the events, the log, the listings or the status', async () => {
-  expect.hasAssertions()
-  const home = testHome()
-  const daemon = await startDaemonProcess(home)
-  const canary = 'sk-ant-canary-7f3a9c2e'
-  await runCli(['profiles', 'add', 'fake', 'key', '--api-key'], { home, stdin: `${canary}\n` })
-  const repo = createTempRepo()
-  const run = await runCli(['run', 'Create src/hello.ts exporting hello()', '--project', repo, '--provider', 'fake', '--profile', 'fake/key', '--json', '--yes'], { home })
-  expect(run.code).toBe(0)
-  const events = jsonLines(run.stdout)
-  expect(events.some((event) => event['type'] === 'session.warning' && JSON.stringify(event).includes('api key: present'))).toBe(true)
-  const everything = [run.stdout, run.stderr, (await runCli(['profiles', 'ls', '--json'], { home })).stdout, (await runCli(['profiles', 'status', '--json'], { home })).stdout, readFileSync(path.join(home, 'logs', 'daemon.log'), 'utf8'), readFileSync(path.join(home, 'data', 'bytebureau.db')).toString('latin1')].join('\n')
-  expect(everything).not.toContain(canary)
-  expect(readFileSync(path.join(home, 'secrets.json'), 'utf8')).toContain(canary)
-  await daemon.stop()
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { startDaemonProcess } from '../testing/daemon.js'
+import { jsonLines } from '../testing/json-lines.js'
+import { runCli, runCliWithStdin } from '../testing/run-cli.js'
+import type { Bench, Env } from '../testing/session-bench.js'
+import { ON_FAKE, PROMPT, workbench } from '../testing/workbench.js'
+
+const CANARY = 'sk-ant-canary-7f3a9c2e'
+
+// A daemon that logs all it can, so a key in any line of it would show
+async function debugBench(): Promise<Bench> {
+  const { repo, home } = workbench()
+  const daemon = await startDaemonProcess(home, ['--port', '0', '--debug'])
+  return { repo, home, env: { BYTEBUREAU_HOME: home }, daemon }
+}
+
+// What the listings of the profiles and of their status tell, as JSON
+async function listingsOf(env: Env): Promise<string> {
+  const listed = await runCli(['profiles', 'ls', '--json'], env)
+  const checked = await runCli(['profiles', 'status', '--json'], env)
+  return [listed.stdout, listed.stderr, checked.stdout, checked.stderr].join('\n')
+}
+
+// The warning of the fake agent that it was given the variable of the key, which it tells without the value
+const tellsKey = (event: Record<string, unknown>): boolean =>
+  event['type'] === 'session.warning' && JSON.stringify(event).includes('api key: present')
+
+interface Said {
+  readonly codes: readonly number[]
+  readonly toldKey: boolean
+  // Everything the commands printed
+  readonly text: string
+}
+
+// The key added on stdin, a run under its profile, and the listings after it
+async function addedAndRun({ env, repo }: Bench): Promise<Said> {
+  const add = ['profiles', 'add', 'fake', 'key', '--api-key']
+  const added = await runCliWithStdin(add, env, `${CANARY}\n`)
+  const args = ['run', PROMPT, '--project', repo, ...ON_FAKE, '--profile', 'fake/key']
+  const run = await runCli([...args, '--json', '--yes'], env)
+  const listings = await listingsOf(env)
+  return {
+    codes: [added.code, run.code],
+    toldKey: jsonLines(run.stdout).some((event) => tellsKey(event)),
+    text: [added.stdout, added.stderr, run.stdout, run.stderr, listings].join('\n'),
+  }
+}
+
+// Every file under the directory, however deep
+const filesIn = (directory: string): string[] =>
+  readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name))
+
+const secretsOf = (home: string): string => path.join(home, 'secrets.json')
+
+// What the daemon logged, and every file of the home but its secrets and of the repository with its worktree: the store and its journal among them
+function leftBehind({ home, repo, daemon }: Bench): string {
+  const files = [...filesIn(home).filter((file) => file !== secretsOf(home)), ...filesIn(repo)]
+  const contents = files.map((file) => readFileSync(file).toString('latin1'))
+  return [daemon.stdout(), daemon.stderr(), ...contents].join('\n')
+}
+
+describe('an API key added through the CLI', () => {
+  it('reaches the agent and nowhere else: not the events, the log, the store, the listings or the status', async () => {
+    expect.hasAssertions()
+    const bench = await debugBench()
+    const said = await addedAndRun(bench)
+    expect([said.codes, said.toldKey]).toStrictEqual([[0, 0], true])
+    await bench.daemon.stop()
+    expect(`${said.text}\n${leftBehind(bench)}`).not.toContain(CANARY)
+    expect(readFileSync(secretsOf(bench.home), 'utf8')).toContain(CANARY)
+  })
 })
 ```
 
@@ -4348,6 +4579,9 @@ Expected: FAIL — `Unknown command profiles`; the module `api-key-input.js` doe
 
 ```ts
 import type { Readable } from 'node:stream'
+import { isatty } from 'node:tty'
+import { m } from '@bytebureau/i18n'
+import { isCancel, password } from '@clack/prompts'
 
 export interface KeyInput {
   readonly tty: boolean
@@ -4356,28 +4590,48 @@ export interface KeyInput {
   readonly prompt: () => Promise<string | undefined>
 }
 
-// The first line of stdin, trimmed; nothing when the line is empty or stdin ends first
-const firstLine = async (stdin: Readable): Promise<string | undefined> => {
+const keyIn = (text: string): string | undefined => {
+  const key = text.trim()
+  return key === '' ? undefined : key
+}
+
+// The first line of stdin, trimmed; nothing when the line is empty or stdin ends without one
+async function firstLine(stdin: Readable): Promise<string | undefined> {
   let text = ''
   for await (const chunk of stdin) {
     text += String(chunk)
     const end = text.indexOf('\n')
     if (end !== -1) {
-      const line = text.slice(0, end).trim()
-      return line === '' ? undefined : line
+      return keyIn(text.slice(0, end))
     }
   }
-  const line = text.trim()
-  return line === '' ? undefined : line
+  return keyIn(text)
 }
 
 // A key comes from the terminal's hidden prompt, or from the first line of a pipe; never from an argument, which the process list shows
-export const apiKeyFrom = async (input: KeyInput): Promise<string | undefined> => {
+export async function apiKeyFrom(input: KeyInput): Promise<string | undefined> {
   if (input.tty) {
     const typed = await input.prompt()
-    return typed === undefined || typed.trim() === '' ? undefined : typed.trim()
+    return typed === undefined ? undefined : keyIn(typed)
   }
-  return firstLine(input.stdin)
+  const piped = await firstLine(input.stdin)
+  return piped
+}
+
+// Whether a person types at the stdin of the command
+export const stdinIsTerminal = (): boolean => isatty(process.stdin.fd)
+
+// The prompt goes to stderr, so the output of the command stays what it prints, JSON included
+const hiddenPrompt = (id: string) => async (): Promise<string | undefined> => {
+  const typed = await password({ message: m.profiles_key_prompt({ id }), output: process.stderr })
+  return isCancel(typed) ? undefined : typed
+}
+
+// The key of the profile, typed at the terminal or piped on the stdin of the command
+export async function apiKeyOf(id: string): Promise<string | undefined> {
+  const tty = stdinIsTerminal()
+  const key = await apiKeyFrom({ tty, stdin: process.stdin, prompt: hiddenPrompt(id) })
+  return key
 }
 ```
 
@@ -4387,64 +4641,175 @@ export const apiKeyFrom = async (input: KeyInput): Promise<string | undefined> =
 
 ```ts
 import { m } from '@bytebureau/i18n'
-import type { ProfileDto } from '@bytebureau/protocol'
-import { confirm, isCancel, password } from '@clack/prompts'
+import type { AddProfileBody, ProfileDto, ProfileStatusDto } from '@bytebureau/protocol'
+import { confirm } from '@clack/prompts'
 import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext, type Context } from '../context.js'
-import { apiKeyFrom } from './api-key-input.js'
+import { profileStatusRows } from '../render/rows.js'
+import { table } from '../render/tables.js'
+import { apiKeyOf, stdinIsTerminal } from './api-key-input.js'
 import { withBureauRefusable } from './refusable.js'
 
-const hiddenPrompt = (id: string) => async (): Promise<string | undefined> => {
-  const typed = await password({ message: m.profiles_key_prompt({ id }) })
-  return isCancel(typed) ? undefined : typed
+const ADD_ARGS = {
+  ...globalArgs,
+  provider: {
+    type: 'positional',
+    description: 'Provider id (claude, acp:codex, …)',
+    required: true,
+  },
+  name: {
+    type: 'positional',
+    description: 'Profile name (lower-case letters, digits, dashes)',
+    required: true,
+  },
+  'api-key': {
+    type: 'boolean',
+    description: 'An API-key profile; the key is read from the terminal or the first line of stdin',
+    default: false,
+  },
+  default: {
+    type: 'boolean',
+    description: 'Make it the default profile of its provider',
+    default: false,
+  },
+} as const
+
+// What the person tells once they have logged in: anything but a yes checks nothing
+async function loggedInAtTerminal(): Promise<boolean> {
+  const done = await confirm({ message: m.profiles_wait_login(), initialValue: true })
+  return done === true
 }
 
-// A login profile is told where to log in; at a terminal the command waits for the login and tells what it finds
-const afterLogin = async (bureau: Bureau, profile: ProfileDto, context: Context): Promise<void> => {
-  const status = await bureau.profiles.status(profile.id)
-  context.output.print(m.profiles_added_login({ id: profile.id, hint: status.hint ?? '' }))
-  if (context.stdoutIsTTY && !context.yes) {
-    const done = await confirm({ message: m.profiles_wait_login(), initialValue: true })
-    if (done === true) {
-      const checked = await bureau.profiles.status(profile.id)
-      context.output.emit({ command: 'profiles.status', statuses: [checked] })
-      context.output.print(`${checked.profileId}: ${checked.state}${checked.hint === undefined ? '' : ` — ${checked.hint}`}`)
-    }
+interface ProfileArgs {
+  readonly provider: string
+  readonly name: string
+  readonly default: boolean
+}
+
+const bodyOf = (args: ProfileArgs, apiKey: string | undefined): AddProfileBody => ({
+  providerId: args.provider,
+  name: args.name,
+  kind: apiKey === undefined ? 'login' : 'api_key',
+  ...(apiKey === undefined ? {} : { apiKey }),
+  ...(args.default ? { makeDefault: true } : {}),
+})
+
+export interface Telling {
+  readonly context: Context
+  // Waits for the person to log in, true once they have; none off a terminal or with --yes
+  readonly wait: (() => Promise<boolean>) | undefined
+}
+
+// The status of the profile, or none when it cannot be had: the profile is added all the same, and a retry would find it exists
+async function statusOf(bureau: Bureau, id: string): Promise<ProfileStatusDto | undefined> {
+  try {
+    const status = await bureau.profiles.status(id)
+    return status
+  } catch {
+    return undefined
   }
 }
 
+const tellStatuses = (output: Context['output'], statuses: readonly ProfileStatusDto[]): void => {
+  for (const line of table(profileStatusRows(statuses))) {
+    output.print(line)
+  }
+}
+
+// The status of a login profile, told as a JSON record; an API-key profile has none to check
+async function statusAfterAdd(
+  bureau: Bureau,
+  profile: ProfileDto,
+  output: Context['output'],
+): Promise<ProfileStatusDto | undefined> {
+  const status = profile.kind === 'login' ? await statusOf(bureau, profile.id) : undefined
+  if (status !== undefined) {
+    output.emit({ command: 'profiles.status', statuses: [status] })
+  }
+  return status
+}
+
+// Only a logged-out profile is told to log in; the hint of another state, such as the reason of an unknown one, is no login
+const loginHintOf = (status: ProfileStatusDto | undefined): string | undefined =>
+  status !== undefined && status.state === 'loggedOut' ? status.hint : undefined
+
+// Once the person says they have logged in, the status is checked again and told
+async function checkedAfterLogin(
+  bureau: Bureau,
+  id: string,
+  { context, wait }: Telling,
+): Promise<void> {
+  if (wait === undefined || !(await wait())) {
+    return
+  }
+  const checked = await statusOf(bureau, id)
+  tellStatuses(context.output, checked === undefined ? [] : [checked])
+}
+
+// A logged-out profile is told where to log in, and waited for at a terminal; any other status is told as its row
+export async function tellAdded(
+  bureau: Bureau,
+  profile: ProfileDto,
+  telling: Telling,
+): Promise<void> {
+  const { output } = telling.context
+  const status = await statusAfterAdd(bureau, profile, output)
+  const hint = loginHintOf(status)
+  if (hint === undefined) {
+    output.print(m.profiles_added({ id: profile.id }))
+    tellStatuses(output, status === undefined ? [] : [status])
+    return
+  }
+  output.print(m.profiles_added_login({ id: profile.id, hint }))
+  await checkedAfterLogin(bureau, profile.id, telling)
+}
+
+interface KeyArgs {
+  readonly provider: string
+  readonly name: string
+  readonly 'api-key': boolean
+}
+
+// The key of the profile, if it takes one, or why the command ends before anything is read or sent
+interface KeyRead {
+  readonly apiKey?: string | undefined
+  readonly refusal?: string | undefined
+}
+
+// A positional beyond the provider and the name is a key typed as an argument, which the shell's history and the process list keep
+async function keyRead(args: KeyArgs, positionals: number): Promise<KeyRead> {
+  if (positionals > 2) {
+    return { refusal: m.profiles_key_argument() }
+  }
+  if (!args['api-key']) {
+    return {}
+  }
+  const apiKey = await apiKeyOf(`${args.provider}/${args.name}`)
+  return apiKey === undefined ? { refusal: m.profiles_key_missing() } : { apiKey }
+}
+
 export const addCommand = defineCommand({
-  meta: { name: 'add', description: 'Add a profile: a login directory, or an API key read from the prompt or stdin' },
-  args: {
-    ...globalArgs,
-    provider: { type: 'positional', description: 'Provider id (claude, acp:codex, …)', required: true },
-    name: { type: 'positional', description: 'Profile name (lower-case letters, digits, dashes)', required: true },
-    'api-key': { type: 'boolean', description: 'An API-key profile; the key is read from the terminal or the first line of stdin', default: false },
-    default: { type: 'boolean', description: 'Make it the default profile of its provider', default: false },
+  meta: {
+    name: 'add',
+    description: 'Add a profile: a login directory, or an API key read from the prompt or stdin',
   },
+  args: ADD_ARGS,
   async run({ args }) {
     const context = processContext(args)
-    const id = `${args.provider}/${args.name}`
-    const apiKey = args['api-key'] ? await apiKeyFrom({ tty: context.stdinIsTTY, stdin: process.stdin, prompt: hiddenPrompt(id) }) : undefined
-    if (args['api-key'] && apiKey === undefined) {
-      context.output.warn(m.profiles_key_missing())
+    const flags = bureauFlags(args)
+    const { apiKey, refusal } = await keyRead(args, args._.length)
+    if (refusal !== undefined) {
+      context.output.warn(refusal)
       process.exitCode = 1
       return
     }
-    const added = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
-      const profile = await bureau.profiles.add({ providerId: args.provider, name: args.name, kind: args['api-key'] ? 'api_key' : 'login', ...(apiKey === undefined ? {} : { apiKey }), ...(args.default ? { makeDefault: true } : {}) })
+    const waits = context.interactive && !args.yes && stdinIsTerminal()
+    await withBureauRefusable(context, flags, async (bureau) => {
+      const profile = await bureau.profiles.add(bodyOf(args, apiKey))
       context.output.emit({ command: 'profiles.add', profile })
-      if (profile.kind === 'login') {
-        await afterLogin(bureau, profile, context)
-      } else {
-        context.output.print(m.profiles_added({ id: profile.id }))
-      }
-      return profile
+      await tellAdded(bureau, profile, { context, wait: waits ? loggedInAtTerminal : undefined })
     })
-    if (added === undefined) {
-      return
-    }
   },
 })
 ```
@@ -4455,19 +4820,28 @@ export const addCommand = defineCommand({
 
 ```ts
 import { m } from '@bytebureau/i18n'
+import type { ProfileStatusDto } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
+import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
 import { profileRows, profileStatusRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
 import { addCommand } from './profiles-add.js'
 import { withBureauRefusable } from './refusable.js'
 
+const idArg = {
+  id: { type: 'positional', description: 'Profile id (provider/name)', required: true },
+} as const
+
 const ls = defineCommand({
   meta: { name: 'ls', description: 'List the profiles of every provider' },
   args: { ...globalArgs },
   async run({ args }) {
     const context = processContext(args)
-    const profiles = await withBureauRefusable(context, bureauFlags(args), async (bureau) => bureau.profiles.list())
+    const profiles = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+      const listed = await bureau.profiles.list()
+      return listed
+    })
     if (profiles === undefined) {
       return
     }
@@ -4484,14 +4858,23 @@ const ls = defineCommand({
 
 const rm = defineCommand({
   meta: { name: 'rm', description: 'Remove a profile; --purge removes its login directory too' },
-  args: { ...globalArgs, id: { type: 'positional', description: 'Profile id (provider/name)', required: true }, purge: { type: 'boolean', description: 'Remove the login directory of the profile', default: false } },
+  args: {
+    ...globalArgs,
+    ...idArg,
+    purge: {
+      type: 'boolean',
+      description: 'Remove the login directory of the profile',
+      default: false,
+    },
+  },
   async run({ args }) {
     const context = processContext(args)
-    const done = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
+    // A profile that a session can still run under stays: that is a refusal, with its reason and exit code 1
+    const removed = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       await bureau.profiles.remove(args.id, { purge: args.purge })
       return true
     })
-    if (done === true) {
+    if (removed !== undefined) {
       context.output.emit({ command: 'profiles.rm', id: args.id, purged: args.purge })
       context.output.print(m.profiles_removed({ id: args.id }))
     }
@@ -4500,28 +4883,59 @@ const rm = defineCommand({
 
 const use = defineCommand({
   meta: { name: 'use', description: 'Make a profile the default of its provider' },
-  args: { ...globalArgs, id: { type: 'positional', description: 'Profile id (provider/name)', required: true } },
+  args: { ...globalArgs, ...idArg },
   async run({ args }) {
     const context = processContext(args)
     const done = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
       await bureau.profiles.setDefault(args.id)
       return true
     })
-    if (done === true) {
+    if (done !== undefined) {
       context.output.emit({ command: 'profiles.use', id: args.id })
       context.output.print(m.profiles_default_set({ id: args.id }))
     }
   },
 })
 
+// The ids of the profile named, else of every profile
+async function profileIds(bureau: Bureau, id: string | undefined): Promise<readonly string[]> {
+  if (id !== undefined) {
+    return [id]
+  }
+  const profiles = await bureau.profiles.list()
+  return profiles.map((profile) => profile.id)
+}
+
+// Asked side by side; a status that fails refuses the command, as one a provider cannot give is unknown already
+async function statusesOf(
+  bureau: Bureau,
+  id: string | undefined,
+): Promise<readonly ProfileStatusDto[]> {
+  const ids = await profileIds(bureau, id)
+  const statuses = await Promise.all(
+    ids.map(async (each) => {
+      const checked = await bureau.profiles.status(each)
+      return checked
+    }),
+  )
+  return statuses
+}
+
 const status = defineCommand({
-  meta: { name: 'status', description: 'Check the login of one profile, or of all' },
-  args: { ...globalArgs, id: { type: 'positional', description: 'Profile id; every profile when left out', required: false } },
+  meta: { name: 'status', description: 'Check the login of one profile, or of every profile' },
+  args: {
+    ...globalArgs,
+    id: {
+      type: 'positional',
+      description: 'Profile id; every profile when left out',
+      required: false,
+    },
+  },
   async run({ args }) {
     const context = processContext(args)
     const statuses = await withBureauRefusable(context, bureauFlags(args), async (bureau) => {
-      const ids = args.id === undefined ? (await bureau.profiles.list()).map((profile) => profile.id) : [args.id]
-      return Promise.all(ids.map(async (id) => bureau.profiles.status(id)))
+      const checked = await statusesOf(bureau, args.id)
+      return checked
     })
     if (statuses === undefined) {
       return
@@ -4546,6 +4960,133 @@ export const profilesCommand = defineCommand({
 (`import/max-dependencies` is 10 and `max-lines` 300 — split `rm`/`use` into `profiles-manage.ts` if needed. `Promise.all` over the statuses runs the provider checks concurrently; fine for a handful.)
 
 `render/rows.ts`: `profileRows(profiles, marker)` → `[id, providerId, kind, isDefault ? marker : '', configDir ?? '-']`; `profileStatusRows(statuses)` → `[profileId, state, account ?? '-', flat(hint ?? '')]`. `bureau/bureau.ts`: `profiles: { list, add(body: AddProfileBody), remove(id, options?: { purge?: boolean }), setDefault(id), status(id) }`, `usage.profile(id)`; `local.ts` through `kernel.profiles.*` (map the kernel's `Profile`/`ProfileStatus` to the DTO shapes — identical fields) and `kernel.usage`'s snapshot (add `Kernel.usage.profile` in the facade: `promised(UsageService, (usage, id) => usage.snapshot(id))` mapped to the DTO with `observedAt: null` when undefined); `remote.ts` passes the client's areas through. `run.ts`: `profile: { type: 'string', description: 'Profile id of the provider (default: its default profile)' }` → `RunOptions.profile` → `sessionBody` adds `profileId`. `sessions show` adds a `profile` line (`session.profileId ?? '-'`). `sub-commands.ts`: `profiles: profilesCommand`. Messages in `en.json`/`cs.json` as listed.
+
+**Added files (as shipped):**
+
+`apps/bytebureau/src/commands/profiles-add.test.ts` (as shipped):
+
+```ts
+import type { ProfileStatusDto } from '@bytebureau/protocol'
+import { describe, expect, it } from 'vitest'
+import type { Bureau } from '../bureau/bureau.js'
+import { PROFILE, PROFILE_STATUS, problemError } from '../testing/records.js'
+import { captureConsole, contextOf, rejecting, scripted } from '../testing/scripted-kernel.js'
+import { tellAdded } from './profiles-add.js'
+
+const HINT = 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/fake/work claude /login'
+const LOGGED_OUT: ProfileStatusDto = { ...PROFILE_STATUS, state: 'loggedOut', hint: HINT }
+const ADDED_LOGIN = `Profile fake/work added. Log in with: ${HINT}`
+
+interface Statuses {
+  readonly bureau: Bureau
+  // The profiles whose status was asked, in order
+  readonly asked: string[]
+}
+
+// A Bureau that answers the statuses one after the other
+function answering(...statuses: ProfileStatusDto[]): Statuses {
+  const { bureau } = scripted([])
+  const asked: string[] = []
+  const status = async (id: string): Promise<ProfileStatusDto> => {
+    asked.push(id)
+    await Promise.resolve()
+    return statuses[asked.length - 1] ?? PROFILE_STATUS
+  }
+  return { bureau: { ...bureau, profiles: { ...bureau.profiles, status } }, asked }
+}
+
+const saying = (done: boolean) => async (): Promise<boolean> => {
+  await Promise.resolve()
+  return done
+}
+
+describe(tellAdded, () => {
+  it('tells where to log in when the status of a login profile has a hint, and waits for nothing off a terminal', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, asked } = answering(LOGGED_OUT)
+    await tellAdded(bureau, PROFILE, { context: contextOf(), wait: undefined })
+    expect([printed.out(), asked]).toStrictEqual([[ADDED_LOGIN], ['fake/work']])
+  })
+
+  it('checks the login again once the person says they have logged in, and tells what it finds', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, asked } = answering(LOGGED_OUT, {
+      ...PROFILE_STATUS,
+      account: 'me@example.com',
+    })
+    await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(true) })
+    expect(printed.out()).toStrictEqual([ADDED_LOGIN, 'fake/work  loggedIn  me@example.com'])
+    expect(asked).toStrictEqual(['fake/work', 'fake/work'])
+  })
+
+  it('checks nothing more when the person does not say they have logged in', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau, asked } = answering(LOGGED_OUT)
+    await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(false) })
+    expect([printed.out(), asked]).toStrictEqual([[ADDED_LOGIN], ['fake/work']])
+  })
+})
+
+describe('tellAdded and a profile that needs no login', () => {
+  it('tells a login profile without a hint as added, and an API-key one without asking its status', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const login = answering(PROFILE_STATUS)
+    const key = answering()
+    await tellAdded(login.bureau, PROFILE, { context: contextOf(), wait: saying(true) })
+    const keyed = { ...PROFILE, id: 'fake/key', kind: 'api_key' } as const
+    await tellAdded(key.bureau, keyed, { context: contextOf(), wait: saying(true) })
+    expect(printed.out()).toStrictEqual([
+      'Profile fake/work added',
+      'fake/work  loggedIn  -',
+      'Profile fake/key added',
+    ])
+    expect([login.asked, key.asked]).toStrictEqual([['fake/work'], []])
+  })
+
+  it('tells the status of a login profile as a JSON record, without words', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = answering(LOGGED_OUT)
+    await tellAdded(bureau, PROFILE, { context: contextOf(true), wait: undefined })
+    expect(printed.out()).toStrictEqual([
+      JSON.stringify({ command: 'profiles.status', statuses: [LOGGED_OUT] }),
+    ])
+  })
+})
+
+describe('tellAdded and a status that tells no login to perform', () => {
+  it('tells a state other than logged out as added with its status row, never as a login, and waits for nothing', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const reason = 'claude is not installed; install it first'
+    const { bureau, asked } = answering({ ...PROFILE_STATUS, state: 'unknown', hint: reason })
+    await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(true) })
+    expect(printed.out()).toStrictEqual([
+      'Profile fake/work added',
+      `fake/work  unknown  -  ${reason}`,
+    ])
+    expect(asked).toStrictEqual(['fake/work'])
+  })
+
+  it('ends as added when the status cannot be had after the add, which a retry would refuse as existing', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    const { bureau } = scripted([])
+    const status = rejecting(problemError(503, 'store_unavailable', 'the store is unavailable'))
+    const failing = { ...bureau, profiles: { ...bureau.profiles, status } }
+    await expect(
+      tellAdded(failing, PROFILE, { context: contextOf(), wait: saying(true) }),
+    ).resolves.toBeUndefined()
+    expect([printed.out(), printed.err()]).toStrictEqual([['Profile fake/work added'], []])
+  })
+})
+```
+
+**Semantics (as shipped, commits 6cd9887, 83e8cff, 94ed87e, 93d6b98, f86b258, 1451e59, 973bd47, 4ae3fd9, 32225ad, 9da464c):** `profiles ls` prints the table `id  provider  kind  default  dir` (the marker `default`/`výchozí`, `-` for no directory; `profiles_none` when empty; `--json` → `{ command: 'profiles.ls', profiles }`). `profiles add <provider> <name> [--api-key] [--default]` reads the key before any request — at a terminal through a hidden clack `password` prompt that draws on stderr (`profiles_key_prompt`), otherwise the first line of stdin, trimmed; an empty or cancelled key is the refusal `profiles_key_missing` (exit 1, no daemon contacted); `--api-key` is a boolean flag, so `--api-key=<value>` is dropped by citty, and a third positional (a key typed as `--api-key <value>` before the name) is refused before anything is read or sent (`profiles_key_argument`, exit 1); the key travels only in the body of `profiles.add`, and the emitted record is `{ command: 'profiles.add', profile }`. For a login profile the command checks the status: `loggedOut` with a hint prints `profiles_added_login` ("Profile {id} added. Log in with: {hint}" — so an adapter's loggedOut hint is a bare command) and, at a terminal without `--yes` (stdout a TTY, not `--json`, stdin a TTY), waits with a clack `confirm` (`profiles_wait_login`) and on yes checks again and prints the status row; any other state prints `profiles_added` and the status row; a failed status check after a successful add is told as `profiles_added` and ends 0; with `--json` the status is a second record `{ command: 'profiles.status', statuses: [status] }`. `profiles rm <id> [--purge]` → `{ command: 'profiles.rm', id, purged }`; `profiles use <id>` → `{ command: 'profiles.use', id }`; `profiles status [<id>]` probes one profile or every profile at once (one failing status is told as the refusal — deliberate), table `id  state  account  hint`, `profiles_status_none`, `--json` → `{ command: 'profiles.status', statuses }`. `run --profile <id>` → `CreateSessionBody.profileId`; a profile the kernel does not know or cannot use is a refusal of the run, exit 4 (Phase B's contract for `run`; `isRefusal` takes `ProfileError` and the `profile_*` codes), while every other profile command's refusal ends 1 with the detail (`refusable.ts` maps an in-process `ProfileError` to its reason; the API's 404/409/409/422 arrive as `ApiError`). `sessions complete <id>` joins `interrupt|stop|resume` in `steer` (`Completed <id>` / `Dokončeno: <id>`, `--json` → `{ command: 'sessions.complete', id }`), and the kernel now completes a `stopped` or `errored` session too (`state-machine.ts` `complete: { ready, stopped, errored }` — a bookkeeping end that starts no agent, so a session whose profile lost its key can still be closed and the profile removed; a spec amendment for Task 9); `sessions show` prints `profile  <id>` (`-` for the nameless login). `Bureau.profiles` `{ list, add, remove(id, { purge? }), setDefault, status }` and `Bureau.usage.profile(id)` pass the client's areas (remote) or `kernel.profiles`/`kernel.usage` (local) through; the kernel facade gained `usage.profile(id)` (the newest snapshot, `{ profileId, rateLimit: {}, observedAt: null }` before any, `ProfileError not_found` for an unknown profile, as the API answers). `Context` is unchanged (`createContext` is at the 3-parameter cap): `add` reads `--yes` and the stdin terminal itself. Messages (en, cs): `profiles_none`, `profiles_added`, `profiles_added_login`, `profiles_wait_login`, `profiles_removed`, `profiles_default_set`, `profiles_key_prompt`, `profiles_key_missing`, `profiles_key_argument`, `profiles_status_none`, `profiles_default_marker`, `sessions_completed`. Tests: `profiles.test.ts` drives the built CLI against a Bun daemon on `testHome()` (a login profile added and listed, the key from stdin and not in stdout, `use` moving the default, `--default`, a slow run under `--profile` stopped by SIGINT exiting 3, `rm` refused with the in-use text, `sessions show` with the profile, `sessions complete` of the stopped session, then the removals) and in-process (`--lang cs`, the refusals, `run --profile fake/nope` exit 4, the third-positional refusal); `profiles-canary.test.ts` (Review Focus 1) adds a canary key on stdin against a daemon under `--debug`, runs under the profile (the fake says `api key: present`), stops the daemon and finds the canary only in `secrets.json` — not in any output, any other file of the home (WAL and journal included), the repository or its worktree; `profiles-add.test.ts` the terminal path with a scripted Bureau; `api-key-input.test.ts` the brief's cases plus CRLF, a chunked line, no trailing newline, empty stdin; `refusals.test.ts`, `cli.test.ts`, `rows.test.ts`, `remote.test.ts`, `refusable.test.ts`, `run-session*.test.ts`, the kernel's state-machine and facade tests. `runCliWithStdin(args, env, stdin)` in `testing/run-cli.ts` pipes stdin to the CLI. For Task 6: the CLI prints a loggedOut hint as "Log in with: {hint}", so the Claude adapter's hint is the bare `CLAUDE_CONFIG_DIR=<dir> claude /login`; an `unknown` state's hint (the probe's reason) is shown in the status row only. For Task 7: the preset hints are bare commands (`codex login`, …), no "log in with: " prefix. For Task 9's docs: the commands, the key rules (hidden prompt on stderr, stdin, never an argument), the JSON shapes, the exit codes (1 for a refused profile command, 4 for `run` under a missing or invalid profile), and the way out of `profile_in_use` (`sessions complete <id>`, which now takes a stopped session too).
 
 - [ ] **Step 5: Run the CLI suite twice and the gates**
 
@@ -5322,14 +5863,15 @@ export interface Preset {
   // The variable an API-key profile's key travels in, where the agent takes one
   readonly apiKeyEnv?: string | undefined
   readonly installHint: string
+  // A bare command: the CLI prints it after "Log in with: " (ruled after Task 5); pi asks for its provider login on first run
   readonly loginHint: string
 }
 
 export const PRESETS: Readonly<Record<Exclude<PresetId, 'custom'>, Preset>> = {
-  codex: { id: 'codex', displayName: 'Codex (ACP)', command: 'codex-acp', args: [], env: {}, configDirEnv: 'CODEX_HOME', apiKeyEnv: 'OPENAI_API_KEY', installHint: 'install it with: npm install -g @agentclientprotocol/codex-acp', loginHint: 'log in with: codex login' },
-  gemini: { id: 'gemini', displayName: 'Gemini CLI (ACP)', command: 'gemini', args: ['--acp'], env: {}, apiKeyEnv: 'GEMINI_API_KEY', installHint: 'install it with: npm install -g @google/gemini-cli', loginHint: 'log in once by running: gemini' },
-  opencode: { id: 'opencode', displayName: 'OpenCode (ACP)', command: 'opencode', args: ['acp'], env: {}, installHint: 'install it with: npm install -g opencode-ai', loginHint: 'log in with: opencode auth login' },
-  pi: { id: 'pi', displayName: 'pi (ACP)', command: 'pi-acp', args: [], env: {}, installHint: 'install it with: npm install -g pi-acp @earendil-works/pi-coding-agent', loginHint: 'configure pi as its documentation says' },
+  codex: { id: 'codex', displayName: 'Codex (ACP)', command: 'codex-acp', args: [], env: {}, configDirEnv: 'CODEX_HOME', apiKeyEnv: 'OPENAI_API_KEY', installHint: 'install it with: npm install -g @agentclientprotocol/codex-acp', loginHint: 'codex login' },
+  gemini: { id: 'gemini', displayName: 'Gemini CLI (ACP)', command: 'gemini', args: ['--acp'], env: {}, apiKeyEnv: 'GEMINI_API_KEY', installHint: 'install it with: npm install -g @google/gemini-cli', loginHint: 'gemini' },
+  opencode: { id: 'opencode', displayName: 'OpenCode (ACP)', command: 'opencode', args: ['acp'], env: {}, installHint: 'install it with: npm install -g opencode-ai', loginHint: 'opencode auth login' },
+  pi: { id: 'pi', displayName: 'pi (ACP)', command: 'pi-acp', args: [], env: {}, installHint: 'install it with: npm install -g pi-acp @earendil-works/pi-coding-agent', loginHint: 'pi' },
 }
 
 export const providerIdOf = (preset: PresetId): string => `acp:${preset}`
@@ -5361,7 +5903,7 @@ export const spawnAgent = (spawn: SpawnFn, preset: Preset, options: { readonly c
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { for (const line of chunk.split('\n')) { if (line !== '') { stderr.push(line); if (stderr.length > STDERR_LINES) { stderr.shift() } } } })
     const exited = new Promise<{ code: number | null; signal: string | null }>((done) => { child.once('exit', (code, signal) => done({ code, signal })) })
     child.once('error', (error: NodeJS.ErrnoException) => {
-      reject(error.code === 'ENOENT' ? new Error(`${preset.command} is not installed; ${preset.installHint}; then ${preset.loginHint}`) : error)
+      reject(error.code === 'ENOENT' ? new Error(`${preset.command} is not installed; ${preset.installHint}; then log in with: ${preset.loginHint}`) : error)
     })
     child.once('spawn', () => resolve({ child, exited, recentStderr: () => [...stderr] }))
   })
@@ -5521,6 +6063,7 @@ Semantics: Phase C is done when a fresh clone passes every gate, `bytebureau plu
 
 - §4 `SecretStore` row: `Bun.secrets` (Keychain, libsecret, Credential Manager) with a 0600 file under the home as the fallback; `backend()` reported by health and `doctor`; the age-encrypted fallback deferred.
 - §4 `ProfileService` row: profile ids `<provider>/<name>`, the store as the one source, `resolve()` for sessions.
+- §5.3: `complete` is allowed from `stopped` and `errored` too — a bookkeeping end that starts no agent, so a session whose profile lost its key can be closed and its profile removed; `remove` of a profile is refused while any session but a completed one refers to it.
 - §6: `AgentProvider.apiKeyEnv?`, `CreateSessionRequest.providerConfig`.
 - §7: an in-process agent plugin may spawn its own agent process when the port's process spawner cannot serve it (ACP needs stdin); the kernel's allowlisted environment still applies through the request.
 - §8.1: `authStatus()` is implemented through `initializationResult()` + `accountInfo()` and the `auth_status` message; `permissionMode` is passed explicitly; `settingSources` default; the user's `claude` through `pathToClaudeCodeExecutable`.
