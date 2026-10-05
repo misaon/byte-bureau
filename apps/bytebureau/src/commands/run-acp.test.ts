@@ -8,8 +8,20 @@ import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testin
 import { configureHome } from '../testing/temp-repo.js'
 import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
 
+const CUSTOM = 'acp:custom'
+
 // A run on the custom ACP agent through the daemon of the home, its events as JSON lines
-const ON_CUSTOM = ['--provider', 'acp:custom', '--json']
+const ON_CUSTOM = ['--provider', CUSTOM, '--json']
+
+// A run of a prompt of one word on the provider, which the tests that use it expect refused
+const runOn = (repo: string, provider: string): string[] => [
+  'run',
+  'x',
+  '--project',
+  repo,
+  '--provider',
+  provider,
+]
 
 // What a run prints once the agent asks for its permission
 const ASKED = '"type":"ask.requested"'
@@ -29,7 +41,7 @@ async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Be
 
 // The custom provider runs the fake ACP agent, whose hello script asks one permission and then writes src/hello.ts
 async function onTheFake(): Promise<Bench> {
-  const bench = await benchOn({ 'acp:custom': fakeAcpPreset() })
+  const bench = await benchOn({ [CUSTOM]: fakeAcpPreset() })
   return bench
 }
 
@@ -127,14 +139,11 @@ describe('bytebureau run on an ACP agent that cannot be started', () => {
   it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
     expect.hasAssertions()
     const { repo, home, env, daemon } = await benchWithDaemon()
-    const withoutCommand = await runCli(
-      ['run', 'x', '--project', repo, '--provider', 'acp:custom'],
-      env,
-    )
+    const withoutCommand = await runCli(runOn(repo, CUSTOM), env)
     // Trusted, so the override is run and not the codex-acp the machine may have installed
     configureHome(home, { trust: { commands: ['bun', 'codex-acp-definitely-missing'] } })
     writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
-    const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
+    const missing = await runCli(runOn(repo, 'acp:codex'), env)
     expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
       4,
       `${path.join(repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured (config_invalid)\n`,
@@ -152,10 +161,7 @@ describe('bytebureau run on an ACP agent that a cloned project names', () => {
     expect.hasAssertions()
     const bench = await onTheFake()
     configureHome(bench.home, { trust: {} })
-    const refused = await runCli(
-      ['run', 'x', '--project', bench.repo, '--provider', 'acp:custom'],
-      bench.env,
-    )
+    const refused = await runCli(runOn(bench.repo, CUSTOM), bench.env)
     expect([refused.code, refused.stderr]).toStrictEqual([
       4,
       `${path.join(bench.repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ${path.join(bench.home, 'config.json')} (config_invalid)\n`,

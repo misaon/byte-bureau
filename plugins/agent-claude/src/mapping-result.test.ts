@@ -15,6 +15,7 @@ import {
 
 const DELTA = 'message.delta'
 const TURN_END = 'turn.completed'
+const USAGE = 'usage.updated'
 const RESETS_AT = new Date(1_791_100_000 * 1000).toISOString()
 const NO_USAGE = {
   inputTokens: 0,
@@ -59,7 +60,7 @@ describe('the end of a turn', () => {
     expect(events.map((event) => event.type)).toStrictEqual([
       'turn.started',
       DELTA,
-      'usage.updated',
+      USAGE,
       TURN_END,
       'turn.started',
       DELTA,
@@ -139,7 +140,7 @@ describe('a turn that failed on the API', () => {
     expect.hasAssertions()
     expect(mapMessage(OVERLOADED, newMapState())).toStrictEqual([
       { type: 'session.warning', kind: 'turn_error', message: 'API Error: 529 Overloaded' },
-      { type: 'usage.updated', usage: NO_USAGE },
+      { type: USAGE, usage: NO_USAGE },
       { type: TURN_END, stopReason: 'api_error', usage: NO_USAGE },
     ])
   })
@@ -148,7 +149,7 @@ describe('a turn that failed on the API', () => {
     expect.hasAssertions()
     expect(mapMessage(UNNAMED, newMapState())).toMatchObject([
       { type: 'session.warning', message: 'the turn ended on an error' },
-      { type: 'usage.updated' },
+      { type: USAGE },
       { type: TURN_END, stopReason: 'error' },
     ])
   })
@@ -169,7 +170,7 @@ describe('a turn that ended on an error result', () => {
         kind: 'turn_error',
         message: 'Reached maximum number of turns (1)',
       },
-      { type: 'usage.updated' },
+      { type: USAGE },
       { type: TURN_END, stopReason: 'error_max_turns' },
     ])
     expect(mapMessage(NO_ERRORS, newMapState()).at(0)).toStrictEqual({
@@ -182,7 +183,7 @@ describe('a turn that ended on an error result', () => {
   it('warns of nothing for an interrupt', () => {
     expect.hasAssertions()
     const types = mapMessage(resultInterrupted, newMapState()).map((event) => event.type)
-    expect(types).toStrictEqual(['usage.updated', TURN_END])
+    expect(types).toStrictEqual([USAGE, TURN_END])
   })
 })
 
