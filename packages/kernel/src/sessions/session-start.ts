@@ -74,13 +74,27 @@ const requestOf = (
 // A provider that has not started a session within this time is given up on, so it cannot hold a session for ever
 export const START_LIMIT = '60 seconds'
 
+// The error of a section the adapter cannot use, by its class, or by its name where a plugin brings a copy of the plugin-api of its own
+const configReasonOf = (cause: unknown): string | undefined => {
+  if (cause instanceof ProviderConfigError) {
+    return cause.reason
+  }
+  if (!(cause instanceof Error) || cause.name !== 'ProviderConfigError') {
+    return undefined
+  }
+  const reason: unknown = Reflect.get(cause, 'reason')
+  return typeof reason === 'string' ? reason : cause.message
+}
+
 // A provider section the adapter cannot use is the project's configuration error, never a crash of an agent that did not run
 const startFailure =
   (configFile: string) =>
-  (cause: unknown): ProviderError | ConfigError =>
-    cause instanceof ProviderConfigError
-      ? new ConfigError({ file: configFile, pointer: '', reason: cause.reason })
-      : new ProviderError({ kind: 'crash', reason: reasonOf(cause), retryable: true })
+  (cause: unknown): ProviderError | ConfigError => {
+    const reason = configReasonOf(cause)
+    return reason === undefined
+      ? new ProviderError({ kind: 'crash', reason: reasonOf(cause), retryable: true })
+      : new ConfigError({ file: configFile, pointer: '', reason })
+  }
 
 // The start is a promise of its own, so what is left of it can still be dealt with when the kernel has given up on it
 const begin = async (

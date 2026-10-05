@@ -1,6 +1,6 @@
-import path from 'node:path'
 import type { ProfileRef, ProjectTrust } from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
+import { readLayer, type LoadedFile } from '../config/files.js'
 import type { ConfigError, ProfileError, SessionError, StoreError } from '../errors.js'
 import { namelessRefOf } from '../profiles/profile-ids.js'
 import type { SessionDeps } from './session-deps.js'
@@ -31,13 +31,34 @@ export const profilePartOf = (
         }),
       )
 
+// What a configuration error of a section is told against when no one file of the project sets it
+export const PROJECT_CONFIGURATION = "the project's configuration"
+
 // What the provider is started with from the project's configuration
 export interface ProviderSetup {
   readonly providerConfig: Readonly<Record<string, unknown>>
   readonly trust: ProjectTrust
-  // The project file a section the provider cannot use is told against: the one that exists, else where it would go
+  // The file a section the provider cannot use came from, when one file alone sets it
   readonly configFile: string
 }
+
+const setsSection = (loaded: LoadedFile | null, providerId: string): loaded is LoadedFile => {
+  const providers: unknown = loaded === null ? undefined : loaded.config['providers']
+  return typeof providers === 'object' && providers !== null && Object.hasOwn(providers, providerId)
+}
+
+// The project file the providers.<id> section comes from: bytebureau.json or bytebureau.local.json, or the configuration as a whole
+const sectionFileOf = (
+  projectPath: string,
+  providerId: string,
+): Effect.Effect<string, ConfigError> =>
+  Effect.map(
+    Effect.all([readLayer(projectPath, 'bytebureau'), readLayer(projectPath, 'bytebureau.local')]),
+    (loaded) => {
+      const [only, other] = loaded.filter((file) => setsSection(file, providerId))
+      return only !== undefined && other === undefined ? only.file : PROJECT_CONFIGURATION
+    },
+  )
 
 // What the project named and the user does not trust is not used, and the person is told: in the log and as a warning of the session
 const toldWithheld = (
@@ -76,6 +97,6 @@ export const providerSetupOf = (
       searchPath: process.env['PATH'] ?? '',
     })
     yield* toldWithheld(deps, session, gated)
-    const configFile = resolved.files.project ?? path.join(registered.path, 'bytebureau.json')
+    const configFile = yield* sectionFileOf(registered.path, session.providerId)
     return { providerConfig: gated.providerConfig, trust: gated.trust, configFile }
   })
