@@ -5,6 +5,7 @@
   "hello_intro": "ByteBureau",
   "hello_outro": "Spusťte bytebureau --help a podívejte se, co je k dispozici.",
   "cli_unknown_locale": "Nepodporovaný jazyk „{locale}“, používám angličtinu.",
+  "cli_home_empty": "Proměnná BYTEBUREAU_HOME je nastavená, ale prázdná: zrušte ji, aby se použil ~/.bytebureau, nebo do ní zadejte adresář",
   "run_intro": "Relace ByteBureau {title}",
   "run_provisioning": "Připravuji pracovní prostor na větvi {branch}",
   "run_turn_started": "Zaměstnanec pracuje…",

@@ -15,8 +15,9 @@ describe(kernelHome, () => {
     expect(kernelHome({ BYTEBUREAU_HOME: undefined })).toBe(DEFAULT)
   })
 
-  it('counts an empty BYTEBUREAU_HOME as none, which would put the data in ./data', () => {
-    expect(kernelHome({ BYTEBUREAU_HOME: '' })).toBe(DEFAULT)
+  it('refuses an empty BYTEBUREAU_HOME, naming the variable, instead of taking it for the home of the user', () => {
+    expect(() => kernelHome({ BYTEBUREAU_HOME: '' })).toThrow(/^BYTEBUREAU_HOME is set but empty/u)
+    expect(() => kernelHome({ BYTEBUREAU_HOME: ' ' })).toThrow(/BYTEBUREAU_HOME/u)
   })
 })
 

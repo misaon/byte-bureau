@@ -5,6 +5,7 @@
   "hello_intro": "ByteBureau",
   "hello_outro": "Run bytebureau --help to see what is available.",
   "cli_unknown_locale": "Unsupported language \"{locale}\", falling back to English.",
+  "cli_home_empty": "BYTEBUREAU_HOME is set but empty: unset it to use ~/.bytebureau, or set it to a directory",
   "run_intro": "ByteBureau session {title}",
   "run_provisioning": "Preparing the workspace on branch {branch}",
   "run_turn_started": "The employee is working…",

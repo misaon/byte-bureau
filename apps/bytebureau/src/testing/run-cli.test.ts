@@ -3,6 +3,7 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { childEnv } from './run-cli.js'
+import { tempDir } from './temp-repo.js'
 
 function homeOf(env: Readonly<Record<string, string>>): string {
   return env['BYTEBUREAU_HOME'] ?? ''
@@ -32,8 +33,17 @@ describe(childEnv, () => {
   })
 
   it('keeps the home that a test names, and the other variables it sets', () => {
-    const env = childEnv({ BYTEBUREAU_HOME: '/data/bytebureau', FORCE_COLOR: '1' })
-    expect(homeOf(env)).toBe('/data/bytebureau')
+    const home = tempDir('bb-home-')
+    const env = childEnv({ BYTEBUREAU_HOME: home, FORCE_COLOR: '1' })
+    expect(homeOf(env)).toBe(home)
     expect(env['FORCE_COLOR']).toBe('1')
+  })
+
+  it('refuses a home that is empty or no existing directory before any command runs', () => {
+    expect.hasAssertions()
+    const missing = path.join(tempDir('bb-home-'), 'missing')
+    for (const home of ['', ' ', missing]) {
+      expect(() => childEnv({ BYTEBUREAU_HOME: home })).toThrow(/existing home directory/u)
+    }
   })
 })

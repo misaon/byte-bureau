@@ -5,7 +5,7 @@ description: The local daemon, its HTTP API, the event stream over SSE, RPC over
 
 The kernel of ByteBureau runs in a daemon, one per home, and every client talks to it: the CLI today, the web UI, the desktop shell and the phone later. The daemon serves an HTTP API under `/api/v1` that an OpenAPI 3.1 document describes, the event log as server-sent events, and `effect/rpc` over a WebSocket ([ADR-0013](../decisions/0013-api-transports/)). `packages/api` implements the three over the services of the kernel, and `packages/client` is how a TypeScript program speaks them.
 
-The home is `~/.bytebureau` unless `BYTEBUREAU_HOME` names another directory; the paths below assume the default.
+The home is `~/.bytebureau` unless `BYTEBUREAU_HOME` names another directory; the paths below assume the default. A `BYTEBUREAU_HOME` that is set but empty, most often a variable that expanded to nothing, is refused by every command and by the daemon with exit code 2 and a line naming the variable, rather than taken for `~/.bytebureau`.
 
 ## The daemon
 

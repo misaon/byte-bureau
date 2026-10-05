@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
+import { statSync } from 'node:fs'
 import type { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { onTestFinished } from 'vitest'
@@ -14,10 +15,23 @@ const BASE_ENV = {
   GIT_CONFIG_NOSYSTEM: '1',
 }
 
+// A home that is empty or no directory is refused before any command runs: it could reach the home of the person who runs the tests
+function existingHome(home: string): string {
+  const stats = home.trim() === '' ? undefined : statSync(home, { throwIfNoEntry: false })
+  if (stats === undefined || !stats.isDirectory()) {
+    throw new Error(`a CLI of a test runs on an existing home directory, not on "${home}"`)
+  }
+  return home
+}
+
 // A test that names no home for the CLI gets a throwaway one, never that of the person who runs the tests
 // Its daemon, should the CLI start one on demand, listens on a free port
 export function childEnv(env: Readonly<Record<string, string>>): Record<string, string> {
-  return { ...BASE_ENV, BYTEBUREAU_HOME: env['BYTEBUREAU_HOME'] ?? testHome(), ...env }
+  return {
+    ...BASE_ENV,
+    ...env,
+    BYTEBUREAU_HOME: existingHome(env['BYTEBUREAU_HOME'] ?? testHome()),
+  }
 }
 
 export interface CliResult {
