@@ -73,6 +73,35 @@ describe(ClaudeAgentProvider, () => {
   })
 })
 
+// Only the claude on PATH is installed
+const onPath = (name: string): string | undefined =>
+  name === 'claude' ? '/usr/local/bin/claude' : undefined
+
+describe('a configured claude that is not found', () => {
+  it('is warned of by its name and passed over for the default one', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const fake = fakeQuery()
+    const provider = new ClaudeAgentProvider({
+      query: fake.query,
+      logger,
+      resolveExecutable: onPath,
+    })
+    const session = await provider.createSession(
+      sessionRequest({ providerConfig: { executable: '~/bin/claude' } }),
+    )
+    await session.close()
+    expect(fake.options[0]).toHaveProperty('pathToClaudeCodeExecutable', '/usr/local/bin/claude')
+    expect(entries).toStrictEqual([
+      {
+        level: 'warn',
+        message: 'the claude of providers.claude.executable is not found; the default one runs',
+        properties: { executable: '~/bin/claude' },
+      },
+    ])
+  })
+})
+
 const unused = (): never => {
   throw new Error('the Claude plugin does not use this part of the plugin context')
 }

@@ -49,8 +49,17 @@ export class ClaudeAgentProvider implements AgentProvider {
   }
 
   // The user's claude where it is configured or installed; the SDK's bundled binary when none is found
+  // A configured one that is not found is warned of, by the name it was given, and passed over
   private executableOf(providerConfig: Readonly<Record<string, unknown>>): string | undefined {
     const resolve = this.deps.resolveExecutable ?? resolveExecutable
-    return resolve(claudeConfigOf(providerConfig).executable ?? 'claude')
+    const { executable } = claudeConfigOf(providerConfig)
+    const configured = executable === undefined ? undefined : resolve(executable)
+    if (executable !== undefined && configured === undefined) {
+      this.deps.logger.warn(
+        'the claude of providers.claude.executable is not found; the default one runs',
+        { executable },
+      )
+    }
+    return configured ?? resolve('claude')
   }
 }
