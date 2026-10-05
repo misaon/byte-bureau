@@ -15,7 +15,7 @@ import type {
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
 import { mapMessage, measuredPctOf, newMapState, unreadResult, type MapState } from './mapping.js'
-import { claudeResumeOf, optionsOf } from './options.js'
+import { claudeResumeOf, optionsOf, UNTRUSTED_SETTINGS } from './options.js'
 import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
 import { withinLimit } from './within-limit.js'
@@ -59,8 +59,17 @@ export class ClaudeSession implements AgentSession {
       hooks: this.hooks(),
       canUseTool: this.canUseTool,
     }
+    this.untrusted(request)
     this.query = startQuery(deps, { prompt: this.input, options: optionsOf(parts) })
     this.ended = this.read()
+  }
+
+  // A project the user does not trust runs without its own settings, which the session tells first, and logs
+  private untrusted({ trust, sessionId }: CreateSessionRequest): void {
+    if (!trust.project) {
+      this.logger.warn(UNTRUSTED_SETTINGS, { sessionId })
+      this.output.push({ type: 'session.warning', kind: 'trust', message: UNTRUSTED_SETTINGS })
+    }
   }
 
   public get externalRef(): ExternalSessionRef | null {

@@ -2,6 +2,7 @@ import { ProviderConfigError, type PluginContext } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
 import { claudeAgentPlugin } from './plugin.js'
+import { UNTRUSTED_SETTINGS } from './options.js'
 import { ClaudeAgentProvider } from './provider.js'
 import { fakeQuery, type FakeQuery } from './testing/fake-query.js'
 import { recordingLogger, sessionRequest, TRUSTED } from './testing/requests.js'
@@ -103,7 +104,7 @@ describe('a configured claude that is not found', () => {
 })
 
 describe('a project the user does not trust', () => {
-  it('is warned of, as Claude Code then loads the settings of the user alone', async () => {
+  it('is warned of in the log and as the first event of the session, as Claude Code then loads the settings of the user alone', async () => {
     expect.hasAssertions()
     const { logger, entries } = recordingLogger()
     const fake = fakeQuery()
@@ -112,9 +113,16 @@ describe('a project the user does not trust', () => {
       logger,
       resolveExecutable: onPath,
     })
-    const untrusted = { ...TRUSTED, project: false }
-    const session = await provider.createSession(sessionRequest({ trust: untrusted }))
+    const session = await provider.createSession(
+      sessionRequest({ trust: { ...TRUSTED, project: false } }),
+    )
     await session.close()
+    const [first] = await Array.fromAsync(session.events())
+    expect(first).toStrictEqual({
+      type: 'session.warning',
+      kind: 'trust',
+      message: UNTRUSTED_SETTINGS,
+    })
     expect(fake.options[0]).toHaveProperty('settingSources', ['user'])
     expect(entries.map((entry) => [entry.level, entry.message, entry.properties])).toStrictEqual([
       [

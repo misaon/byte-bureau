@@ -6,7 +6,7 @@ import { namelessRefOf } from '../profiles/profile-ids.js'
 import type { SessionDeps } from './session-deps.js'
 import { logger } from './session-logger.js'
 import { providerOptionsOf, requireProject } from './session-project.js'
-import { gateProviderConfig, providerKeyOf, type Gated } from './session-trust.js'
+import { gateProviderConfig, type Gated } from './session-trust.js'
 import type { Session } from './types.js'
 
 // What the profile adds to the start: the ref the provider sees, and the key in the variable the provider named
@@ -39,20 +39,27 @@ export interface ProviderSetup {
   readonly configFile: string
 }
 
-// A command of the project that the user does not trust is not run, and the person is told which keys and how to trust them
-const warnWithheld = (session: Session, projectPath: string, gated: Gated): void => {
-  const { withheld, hint } = gated.trust
-  if (withheld.length === 0) {
-    return
-  }
-  const keys = withheld.map((key) => providerKeyOf(session.providerId, key)).join(', ')
-  logger.warn(`not using ${keys} of the project ${projectPath}: ${hint}`, {
-    sessionId: session.id,
-    commands: gated.commands,
-  })
-}
+// What the project named and the user does not trust is not used, and the person is told: in the log and as a warning of the session
+const toldWithheld = (
+  deps: SessionDeps,
+  session: Session,
+  gated: Gated,
+): Effect.Effect<void, StoreError> =>
+  Effect.forEach(
+    gated.warnings,
+    (message) => {
+      logger.warn(message, { sessionId: session.id })
+      return deps.log.publish({
+        type: 'session.warning',
+        sessionId: session.id,
+        projectId: session.projectId,
+        payload: { kind: 'trust', message },
+      })
+    },
+    { discard: true },
+  )
 
-// The providers.<id> section of the project as it stands now, as the passEnv names of a resumed session are read
+// The providers.<id> section of the project as it stands now, as the passEnv names of a resumed session are read, through the trust of the user
 export const providerSetupOf = (
   deps: SessionDeps,
   session: Session,
@@ -66,11 +73,9 @@ export const providerSetupOf = (
       projectPath: registered.path,
       user: resolved.user,
       userFile: resolved.files.user ?? deps.config.userFile,
+      searchPath: process.env['PATH'] ?? '',
     })
-    warnWithheld(session, registered.path, gated)
-    return {
-      providerConfig: gated.providerConfig,
-      trust: gated.trust,
-      configFile: resolved.files.project ?? path.join(registered.path, 'bytebureau.json'),
-    }
+    yield* toldWithheld(deps, session, gated)
+    const configFile = resolved.files.project ?? path.join(registered.path, 'bytebureau.json')
+    return { providerConfig: gated.providerConfig, trust: gated.trust, configFile }
   })

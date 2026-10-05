@@ -33,6 +33,10 @@ export const claudeResumeOf = ({ resume }: CreateSessionRequest): string | undef
 
 const ALL_SOURCES: readonly SettingSource[] = ['user', 'project', 'local']
 
+// What a session of a project the user does not trust tells, in its log and as a warning of the session
+export const UNTRUSTED_SETTINGS =
+  "Claude Code loads the user's settings alone, not the project's .claude settings, hooks or CLAUDE.md: the user configuration does not trust the project (trust.projects)"
+
 // The project's own settings, their hooks among them, and its CLAUDE.md load only for a project the user trusts
 const settingSourcesOf = (
   { trust }: CreateSessionRequest,

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { onTestFinished } from 'vitest'
@@ -31,11 +31,21 @@ export function tempDir(prefix: string): string {
   return dir
 }
 
-// What every test home's config.json says: daemons on a free port, secrets in a file and never in the keychain of whoever runs the tests, bun trusted for the fake ACP agent
-const TEST_CONFIG = {
-  server: { port: 0 },
-  secrets: { backend: 'file' },
-  trust: { commands: ['bun'] },
+// What every test home's config.json says: daemons on a free port, secrets in a file and never in the keychain of whoever runs the tests
+const TEST_CONFIG = { server: { port: 0 }, secrets: { backend: 'file' } }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// The repository trusted in the config.json of the home, by its real path, so that the commands its project file names run
+export function trustProject(home: string, repo: string): void {
+  const file = path.join(home, 'config.json')
+  const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+  const config = isRecord(parsed) ? parsed : {}
+  const trust = isRecord(config['trust']) ? config['trust'] : {}
+  const projects: unknown[] = Array.isArray(trust['projects']) ? trust['projects'] : []
+  const trusted = { ...trust, projects: [...projects, realpathSync(repo)] }
+  writeFileSync(file, `${JSON.stringify({ ...config, trust: trusted })}\n`)
 }
 
 // The config.json of a test home: the sections given in place of those of every test home, the others as they are
@@ -59,6 +69,15 @@ export function tokenFile(token: string = 'a'.repeat(64)): string {
   const file = path.join(tempDir('bb-token-'), 'token')
   writeFileSync(file, `${token}\n`)
   return file
+}
+
+// An executable file committed on main, as a cloned repository would hold it
+export function commitExecutable(repo: string, file: string, text: string): void {
+  const target = path.join(repo, file)
+  mkdirSync(path.dirname(target), { recursive: true })
+  writeFileSync(target, text, { mode: 0o755 })
+  git(repo, 'add', file)
+  git(repo, 'commit', '-q', '-m', `add ${file}`)
 }
 
 // A repository with one commit on `main`

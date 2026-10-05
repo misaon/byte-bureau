@@ -46,9 +46,9 @@ export interface ExternalSessionRef {
 export interface ProjectTrust {
   // The project is trusted as a whole: an adapter may load what the project configures for its agent, such as Claude Code's project settings
   readonly project: boolean
-  // The keys of providerConfig the kernel withheld: a command, its arguments or its environment that the project names and the user does not trust
+  // The keys of providerConfig the kernel withheld: a command, its arguments or environment, or a hint, that the project names without the user's trust
   readonly withheld: readonly string[]
-  // How the person trusts them, for a refusal that a withheld key causes
+  // Why a withheld command was withheld, and how the person trusts it, for the refusal it causes
   readonly hint: string
 }
 
@@ -58,6 +58,7 @@ export interface CreateSessionRequest {
   readonly employee: EmployeeSpec
   readonly profile: ProfileRef
   // The providers.<id> section of the project's configuration, without passEnv (the kernel's) and without what trust withheld; {} when there is none
+  // A command trusted by its name arrives as the absolute path the daemon's PATH gives it
   readonly providerConfig: Readonly<Record<string, unknown>>
   readonly trust: ProjectTrust
   readonly resume?: ExternalSessionRef | undefined

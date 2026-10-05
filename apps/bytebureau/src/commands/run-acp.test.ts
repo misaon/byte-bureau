@@ -5,7 +5,7 @@ import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
 import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
 import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
 import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
-import { configureHome } from '../testing/temp-repo.js'
+import { commitExecutable, configureHome, trustProject } from '../testing/temp-repo.js'
 import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
 
 const CUSTOM = 'acp:custom'
@@ -32,10 +32,11 @@ const CODEX_HINTS =
 
 const CANARY = 'sk-acp-canary-5d81e0b4'
 
-// A daemon for the home of a test, and a repository whose project file configures the providers
+// A daemon for the home of a test, and a repository whose project file configures the providers, trusted by the home
 async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Bench> {
   const bench = await benchWithDaemon()
   writeConfig(bench.repo, { providers })
+  trustProject(bench.home, bench.repo)
   return bench
 }
 
@@ -140,8 +141,8 @@ describe('bytebureau run on an ACP agent that cannot be started', () => {
     expect.hasAssertions()
     const { repo, home, env, daemon } = await benchWithDaemon()
     const withoutCommand = await runCli(runOn(repo, CUSTOM), env)
-    // Trusted, so the override is run and not the codex-acp the machine may have installed
-    configureHome(home, { trust: { commands: ['bun', 'codex-acp-definitely-missing'] } })
+    // The project is trusted, so its override runs, never the codex-acp the machine may have installed
+    trustProject(home, repo)
     writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
     const missing = await runCli(runOn(repo, 'acp:codex'), env)
     expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
@@ -159,14 +160,55 @@ describe('bytebureau run on an ACP agent that cannot be started', () => {
 describe('bytebureau run on an ACP agent that a cloned project names', () => {
   it('refuses a command the user configuration does not trust with exit 4, the key and the way to trust it', async () => {
     expect.hasAssertions()
-    const bench = await onTheFake()
-    configureHome(bench.home, { trust: {} })
+    const bench = await benchWithDaemon()
+    writeConfig(bench.repo, { providers: { [CUSTOM]: fakeAcpPreset() } })
     const refused = await runCli(runOn(bench.repo, CUSTOM), bench.env)
     expect([refused.code, refused.stderr]).toStrictEqual([
       4,
       `${path.join(bench.repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ${path.join(bench.home, 'config.json')} (config_invalid)\n`,
     ])
     expect(existsSync(helloIn(bench.repo))).toBe(false)
+    await bench.daemon.stop()
+  })
+})
+
+// What the kernel tells, in its log and as a warning of the session, of the environment of the project it did not use
+const WITHHELD_ENV = /not using providers\[\\?"acp:custom\\?"\]\.env of the project /u
+
+// The payloads of the warnings a run printed, as text
+const trustWarningsOf = (run: CliResult): readonly string[] =>
+  jsonLines(run.stdout)
+    .filter((event) => event['type'] === 'session.warning')
+    .map((event) => JSON.stringify(event['payload']))
+
+// A binary of the project under the name of a command the user trusts: it marks the worktree it runs in and fails
+const IMPOSTOR = '#!/bin/sh\necho ran > impostor-ran\nexit 1\n'
+
+// A daemon whose home trusts bun, and a repository that names bun with a PATH of its own, holding its own bin/bun
+async function onTrustedBun(): Promise<Bench> {
+  const bench = await benchWithDaemon()
+  configureHome(bench.home, { trust: { commands: ['bun'] } })
+  commitExecutable(bench.repo, 'bin/bun', IMPOSTOR)
+  const preset = fakeAcpPreset()
+  writeConfig(bench.repo, {
+    providers: { [CUSTOM]: { ...preset, env: { ...preset.env, PATH: 'bin' } } },
+  })
+  return bench
+}
+
+describe('bytebureau run on a command the user trusts and the environment a project names', () => {
+  it("runs the binary the daemon finds, never the project's own under its name, and says it did not use the environment", async () => {
+    expect.hasAssertions()
+    const bench = await onTrustedBun()
+    const run = await runCli(
+      ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM, '--yes'],
+      bench.env,
+    )
+    const hello = helloIn(bench.repo)
+    const impostor = path.join(path.dirname(hello), '..', 'impostor-ran')
+    expect([run.code, existsSync(hello), existsSync(impostor)]).toStrictEqual([0, true, false])
+    expect(trustWarningsOf(run)).toStrictEqual([expect.stringMatching(WITHHELD_ENV)])
+    expect(bench.daemon.stderr()).toMatch(WITHHELD_ENV)
     await bench.daemon.stop()
   })
 })

@@ -52,21 +52,23 @@ A session reads its provider's section when its agent starts, and again at every
 
 ### Trust
 
-A project's own files, `bytebureau.json` and `bytebureau.local.json`, can name commands to run: `command`, `args` and `env` of a provider section and `executable` of `providers.claude`. A repository you clone could name any program there and make it the provider of its default employee, so ByteBureau runs such a command only when the user configuration, `~/.bytebureau/config.json`, trusts the project or that exact command:
+A project's own files, `bytebureau.json` and `bytebureau.local.json`, can name commands to run: `command`, `args` and `env` of a provider section and `executable` of `providers.claude`, and the `installHint` and `loginHint` that ByteBureau would tell you to run. A repository you clone could name any program there and make it the provider of its default employee, so ByteBureau uses such keys only as the user configuration, `<home>/config.json` (`~/.bytebureau/config.json` by default), allows:
 
 ```json
 {
   "trust": {
     "projects": ["/Users/me/code/my-app"],
-    "commands": ["bun", "/opt/codex/bin/codex-acp"]
+    "commands": ["codex-acp", "/opt/gemini/bin/gemini"]
   }
 }
 ```
 
-- `trust.projects` lists projects by their absolute path; a link to the project or a trailing slash still names it. What a trusted project configures is used as it stands.
-- `trust.commands` lists commands by the exact name or path the project writes in `command` or `executable`; a trusted command runs with the project's `args` and `env` too.
+- `trust.projects` lists projects by their absolute path; a relative one is refused when the configuration is read, and a link to the project or a trailing slash still names it. What a trusted project configures is used as it stands.
+- `trust.commands` lists commands by the exact name or absolute path the project writes in `command` or `executable`. A trusted bare name runs as the absolute path that the daemon's own `PATH` gives it, so a project's `env` can never put a binary of its own in its place, and a name the daemon does not find is not used, with a warning. A trusted command runs with the project's `args`, but never with its `env` or its hints, which only a trusted project sets. Trusting a command trusts every project that names it, with any arguments: trust agent binaries such as `codex-acp` or `/opt/gemini/bin/gemini`, never an interpreter such as `bun`, `node`, `python` or `sh`.
 
-Otherwise the kernel takes those keys out of the provider's section before the adapter sees it, and the daemon logs a warning that names the keys and the way to trust them, at every start of the session's agent. The custom agent is then left without a command and the run is refused with exit 4: `<repository>/bytebureau.json: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ~/.bytebureau/config.json (config_invalid)`. A built-in preset runs its own command instead of the project's, and Claude runs the `claude` on `PATH`. A value the defaults hold already, such as `"executable": "claude"`, needs no trust. Claude Code's project settings can run commands as well, through the hooks of a repository's `.claude/settings.json`, so in a project the user does not trust Claude Code loads the user's settings alone, `settingSources: ["user"]`, without the project's `.claude` settings, its hooks and its `CLAUDE.md`, and the daemon logs a warning saying so; add the project to `trust.projects` to load them. The user configuration is read again at every start of an agent, so a change to `trust` needs no restart of the daemon.
+Whatever else a project names of these keys, the kernel takes out of the provider's section before the adapter sees it, at every start of the session's agent, and says which keys and why: in the daemon's log and as a `session.warning` of kind `trust`, which `run` prints. The custom agent is then left without a command and the run is refused with exit 4: `<repository>/bytebureau.json: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in <home>/config.json (config_invalid)`. A built-in preset runs its own command instead of the project's, and Claude runs the `claude` on `PATH`. A value the defaults hold already, such as `"executable": "claude"`, needs no trust. Claude Code's project settings can run commands as well, through the hooks of a repository's `.claude/settings.json`, so in a project the user does not trust Claude Code loads the user's settings alone, `settingSources: ["user"]`, without the project's `.claude` settings, its hooks and its `CLAUDE.md`, and the session warns of it (kind `trust`); add the project to `trust.projects` to load them. The user configuration is read again at every start of an agent, so a change to `trust` needs no restart of the daemon.
+
+Some keys of a project file are not gated yet, and Phase D's project trust takes them on: `passEnv` of a provider section (variables of the daemon's environment that the agent gets), the `apiKeyEnv` and `configDirEnv` of a preset (the variables the key and the login directory are handed in), and an employee's `tools.allow` and `permissionMode` (what the agent may do without asking). Read the project file of a repository you clone before you run its employees.
 
 ## Profiles
 
@@ -182,6 +184,7 @@ ACP v1 carries no usage, model, effort or system prompt: an ACP agent runs on th
 
 ## Limits in this phase
 
+- The trust of a project gates the commands, environments and hints of its provider sections only: its `passEnv`, a preset's `apiKeyEnv` and `configDirEnv` and its employees' `tools.allow` and `permissionMode` are used without it until Phase D's project trust.
 - `acp:custom`, `acp:opencode` and `acp:pi` take no API-key profiles: the custom agent's variable is known only from a project's configuration, and the presets of the other two name no API-key variable.
 - ACP v1 has no status query, so `profiles status` cannot tell whether an installed ACP agent is logged in; a prompt the agent refuses for its login ends the turn with a warning that names the login command.
 - There is no encrypted fallback: where the keychain is not available, the keys are in a 0600 file under the home, which anything running as the user can read. An age-encrypted file with a passphrase comes later.

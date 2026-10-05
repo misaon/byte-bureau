@@ -17,7 +17,7 @@ import { reasonOf } from '../plugins/reason.js'
 import { allowlistEnv, bytebureauEnv } from '../process/env-allowlist.js'
 import type { SessionDeps } from './session-deps.js'
 import { attempt } from './session-live.js'
-import { profilePartOf, providerSetupOf } from './session-profile.js'
+import { profilePartOf, providerSetupOf } from './session-setup.js'
 import type { Session } from './types.js'
 
 // What the start of a provider session is made of: the signal of its controller is the one the provider gets
