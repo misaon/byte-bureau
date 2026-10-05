@@ -32,7 +32,7 @@ export const profilePartOf = (
       )
 
 // What a configuration error of a section is told against when no one file of the project sets it
-export const PROJECT_CONFIGURATION = "the project's configuration"
+const PROJECT_CONFIGURATION = "the project's configuration"
 
 // What the provider is started with from the project's configuration
 export interface ProviderSetup {
