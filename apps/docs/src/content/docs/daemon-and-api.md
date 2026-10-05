@@ -106,6 +106,8 @@ Every path starts with `/api/v1` and every body is JSON. Every operation needs t
 | `GET /events` | `200` | the event stream, see [Events over SSE](#events-over-sse) |
 | `GET /ws` | `101` | the RPC socket, see [RPC over WebSocket](#rpc-over-websocket); the upgrade takes no token (`101`, or `403` for a foreign `Origin`), and every RPC request on the socket carries it |
 
+A profile id, `<provider>/<name>`, travels in a path as one segment, percent-encoded as `encodeURIComponent` gives it: `/profiles/claude%2Fwork`, `/profiles/acp%3Acodex%2Fhome/status`; the generated client encodes it. An id written raw, as `/profiles/claude/work`, matches no route and gets Effect's empty `404`, not the `profile_not_found` problem.
+
 ### Problems
 
 A refusal is an RFC 9457 problem, `application/problem+json`:

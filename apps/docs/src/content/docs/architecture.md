@@ -87,6 +87,7 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 
 - A restart with backoff (spec §14): `restartSchedule` of the supervisor stays unused, as the ACP adapter starts an agent again only for the next prompt, and Claude Code runs as a process of the SDK, whose failure errors the session.
 - A Claude session that reaches its usage limit is errored rather than paused until the limit resets (spec §14), and resumed by hand.
+- Steering (spec §8.1): a prompt sent while a turn runs is refused with `409 session_invalid_transition`, as only a `ready` session takes one; follow-ups queued to steer a running turn come later.
 - An age-encrypted file with a passphrase, as the fallback where no keychain answers, in place of the 0600 file.
 - A login status of ACP agents through ACP's `authenticate`: ACP v1 has no status query, so until then the login of an installed ACP agent is `unknown`.
 - The `profiles` section of the user configuration (the non-secret parts of profiles, spec §10) is reserved; profiles are kept in the store.

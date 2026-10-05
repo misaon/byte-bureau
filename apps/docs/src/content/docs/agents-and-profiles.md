@@ -21,7 +21,7 @@ An employee works through an agent provider, which a plugin brings. ByteBureau b
 
 The Claude adapter runs your own `claude`, unmodified: the one `providers.claude.executable` names when it is found, else `claude` on the daemon's `PATH`. A configured one that is not found is logged as a warning and the default one runs. Run from source, ByteBureau falls back to the Claude Code bundled with the SDK when no `claude` is installed at all; the compiled `bytebureau` binary cannot reach that one, so with the binary `claude` must be installed. The employee's `model`, `effort`, system prompt, tools and `maxTurns` reach Claude Code, a resumed session continues the Claude session it had, and `settingSources` is always given: `["user", "project", "local"]` unless configured.
 
-An ACP agent is started by the adapter itself, in the session's worktree, with the environment the kernel allows, and it speaks ACP over its stdin and stdout. The adapter serves the agent's file-system requests inside the worktree only (a path that leaves it, through `..` or a symbolic link, is refused) and its terminal requests in the worktree, without the API-key variables or any variable whose name ends in `_API_KEY` or `_TOKEN`. A resumed session loads the agent's session again where the agent offers `session/load`, else it starts a new one. An agent that is not installed refuses the run with exit 4 and a line that says how to install it and how to log in, such as `codex-acp is not installed; install it with: npm install -g @agentclientprotocol/codex-acp; then log in with: codex login (provider_crash)`, and `acp:custom` without its command refuses it with `providers["acp:custom"].command is not configured (provider_crash)`.
+An ACP agent is started by the adapter itself, in the session's worktree, with the environment the kernel allows, and it speaks ACP over its stdin and stdout. The adapter serves the agent's file-system requests inside the worktree only (a path that leaves it, through `..` or a symbolic link, is refused) and its terminal requests in the worktree, without the API-key variables or any variable whose name ends in `_API_KEY` or `_TOKEN`. A resumed session loads the agent's session again where the agent offers `session/load`, else it starts a new one. An agent that is not installed refuses the run with exit 4 and a line that says how to install it and how to log in (for a login profile, the login command carries the profile's directory). Through the daemon the line reads `codex-acp is not installed; install it with: npm install -g @agentclientprotocol/codex-acp; then log in with: codex login (provider_crash)`, and `acp:custom` without its command gives `providers["acp:custom"].command is not configured (provider_crash)`; with `--no-daemon` such a line reads `ProviderError: … (crash)`.
 
 ### Provider options
 
@@ -72,7 +72,21 @@ $ bytebureau profiles add claude work
 Profile claude/work added. Log in with: CLAUDE_CONFIG_DIR=/Users/me/.bytebureau/profiles/claude/work claude /login
 ```
 
-At a terminal, without `--yes` and `--json`, the command then waits until you say you have logged in and checks again; any other status is printed as its row. The directory reaches the agent in `CLAUDE_CONFIG_DIR` for Claude Code and in `CODEX_HOME` for Codex. The other ACP presets name no such variable, so a login profile of theirs runs on the agent's own login unless `configDirEnv` names one.
+At a terminal, without `--yes` and `--json`, the command then waits until you say you have logged in and checks again; any other status is printed as its row. The directory reaches the agent in `CLAUDE_CONFIG_DIR` for Claude Code and in `CODEX_HOME` for Codex, and the login command of a profile carries it, so that the login lands where the agent will look. An ACP agent has no status to ask, so a Codex profile is `unknown` and the CLI prints its status row, whose hint is that command (or the install command, while `codex-acp` is not on the daemon's `PATH`):
+
+```text
+$ bytebureau profiles add acp:codex home
+Profile acp:codex/home added
+acp:codex/home  unknown  -  CODEX_HOME=/Users/me/.bytebureau/profiles/acp-codex/home codex login
+```
+
+Run that command, then run under the profile:
+
+```bash
+bytebureau run "Create src/hello.ts exporting hello()" --provider acp:codex --profile acp:codex/home
+```
+
+`--profile` names a profile of the run's provider, the employee's or the one `--provider` names, so the two must match: a profile of another provider refuses the run with exit 4. As the first profile of `acp:codex`, `acp:codex/home` is also the default that a run of `acp:codex` without `--profile` takes from then on. The other ACP presets name no directory variable, so a login profile of theirs runs on the agent's own login unless `configDirEnv` names one.
 
 ### API-key profiles
 
@@ -93,7 +107,7 @@ The first profile of a provider becomes its default; `--default` or `profiles us
 `profiles status` answers `loggedIn` (with the account, where the agent names one), `loggedOut` (with the command that logs in), `expired` or `unknown` (with what is known):
 
 - A Claude login profile is checked by a query that asks Claude Code for its account and sends no prompt, given 20 seconds. An API-key profile of Claude is `unknown`, with the hint to run a session to check it.
-- ACP v1 has no status query. An agent whose command is not on the daemon's `PATH` is `unknown` with its install command (nothing is started to find out), a login profile whose directory is gone is `loggedOut`, and any other is `unknown` with the agent's login command. The command of `acp:custom` is not checked, as a status check knows no project.
+- ACP v1 has no status query. An agent whose command is not on the daemon's `PATH` is `unknown` with its install command (nothing is started to find out), a login profile whose directory is gone is `loggedOut`, and any other is `unknown` with the agent's login command. The check looks for the preset's built-in command, never for a `providers["acp:<preset>"].command` of a project, and the command of `acp:custom` is not checked at all, as a status check knows no project.
 - An API-key profile whose key is no longer in the secret store is `loggedOut` with `remove the profile and add it again`, and a login profile whose directory is gone is `loggedOut` with the login command.
 
 ### Removing a profile
@@ -114,7 +128,7 @@ With `--json` each command prints one record: `{"command":"profiles.ls","profile
 | `keychain` | in the keychain of the system through `Bun.secrets` (the macOS Keychain, libsecret on Linux, the Windows Credential Manager), under the service `bytebureau`; a daemon that cannot reach it does not start, and says why |
 | `file` | in `~/.bytebureau/secrets.json`, for the user alone (0600), replaced as a whole on every change |
 
-With `auto`, the first start of a home probes the keychain by writing, reading and deleting one entry, within three seconds; where the probe fails, the keys go to the file and a warning says why. The choice is recorded in `~/.bytebureau/secrets.backend` and kept: a home on the file stays on the file even once the keychain answers, and a home on the keychain whose keychain does not answer warns that the stored keys are out of reach and keeps new ones in the file until it answers again. Removing `secrets.backend` lets `auto` choose again; keys already stored are not moved, so add their profiles again. `keychain` and `file` ignore the record, and any other value refuses the start, naming `/secrets/backend`. `bytebureau doctor`, in phase D, will show the backend; until then a daemon started with `--debug` logs it, as in `secrets backend: keychain (auto: the keychain answered)`.
+With `auto`, the first start of a home probes the keychain by writing, reading and deleting one entry, within three seconds; where the probe fails, the keys go to the file and a warning says why. The choice is recorded in `~/.bytebureau/secrets.backend` and kept: a home on the file stays on the file even once the keychain answers, and a home on the keychain whose keychain does not answer warns that the stored keys are out of reach and keeps new ones in the file until it answers again. Removing the file `~/.bytebureau/secrets.backend` lets `auto` choose again; keys already stored are not moved, so add their profiles again. `keychain` and `file` ignore the record, and any other value refuses the start, naming `/secrets/backend`. `bytebureau doctor`, in phase D, will show the backend; until then a daemon started with `--debug` logs it, as in `secrets backend: keychain (auto: the keychain answered)`.
 
 ## Permissions and questions
 
