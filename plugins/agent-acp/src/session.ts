@@ -71,7 +71,8 @@ export class AcpSession implements AgentSession {
     const tell = (event: AgentEvent): void => {
       this.output.push(event)
     }
-    const interrupted = (): boolean => this.turn !== undefined && this.turn.interrupted
+    const interrupted = (): boolean =>
+      this.closed || (this.turn !== undefined && this.turn.interrupted)
     this.asks = new PermissionBroker(request.sessionId, tell, interrupted)
     this.terminals = new Terminals(deps.process, request.workspace.path, terminalEnvOf(setup))
     // Updates are told only while the agent is the session's: what a load replays before is history the session already told

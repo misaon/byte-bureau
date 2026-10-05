@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { until } from './testing/session-harness.js'
+import { rest, until } from './testing/session-harness.js'
 import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
 const HELLO_TYPES = [
@@ -122,5 +122,23 @@ describe('a turn the agent refuses', () => {
       kind: 'turn_error',
       message: 'Authentication required; log in with: fake-agent login',
     })
+  })
+})
+
+describe('an ACP agent that asks while its session closes', () => {
+  it('is answered cancelled at once, and no ask is told after the session began to close', async () => {
+    expect.hasAssertions()
+    const session = await sessionOf({
+      workspace: { path: workspaceOf() },
+      providerConfig: customOf('ask-again'),
+    })
+    const asked = until(session, 'ask.requested')
+    const prompting = session.prompt({ text: 'Create src/hello.ts' })
+    await asked
+    await session.close()
+    await prompting
+    const after = await rest(session)
+    const types = after.map((event) => event.type)
+    expect([types.includes('ask.requested'), types.at(-1)]).toStrictEqual([false, 'session.closed'])
   })
 })

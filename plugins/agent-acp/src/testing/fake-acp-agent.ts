@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does, hello when unset
-// The last three scripts misbehave as real agents can: they refuse the prompt, demand a login, or speak another ACP
+// An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does (hello when unset), some misbehaving as real agents can
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -31,6 +30,7 @@ export type FakeScript =
   | 'children'
   | 'quick-exit'
   | 'auth-lapsed'
+  | 'ask-again'
 
 interface Turn {
   readonly client: AgentContext
@@ -201,6 +201,16 @@ const quickExit = async (): Promise<PromptResponse> => {
   return END_TURN
 }
 
+// Holds on through a SIGINT, asks again once its ask is cancelled, and answers and leaves once that one is answered
+const askAgain = async (turn: Turn): Promise<PromptResponse> => {
+  process.on('SIGINT', () => {
+    state.cancelled = true
+  })
+  await allowed(turn)
+  await allowed(turn)
+  return quickExit()
+}
+
 // Ends the turn as hello does, then dies while idle
 const crashIdle = async (turn: Turn): Promise<PromptResponse> => {
   const ended = await hello(turn)
@@ -225,6 +235,7 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'no-load': hello,
   children,
   'quick-exit': quickExit,
+  'ask-again': askAgain,
   // A login lost by the time of the prompt
   'auth-lapsed': failing(RequestError.authRequired()),
 }
@@ -240,8 +251,7 @@ const prompt = async (turn: Turn): Promise<PromptResponse> => {
     content: { type: 'text', text: 'thinking' },
   })
   await say(turn, `hello; api key ${API_KEY === undefined ? 'absent' : 'present'}`)
-  const play = SCRIPTS[isScript(SCRIPT) ? SCRIPT : 'hello']
-  const response = await play(turn)
+  const response = await SCRIPTS[isScript(SCRIPT) ? SCRIPT : 'hello'](turn)
   return response
 }
 
