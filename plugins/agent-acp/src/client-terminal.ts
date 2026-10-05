@@ -35,6 +35,8 @@ interface Terminal {
 }
 
 const DEFAULT_LIMIT = 1024 * 1024
+// An agent may ask for more than the default, never for more than a terminal holds in memory
+const MAX_LIMIT = 16 * 1024 * 1024
 const OUTPUT_GRACE_MS = 1000
 const NOT_STARTED: Exit = { code: null, signal: null }
 
@@ -52,11 +54,11 @@ const tailOf = (text: string, bytes: number): string => {
   return encoded.subarray(start).toString('utf8')
 }
 
-// The oldest output goes first once the limit is passed
+// The oldest output goes first once the limit is passed, until nothing is left to drop
 const append = (output: Output, text: string): void => {
   output.chunks.push(text)
   output.bytes += Buffer.byteLength(text)
-  while (output.bytes > output.limit) {
+  while (output.bytes > output.limit && output.chunks.length > 0) {
     const [oldest = ''] = output.chunks
     const size = Buffer.byteLength(oldest)
     const kept = tailOf(oldest, Math.max(size - (output.bytes - output.limit), 0))
@@ -106,6 +108,12 @@ const endTerminal = (terminal: Terminal): void => {
   }
 }
 
+// The limit in whole bytes, none below zero and 16 MiB at most; a limit that is not a number is the default
+const limitOf = (requested: number | null | undefined): number =>
+  typeof requested === 'number' && !Number.isNaN(requested)
+    ? Math.min(Math.max(Math.floor(requested), 0), MAX_LIMIT)
+    : DEFAULT_LIMIT
+
 const envOf = (env: readonly EnvVariable[] | undefined): Record<string, string> =>
   Object.fromEntries((env ?? []).map(({ name, value }) => [name, value]))
 
@@ -139,7 +147,7 @@ export class Terminals {
     const handle = await this.spawner.spawn({ command: params.command, args, cwd, env })
     this.created += 1
     const terminalId = `term-${this.created}`
-    this.terminals.set(terminalId, terminalOf(handle, params.outputByteLimit ?? DEFAULT_LIMIT))
+    this.terminals.set(terminalId, terminalOf(handle, limitOf(params.outputByteLimit)))
     return { terminalId }
   }
 

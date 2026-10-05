@@ -27,6 +27,27 @@ const run = async (terminals: Terminals, script: string, extra = {}): Promise<st
   return terminalId
 }
 
+// What a terminal that printed ok tells, under the output limit given
+const okUnder = async (terminals: Terminals, outputByteLimit: number): Promise<unknown> => {
+  const terminalId = await run(terminals, "console.log('ok')", { outputByteLimit })
+  await terminals.waitForExit({ sessionId: SESSION, terminalId })
+  return terminals.output({ sessionId: SESSION, terminalId })
+}
+
+describe('the output limit an agent asks for', () => {
+  it('is taken in whole bytes, none below zero and 16 MiB at most, so no limit can stall the output', async () => {
+    expect.hasAssertions()
+    const { terminals } = terminalsIn()
+    await expect(okUnder(terminals, -1)).resolves.toMatchObject({ output: '', truncated: true })
+    await expect(okUnder(terminals, 0.5)).resolves.toMatchObject({ output: '', truncated: true })
+    await expect(okUnder(terminals, 2.5)).resolves.toMatchObject({ output: 'k\n', truncated: true })
+    await expect(okUnder(terminals, 1e15)).resolves.toMatchObject({
+      output: 'ok\n',
+      truncated: false,
+    })
+  })
+})
+
 describe('the output of a terminal', () => {
   it('keeps the newest output within the byte limit, at a character boundary, and says it cut', async () => {
     expect.hasAssertions()
