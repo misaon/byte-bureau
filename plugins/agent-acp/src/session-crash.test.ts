@@ -1,8 +1,12 @@
+import { PassThrough } from 'node:stream'
 import type { AgentSession } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
+import type { SpawnFn } from './process.js'
+import { AcpAgentProvider } from './provider.js'
 import type { FakeScript } from './testing/fake-acp-agent.js'
-import { endOf, harness, rest, until, type Harness } from './testing/session-harness.js'
-import { customOf, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
+import { sessionRequest } from './testing/requests.js'
+import { endOf, harness, rest, started, until, type Harness } from './testing/session-harness.js'
+import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
 const ALLOW = { selected: ['allow'] }
 
@@ -87,6 +91,54 @@ describe('an ACP agent that answers and exits at once', () => {
     const events = await reading
     expect(events.map((event) => event.type)).not.toContain('session.error')
     expect(events[0]).toMatchObject({ type: 'session.warning', kind: 'restart' })
+  })
+})
+
+// Agents whose output reaches the adapter late, so that their death is noticed before what they wrote last is read
+const lateOutput =
+  (spawn: SpawnFn, delayMs: number): SpawnFn =>
+  (command, args, options) => {
+    const child = spawn(command, args, options)
+    const late = new PassThrough()
+    child.stdout.on('data', (chunk: Buffer) => {
+      setTimeout(() => {
+        late.write(chunk)
+      }, delayMs)
+    })
+    child.stdout.on('end', () => {
+      setTimeout(() => {
+        late.end()
+      }, delayMs)
+    })
+    Object.defineProperty(child, 'stdout', { value: late })
+    return child
+  }
+
+const HELLO = 'hello; api key absent'
+
+describe('an ACP agent whose death is noticed before its answer is read', () => {
+  it('keeps what it said last in its turn, and is started again by the next prompt', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const provider = new AcpAgentProvider('custom', {
+      ...run.deps,
+      spawn: lateOutput(run.deps.spawn, 300),
+    })
+    const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('quick-exit') }
+    const session = await started(provider, sessionRequest(request))
+    const turn = await prompted(session, 'Go on')
+    expect(turn).toContainEqual({ type: 'message.delta', kind: 'text', text: HELLO })
+    expect(turn).toContainEqual({
+      type: 'message.completed',
+      role: 'assistant',
+      content: [],
+      text: HELLO,
+    })
+    await expect(prompted(session, 'Again')).resolves.toContainEqual({
+      type: 'session.warning',
+      kind: 'restart',
+      message: 'the agent exited idle; starting it again (1 of 3)',
+    })
   })
 })
 

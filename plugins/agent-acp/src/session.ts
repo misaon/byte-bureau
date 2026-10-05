@@ -50,6 +50,8 @@ export class AcpSession implements AgentSession {
   // The watch on the agent that runs, and the start of an agent under way, which close() waits for
   private watching: Promise<void> = Promise.resolve()
   private launching: Promise<void> = Promise.resolve()
+  // The death of an agent being decided, which a prompt that notices it waits for
+  private dying: Promise<void> = Promise.resolve()
 
   private constructor(setup: Setup) {
     this.setup = setup
@@ -190,13 +192,24 @@ export class AcpSession implements AgentSession {
   }
 
   // A death is told once: mid-turn it ends the session, idle it leaves the next prompt to start another agent, three times at most
+  // Whoever notices it as well waits for that
   private async died(running: Running): Promise<void> {
-    if (running.gone || this.closed) {
+    if (this.closed) {
       return
     }
-    running.gone = true
-    this.running = undefined
+    if (!running.gone) {
+      running.gone = true
+      this.dying = this.deathOf(running)
+    }
+    await this.dying
+  }
+
+  // The agent stays the session's until its last answer is read, so the updates read meanwhile are still told
+  private async deathOf(running: Running): Promise<void> {
     const midTurn = await this.owedBy(running)
+    if (this.running === running) {
+      this.running = undefined
+    }
     this.release(running)
     await this.afterDeath(running, midTurn)
   }

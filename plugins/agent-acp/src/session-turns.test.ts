@@ -14,6 +14,21 @@ describe('whether an agent that died answered its turn', () => {
     await expect(answeredIn(newTurn())).resolves.toBe(false)
   })
 
+  it('counts an answer read within that second, as one the agent wrote before it died is', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const late = Promise.withResolvers<boolean>()
+    setTimeout(() => {
+      late.resolve(true)
+    }, 500)
+    const deciding = answeredIn(sent(late.promise))
+    await vi.advanceTimersByTimeAsync(500)
+    await expect(deciding).resolves.toBe(true)
+  })
+
   it('waits a second for an answer the agent may have written before it died, and no longer', async () => {
     expect.hasAssertions()
     vi.useFakeTimers()
