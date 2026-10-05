@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from 'node:child_process'
 import { once } from 'node:events'
+import { setTimeout } from 'node:timers/promises'
 import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
 import type {
@@ -27,15 +28,48 @@ export interface Harness {
   readonly deps: AcpDeps
   readonly logged: LogEntry[]
   readonly spawned: Spawned[]
+  readonly terminals: ChildProcess[]
 }
 
-// A process that still runs when its test ends is killed, and waited for
+// Whatever of a process group is left when its test ends is killed; a child that leads none is killed alone
+const killGroup = (child: ChildProcess): void => {
+  try {
+    process.kill(-(child.pid ?? 0), 'SIGKILL')
+  } catch {
+    child.kill('SIGKILL')
+  }
+}
+
+// A process that still runs when its test ends is killed, its group with it, and waited for
 const endNow = async (child: ChildProcess): Promise<void> => {
   if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
     const exit = once(child, 'exit')
-    child.kill('SIGKILL')
+    killGroup(child)
     await exit
+  } else if (child.pid !== undefined) {
+    killGroup(child)
   }
+}
+
+const isRunning = (pid: number): boolean => {
+  try {
+    return process.kill(pid, 0)
+  } catch {
+    return false
+  }
+}
+
+// Whether a process is gone within the time given; a pid is polled, as nothing else tells of a grandchild
+export const goneWithin = async (pid: number, limitMs: number): Promise<boolean> => {
+  if (!isRunning(pid)) {
+    return true
+  }
+  if (limitMs <= 0) {
+    return false
+  }
+  await setTimeout(50)
+  const gone = await goneWithin(pid, limitMs - 50)
+  return gone
 }
 
 async function* linesOf(stream: Readable): AsyncIterable<string> {
@@ -102,7 +136,7 @@ export const harness = (): Harness => {
     )
   })
   const deps: AcpDeps = { spawn: recording, process: nodeProcesses(terminals), logger }
-  return { deps, logged: entries, spawned }
+  return { deps, logged: entries, spawned, terminals }
 }
 
 // A session closed when its test ends, whatever happened in it

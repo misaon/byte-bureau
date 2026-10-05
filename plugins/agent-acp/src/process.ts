@@ -110,9 +110,11 @@ export const spawnAgent = async (
   if (!existsSync(options.cwd)) {
     throw new Error(`the workspace ${options.cwd} does not exist`)
   }
+  // A group of its own, so what the agent starts is signalled with it
   const child = spawn(preset.command, [...preset.args], {
     cwd: options.cwd,
     env: { ...options.env, ...preset.env },
+    detached: true,
   })
   const lines: string[] = []
   keepLines(child.stderr, lines, options.secrets)

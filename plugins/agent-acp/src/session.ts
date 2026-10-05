@@ -9,7 +9,7 @@ import { startAgent, terminalEnvOf, toldReason, type Setup } from './agent-start
 import { readTextFile, writeTextFile } from './client-fs.js'
 import { Terminals } from './client-terminal.js'
 import type { ClientHandlers, Running } from './connection.js'
-import { endProcess } from './kill-ladder.js'
+import { endProcess, sweepGroup } from './kill-ladder.js'
 import { PermissionBroker } from './permissions.js'
 import { endingOf } from './process.js'
 import { Queue } from './queue.js'
@@ -173,6 +173,7 @@ export class AcpSession implements AgentSession {
   private release(running: Running): void {
     running.gone = true
     this.running = undefined
+    sweepGroup(running.process.child)
     running.connection.close()
     this.asks.cancelAll()
     this.terminals.releaseAll()

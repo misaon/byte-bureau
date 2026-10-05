@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import type { AgentSession } from '@bytebureau/plugin-api'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { sessionRequest } from './testing/requests.js'
-import { harness, until } from './testing/session-harness.js'
+import { goneWithin, harness, until } from './testing/session-harness.js'
 import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.js'
 
 describe('the agent an ACP session starts', () => {
@@ -70,5 +71,42 @@ describe('a session to resume that the agent cannot load', () => {
     await expect(until(session, 'session.warning')).resolves.toStrictEqual([
       notLoaded('it does not load sessions'),
     ])
+  })
+})
+
+// The words of the first text the agent says that starts with the prefix
+const saying = async (session: AgentSession, prefix: string): Promise<readonly string[]> => {
+  for await (const event of session.events()) {
+    if (event.type === 'message.delta' && event.text.startsWith(prefix)) {
+      return event.text.split(' ')
+    }
+  }
+  return []
+}
+
+// A process the test learnt of is killed when it ends, should it outlive what the test checks
+const killedAtEnd = (pid: number): void => {
+  onTestFinished(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Gone already
+    }
+  })
+}
+
+describe('what an ACP agent starts', () => {
+  it('ends with the agent when the session closes, its own processes as well', async () => {
+    expect.hasAssertions()
+    const session = await sessionOf({
+      workspace: { path: workspaceOf() },
+      providerConfig: customOf('children'),
+    })
+    const prompting = session.prompt({ text: 'Start some work' })
+    const [, pid] = await saying(session, 'children ')
+    killedAtEnd(Number(pid))
+    await session.close()
+    await prompting
+    await expect(goneWithin(Number(pid), 3000)).resolves.toBe(true)
   })
 })

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does, hello when unset
 // The last three scripts misbehave as real agents can: they refuse the prompt, demand a login, or speak another ACP
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import {
@@ -27,6 +28,7 @@ export type FakeScript =
   | 'protocol-v2'
   | 'load-fails'
   | 'no-load'
+  | 'children'
 
 interface Turn {
   readonly client: AgentContext
@@ -182,6 +184,20 @@ const refusePrompt = async (): Promise<PromptResponse> => {
   throw new Error(`the model is overloaded for ${API_KEY ?? 'nobody'}`)
 }
 
+// Starts a process of its own and a terminal of the client, both running until killed, then runs until cancelled
+const children = async (turn: Turn): Promise<PromptResponse> => {
+  const forever = ['-e', 'setInterval(() => {}, 1000)']
+  const own = spawn(process.execPath, forever, { stdio: 'ignore' })
+  const { terminalId } = await turn.client.request('terminal/create', {
+    sessionId: turn.sessionId,
+    command: process.execPath,
+    args: forever,
+  })
+  await say(turn, `children ${String(own.pid)} ${terminalId}`)
+  const ended = await slow()
+  return ended
+}
+
 // Ends the turn as hello does, then dies while idle
 const crashIdle = async (turn: Turn): Promise<PromptResponse> => {
   const ended = await hello(turn)
@@ -203,6 +219,7 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'protocol-v2': hello,
   'load-fails': hello,
   'no-load': hello,
+  children,
 }
 
 const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, name)
