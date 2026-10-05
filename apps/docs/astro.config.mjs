@@ -31,6 +31,11 @@ export default defineConfig({
               translations: { cs: 'Démon a API' },
               link: '/daemon-and-api/',
             },
+            {
+              label: 'Agents and profiles',
+              translations: { cs: 'Agenti a profily' },
+              link: '/agents-and-profiles/',
+            },
             'contributing',
           ],
         },

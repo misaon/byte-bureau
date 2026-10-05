@@ -114,3 +114,5 @@ toolu
 modelcontextprotocol
 agentclientprotocol
 earendil
+libsecret
+napi
