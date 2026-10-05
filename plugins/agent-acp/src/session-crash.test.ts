@@ -9,6 +9,11 @@ import { endOf, harness, rest, started, until, type Harness } from './testing/se
 import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
 const ALLOW = { selected: ['allow'] }
+const FIRST_RESTART = {
+  type: 'session.warning',
+  kind: 'restart',
+  message: 'the agent exited idle; starting it again (1 of 3)',
+}
 
 const startedWith = async (
   script: FakeScript,
@@ -55,11 +60,7 @@ describe('an ACP agent that dies while it is idle', () => {
     const reading = until(session, TURN_END, ALLOW)
     await session.prompt({ text: 'Again' })
     const events = await reading
-    expect(events[0]).toStrictEqual({
-      type: 'session.warning',
-      kind: 'restart',
-      message: 'the agent exited idle; starting it again (1 of 3)',
-    })
+    expect(events[0]).toStrictEqual(FIRST_RESTART)
     expect(events.slice(1).map((event) => event.type)).toContain(TURN_END)
     expect(run.spawned).toHaveLength(2)
   })
@@ -134,11 +135,7 @@ describe('an ACP agent whose death is noticed before its answer is read', () => 
       content: [],
       text: HELLO,
     })
-    await expect(prompted(session, 'Again')).resolves.toContainEqual({
-      type: 'session.warning',
-      kind: 'restart',
-      message: 'the agent exited idle; starting it again (1 of 3)',
-    })
+    await expect(prompted(session, 'Again')).resolves.toContainEqual(FIRST_RESTART)
   })
 })
 
@@ -164,11 +161,7 @@ describe('an ACP agent that is not started again in time', () => {
     const ending = rest(session)
     await session.prompt({ text: 'Again' })
     await expect(ending).resolves.toStrictEqual([
-      {
-        type: 'session.warning',
-        kind: 'restart',
-        message: 'the agent exited idle; starting it again (1 of 3)',
-      },
+      FIRST_RESTART,
       {
         type: 'session.error',
         kind: 'crash',
@@ -181,13 +174,23 @@ describe('an ACP agent that is not started again in time', () => {
   })
 })
 
+// A session whose agent died idle after a turn, and the prompt that is starting it again
+const restarting = async (): Promise<{
+  readonly session: AgentSession
+  readonly run: Harness
+  readonly prompting: Promise<void>
+}> => {
+  const { session, run } = await startedWith('crash-idle')
+  await turnThenDeath(session, run)
+  const prompting = session.prompt({ text: 'Again' })
+  await until(session, 'session.warning')
+  return { session, run, prompting }
+}
+
 describe('a session whose agent is being started again', () => {
   it('cancels the turn of a prompt interrupted while its agent was being started again', async () => {
     expect.hasAssertions()
-    const { session, run } = await startedWith('crash-idle')
-    await turnThenDeath(session, run)
-    const prompting = session.prompt({ text: 'Again' })
-    await until(session, 'session.warning')
+    const { session, prompting } = await restarting()
     await session.interrupt()
     const events = await until(session, TURN_END, ALLOW)
     await prompting
@@ -197,10 +200,7 @@ describe('a session whose agent is being started again', () => {
 
   it('gives up, when it closes, the agent it was starting again, waits for its end, and logs no crash of it', async () => {
     expect.hasAssertions()
-    const { session, run } = await startedWith('crash-idle')
-    await turnThenDeath(session, run)
-    const prompting = session.prompt({ text: 'Again' })
-    await until(session, 'session.warning')
+    const { session, run, prompting } = await restarting()
     await session.close()
     expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual([null, 'SIGKILL'])
     await prompting
