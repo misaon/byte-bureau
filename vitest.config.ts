@@ -11,6 +11,7 @@ export default defineConfig({
       'packages/client',
       'plugins/workspace-local',
       'plugins/agent-claude',
+      'plugins/agent-acp',
       'apps/bytebureau',
       'apps/docs',
       'scripts',

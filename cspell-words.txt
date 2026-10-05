@@ -112,3 +112,5 @@ lstart
 unstub
 toolu
 modelcontextprotocol
+agentclientprotocol
+earendil
