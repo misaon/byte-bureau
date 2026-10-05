@@ -122,7 +122,7 @@ The first profile of a provider becomes its default; `--default` or `profiles us
 
 ### Status
 
-`profiles status` answers `loggedIn` (with the account, where the agent names one), `loggedOut` (with the command that logs in), `expired` or `unknown` (with what is known):
+`profiles status` answers `loggedIn` (with the account, where the agent names one), `loggedOut` (with the command that logs in), `expired` or `unknown` (with what is known). Without an id it checks every profile, two at a time, as a check may start the provider's own agent:
 
 - A Claude login profile is checked by a query that asks Claude Code for its account and sends no prompt, given 20 seconds. An API-key profile of Claude is `unknown`, with the hint to run a session to check it.
 - ACP v1 has no status query. An agent whose command is not on the daemon's `PATH` is `unknown` with its install command (nothing is started to find out), a login profile whose directory is gone is `loggedOut`, and any other is `unknown` with the agent's login command. The check looks for the preset's built-in command, never for a `providers["acp:<preset>"].command` of a project, and the command of `acp:custom` is not checked at all, as a status check knows no project.

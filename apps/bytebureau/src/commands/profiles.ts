@@ -3,6 +3,7 @@ import type { ProfileStatusDto } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
+import { mapLimited } from '../limited.js'
 import { profileRows, profileStatusRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
 import { addCommand } from './profiles-add.js'
@@ -85,18 +86,19 @@ async function profileIds(bureau: Bureau, id: string | undefined): Promise<reado
   return profiles.map((profile) => profile.id)
 }
 
-// Asked side by side; a status that fails refuses the command, as one a provider cannot give is unknown already
+// A check may start the provider's own agent for a while, a claude for up to 20 s: two at a time keep the machine usable
+const STATUS_LANES = 2
+
+// A status that fails refuses the command, as one a provider cannot give is unknown already
 async function statusesOf(
   bureau: Bureau,
   id: string | undefined,
 ): Promise<readonly ProfileStatusDto[]> {
   const ids = await profileIds(bureau, id)
-  const statuses = await Promise.all(
-    ids.map(async (each) => {
-      const checked = await bureau.profiles.status(each)
-      return checked
-    }),
-  )
+  const statuses = await mapLimited(ids, STATUS_LANES, async (each) => {
+    const checked = await bureau.profiles.status(each)
+    return checked
+  })
   return statuses
 }
 

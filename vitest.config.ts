@@ -29,6 +29,7 @@ export default defineConfig({
         'apps/bytebureau/src/run.ts',
         'apps/bytebureau/src/errors.ts',
         'apps/bytebureau/src/kernel-home.ts',
+        'apps/bytebureau/src/limited.ts',
         'apps/bytebureau/src/resource.ts',
         'apps/bytebureau/src/usage-error.ts',
         'apps/bytebureau/src/render/**/*.ts',
