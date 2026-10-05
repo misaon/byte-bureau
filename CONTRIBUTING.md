@@ -29,9 +29,27 @@ bun run check
 | `bun run test` | Vitest across all packages |
 | `bun run build:binaries --host` | compile the CLI for your machine into `dist/` |
 | `bun run docs:build` | build the documentation site |
+| `bun run clean` | remove `dist`, `coverage`, the docs build and `*.tsbuildinfo`, and prune the Turborepo cache entries older than 7 days (`--dry-run` lists first) |
+| `bun run clean:cache` | prune only the Turborepo cache (`--cache-days <n>`, 7 by default) |
 | `bun run smoke:claude`, `bun run smoke:acp` | run a real agent once, on your own login (never in CI; see below) |
 
 Export `GH_TOKEN="$(gh auth token)"` before `bun run lint:actions` to let zizmor run its online audits too (`impostor-commit`, `known-vulnerable-actions`, `stale-action-refs`).
+
+## Keeping the checkout small
+
+`node_modules` is most of a checkout and stays. Three other things grow until someone removes them:
+
+- `.turbo/cache`: Turborepo's local cache keeps the output of every task it runs, and evicts an entry only when `cacheMaxAge` or `cacheMaxSize` is set in `turbo.json`: `cacheMaxAge` is `7d`, so an entry older than a week goes at the next `turbo run` (a cache hit does not refresh its age).
+- `dist/` (`bun run build:binaries`) and `apps/bytebureau/dist` (`bun run build`): a compiled binary is 60 MB or more. A build removes the binaries and source maps of earlier builds (`bytebureau-<version>-<target>` and its `.map`) from its output directory before it writes, so a directory holds the artefacts of one build.
+- `coverage/`, `apps/docs/dist` and `apps/docs/.astro`: the output of `bun run test:coverage` and `bun run docs:build`, which the next run replaces.
+
+```bash
+bun run clean --dry-run   # list what would go and the bytes it frees
+bun run clean             # remove those directories and the *.tsbuildinfo files, then prune the cache
+bun run clean:cache       # prune only the cache
+```
+
+The prune removes the cache entries older than 7 days (a `<hash>.tar.zst` with its `-meta.json` and `-manifest.json`); `--cache-days <n>` changes that, and `--cache-days 0` empties the cache. A pruned entry means only that its task runs again once. The script prints each path it removes and the bytes it frees, and never touches `node_modules`, `.git`, `.superpowers` or anything outside the repository.
 
 ## Commit messages
 
