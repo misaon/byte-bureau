@@ -17,6 +17,19 @@ const installed = (
   return { root, bin, empty }
 }
 
+// Entries of PATH whose claude no lookup may take, ahead of the one that holds the real one: a directory named relatively, a file it may not run, a directory of the name
+const decoyPath = (root: string, bin: string): string => {
+  const lent = path.join(root, 'lent')
+  const plain = path.join(root, 'plain')
+  const folder = path.join(root, 'folder', 'claude')
+  mkdirSync(lent)
+  mkdirSync(plain)
+  mkdirSync(folder, { recursive: true })
+  writeFileSync(path.join(lent, 'claude'), '#!/bin/sh\n', { mode: 0o755 })
+  writeFileSync(path.join(plain, 'claude'), '#!/bin/sh\n', { mode: 0o644 })
+  return [path.relative(process.cwd(), lent), plain, path.dirname(folder), bin].join(path.delimiter)
+}
+
 describe(resolveExecutable, () => {
   it('finds the name in the first directory of PATH that has it', () => {
     expect.hasAssertions()
@@ -51,6 +64,20 @@ describe(resolveExecutable, () => {
     try {
       expect(resolveExecutable('claude', { PATH: bin }, 'win32')).toBe(path.join(bin, 'claude.cmd'))
       expect(resolveExecutable('claude', { PATH: bin }, 'linux')).toBeUndefined()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('resolveExecutable and what no lookup may take', () => {
+  it('skips a relative entry of PATH, a file it may not run and a directory of the name', () => {
+    expect.hasAssertions()
+    const { root, bin } = installed('claude')
+    try {
+      const env = { PATH: decoyPath(root, bin) }
+      expect(resolveExecutable('claude', env)).toBe(path.join(bin, 'claude'))
+      expect(resolveExecutable(path.join(root, 'plain', 'claude'), {})).toBeUndefined()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
