@@ -1,5 +1,12 @@
 import path from 'node:path'
-import { ProjectRegistry, type Project } from '@bytebureau/kernel'
+import {
+  profileUsage,
+  ProjectRegistry,
+  type ProfileService,
+  type Project,
+  type UsageService,
+} from '@bytebureau/kernel'
+import type { UsageSnapshotDto } from '@bytebureau/protocol'
 import { Effect } from 'effect'
 import {
   orProblem,
@@ -28,6 +35,12 @@ export const absolutePath = (directory: string): Effect.Effect<string, ApiProble
           `${directory} is not an absolute path: the daemon cannot tell what it is relative to`,
         ),
       )
+
+// The usage of a profile as the kernel tells it, "default" the nameless login's; the REST API and the RPC socket ask the same way
+export const profileUsageOf = (
+  id: string,
+): Effect.Effect<UsageSnapshotDto, ApiProblem<KernelStatus>, ProfileService | UsageService> =>
+  orProblem(profileUsage(id))
 
 // The project, or the 404 problem when nobody holds the id; the REST API and the RPC socket ask the same way
 export const projectOf = (

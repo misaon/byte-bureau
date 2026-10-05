@@ -21,7 +21,7 @@ export const apisOf = (
   asks: asksApi(promised),
   events: eventsApi(promised, services),
   workspaces: workspacesApi(promised),
-  usage: usageApi(promised),
+  usage: usageApi(promised, services),
   providers: providersApi(services),
   profiles: profilesApi(promised),
   plugins: pluginsApi(services),

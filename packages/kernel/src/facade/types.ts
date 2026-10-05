@@ -78,7 +78,7 @@ export interface Kernel extends ProviderAreas {
   }
   readonly usage: {
     readonly session: (sessionId: string) => Promise<SessionUsage>
-    // The last rate limit seen under the profile, empty with no observedAt before any; an unknown profile rejects with ProfileError not_found
+    // The last rate limit seen under the profile, empty with no observedAt before any; "default" is the nameless login's, any other unknown profile rejects with ProfileError not_found
     readonly profile: (profileId: string) => Promise<UsageSnapshotDto>
   }
   readonly health: { readonly check: () => Promise<HealthReport> }

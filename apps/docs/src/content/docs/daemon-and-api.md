@@ -100,7 +100,7 @@ Every path starts with `/api/v1` and every body is JSON. Every operation needs t
 | `POST /profiles/{id}/default` | `204` | makes the profile the default of its provider; `404 profile_not_found` |
 | `GET /profiles/{id}/status` | `200 ProfileStatus` | `state` (`loggedIn`, `loggedOut`, `expired` or `unknown`), `hint?`, `account?` and `checkedAt`; `404 profile_not_found` |
 | `GET /usage/sessions/{id}` | `200 SessionUsage` | `404 session_not_found` |
-| `GET /usage/profiles/{id}` | `200 UsageSnapshot` | the newest rate-limit snapshot of the profile, `{ profileId, rateLimit: {}, observedAt: null }` before there is one; `404 profile_not_found` |
+| `GET /usage/profiles/{id}` | `200 UsageSnapshot` | the newest rate-limit snapshot of the profile, `{ profileId, rateLimit: {}, observedAt: null }` before there is one; `default`, which holds no `/` and so names no stored profile, is the nameless login that sessions without a profile run under; `404 profile_not_found` for any other id nobody holds |
 | `GET /workspaces?project={id}` | `200 WorkspaceInfo[]` | the worktrees, of one project when `project` is given |
 | `POST /workspaces/prune` | `200 PruneReport` | body `{ projectId? }`, `{}` for every project |
 | `GET /plugins` | `200 PluginStatus[]` | |

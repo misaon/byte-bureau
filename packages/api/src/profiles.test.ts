@@ -266,4 +266,19 @@ it.layer(ApiTestLayer())('GET /api/v1/usage/profiles/:id', (suite) => {
       assert.isString(decoded.observedAt)
     }),
   )
+
+  suite.effect(
+    'answers the snapshot of the nameless login under default, which no profile can be called',
+    () =>
+      Effect.gen(function* readsNameless() {
+        const before = yield* get('/usage/profiles/default')
+        yield* UsageService.use((usage) => usage.record(null, SEEN))
+        const after = yield* get('/usage/profiles/default')
+        assert.deepStrictEqual(
+          [before.status, before.body],
+          [200, { profileId: 'default', rateLimit: {}, observedAt: null }],
+        )
+        assert.containSubset(after.body, { profileId: 'default', rateLimit: SEEN })
+      }),
+  )
 })

@@ -100,6 +100,7 @@ export {
   type SessionUsage,
   type UsageSnapshot,
 } from './usage/usage-service.js'
+export { profileUsage } from './usage/profile-usage.js'
 export { KernelLayer, type KernelLayerOptions, type KernelServices } from './kernel-live.js'
 export { createKernelFrom, type Kernel, type KernelOptions } from './facade.js'
 export { configReader, type ConfigReader } from './facade/config-reader.js'

@@ -156,6 +156,11 @@ describe('the usage of the facade', () => {
       rateLimit: {},
       observedAt: null,
     })
+    await expect(kernel.usage.profile('default')).resolves.toStrictEqual({
+      profileId: 'default',
+      rateLimit: {},
+      observedAt: null,
+    })
     await expect(kernel.usage.profile('fake/nope')).rejects.toMatchObject({
       _tag: 'ProfileError',
       code: 'not_found',

@@ -8,8 +8,7 @@ import {
 } from '@bytebureau/kernel'
 import { Effect, Stream } from 'effect'
 import { buffered } from '../events/buffered.js'
-import { absolutePath, projectOf } from '../handlers/found.js'
-import { profileUsageOf } from '../handlers/usage.js'
+import { absolutePath, profileUsageOf, projectOf } from '../handlers/found.js'
 import { orProblem } from '../problems.js'
 import { BureauRpcsWithAuth } from './group.js'
 
