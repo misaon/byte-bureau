@@ -50,6 +50,7 @@
   "profiles_default_set": "Profile {id} is now the default of its provider",
   "profiles_key_prompt": "API key for {id}",
   "profiles_key_missing": "--api-key needs a key: type it at the prompt or pipe it on stdin",
+  "profiles_key_argument": "The API key is never an argument: pass --api-key alone and type it at the prompt, or pipe it on stdin",
   "profiles_status_none": "No profiles to check",
   "profiles_default_marker": "default",
   "status_daemon": "Daemon: {url} (pid {pid}, up since {since})",
