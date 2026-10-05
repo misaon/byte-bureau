@@ -158,3 +158,27 @@ describe('the questions an agent did not mark or could not ask', () => {
     await expect(Promise.all([asked, malformed])).resolves.toStrictEqual([closed, closed])
   })
 })
+
+describe('an ask the SDK takes back', () => {
+  it('is denied as cancelled when the SDK aborts it, and a later answer changes nothing', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const controller = new AbortController()
+    const ids = { requestId: 'req-9', toolUseID: 'toolu_9', signal: controller.signal }
+    const pending = broker.ask('Bash', { command: 'ls' }, ids)
+    controller.abort()
+    broker.answer('req-9', { selected: ['allow'] })
+    await expect(pending).resolves.toStrictEqual({ behavior: 'deny', message: 'cancelled' })
+  })
+
+  it('is not asked at all when the SDK took it back before it was raised', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const ids = { requestId: 'req-10', toolUseID: 'toolu_10', signal: AbortSignal.abort() }
+    await expect(broker.ask('Bash', {}, ids)).resolves.toStrictEqual({
+      behavior: 'deny',
+      message: 'cancelled',
+    })
+    expect(broker.drain()).toStrictEqual([])
+  })
+})

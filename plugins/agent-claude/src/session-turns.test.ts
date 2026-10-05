@@ -139,3 +139,17 @@ describe('the context a turn leaves in use', () => {
     }
   })
 })
+
+describe('a permission prompt the SDK takes back', () => {
+  it('is answered as denied, so the agent does not wait on it', async () => {
+    expect.hasAssertions()
+    const cancelled = {
+      ask: { toolName: 'Bash', input: {}, requestId: 'req-1', cancel: true },
+    } as const
+    const { session, fake } = start({ turns: [[init, cancelled, resultSuccess]] })
+    await session.prompt({ text: 'Hello' })
+    await until(session, TURN_END)
+    expect(fake.permissions).toStrictEqual([{ behavior: 'deny', message: 'cancelled' }])
+    await session.close()
+  })
+})

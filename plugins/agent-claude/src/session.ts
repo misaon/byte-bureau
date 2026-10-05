@@ -108,8 +108,9 @@ export class ClaudeSession implements AgentSession {
   }
 
   // The SDK waits for the answer; the ask is told at once, so the kernel can open it
-  private readonly canUseTool: CanUseTool = async (toolName, input, { requestId, toolUseID }) => {
-    const pending = this.asks.ask(toolName, input, { requestId, toolUseID })
+  private readonly canUseTool: CanUseTool = async (toolName, input, options) => {
+    const { requestId, toolUseID, signal } = options
+    const pending = this.asks.ask(toolName, input, { requestId, toolUseID, signal })
     this.tell(this.asks.drain())
     const result = await pending
     return result

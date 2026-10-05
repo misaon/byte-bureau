@@ -15,6 +15,8 @@ interface AskStep {
     readonly toolName: string
     readonly input: Record<string, unknown>
     readonly requestId: string
+    // The SDK takes the prompt back at once, as when the CLI cancels it
+    readonly cancel?: true
   }
 }
 
@@ -66,10 +68,13 @@ const askOf = async ({ ask }: AskStep, { options, fake }: Run): Promise<void> =>
   if (options.canUseTool === undefined) {
     throw new Error('the adapter gave the query no canUseTool')
   }
-  const ids = { signal: new AbortController().signal, toolUseID: `toolu-${ask.requestId}` }
-  fake.permissions.push(
-    await options.canUseTool(ask.toolName, ask.input, { ...ids, requestId: ask.requestId }),
-  )
+  const controller = new AbortController()
+  const ids = { signal: controller.signal, toolUseID: `toolu-${ask.requestId}` }
+  const pending = options.canUseTool(ask.toolName, ask.input, { ...ids, requestId: ask.requestId })
+  if (ask.cancel === true) {
+    controller.abort()
+  }
+  fake.permissions.push(await pending)
 }
 
 const hookOf = async ({ hook }: HookStep, { options }: Run): Promise<void> => {
