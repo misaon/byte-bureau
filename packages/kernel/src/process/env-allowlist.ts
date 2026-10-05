@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 // USER is how Claude Code finds its login in the macOS keychain
 const FIXED = new Set([
   'PATH',
@@ -38,12 +40,27 @@ const pick = (
   return result
 }
 
+// PATH with its absolute directories alone: an empty or a relative entry would find a program in whatever directory the child runs in, a worktree among them
+// A PATH left with none is dropped, as an empty one would search the working directory
+const withAbsolutePath = (env: Record<string, string>): Record<string, string> => {
+  const { PATH: value } = env
+  if (value === undefined) {
+    return env
+  }
+  const kept = value
+    .split(path.delimiter)
+    .filter((entry) => path.isAbsolute(entry))
+    .join(path.delimiter)
+  const others = Object.entries(env).filter(([name]) => name !== 'PATH')
+  return kept === '' ? Object.fromEntries(others) : { ...Object.fromEntries(others), PATH: kept }
+}
+
 export function allowlistEnv(
   source: Readonly<Record<string, string | undefined>>,
   extra: readonly string[] = [],
 ): Record<string, string> {
   const extraSet = new Set(extra)
-  return pick(source, (name) => allowed(name, extraSet))
+  return withAbsolutePath(pick(source, (name) => allowed(name, extraSet)))
 }
 
 // What a caller adds to an environment it does not own: the names of ByteBureau and nothing else, so it cannot decide PATH or HOME

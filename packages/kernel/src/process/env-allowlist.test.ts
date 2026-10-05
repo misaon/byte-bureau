@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { allowlistEnv, bytebureauEnv } from './env-allowlist.js'
 
@@ -51,6 +52,20 @@ describe(allowlistEnv, () => {
       ['MISSING'],
     )
     expect(env).toStrictEqual({ LANG: 'C' })
+  })
+})
+
+// A PATH of the entries, as the platform delimits them
+const delimited = (...entries: readonly string[]): string => entries.join(path.delimiter)
+
+describe('allowlistEnv and the PATH it hands on', () => {
+  it('keeps the absolute directories of PATH alone, in their order, and drops a PATH left with none', () => {
+    const kept = allowlistEnv({ PATH: delimited('bin', '', '/usr/bin', './x', '/opt/bin', '.') })
+    const dropped = allowlistEnv({ PATH: delimited('bin', '', 'node_modules/.bin'), HOME: '/h' })
+    expect([kept, dropped]).toStrictEqual([
+      { PATH: delimited('/usr/bin', '/opt/bin') },
+      { HOME: '/h' },
+    ])
   })
 })
 
