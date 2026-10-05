@@ -1,6 +1,6 @@
 import { rmSync } from 'node:fs'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Fiber, Stream } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { resolved } from '../plugins/plugin-call-fixtures.js'
@@ -74,8 +74,19 @@ it.layer(resolving.layer)('ProfileService resolve', (suite) => {
   )
 })
 
+// The statuses told live while a subscriber listens; the log keeps none of them, as a probe is a reading
+const storedStatuses = EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
+
+const listeningForStatuses = EventLog.use((log) =>
+  Effect.forkChild(
+    log.subscribe({ types: ['profile.status'] }).pipe(Stream.take(2), Stream.runCollect),
+    { startImmediately: true },
+  ),
+)
+
 const tellsStatus = Effect.gen(function* tellsStatus() {
   const profiles = yield* loadedProfiles
+  const listening = yield* listeningForStatuses
   const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
   const fine = yield* profiles.status(work.id)
   const dir = work.configDir ?? ''
@@ -85,12 +96,15 @@ const tellsStatus = Effect.gen(function* tellsStatus() {
     [fine.state, gone.state, gone.hint],
     ['loggedIn', 'loggedOut', `the directory ${dir} is gone; remove the profile and add it again`],
   )
-  const told = yield* EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
+  const told = yield* Fiber.join(listening)
   assert.deepStrictEqual(
-    told.map((event) => event.payload),
+    [told.map((event) => [event.seq, event.payload]), yield* storedStatuses],
     [
-      { profileId: 'fake/work', state: 'loggedIn' },
-      { profileId: 'fake/work', state: 'loggedOut' },
+      [
+        [0, { profileId: 'fake/work', state: 'loggedIn' }],
+        [0, { profileId: 'fake/work', state: 'loggedOut' }],
+      ],
+      [],
     ],
   )
 })

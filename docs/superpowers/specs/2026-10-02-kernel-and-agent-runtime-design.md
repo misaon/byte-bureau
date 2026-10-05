@@ -97,7 +97,7 @@ Interrupt keeps the session `running` until the provider acknowledges, then `rea
 Durable (persisted): `project.registered|updated|removed`, `profile.added|removed|status`, `session.created|provisioning|ready|running|waiting|paused|resumed|stopped|completed|errored`, `turn.started|completed|interrupted`, `message.user`, `message.assistant.completed`, `tool.started|completed|failed`, `subagent.started|stopped`, `ask.requested|answered|expired|cancelled`, `usage.updated` (per turn end and on rate-limit change), `ratelimit.updated`, `compaction.started|completed`, `workspace.provisioned|destroyed|retained`, `plugin.loaded|failed`, `session.warning` (api retry, degraded capability).
 Ephemeral (fan-out only): `message.assistant.delta` (text and thinking chunks), `tool.progress`, `heartbeat`.
 Every event type has an effect/schema definition in `packages/protocol/src/events/*.ts`; the JSON Schema is generated into the package and served at `/api/v1/schemas/events.json`.
-Payloads are redacted once, when `EventLog.publish` stores and fans them out, with the field names and patterns of §12, so no reader of the log redacts on its own (amended in Phase B: ADR-0012).
+Payloads are redacted once, when `EventLog.publish` stores and fans them out, with the field names and patterns of §12, so no reader of the log redacts on its own (amended in Phase B: ADR-0012). `profile.status` is ephemeral rather than durable: a status probe is a reading, not a fact of a profile's life, so it is fanned out to subscribers with `seq` 0 and never persisted, and a client that polls a status does not grow the log (amended in the Phase C final wave).
 
 ## 6. Ports (`packages/plugin-api`)
 

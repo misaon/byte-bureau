@@ -158,7 +158,7 @@ event: project.registered
 data: {"seq":3,"id":"01a10725-9d8f-7202-9580-26e16db4aedd","ts":"2026-10-04T13:41:08.111Z","type":"project.registered","projectId":"01a10725-9d8f-7202-9580-211c5f09f0c1","payload":{…}}
 ```
 
-A durable event carries its `seq` as the `id`. An ephemeral one, a text delta or the progress of a tool, has `seq` 0 and no `id`, and is never replayed. A client that reconnects sends the last id it has seen as `Last-Event-ID`, which wins over `since`, and the stream goes on after it; a value that is not a whole number is ignored.
+A durable event carries its `seq` as the `id`. An ephemeral one, a text delta, the progress of a tool or the status of a profile that a check found, has `seq` 0 and no `id`, and is never replayed. A client that reconnects sends the last id it has seen as `Last-Event-ID`, which wins over `since`, and the stream goes on after it; a value that is not a whole number is ignored.
 
 A turn that the agent ends is told once its session is `ready` again: `turn.completed` or `turn.interrupted`, then `session.ready`, so a client may send the next prompt as soon as it sees the end of the turn.
 

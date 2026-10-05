@@ -119,10 +119,12 @@ export const KernelEventSchemas = {
   heartbeat: Schema.Struct({ at: Timestamp }),
 } as const
 
+// A status probe is a reading, not a fact of a profile's life: a poller must not grow the log
 export const EPHEMERAL_EVENT_TYPES = [
   'message.assistant.delta',
   'tool.progress',
   'heartbeat',
+  'profile.status',
 ] as const
 
 const isKernelEventType = (type: string): type is KernelEventType =>
