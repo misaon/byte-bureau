@@ -47,4 +47,12 @@ describe('an empty BYTEBUREAU_HOME', () => {
     expect([refusal.code, refusal.written]).toStrictEqual([2, false])
     expect(refusal.stderr).toContain('BYTEBUREAU_HOME is set but empty')
   })
+
+  it('is refused by config init with exit code 2, naming the variable, before it writes the project file', () => {
+    const project = tempDir('bb-project-')
+    const refusal = runOnEmptyHome(['config', 'init', '--project', project])
+    const created = existsSync(path.join(project, 'bytebureau.jsonc'))
+    expect([refusal.code, refusal.written, created]).toStrictEqual([2, false, false])
+    expect(refusal.stderr).toContain('BYTEBUREAU_HOME is set but empty')
+  })
 })

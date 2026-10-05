@@ -48,12 +48,15 @@ const readerOf = (context: Context): ConfigReader =>
   configReader(kernelHome(context.env), context.env)
 
 // The context of a config command, which talks to no daemon and so takes no flag that chooses one
+// An empty BYTEBUREAU_HOME is refused first, as by every command but hello, --help and --version: init too, which writes into the project alone
 const contextOf = (
   command: string,
   { args, rawArgs }: { readonly args: GlobalArgs; readonly rawArgs: readonly string[] },
 ): Context => {
   refuseBureauFlags(`config ${command}`, rawArgs)
-  return processContext(args)
+  const context = processContext(args)
+  kernelHome(context.env)
+  return context
 }
 
 // The issues one to a line and their count, exit code 1; or that the configuration is valid
