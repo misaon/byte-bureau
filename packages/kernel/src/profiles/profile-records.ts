@@ -29,7 +29,7 @@ const firstProfile = (rows: readonly Row[]): Profile | undefined => {
   return row === undefined ? undefined : profileOf(row)
 }
 
-const missing = (id: string): ProfileError =>
+export const missingProfile = (id: string): ProfileError =>
   new ProfileError({ code: 'not_found', reason: `no profile "${id}"` })
 
 // By provider, then in the order they were added; the rowid parts two added within one millisecond
@@ -55,7 +55,7 @@ export const requireProfile = (
   id: string,
 ): Effect.Effect<Profile, ProfileError | StoreError> =>
   Effect.flatMap(loadProfile(sql, id), (profile) =>
-    profile === undefined ? Effect.fail(missing(id)) : Effect.succeed(profile),
+    profile === undefined ? Effect.fail(missingProfile(id)) : Effect.succeed(profile),
   )
 
 export const defaultProfileOf = (
@@ -164,7 +164,7 @@ export const deleteProfile = (
           Effect.map(firstProfile),
         )
         if (deleted === undefined) {
-          return yield* missing(id)
+          return yield* missingProfile(id)
         }
         yield* passDefault(sql, deleted)
         return deleted

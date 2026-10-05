@@ -4,6 +4,7 @@ import type {
   AskRecord,
   EventEnvelope,
   PromptInput,
+  UsageSnapshotDto,
 } from '@bytebureau/protocol'
 import type { ConfigIssue, ResolvedConfig } from '../config/config.js'
 import type { EventFilter } from '../events/event-log.js'
@@ -75,7 +76,11 @@ export interface Kernel extends ProviderAreas {
     readonly list: (projectId?: string) => Promise<readonly WorkspaceInfo[]>
     readonly prune: (projectId?: string) => Promise<PruneReport>
   }
-  readonly usage: { readonly session: (sessionId: string) => Promise<SessionUsage> }
+  readonly usage: {
+    readonly session: (sessionId: string) => Promise<SessionUsage>
+    // The last rate limit seen under the profile, empty with no observedAt before any; an unknown profile rejects with ProfileError not_found
+    readonly profile: (profileId: string) => Promise<UsageSnapshotDto>
+  }
   readonly health: { readonly check: () => Promise<HealthReport> }
   /** Stops the agents and ends the open event subscriptions; a call made after it may reject. */
   readonly close: () => Promise<void>

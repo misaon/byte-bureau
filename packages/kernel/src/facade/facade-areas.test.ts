@@ -146,6 +146,24 @@ describe('the profiles of the facade', () => {
   })
 })
 
+describe('the usage of the facade', () => {
+  it('tells an empty snapshot of a profile no rate limit was seen under, and refuses a profile nobody holds', async () => {
+    expect.hasAssertions()
+    const kernel = await openKernel()
+    await kernel.profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
+    await expect(kernel.usage.profile('fake/work')).resolves.toStrictEqual({
+      profileId: 'fake/work',
+      rateLimit: {},
+      observedAt: null,
+    })
+    await expect(kernel.usage.profile('fake/nope')).rejects.toMatchObject({
+      _tag: 'ProfileError',
+      code: 'not_found',
+      reason: 'no profile "fake/nope"',
+    })
+  })
+})
+
 describe('the failures of the facade', () => {
   it('rejects with the errors of the sessions and of the asks as they are', async () => {
     expect.hasAssertions()

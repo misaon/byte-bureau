@@ -1,5 +1,7 @@
 import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
+import { missingProfile } from '../profiles/profile-records.js'
+import { ProfileService } from '../profiles/profile-service.js'
 import { SessionManager } from '../sessions/session-manager.js'
 import { UsageService } from '../usage/usage-service.js'
 import type { Promised } from './promised.js'
@@ -26,6 +28,18 @@ export const asksApi = (promised: Promised): Kernel['asks'] => ({
   answer: promised(AskService, (asks, ...args) => Effect.asVoid(asks.answer(...args))),
 })
 
-export const usageApi = (promised: Promised): Kernel['usage'] => ({
-  session: promised(UsageService, (usage, sessionId) => usage.sessionUsage(sessionId)),
-})
+// A profile nobody holds is not found; one no rate limit was seen under has an empty snapshot, as the API tells them
+export const usageApi = (promised: Promised): Kernel['usage'] => {
+  const profileOf = promised(ProfileService, (profiles, id: string) => profiles.get(id))
+  const snapshotOf = promised(UsageService, (usage, id: string) => usage.snapshot(id))
+  return {
+    session: promised(UsageService, (usage, sessionId) => usage.sessionUsage(sessionId)),
+    profile: async (id) => {
+      if ((await profileOf(id)) === undefined) {
+        throw missingProfile(id)
+      }
+      const snapshot = await snapshotOf(id)
+      return snapshot ?? { profileId: id, rateLimit: {}, observedAt: null }
+    },
+  }
+}
