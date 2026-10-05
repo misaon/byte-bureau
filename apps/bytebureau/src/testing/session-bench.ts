@@ -129,7 +129,7 @@ export async function stoppedInProcess(): Promise<{ readonly env: Env; readonly 
 }
 
 // The stdout of `ask ls --json` once an ask waits; the last one when the deadline passes first
-async function asksWaiting(env: Env, deadline: number): Promise<string> {
+export async function asksWaiting(env: Env, deadline: number): Promise<string> {
   const listed = await runCli(['ask', 'ls', '--json'], env)
   if (listedUnder(listed.stdout, 'asks').length > 0 || Date.now() >= deadline) {
     return listed.stdout
