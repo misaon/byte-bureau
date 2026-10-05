@@ -1,6 +1,7 @@
 import type { PromptResponse, SessionNotification } from '@agentclientprotocol/sdk'
 import type { AgentEvent, Usage } from '@bytebureau/protocol'
 import { settled, type Running } from './connection.js'
+import { endProcess } from './kill-ladder.js'
 import { mapUpdate } from './mapping.js'
 import { withinLimit } from './within-limit.js'
 
@@ -84,6 +85,21 @@ export const cancelTurn = async ({ connection, sessionId }: Running): Promise<vo
   }
 }
 
+// An agent ended by the ladder, the turn it owes cancelled first, and its connection closed
+export const stopAgent = async (
+  running: Running | undefined,
+  owing: Owing | undefined,
+): Promise<void> => {
+  if (running === undefined) {
+    return
+  }
+  if (owing !== undefined && owing.running === running) {
+    await cancelTurn(running)
+  }
+  await endProcess(running.process.child, running.process.exited)
+  running.connection.close()
+}
+
 // The answer of the agent to a prompt, once the updates it sent before it are told
 // A turn interrupted before its prompt went out is cancelled right after it
 export const promptOf = async (
@@ -103,6 +119,16 @@ export const promptOf = async (
   await settled()
   return response
 }
+
+// The turn an agent was sent and has not answered
+export interface Owing {
+  readonly running: Running
+  readonly turn: Turn
+}
+
+// Whether the agent died owing the turn it was sent, which the turn's own answer decides: an answer that came is no crash, however close the death
+export const owedBy = async (owing: Owing | undefined, running: Running): Promise<boolean> =>
+  owing !== undefined && owing.running === running && !(await answeredIn(owing.turn))
 
 // Whether the process of an agent has ended, which its watch may not have told yet
 export const hasExited = ({ process: { child } }: Running): boolean =>
@@ -138,11 +164,16 @@ export const restartOf = (restart: number): AgentEvent => ({
 })
 
 // A resume the agent could not load leaves the session without its history
-export const notLoadedOf = (ref: string, why: string): AgentEvent => ({
-  type: 'session.warning',
-  kind: 'resume',
-  message: `the agent could not load session ${ref} (${why}); a new session was started`,
-})
+export const notLoadedOf = (ref: string | undefined, why: string | undefined): AgentEvent[] =>
+  ref === undefined || why === undefined
+    ? []
+    : [
+        {
+          type: 'session.warning',
+          kind: 'resume',
+          message: `the agent could not load session ${ref} (${why}); a new session was started`,
+        },
+      ]
 
 // Why a session ends with its agent: mid-turn the way it died, idle that it died once too often
 export const crashMessageOf = (ending: string, midTurn: boolean): string =>

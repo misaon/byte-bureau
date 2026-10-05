@@ -15,7 +15,6 @@ import { endingOf } from './process.js'
 import { Queue } from './queue.js'
 import { clientOf } from './session-client.js'
 import {
-  answeredIn,
   cancelTurn,
   completionOf,
   crashMessageOf,
@@ -24,11 +23,14 @@ import {
   MAX_RESTARTS,
   newTurn,
   notLoadedOf,
+  owedBy,
   promptOf,
   quietly,
   refusalOf,
   restartOf,
+  stopAgent,
   toldOf,
+  type Owing,
   type Turn,
 } from './session-turns.js'
 
@@ -39,11 +41,12 @@ export class AcpSession implements AgentSession {
   private readonly output = new Queue<AgentEvent>()
   private readonly asks: PermissionBroker
   private readonly terminals: Terminals
+  private readonly client: ClientHandlers
   private running: Running | undefined
   // The prompt in progress, from the moment it is asked for, its agent started again if need be
   private turn: Turn | undefined
   // The turn an agent was sent and has not answered: its death in the meantime is a crash of the turn
-  private owing: { readonly running: Running; readonly turn: Turn } | undefined
+  private owing: Owing | undefined
   private ref: string | undefined
   private restarts = 0
   private closed = false
@@ -59,8 +62,17 @@ export class AcpSession implements AgentSession {
     const tell = (event: AgentEvent): void => {
       this.output.push(event)
     }
-    this.asks = new PermissionBroker(request.sessionId, tell, () => this.interrupted())
+    const interrupted = (): boolean => this.turn !== undefined && this.turn.interrupted
+    this.asks = new PermissionBroker(request.sessionId, tell, interrupted)
     this.terminals = new Terminals(deps.process, request.workspace.path, terminalEnvOf(setup))
+    // Updates are told only while the agent is the session's: what a load replays before is history the session already told
+    const updated: ClientHandlers['sessionUpdate'] = (notification) => {
+      if (this.running !== undefined) {
+        this.tell(toldOf(notification, this.turn))
+      }
+    }
+    const { asks, terminals } = this
+    this.client = clientOf({ workspace: request.workspace.path, asks, terminals, updated })
   }
 
   // The session of a request: its agent started, the session it resumes loaded when that is one of this provider
@@ -118,7 +130,7 @@ export class AcpSession implements AgentSession {
     if (!this.closed) {
       this.closed = true
       this.asks.cancelAll()
-      await this.stop(this.running)
+      await stopAgent(this.running, this.owing)
       this.terminals.close()
       this.finish([{ type: 'session.closed' }])
     }
@@ -133,17 +145,15 @@ export class AcpSession implements AgentSession {
   }
 
   private async started(resume?: string): Promise<void> {
-    const running = await startAgent(this.setup, this.handlers(), resume)
+    const running = await startAgent(this.setup, this.client, resume)
     if (this.closed) {
-      await this.stop(running)
+      await stopAgent(running, this.owing)
       return
     }
     this.running = running
     this.ref = running.sessionId
     this.watching = this.watch(running)
-    if (resume !== undefined && running.notLoaded !== undefined) {
-      this.output.push(notLoadedOf(resume, running.notLoaded))
-    }
+    this.tell(notLoadedOf(resume, running.notLoaded))
   }
 
   // The agent that runs, started again when it died idle; none once the session has ended
@@ -172,20 +182,6 @@ export class AcpSession implements AgentSession {
     }
   }
 
-  private interrupted(): boolean {
-    return this.turn !== undefined && this.turn.interrupted
-  }
-
-  private async stop(running: Running | undefined): Promise<void> {
-    if (running !== undefined) {
-      if (this.owing !== undefined && this.owing.running === running) {
-        await cancelTurn(running)
-      }
-      await endProcess(running.process.child, running.process.exited)
-      running.connection.close()
-    }
-  }
-
   private async watch(running: Running): Promise<void> {
     await running.process.exited
     await this.died(running)
@@ -206,7 +202,7 @@ export class AcpSession implements AgentSession {
 
   // The agent stays the session's until its last answer is read, so the updates read meanwhile are still told
   private async deathOf(running: Running): Promise<void> {
-    const midTurn = await this.owedBy(running)
+    const midTurn = await owedBy(this.owing, running)
     if (this.running === running) {
       this.running = undefined
     }
@@ -222,12 +218,6 @@ export class AcpSession implements AgentSession {
     this.closed = true
     this.terminals.close()
     await this.crashed(running, midTurn)
-  }
-
-  // Whether the agent died owing the turn it was sent, which the turn's own answer decides: an answer that came is no crash, however close the death
-  private async owedBy(running: Running): Promise<boolean> {
-    const { owing } = this
-    return owing !== undefined && owing.running === running && !(await answeredIn(owing.turn))
   }
 
   // What the agent held is let go, once its last answer is read: what is left of its group, its connection, what it asked, its terminals
@@ -276,19 +266,5 @@ export class AcpSession implements AgentSession {
     for (const event of events) {
       this.output.push(event)
     }
-  }
-
-  // Updates are told only while the agent is the session's: what a load replays before is history the session already told
-  private handlers(): ClientHandlers {
-    return clientOf({
-      workspace: this.setup.request.workspace.path,
-      asks: this.asks,
-      terminals: this.terminals,
-      updated: (notification) => {
-        if (this.running !== undefined) {
-          this.tell(toldOf(notification, this.turn))
-        }
-      },
-    })
   }
 }
