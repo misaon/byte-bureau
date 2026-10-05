@@ -1,5 +1,6 @@
 import type {
   ModelUsage,
+  NonNullableUsage,
   SDKContextUsage,
   SDKRateLimitInfo,
   SDKResultMessage,
@@ -20,7 +21,8 @@ export interface MapState {
   turnStarted: boolean
   contextPct: number | undefined
   // The SDK reports the totals of the whole query with every result; a turn is told the difference
-  totals: Totals
+  // Unknown at the start of a resumed query, whose first result also carries the totals of the session it resumed
+  totals: Totals | undefined
   // Each event names one window; both are told together
   rateLimit: RateLimit
 }
@@ -33,11 +35,11 @@ const NO_TOTALS: Totals = {
   costUsd: 0,
 }
 
-export const newMapState = (): MapState => ({
+export const newMapState = (resumed = false): MapState => ({
   sessionId: undefined,
   turnStarted: false,
   contextPct: undefined,
-  totals: NO_TOTALS,
+  totals: resumed ? undefined : NO_TOTALS,
   rateLimit: {},
 })
 
@@ -45,7 +47,7 @@ const sum = (models: readonly ModelUsage[], pick: (model: ModelUsage) => number)
   models.reduce((total, model) => total + pick(model), 0)
 
 // A result without the usage of any model carries zeroed totals, which are no news
-const totalsOf = (message: SDKResultMessage, before: Totals): Totals => {
+const totalsOf = (message: SDKResultMessage, before: Totals | undefined): Totals | undefined => {
   const models = Object.values(message.modelUsage)
   if (models.length === 0) {
     return before
@@ -62,13 +64,20 @@ const totalsOf = (message: SDKResultMessage, before: Totals): Totals => {
 // A total that went down was reset by a /clear, so all of it is new
 const since = (before: number, now: number): number => (now >= before ? now - before : now)
 
-const turnUsage = (before: Totals, now: Totals, contextPct: number | undefined): Usage => ({
+const difference = (before: Totals, now: Totals): Usage => ({
   inputTokens: since(before.inputTokens, now.inputTokens),
   outputTokens: since(before.outputTokens, now.outputTokens),
   cacheReadTokens: since(before.cacheReadTokens, now.cacheReadTokens),
   cacheWriteTokens: since(before.cacheWriteTokens, now.cacheWriteTokens),
   costUsd: since(before.costUsd, now.costUsd),
-  ...(contextPct === undefined ? {} : { contextPct }),
+})
+
+// The usage the result gives of its own turn: the main loop only, without subagents or a cost
+const ownUsage = (usage: NonNullableUsage): Usage => ({
+  inputTokens: usage.input_tokens,
+  outputTokens: usage.output_tokens,
+  cacheReadTokens: usage.cache_read_input_tokens,
+  cacheWriteTokens: usage.cache_creation_input_tokens,
 })
 
 const ABORTED: ReadonlySet<string> = new Set(['aborted_streaming', 'aborted_tools'])
@@ -98,9 +107,14 @@ const failureOf = (message: SDKResultMessage): readonly AgentEvent[] => {
   return [{ type: 'session.warning', kind: 'turn_error', message: text }]
 }
 
+// The first turn of a resumed query is told by its own usage; from then on the totals are known
 export const mapResult = (message: SDKResultMessage, state: MapState): readonly AgentEvent[] => {
-  const now = totalsOf(message, state.totals)
-  const usage = turnUsage(state.totals, now, state.contextPct)
+  const before = state.totals
+  const now = totalsOf(message, before)
+  const counted =
+    before === undefined || now === undefined ? ownUsage(message.usage) : difference(before, now)
+  const { contextPct } = state
+  const usage = contextPct === undefined ? counted : { ...counted, contextPct }
   state.totals = now
   state.turnStarted = false
   state.contextPct = undefined

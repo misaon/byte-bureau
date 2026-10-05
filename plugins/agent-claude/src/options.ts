@@ -27,6 +27,10 @@ const envOf = ({ env, profile }: CreateSessionRequest): Record<string, string> =
   return { ...env, ...loginDir }
 }
 
+// The Claude session a request resumes; a reference of another provider is no session of Claude
+export const claudeResumeOf = ({ resume }: CreateSessionRequest): string | undefined =>
+  resume !== undefined && resume.providerId === 'claude' ? resume.ref : undefined
+
 const appendOf = (systemPrompt: string): string =>
   systemPrompt === '' ? CLAUDE_CONVENTIONS : `${systemPrompt}\n\n${CLAUDE_CONVENTIONS}`
 
@@ -39,7 +43,8 @@ export const optionsOf = ({
   canUseTool,
 }: OptionParts): Options => {
   const config = claudeConfigOf(request.providerConfig)
-  const { employee, resume } = request
+  const { employee } = request
+  const resume = claudeResumeOf(request)
   return {
     cwd: request.workspace.path,
     model: employee.model,
@@ -57,7 +62,7 @@ export const optionsOf = ({
     env: envOf(request),
     settingSources: config.settingSources ?? ['user', 'project', 'local'],
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
-    ...(resume !== undefined && resume.providerId === 'claude' ? { resume: resume.ref } : {}),
+    ...(resume === undefined ? {} : { resume }),
     abortController: abort,
     hooks,
     canUseTool,

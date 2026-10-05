@@ -15,7 +15,7 @@ import type {
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
 import { mapMessage, newMapState, type MapState } from './mapping.js'
-import { optionsOf } from './options.js'
+import { claudeResumeOf, optionsOf } from './options.js'
 import type { AgentQuery, ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
 
@@ -30,7 +30,7 @@ export class ClaudeSession implements AgentSession {
   private readonly input = new Queue<SDKUserMessage>()
   private readonly output = new Queue<AgentEvent>()
   private readonly abort = new AbortController()
-  private readonly state: MapState = newMapState()
+  private readonly state: MapState
   private readonly asks: AskBroker
   private readonly logger: Logger
   private readonly query: AgentQuery
@@ -45,6 +45,7 @@ export class ClaudeSession implements AgentSession {
   ) {
     this.asks = new AskBroker(request.sessionId)
     this.logger = deps.logger
+    this.state = newMapState(claudeResumeOf(request) !== undefined)
     const parts = {
       request,
       executable,
