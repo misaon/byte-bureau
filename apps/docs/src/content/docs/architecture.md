@@ -32,7 +32,7 @@ Only `kernel`, `api` and `protocol` import `effect` ([ADR-0003](../decisions/000
 2. The CLI registers the project and creates a session, and the kernel gives the session a git worktree under `<project>/.bytebureau/worktrees/` on a `bb/<slug>` branch, so the main checkout is never touched.
 3. The prompt goes to the `AgentProvider` port as one turn, and the kernel turns what the agent does into events, which the event log stores with an ever increasing `seq` unless they are ephemeral, like text deltas.
 4. The CLI follows the durable events of the session, over SSE from the daemon, and prints them, as NDJSON with `--json`, and it answers an ask with the recommended option under `--yes` or with the choice made at a prompt.
-5. When the turn completes the CLI completes the session and leaves the worktree for inspection, and the exit code says how the run ended: 0 completed, 3 stopped or interrupted, 4 when the project, its worktree, the provider or the profile cannot be used or the session errors. An invalid configuration, a failure of the store or a daemon that cannot be reached exits 2, a usage error or a refused `--no-daemon` 1.
+5. When the turn completes the CLI completes the session and leaves the worktree for inspection, and the exit code says how the run ended: 0 completed, 3 stopped or interrupted, 4 when the project, its configuration, its worktree, the provider or the profile cannot be used or the session errors. A failure of the store or a daemon that cannot be reached exits 2, a usage error or a refused `--no-daemon` 1.
 
 ## Decisions of phase A
 
