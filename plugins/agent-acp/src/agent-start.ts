@@ -49,9 +49,12 @@ export const terminalEnvOf = ({
     ),
   )
 
-// What an error the agent answered says, with no secret of the session in it
-export const toldReason = (error: unknown, setup: Setup): string =>
-  redacted(reasonOf(error), secretsOf(setup))
+// What an error the agent answered says, with no secret of the session in it, and the login to perform when it asked for one
+export const toldReason = (error: unknown, setup: Setup): string => {
+  const reason = redacted(reasonOf(error), secretsOf(setup))
+  const login = error instanceof RequestError && error.code === AUTH_REQUIRED
+  return login ? `${reason}; log in with: ${setup.preset.loginHint}` : reason
+}
 
 // A key the kernel handed under the variable the provider declares travels under the one the preset names, when that is another
 const movedKey = (
@@ -86,9 +89,7 @@ const failureOf = async (agent: AgentProcess, error: unknown, setup: Setup): Pro
   if (exit !== null) {
     return new Error(endingOf(agent, exit))
   }
-  const reason = toldReason(error, setup)
-  const login = error instanceof RequestError && error.code === AUTH_REQUIRED
-  return new Error(login ? `${reason}; log in with: ${setup.preset.loginHint}` : reason)
+  return new Error(toldReason(error, setup))
 }
 
 // The agent connected and in an ACP session

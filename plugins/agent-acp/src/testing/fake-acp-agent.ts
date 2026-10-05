@@ -30,6 +30,7 @@ export type FakeScript =
   | 'no-load'
   | 'children'
   | 'quick-exit'
+  | 'auth-lapsed'
 
 interface Turn {
   readonly client: AgentContext
@@ -114,19 +115,16 @@ const write = async (turn: Turn): Promise<void> => {
   })
 }
 
-const refused = async (turn: Turn): Promise<void> => {
-  await update(turn, {
-    sessionUpdate: 'tool_call_update',
-    toolCallId: WRITE.toolCallId,
-    status: 'failed',
-    rawOutput: state.cancelled ? 'cancelled' : 'denied',
-  })
+const failedTool = async (turn: Turn, toolCallId: string, rawOutput: string): Promise<void> => {
+  await update(turn, { sessionUpdate: 'tool_call_update', toolCallId, status: 'failed', rawOutput })
 }
 
 // Asks to write src/hello.ts, and writes it only when allowed; a cancelled turn ends as cancelled
 const hello = async (turn: Turn): Promise<PromptResponse> => {
   await update(turn, { sessionUpdate: 'tool_call', ...WRITE })
-  await ((await allowed(turn)) ? write(turn) : refused(turn))
+  const answered = await allowed(turn)
+  const refusal = state.cancelled ? 'cancelled' : 'denied'
+  await (answered ? write(turn) : failedTool(turn, WRITE.toolCallId, refusal))
   return state.cancelled ? { stopReason: 'cancelled' } : END_TURN
 }
 
@@ -147,12 +145,7 @@ const escape = async (turn: Turn): Promise<PromptResponse> => {
     })
     await say(turn, `outside.txt says ${content}`)
   } catch (error) {
-    await update(turn, {
-      sessionUpdate: 'tool_call_update',
-      toolCallId: READ_OUTSIDE.toolCallId,
-      status: 'failed',
-      rawOutput: messageOf(error),
-    })
+    await failedTool(turn, READ_OUTSIDE.toolCallId, messageOf(error))
   }
   return END_TURN
 }
@@ -179,10 +172,10 @@ const crashMidTurn = async (): Promise<PromptResponse> => {
   return never
 }
 
-// Answers the prompt with an error once it has said hello, as an agent whose model failed does; the error names the key it was given
-const refusePrompt = async (): Promise<PromptResponse> => {
+// Answers the prompt with the error once it has said hello
+const failing = (failure: Error) => async (): Promise<PromptResponse> => {
   await Promise.resolve()
-  throw new Error(`the model is overloaded for ${API_KEY ?? 'nobody'}`)
+  throw failure
 }
 
 // Starts a process of its own and a terminal of the client, both running until killed, then runs until cancelled
@@ -224,13 +217,16 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'crash-idle': crashIdle,
   escape,
   terminal,
-  'refuse-prompt': refusePrompt,
+  // A model that failed, its error naming the key the agent was given
+  'refuse-prompt': failing(new Error(`the model is overloaded for ${API_KEY ?? 'nobody'}`)),
   'auth-required': hello,
   'protocol-v2': hello,
   'load-fails': hello,
   'no-load': hello,
   children,
   'quick-exit': quickExit,
+  // A login lost by the time of the prompt
+  'auth-lapsed': failing(RequestError.authRequired()),
 }
 
 const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, name)

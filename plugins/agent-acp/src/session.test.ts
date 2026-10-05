@@ -83,6 +83,19 @@ describe('a session of an ACP agent at work', () => {
     expect(ended.at(-1)).toStrictEqual({ type: TURN_END, stopReason: 'interrupted', usage })
   })
 
+  it('serves a terminal to the agent inside the workspace and gives it the output', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('terminal')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
+    await expect(prompted(session, 'Run node')).resolves.toContainEqual({
+      type: 'message.delta',
+      kind: 'text',
+      text: 'terminal said ok',
+    })
+  })
+})
+
+describe('a turn the agent refuses', () => {
   it('ends a turn the agent refuses with the reason it gives, and takes the next prompt', async () => {
     expect.hasAssertions()
     const providerConfig = customOf('refuse-prompt')
@@ -100,14 +113,14 @@ describe('a session of an ACP agent at work', () => {
     await expect(prompted(session, 'Again')).resolves.toContainEqual({ type: 'turn.started' })
   })
 
-  it('serves a terminal to the agent inside the workspace and gives it the output', async () => {
+  it('ends a turn whose agent lost its login with the login to perform', async () => {
     expect.hasAssertions()
-    const providerConfig = customOf('terminal')
+    const providerConfig = customOf('auth-lapsed', { loginHint: 'fake-agent login' })
     const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
-    await expect(prompted(session, 'Run node')).resolves.toContainEqual({
-      type: 'message.delta',
-      kind: 'text',
-      text: 'terminal said ok',
+    await expect(prompted(session, 'Go on')).resolves.toContainEqual({
+      type: 'session.warning',
+      kind: 'turn_error',
+      message: 'Authentication required; log in with: fake-agent login',
     })
   })
 })
