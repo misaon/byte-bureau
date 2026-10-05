@@ -6,9 +6,16 @@ import type {
   ExternalSessionRef,
   PromptInput,
 } from '@bytebureau/plugin-api'
-import { startAgent, terminalEnvOf, toldReason, type Setup } from './agent-start.js'
+import {
+  START_LIMIT_MS,
+  startAgent,
+  terminalEnvOf,
+  toldReason,
+  type Launching,
+  type Setup,
+} from './agent-start.js'
 import { Terminals } from './client-terminal.js'
-import type { ClientHandlers, Running } from './connection.js'
+import { reasonOf, type ClientHandlers, type Running } from './connection.js'
 import { endProcess, sweepGroup } from './kill-ladder.js'
 import { PermissionBroker } from './permissions.js'
 import { endingOf } from './process.js'
@@ -42,6 +49,8 @@ export class AcpSession implements AgentSession {
   private readonly asks: PermissionBroker
   private readonly terminals: Terminals
   private readonly client: ClientHandlers
+  // Gives up a start under way when the session closes
+  private readonly ending = new AbortController()
   private running: Running | undefined
   // The prompt in progress, from the moment it is asked for, its agent started again if need be
   private turn: Turn | undefined
@@ -80,7 +89,7 @@ export class AcpSession implements AgentSession {
     const session = new AcpSession(setup)
     const { resume } = setup.request
     const own = resume !== undefined && resume.providerId === setup.providerId
-    await session.launch(own ? resume.ref : undefined)
+    await session.launch({ resume: own ? resume.ref : undefined })
     return session
   }
 
@@ -125,10 +134,11 @@ export class AcpSession implements AgentSession {
   }
 
   // A running turn is cancelled, the agent ended by the ladder, then its terminals; the events end with session.closed
-  // An agent still starting is ended once it has started, before close() is done
+  // An agent still starting is given up, killed with its group, before close() is done
   public async close(): Promise<void> {
     if (!this.closed) {
       this.closed = true
+      this.ending.abort()
       this.asks.cancelAll()
       await stopAgent(this.running, this.owing)
       this.terminals.close()
@@ -138,14 +148,20 @@ export class AcpSession implements AgentSession {
     await this.watching
   }
 
-  private async launch(resume?: string): Promise<void> {
-    const launched = this.started(resume)
+  private async launch(starting: Launching): Promise<void> {
+    const launched = this.started(starting)
     this.launching = quietly(launched)
     await launched
   }
 
-  private async started(resume?: string): Promise<void> {
-    const running = await startAgent(this.setup, this.client, resume)
+  private async started(starting: Launching): Promise<void> {
+    const signal = AbortSignal.any([this.setup.request.signal, this.ending.signal])
+    const running = await startAgent(this.setup, this.client, { ...starting, signal })
+    await this.adopted(running, starting.resume)
+  }
+
+  // An agent started for a session that closed meanwhile is ended; else it is the session's, watched, and a resume it could not load is told
+  private async adopted(running: Running, resume: string | undefined): Promise<void> {
     if (this.closed) {
       await stopAgent(running, this.owing)
       return
@@ -165,9 +181,21 @@ export class AcpSession implements AgentSession {
     if (!this.closed && this.running === undefined) {
       this.restarts += 1
       this.output.push(restartOf(this.restarts))
-      await this.launch()
+      await this.relaunched()
     }
     return this.closed ? undefined : this.running
+  }
+
+  // An agent that cannot be started again, in its time or at all, ends the session as a crash a resume may retry
+  // One that close() gave up on ends nothing more: the session has closed
+  private async relaunched(): Promise<void> {
+    try {
+      await this.launch({ limitMs: this.setup.deps.startLimitMs ?? START_LIMIT_MS })
+    } catch (error) {
+      if (!this.closed) {
+        this.crashedWith('the ACP agent of a session could not start again', reasonOf(error), true)
+      }
+    }
   }
 
   // The turn on the agent: owed until its answer comes
@@ -216,8 +244,9 @@ export class AcpSession implements AgentSession {
       return
     }
     this.closed = true
-    this.terminals.close()
-    await this.crashed(running, midTurn)
+    const exit = await running.process.exited
+    const reason = crashMessageOf(endingOf(running.process, exit), midTurn)
+    this.crashedWith('the ACP agent of a session exited', reason, midTurn)
   }
 
   // What the agent held is let go, once its last answer is read: what is left of its group, its connection, what it asked, its terminals
@@ -228,13 +257,13 @@ export class AcpSession implements AgentSession {
     this.terminals.releaseAll()
   }
 
-  private async crashed(running: Running, midTurn: boolean): Promise<void> {
-    const exit = await running.process.exited
-    const ending = endingOf(running.process, exit)
-    const reason = crashMessageOf(ending, midTurn)
-    const named = { sessionId: this.setup.request.sessionId, ref: running.sessionId, reason }
-    this.setup.deps.logger.warn('the ACP agent of a session exited', named)
-    this.finish(crashOf(reason, midTurn))
+  // The end of the session by a crash: its terminals closed, the reason logged and told, retryable or not
+  private crashedWith(logged: string, reason: string, retryable: boolean): void {
+    this.closed = true
+    this.terminals.close()
+    const named = { sessionId: this.setup.request.sessionId, ref: this.ref, reason }
+    this.setup.deps.logger.warn(logged, named)
+    this.finish(crashOf(reason, retryable))
   }
 
   // A prompt that failed: an agent that has gone or is going tells it by its death; else it refused the prompt, and the session goes on

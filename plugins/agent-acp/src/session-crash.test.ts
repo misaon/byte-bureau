@@ -142,6 +142,45 @@ describe('an ACP agent whose death is noticed before its answer is read', () => 
   })
 })
 
+// Spawns that, from the start given on, run a process that never answers
+const silentFrom = (spawn: SpawnFn, start: number): SpawnFn => {
+  let starts = 0
+  return (command, args, options) => {
+    starts += 1
+    return starts < start
+      ? spawn(command, args, options)
+      : spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], options)
+  }
+}
+
+describe('an ACP agent that is not started again in time', () => {
+  it('ends the session with a retryable crash that names the time, its group killed', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const deps = { ...run.deps, spawn: silentFrom(run.deps.spawn, 2), startLimitMs: 300 }
+    const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('crash-idle') }
+    const session = await started(new AcpAgentProvider('custom', deps), sessionRequest(request))
+    await turnThenDeath(session, run)
+    const ending = rest(session)
+    await session.prompt({ text: 'Again' })
+    await expect(ending).resolves.toStrictEqual([
+      {
+        type: 'session.warning',
+        kind: 'restart',
+        message: 'the agent exited idle; starting it again (1 of 3)',
+      },
+      {
+        type: 'session.error',
+        kind: 'crash',
+        message: 'the agent did not start a session within 300 ms',
+        retryable: true,
+      },
+      { type: 'session.closed' },
+    ])
+    expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual([null, 'SIGKILL'])
+  })
+})
+
 describe('a session whose agent is being started again', () => {
   it('cancels the turn of a prompt interrupted while its agent was being started again', async () => {
     expect.hasAssertions()
@@ -156,14 +195,15 @@ describe('a session whose agent is being started again', () => {
     expect(events.at(-1)).toMatchObject({ type: TURN_END, stopReason: 'interrupted' })
   })
 
-  it('waits, when it closes, for the agent it was starting again, and ends it', async () => {
+  it('gives up, when it closes, the agent it was starting again, waits for its end, and logs no crash of it', async () => {
     expect.hasAssertions()
     const { session, run } = await startedWith('crash-idle')
     await turnThenDeath(session, run)
     const prompting = session.prompt({ text: 'Again' })
     await until(session, 'session.warning')
     await session.close()
-    expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual([null, 'SIGINT'])
+    expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual([null, 'SIGKILL'])
     await prompting
+    expect(run.logged).toStrictEqual([])
   })
 })

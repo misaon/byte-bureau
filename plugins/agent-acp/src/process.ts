@@ -18,6 +18,8 @@ export interface AcpDeps {
   readonly spawn: SpawnFn
   readonly process: ProcessSpawner
   readonly logger: Logger
+  // How long an agent started again for a prompt may take to open its session; 60 s when not given
+  readonly startLimitMs?: number | undefined
 }
 
 export interface Exit {
