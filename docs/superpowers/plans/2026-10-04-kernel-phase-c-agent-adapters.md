@@ -9710,8 +9710,8 @@ git commit -m "feat(kernel): bundle the claude and acp agent providers, and tell
 ### Task 9: Smoke scripts, docs, spec amendments, deferrals, gates
 
 **Files:**
-- Create: `scripts/smoke-claude.ts`, `scripts/smoke-acp.ts`, `apps/docs/src/content/docs/agents-and-profiles.md`
-- Modify: `package.json` (`smoke:claude`, `smoke:acp` scripts), `apps/docs/astro.config.mjs` (sidebar entry `{ label: 'Agents and profiles', translations: { cs: 'Agenti a profily' }, link: '/agents-and-profiles/' }` after `daemon-and-api`), `apps/docs/src/content/docs/architecture.md` (package table rows `plugins/agent-claude`, `plugins/agent-acp`; "Phase C decisions"; the "Deferred to later phases" list rewritten), `apps/docs/src/content/docs/daemon-and-api.md` (the `profiles` group rows, `GET /usage/profiles/:id`, the new problem codes, `run --profile`), `CONTRIBUTING.md` ("Working on an agent adapter"), `README.md` + `README.cs.md` (status line: Phase C), `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` (amendments below), `.github/labeler.yml` (`'area: agents': plugins/agent-*/**`), `.github/workflows/semantic-pr.yml` (scopes `agent-claude`, `agent-acp`), `scripts/repo-settings/labels.txt` (`area: agents` exists already)
+- Create: `scripts/smoke-agent.ts` (the pure part: the guard `SMOKE_REAL_AGENTS=1`, the plans, the `SMOKE_PROFILE` choice, the reading of the CLI's JSON lines), `scripts/smoke-cli.ts` (the process side: a throwaway home on the file backend, a throwaway repository with `GIT_CONFIG_GLOBAL` at the null device, the CLI from source, the signals, the cleanup), `scripts/smoke-run.ts` (the steps: serve, the optional login profile, a run, the stop/resume/prompt/complete path, the cleanup), `scripts/smoke-claude.ts`, `scripts/smoke-acp.ts` (the entries; `SMOKE_ACP_PRESET`, default `opencode`), `scripts/smoke-agent.test.ts`, `apps/docs/src/content/docs/agents-and-profiles.md`
+- Modify: `package.json` (`smoke:claude`, `smoke:acp`), `apps/docs/astro.config.mjs` (the sidebar entry after `Daemon and API`), `apps/docs/src/content/docs/architecture.md` (the package rows, the allowlist line with `USER`, "Decisions of phase C", the rewritten "Deferred to later phases"), `apps/docs/src/content/docs/daemon-and-api.md` (the `profiles` endpoints, `GET /usage/profiles/{id}`, the percent-encoded id, the problem codes, the RPC procedures, `run --profile`, the complete rule), `CONTRIBUTING.md` ("Working on an agent adapter"), `README.md` + `README.cs.md` (the status paragraph), `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` (the appended "(amended in Phase C …)" sentences), `.github/labeler.yml` (`area: agents`), `cspell-words.txt`, `plugins/agent-acp/src/{provider,provider.test,session-start.test}.ts` with the new `plugins/agent-acp/src/login-hint.ts` (a login profile's hint and the session's two refusals name its directory), `scripts/vitest.config.ts` (the CI smoke test on the fake provider, 60 s); `semantic-pr.yml` and `scripts/repo-settings/labels.txt` were already right
 - Test: `bun run check`, `bun run lint:actions`, the docs build, the fresh-clone gate
 
 Semantics: Phase C is done when a fresh clone passes every gate, `bytebureau plugins ls` on the compiled binary lists the two adapters, `bytebureau run --provider acp:custom` with the fake ACP agent as the command runs end to end through the daemon in CI (Task 8's test), and the docs, the spec and the research index say what the code does. The real-agent smoke scripts run only on demand.
@@ -9742,6 +9742,1055 @@ Semantics: Phase C is done when a fresh clone passes every gate, `bytebureau plu
 - [ ] **Step 4: CI and labels**
 
 `.github/labeler.yml`: `'area: agents': plugins/agent-*/**` in the file's form; `.github/workflows/semantic-pr.yml`: scopes `agent-claude`, `agent-acp`; run `bun run lint:actions`. The root `vitest.config.ts` projects already carry the two plugins (Tasks 6–7); the CI `unit` jobs run them. No new smoke job: the ACP end-to-end runs inside the unit job through Task 8's test (the daemon spawns `bun fake-acp-agent.ts`).
+
+**Added files (as shipped):**
+
+`scripts/smoke-agent.ts` (as shipped):
+
+```ts
+// What a real-agent smoke runs and how it reads what the CLI printed; the runs themselves are in smoke-run.ts
+
+// A smoke drives a real agent, on the subscription or the key of whoever runs it: it runs only when this is 1, and never in CI
+export const SMOKE_GUARD = 'SMOKE_REAL_AGENTS'
+
+// The prompt of spec §16, acceptance criteria 1 to 3
+export const PROMPT = 'Create src/hello.ts exporting hello()'
+
+type Env = Readonly<Record<string, string | undefined>>
+
+// One JSON record a command printed: an event of a run, or the record of a command
+export type JsonRecord = Readonly<Record<string, unknown>>
+
+export interface SmokePlan {
+  // The package.json script that runs it
+  readonly script: string
+  readonly provider: string
+  // SMOKE_PROFILE: a profile id of the provider, which the smoke adds to its throwaway home as a login profile first
+  readonly profile: string | undefined
+  // The other variables the smoke reads, for the lines that say how to run it
+  readonly variables: readonly string[]
+}
+
+// The profile a smoke runs under: the nameless login of the provider, or a login profile it adds first
+export type ProfileChoice =
+  | { readonly kind: 'nameless' }
+  | { readonly kind: 'login'; readonly id: string; readonly name: string }
+  | { readonly kind: 'refused'; readonly reason: string }
+
+export interface Summary {
+  // The usage of the last turn.completed, as the kernel published it
+  readonly usage: JsonRecord | undefined
+  readonly rateLimit: boolean
+  readonly contextPct: boolean
+}
+
+export const smokeAllowed = (env: Env): boolean => env[SMOKE_GUARD] === '1'
+
+export const planOf = (env: Env, plan: Omit<SmokePlan, 'profile'>): SmokePlan => ({
+  ...plan,
+  profile: env['SMOKE_PROFILE'],
+})
+
+// What the smoke tells when it is not asked to run: what it does and how to run it
+export function usageOf(plan: SmokePlan): string {
+  const file = `scripts/${plan.script.replace(':', '-')}.ts`
+  return [
+    `${plan.script} runs ${plan.provider}, a real agent, on your own login; CI never runs it.`,
+    `Run it with: bun run ${plan.script}   (or ${SMOKE_GUARD}=1 bun ${file})`,
+    'It works on a throwaway BYTEBUREAU_HOME and repository, with a daemon from source that it stops at the end.',
+    `SMOKE_PROFILE=${plan.provider}/<name> adds that login profile to the throwaway home and runs under it.`,
+    ...plan.variables,
+  ].join('\n')
+}
+
+// Without SMOKE_REAL_AGENTS=1 a smoke only says how to run it, and ends with exit code 0
+export async function guarded(
+  plan: SmokePlan,
+  env: Env,
+  run: (plan: SmokePlan) => Promise<number>,
+): Promise<number> {
+  if (!smokeAllowed(env)) {
+    console.log(usageOf(plan))
+    return 0
+  }
+  const code = await run(plan)
+  return code
+}
+
+// A profile id is <provider>/<name>, and a name holds no slash
+export function profileChoiceOf(plan: SmokePlan): ProfileChoice {
+  const id = plan.profile ?? ''
+  if (id === '') {
+    return { kind: 'nameless' }
+  }
+  const slash = id.lastIndexOf('/')
+  if (slash === -1 || id.slice(0, slash) !== plan.provider) {
+    const reason = `SMOKE_PROFILE must be a profile id of ${plan.provider}, such as ${plan.provider}/work, not ${id}`
+    return { kind: 'refused', reason }
+  }
+  return { kind: 'login', id, name: id.slice(slash + 1) }
+}
+
+const isRecord = (value: unknown): value is JsonRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// A line of JSON output as its record; any other line is none
+export function recordOf(line: string): JsonRecord | undefined {
+  try {
+    const parsed: unknown = JSON.parse(line)
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The session an event belongs to
+export function sessionOf(event: JsonRecord): string | undefined {
+  const id = event['sessionId']
+  return typeof id === 'string' ? id : undefined
+}
+
+const ofType = (events: readonly JsonRecord[], type: string): readonly JsonRecord[] =>
+  events.filter((event) => event['type'] === type)
+
+const recordAt = (record: JsonRecord | undefined, key: string): JsonRecord | undefined => {
+  const value = record === undefined ? undefined : record[key]
+  return isRecord(value) ? value : undefined
+}
+
+const usageIn = (event: JsonRecord): JsonRecord | undefined =>
+  recordAt(recordAt(event, 'payload'), 'usage')
+
+// What the agent reported over a turn: its usage, rate limits and how much of the context it uses
+export function summaryOf(events: readonly JsonRecord[]): Summary {
+  const turnEnds = ofType(events, 'turn.completed')
+  const last = turnEnds.at(-1)
+  const usages = [...ofType(events, 'usage.updated'), ...turnEnds].map((event) => usageIn(event))
+  return {
+    usage: last === undefined ? undefined : usageIn(last),
+    rateLimit: ofType(events, 'ratelimit.updated').length > 0,
+    contextPct: usages.some(
+      (usage) => usage !== undefined && typeof usage['contextPct'] === 'number',
+    ),
+  }
+}
+
+const yesOrNo = (value: boolean): string => (value ? 'yes' : 'no')
+
+// What a command that follows a turn tells of it
+export function reportOf(command: string, code: number, summary: Summary): readonly string[] {
+  const usage =
+    summary.usage === undefined ? 'none, no turn completed' : JSON.stringify(summary.usage)
+  return [
+    `${command} exited ${code}`,
+    `usage of the turn: ${usage}`,
+    `ratelimit.updated seen: ${yesOrNo(summary.rateLimit)}`,
+    `contextPct seen: ${yesOrNo(summary.contextPct)}`,
+  ]
+}
+```
+
+`scripts/smoke-cli.ts` (as shipped):
+
+```ts
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, devNull, tmpdir } from 'node:os'
+import path from 'node:path'
+import type { Readable } from 'node:stream'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { recordOf, type JsonRecord } from './smoke-agent.js'
+
+// The CLI and the daemon of a smoke, run from source
+const CLI_DIRECTORY = path.join(import.meta.dirname, '..', 'apps', 'bytebureau')
+const FROM_SOURCE = ['run', 'src/main.ts'] as const
+// Where every throwaway home and repository is made, its links resolved as theirs are
+const TEMP_ROOT = realpathSync(tmpdir())
+
+// A daemon on a free port that keeps its secrets in a file under the home, never in the keychain
+const HOME_CONFIG = { server: { port: 0 }, secrets: { backend: 'file' } }
+
+// What a command left undone, once a signal stops the smoke, exits with
+const NOT_RUN = 130
+
+export interface Throwaway {
+  readonly home: string
+  readonly repo: string
+  // The environment of every command: the smoke's own, on the throwaway home
+  readonly env: Readonly<Record<string, string | undefined>>
+  // Set once a signal stops the smoke: no further command starts, the cleanup still runs
+  readonly stopping: { received: boolean }
+  // The commands running now, which a SIGTERM sent to the smoke is passed on to
+  readonly running: Set<Pick<ChildProcess, 'kill'>>
+}
+
+export interface Ran {
+  readonly code: number
+  readonly records: readonly JsonRecord[]
+}
+
+export interface Running {
+  readonly done: Promise<Ran>
+}
+
+type Watch = (record: JsonRecord) => void
+
+function unwatched(): void {
+  // Nothing to watch: the records are kept all the same
+}
+
+// The lines of the smoke itself go to stderr; its stdout is what the commands printed
+export const tell = (line: string): void => {
+  console.error(`smoke: ${line}`)
+}
+
+// A home the CLI may run on: a directory under the temporary one that is still there
+// An unset or empty BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
+export const isThrowawayHome = (home: string | undefined, root: string = TEMP_ROOT): boolean =>
+  home !== undefined &&
+  path.isAbsolute(home) &&
+  home.startsWith(`${root}${path.sep}`) &&
+  existsSync(home)
+
+// The environment of a command of the CLI, which runs on the smoke's own throwaway home or not at all
+const cliEnv = (smoke: Throwaway, args: readonly string[]): Throwaway['env'] => {
+  const home = smoke.env['BYTEBUREAU_HOME']
+  if (home !== smoke.home || !isThrowawayHome(home)) {
+    const where = home === undefined || home === '' ? 'an unset home, ~/.bytebureau' : home
+    throw new Error(`refusing to run bytebureau ${args.join(' ')} on ${where}`)
+  }
+  return smoke.env
+}
+
+// Links resolved, as git reports paths: on macOS /var is a link to /private/var
+const tempDir = (prefix: string): string => {
+  const created = mkdtempSync(path.join(tmpdir(), prefix))
+  return realpathSync(created)
+}
+
+export const throwaway = (): Throwaway => {
+  const home = tempDir('bb-smoke-home-')
+  return {
+    home,
+    repo: tempDir('bb-smoke-repo-'),
+    env: { ...process.env, BYTEBUREAU_HOME: home },
+    stopping: { received: false },
+    running: new Set(),
+  }
+}
+
+// The home's configuration, and a repository with one empty commit on main; the commit reads no git configuration of the person
+export function prepare({ home, repo }: Throwaway): void {
+  writeFileSync(path.join(home, 'config.json'), `${JSON.stringify(HOME_CONFIG)}\n`)
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: '1' }
+  const git = (...args: readonly string[]): void => {
+    execFileSync('git', ['-C', repo, ...args], { env, stdio: 'ignore' })
+  }
+  git('init', '-q', '-b', 'main')
+  const author = ['-c', 'user.name=ByteBureau smoke', '-c', 'user.email=smoke@example.com']
+  git(...author, 'commit', '-q', '--allow-empty', '-m', 'init')
+}
+
+// The lines of an output as they come; the last one may end without a newline
+function eachLine(stdout: Readable, take: (line: string) => void): void {
+  let rest = ''
+  stdout.setEncoding('utf8')
+  stdout.on('data', (chunk: string) => {
+    const lines = `${rest}${chunk}`.split('\n')
+    rest = lines.pop() ?? ''
+    for (const line of lines) {
+      take(line)
+    }
+  })
+  stdout.once('end', () => {
+    take(rest)
+  })
+}
+
+// A line goes to stdout as the command printed it; a JSON one is kept and watched
+const keeper =
+  (records: JsonRecord[], watch: Watch) =>
+  (line: string): void => {
+    if (line.trim() === '') {
+      return
+    }
+    console.log(line)
+    const record = recordOf(line)
+    if (record !== undefined) {
+      records.push(record)
+      watch(record)
+    }
+  }
+
+// A command a signal ended exits as a shell tells it: 128 and the number of the signal
+const exitOfSignal = (signal: NodeJS.Signals | null): number =>
+  signal === null ? -1 : 128 + constants.signals[signal]
+
+async function endOf(smoke: Throwaway, child: ChildProcess, records: JsonRecord[]): Promise<Ran> {
+  smoke.running.add(child)
+  const { promise, resolve, reject } = Promise.withResolvers<Ran>()
+  child.once('error', reject)
+  child.once('close', (code, signal) => {
+    smoke.running.delete(child)
+    resolve({ code: code ?? exitOfSignal(signal), records })
+  })
+  const ran = await promise
+  return ran
+}
+
+// A command of the CLI on the throwaway home, whatever the signals: stdin closed, its stderr the smoke's
+function spawned(smoke: Throwaway, args: readonly string[], watch: Watch): Running {
+  const child = spawn('bun', [...FROM_SOURCE, ...args], {
+    cwd: CLI_DIRECTORY,
+    env: cliEnv(smoke, args),
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  const records: JsonRecord[] = []
+  eachLine(child.stdout, keeper(records, watch))
+  return { done: endOf(smoke, child, records) }
+}
+
+// A command of the CLI on the throwaway home, unless a signal has stopped the smoke
+export function started(
+  smoke: Throwaway,
+  args: readonly string[],
+  watch: Watch = unwatched,
+): Running {
+  if (smoke.stopping.received) {
+    return { done: Promise.resolve({ code: NOT_RUN, records: [] }) }
+  }
+  return spawned(smoke, args, watch)
+}
+
+// A command a person answers at the terminal: its stdin is the smoke's, its output goes to the smoke's stderr
+export async function atTheTerminal(smoke: Throwaway, args: readonly string[]): Promise<number> {
+  if (smoke.stopping.received) {
+    return NOT_RUN
+  }
+  const child = spawn('bun', [...FROM_SOURCE, ...args], {
+    cwd: CLI_DIRECTORY,
+    env: cliEnv(smoke, args),
+    stdio: ['inherit', 2, 'inherit'],
+  })
+  const ran = await endOf(smoke, child, [])
+  return ran.code
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const killed = (pid: number): void => {
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Gone already
+  }
+}
+
+// The daemon's pid, which the lock of its home holds while it runs
+const daemonOf = (home: string): number | undefined => {
+  try {
+    const pid = Number(readFileSync(path.join(home, 'daemon.lock'), 'utf8').trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// A daemon that outlives its stop gets until the deadline, then SIGKILL; true when it ended by itself
+async function endedBy(pid: number, deadline: number): Promise<boolean> {
+  if (!alive(pid)) {
+    return true
+  }
+  if (Date.now() >= deadline) {
+    killed(pid)
+    return false
+  }
+  await sleep(100)
+  const ended = await endedBy(pid, deadline)
+  return ended
+}
+
+// A step of the cleanup that fails is told, never thrown, so the failure that ended the smoke stays the one it ends with
+async function attempted(what: string, step: () => Promise<void> | void): Promise<void> {
+  try {
+    await step()
+  } catch (error) {
+    tell(`${what} failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+// The daemon ends with the smoke, as serve --stop ends it, else by its pid; the home and the repository go whatever happened
+export async function cleanedUp(smoke: Throwaway): Promise<void> {
+  const pid = daemonOf(smoke.home)
+  await attempted('serve --stop', async () => {
+    const stop = await spawned(smoke, ['serve', '--stop', '--json'], unwatched).done
+    tell(`serve --stop exited ${stop.code}`)
+  })
+  const ended = pid === undefined || (await endedBy(pid, Date.now() + 5000))
+  await attempted('removing the home and the repository', () => {
+    rmSync(smoke.home, { recursive: true, force: true })
+    rmSync(smoke.repo, { recursive: true, force: true })
+  })
+  tell(
+    `${ended ? '' : 'the daemon did not end and was killed; '}the home and the repository are gone`,
+  )
+}
+
+const HELD = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+// A signal stops the smoke where it is: no further command starts, and the cleanup runs
+// Ctrl-C and a hangup reach the commands of the terminal by themselves; a SIGTERM sent to the smoke alone is passed on to them
+export const stopperOf =
+  (smoke: Pick<Throwaway, 'stopping' | 'running'>) =>
+  (signal: NodeJS.Signals): void => {
+    if (!smoke.stopping.received) {
+      tell(`${signal}: no further command starts; the daemon is stopped and the home removed`)
+    }
+    smoke.stopping.received = true
+    if (signal === 'SIGTERM') {
+      for (const child of smoke.running) {
+        child.kill('SIGTERM')
+      }
+    }
+  }
+
+export function heldSignals(smoke: Throwaway): () => void {
+  const stop = stopperOf(smoke)
+  for (const signal of HELD) {
+    process.on(signal, stop)
+  }
+  return () => {
+    for (const signal of HELD) {
+      process.off(signal, stop)
+    }
+  }
+}
+```
+
+`scripts/smoke-run.ts` (as shipped):
+
+```ts
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import {
+  PROMPT,
+  profileChoiceOf,
+  reportOf,
+  sessionOf,
+  summaryOf,
+  type JsonRecord,
+  type ProfileChoice,
+  type SmokePlan,
+} from './smoke-agent.js'
+import {
+  atTheTerminal,
+  cleanedUp,
+  heldSignals,
+  prepare,
+  started,
+  tell,
+  throwaway,
+  type Ran,
+  type Running,
+  type Throwaway,
+} from './smoke-cli.js'
+
+// What the resumed session is told: it reads the same whether or not the agent remembers the turn that was stopped
+const GO_ON = 'Go on: create src/hello.ts exporting hello() unless it is there already'
+
+// The exit code of a run whose session was stopped
+const STOPPED = 3
+
+interface Smoke extends Throwaway {
+  readonly plan: SmokePlan
+  // --provider, and --profile when the smoke runs under a profile
+  readonly flags: readonly string[]
+}
+
+const command = async (smoke: Smoke, args: readonly string[]): Promise<Ran> => {
+  const ran = await started(smoke, args).done
+  return ran
+}
+
+// Whether the session of the events wrote the file of the prompt in its worktree
+function helloOf(smoke: Smoke, ran: Ran): string {
+  const id = ran.records.map((record) => sessionOf(record)).find((each) => each !== undefined)
+  if (id === undefined) {
+    return 'no session'
+  }
+  const file = path.join(smoke.repo, '.bytebureau', 'worktrees', id, 'src', 'hello.ts')
+  return existsSync(file) ? 'yes' : 'no'
+}
+
+function told(smoke: Smoke, label: string, ran: Ran): void {
+  for (const line of reportOf(label, ran.code, summaryOf(ran.records))) {
+    tell(line)
+  }
+  tell(`src/hello.ts in the worktree: ${helloOf(smoke, ran)}`)
+}
+
+// The login profile SMOKE_PROFILE names, in the throwaway home: the CLI prints the login command and waits for it at a terminal
+async function profileAdded(smoke: Smoke, choice: ProfileChoice): Promise<boolean> {
+  if (choice.kind !== 'login') {
+    return true
+  }
+  const code = await atTheTerminal(smoke, ['profiles', 'add', smoke.plan.provider, choice.name])
+  tell(`profiles add exited ${code}`)
+  return code === 0
+}
+
+// One turn to its end, every ask answered with its recommended option
+async function firstRun(smoke: Smoke): Promise<number> {
+  const args = ['run', PROMPT, '--project', smoke.repo, ...smoke.flags, '--json', '--yes']
+  const ran = await command(smoke, args)
+  told(smoke, 'run', ran)
+  return ran.code
+}
+
+async function ended(running: Running): Promise<undefined> {
+  await running.done
+}
+
+// Stopped where it waits, then resumed: the run that followed it ends as stopped
+async function stoppedAndResumed(smoke: Smoke, id: string, running: Running): Promise<boolean> {
+  tell(`session ${id} waits on an ask: sessions stop, then resume, then prompt`)
+  const stop = await command(smoke, ['sessions', 'stop', id, '--json'])
+  const run = await running.done
+  const resume = await command(smoke, ['sessions', 'resume', id, '--json'])
+  tell(`sessions stop exited ${stop.code}, its run ${run.code}, sessions resume ${resume.code}`)
+  return stop.code === 0 && run.code === STOPPED && resume.code === 0
+}
+
+// The resumed session goes on with a prompt, and is completed, which lets go of its profile
+async function promptedAndCompleted(smoke: Smoke, id: string): Promise<boolean> {
+  const prompted = await command(smoke, ['sessions', 'prompt', id, GO_ON, '--json', '--yes'])
+  told(smoke, 'sessions prompt', prompted)
+  const complete = await command(smoke, ['sessions', 'complete', id, '--json'])
+  tell(`sessions complete exited ${complete.code}`)
+  return prompted.code === 0 && complete.code === 0
+}
+
+// The session a run waits in, from the session.waiting it printed once its agent asked
+const waitingIn =
+  (asked: PromiseWithResolvers<string>) =>
+  (record: JsonRecord): void => {
+    const id = sessionOf(record)
+    if (record['type'] === 'session.waiting' && id !== undefined) {
+      asked.resolve(id)
+    }
+  }
+
+// A run that ended before its agent asked anything left no session to stop; only a real agent may ask nothing, the fake one always asks
+/* v8 ignore start */
+async function unasked(running: Running): Promise<number> {
+  const ran = await running.done
+  tell(`the second run ended (exit ${ran.code}) before its agent asked anything: no resume to show`)
+  return ran.code
+}
+/* v8 ignore stop */
+
+// Off a terminal and without --yes, the first ask of a second run waits: its session is stopped there, resumed and prompted again
+async function resumePath(smoke: Smoke): Promise<number> {
+  const asked = Promise.withResolvers<string>()
+  const args = ['run', PROMPT, '--project', smoke.repo, ...smoke.flags, '--json']
+  const running = started(smoke, args, waitingIn(asked))
+  const id = await Promise.race([asked.promise, ended(running)])
+  /* v8 ignore start */
+  if (id === undefined) {
+    const code = await unasked(running)
+    return code
+  }
+  /* v8 ignore stop */
+  const resumed =
+    (await stoppedAndResumed(smoke, id, running)) && (await promptedAndCompleted(smoke, id))
+  return resumed ? 0 : 1
+}
+
+// Where the smoke works, and how a person answers an ask that --yes leaves waiting
+function introduced(smoke: Smoke): void {
+  tell(`${smoke.plan.provider} on the throwaway home ${smoke.home} and repository ${smoke.repo}`)
+  const cli = `BYTEBUREAU_HOME=${smoke.home} bun run --cwd apps/bytebureau src/main.ts`
+  tell(
+    `an ask --yes cannot answer waits; from another terminal, ${cli} ask ls, then ask answer <id>`,
+  )
+}
+
+// 130 once a signal stopped the smoke, else 0 when every step ended 0
+const exitOf = (smoke: Smoke, codes: readonly number[]): number => {
+  if (smoke.stopping.received) {
+    return 130
+  }
+  return codes.every((code) => code === 0) ? 0 : 1
+}
+
+async function steps(smoke: Smoke, choice: ProfileChoice): Promise<number> {
+  introduced(smoke)
+  const serve = await command(smoke, ['serve', '--json'])
+  tell(`serve exited ${serve.code}`)
+  if (serve.code !== 0 || !(await profileAdded(smoke, choice))) {
+    return exitOf(smoke, [1])
+  }
+  const first = await firstRun(smoke)
+  const second = smoke.stopping.received ? first : await resumePath(smoke)
+  return exitOf(smoke, [first, second])
+}
+
+const flagsOf = (plan: SmokePlan, choice: ProfileChoice): readonly string[] => [
+  '--provider',
+  plan.provider,
+  ...(choice.kind === 'login' ? ['--profile', choice.id] : []),
+]
+
+// The steps on a throwaway home, whose daemon is stopped and which is removed whatever happens
+async function onThrowaway(plan: SmokePlan, choice: ProfileChoice): Promise<number> {
+  const smoke: Smoke = { ...throwaway(), plan, flags: flagsOf(plan, choice) }
+  const release = heldSignals(smoke)
+  try {
+    prepare(smoke)
+    return await steps(smoke, choice)
+  } finally {
+    await cleanedUp(smoke)
+    release()
+  }
+}
+
+// A run to its end, then a stop, resume and prompt of a second session
+export async function runSmoke(plan: SmokePlan): Promise<number> {
+  const choice = profileChoiceOf(plan)
+  if (choice.kind === 'refused') {
+    tell(choice.reason)
+    return 1
+  }
+  const code = await onThrowaway(plan, choice)
+  return code
+}
+```
+
+`scripts/smoke-claude.ts` (as shipped):
+
+```ts
+#!/usr/bin/env bun
+import { guarded, planOf, type SmokePlan } from './smoke-agent.js'
+import { runSmoke } from './smoke-run.js'
+
+// Claude Code through the Agent SDK (spec §16, acceptance 2), on the person's own claude login unless SMOKE_PROFILE names a profile
+export const claudePlan = (env: Readonly<Record<string, string | undefined>>): SmokePlan =>
+  planOf(env, {
+    script: 'smoke:claude',
+    provider: 'claude',
+    variables: [
+      'Without SMOKE_PROFILE it runs on the login of claude itself: log in with claude /login first.',
+    ],
+  })
+
+/* v8 ignore start */
+if (import.meta.main) {
+  process.exitCode = await guarded(claudePlan(process.env), process.env, runSmoke)
+}
+/* v8 ignore stop */
+```
+
+`scripts/smoke-acp.ts` (as shipped):
+
+```ts
+#!/usr/bin/env bun
+import { guarded, planOf, type SmokePlan } from './smoke-agent.js'
+import { runSmoke } from './smoke-run.js'
+
+// An ACP agent through the ACP adapter (spec §16, acceptance 3): the preset SMOKE_ACP_PRESET names, opencode by default
+export const acpPlan = (env: Readonly<Record<string, string | undefined>>): SmokePlan =>
+  planOf(env, {
+    script: 'smoke:acp',
+    provider: `acp:${env['SMOKE_ACP_PRESET'] ?? 'opencode'}`,
+    variables: [
+      'SMOKE_ACP_PRESET=codex|gemini|opencode|pi picks the agent, opencode by default.',
+      'The agent must be installed and logged in: codex login, gemini, opencode auth login or pi.',
+    ],
+  })
+
+/* v8 ignore start */
+if (import.meta.main) {
+  process.exitCode = await guarded(acpPlan(process.env), process.env, runSmoke)
+}
+/* v8 ignore stop */
+```
+
+`scripts/smoke-agent.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it, vi } from 'vitest'
+import { acpPlan } from './smoke-acp.js'
+import {
+  guarded,
+  profileChoiceOf,
+  recordOf,
+  reportOf,
+  sessionOf,
+  smokeAllowed,
+  summaryOf,
+  usageOf,
+  type SmokePlan,
+} from './smoke-agent.js'
+import { claudePlan } from './smoke-claude.js'
+
+const ALLOWED = { SMOKE_REAL_AGENTS: '1' }
+
+describe(guarded, () => {
+  it('says how to run the smoke and ends 0 without SMOKE_REAL_AGENTS=1, running nothing', async () => {
+    expect.hasAssertions()
+    const log = vi.spyOn(console, 'log').mockReturnValue()
+    const run = vi.fn<(plan: SmokePlan) => Promise<number>>()
+    const codes = [
+      await guarded(claudePlan({}), {}, run),
+      await guarded(acpPlan({}), { SMOKE_REAL_AGENTS: 'true' }, run),
+    ]
+    expect([codes, run.mock.calls]).toStrictEqual([[0, 0], []])
+    expect(log.mock.calls).toStrictEqual([[usageOf(claudePlan({}))], [usageOf(acpPlan({}))]])
+  })
+
+  it('runs the smoke with SMOKE_REAL_AGENTS=1 and ends with its exit code', async () => {
+    expect.hasAssertions()
+    const run = vi.fn<(plan: SmokePlan) => Promise<number>>().mockResolvedValue(4)
+    const plan = claudePlan(ALLOWED)
+    await expect(guarded(plan, ALLOWED, run)).resolves.toBe(4)
+    expect(run.mock.calls).toStrictEqual([[plan]])
+  })
+
+  it('lets a smoke run for the value 1 alone', () => {
+    const values = ['1', '0', 'true', 'yes', '', undefined]
+    expect(values.map((value) => smokeAllowed({ SMOKE_REAL_AGENTS: value }))).toStrictEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ])
+  })
+})
+
+describe('the smoke plans', () => {
+  it('run claude, and the ACP preset SMOKE_ACP_PRESET names, opencode by default', () => {
+    const plans = [claudePlan({}), acpPlan({}), acpPlan({ SMOKE_ACP_PRESET: 'codex' })]
+    expect(plans.map((plan) => [plan.script, plan.provider])).toStrictEqual([
+      ['smoke:claude', 'claude'],
+      ['smoke:acp', 'acp:opencode'],
+      ['smoke:acp', 'acp:codex'],
+    ])
+  })
+
+  it('tell how to run them, through the package script or the guard variable', () => {
+    const usage = usageOf(acpPlan({}))
+    expect(usage).toContain('bun run smoke:acp')
+    expect(usage).toContain('SMOKE_REAL_AGENTS=1 bun scripts/smoke-acp.ts')
+    expect(usage).toContain('SMOKE_ACP_PRESET=')
+    expect(usage).toContain('CI never runs it')
+  })
+})
+
+describe(profileChoiceOf, () => {
+  it('runs on the nameless login without SMOKE_PROFILE', () => {
+    expect([
+      profileChoiceOf(claudePlan({})),
+      profileChoiceOf(claudePlan({ SMOKE_PROFILE: '' })),
+    ]).toStrictEqual([{ kind: 'nameless' }, { kind: 'nameless' }])
+  })
+
+  it('adds the login profile SMOKE_PROFILE names, an id of the provider', () => {
+    expect([
+      profileChoiceOf(claudePlan({ SMOKE_PROFILE: 'claude/work' })),
+      profileChoiceOf(acpPlan({ SMOKE_ACP_PRESET: 'codex', SMOKE_PROFILE: 'acp:codex/home' })),
+    ]).toStrictEqual([
+      { kind: 'login', id: 'claude/work', name: 'work' },
+      { kind: 'login', id: 'acp:codex/home', name: 'home' },
+    ])
+  })
+
+  it('refuses a profile of another provider and a bare name', () => {
+    const kinds = ['acp:codex/work', 'work', 'claude-x/work'].map(
+      (profile) => profileChoiceOf(claudePlan({ SMOKE_PROFILE: profile })).kind,
+    )
+    expect(kinds).toStrictEqual(['refused', 'refused', 'refused'])
+  })
+})
+
+describe(recordOf, () => {
+  it('reads a JSON object and passes over any other line', () => {
+    const lines = ['{"type":"turn.started"}', '[1]', '"text"', 'Done', '']
+    expect(lines.map((line) => recordOf(line))).toStrictEqual([
+      { type: 'turn.started' },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+  })
+})
+
+describe(sessionOf, () => {
+  it('names the session of an event, and none for a record without one', () => {
+    const records = [
+      { type: 'session.waiting', sessionId: 'abc' },
+      { command: 'serve' },
+      { sessionId: 7 },
+    ]
+    expect(records.map((record) => sessionOf(record))).toStrictEqual(['abc', undefined, undefined])
+  })
+})
+
+const USAGE = { inputTokens: 12, outputTokens: 3, costUsd: 0.01 }
+
+describe(summaryOf, () => {
+  it('takes the usage of the last turn and tells whether rate limits and the context were reported', () => {
+    const events = [
+      { type: 'turn.completed', payload: { stopReason: 'end_turn', usage: { inputTokens: 1 } } },
+      {
+        type: 'ratelimit.updated',
+        payload: { profileId: 'claude/work', rateLimit: { fiveHourPct: 4 } },
+      },
+      { type: 'usage.updated', payload: { usage: { ...USAGE, contextPct: 7 } } },
+      { type: 'turn.completed', payload: { stopReason: 'end_turn', usage: USAGE } },
+    ]
+    expect(summaryOf(events)).toStrictEqual({ usage: USAGE, rateLimit: true, contextPct: true })
+  })
+
+  it('tells nothing seen of a run that completed no turn', () => {
+    const events = [{ type: 'session.created', payload: {} }, { type: 'session.errored' }]
+    expect(summaryOf(events)).toStrictEqual({
+      usage: undefined,
+      rateLimit: false,
+      contextPct: false,
+    })
+  })
+})
+
+describe(reportOf, () => {
+  it('tells the exit code, the usage and what was seen', () => {
+    expect(reportOf('run', 0, { usage: USAGE, rateLimit: false, contextPct: true })).toStrictEqual([
+      'run exited 0',
+      'usage of the turn: {"inputTokens":12,"outputTokens":3,"costUsd":0.01}',
+      'ratelimit.updated seen: no',
+      'contextPct seen: yes',
+    ])
+  })
+})
+```
+
+`scripts/smoke-run.test.ts` (as shipped):
+
+```ts
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { devNull, homedir, tmpdir } from 'node:os'
+import path from 'node:path'
+import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
+import { recordOf, type SmokePlan } from './smoke-agent.js'
+import { isThrowawayHome, started, stopperOf, type Throwaway } from './smoke-cli.js'
+import { runSmoke } from './smoke-run.js'
+
+// The smoke as CI runs it: on the fake provider, so that it cannot rot between the runs on real agents
+const FAKE: SmokePlan = {
+  script: 'smoke:fake',
+  provider: 'fake',
+  profile: undefined,
+  variables: [],
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const linesOf = (spy: MockInstance<(...data: unknown[]) => void>): readonly string[] =>
+  spy.mock.calls.map(([line]) => String(line))
+
+// What the smoke told on stderr and printed on stdout, through the console that writes both
+interface Heard {
+  readonly told: () => readonly string[]
+  readonly printed: () => readonly string[]
+}
+
+function heard(): Heard {
+  const told = vi.spyOn(console, 'error').mockReturnValue()
+  const printed = vi.spyOn(console, 'log').mockReturnValue()
+  return { told: () => linesOf(told), printed: () => linesOf(printed) }
+}
+
+// The daemon the smoke started, as the record of serve names it
+function daemonOf(printed: readonly string[]): number | undefined {
+  const served = printed
+    .map((line) => recordOf(line))
+    .find((record) => record !== undefined && record['command'] === 'serve')
+  const pid = served === undefined ? undefined : served['pid']
+  return typeof pid === 'number' ? pid : undefined
+}
+
+// A daemon that a failing smoke left is killed with the test; the git of the daemon reads no configuration of whoever runs it
+function smokeTest(): Heard {
+  vi.stubEnv('GIT_CONFIG_GLOBAL', devNull)
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1')
+  const output = heard()
+  onTestFinished(() => {
+    vi.unstubAllEnvs()
+    const pid = daemonOf(output.printed())
+    if (pid !== undefined && alive(pid)) {
+      process.kill(pid, 'SIGKILL')
+    }
+  })
+  return output
+}
+
+// The home and the repository the smoke named in its first line
+const throwawaysOf = (told: readonly string[]): readonly string[] => {
+  const [first = ''] = told
+  const named = /on the throwaway home (?<home>\S+) and repository (?<repo>\S+)$/u.exec(first)
+  const { home, repo } = named === null || named.groups === undefined ? {} : named.groups
+  return [home, repo].filter((dir) => dir !== undefined)
+}
+
+// Whether the daemon and the directories of the smoke are gone
+const leftOf = ({ told, printed }: Heard): readonly unknown[] => {
+  const pid = daemonOf(printed())
+  return [pid !== undefined && alive(pid), throwawaysOf(told()).map((dir) => existsSync(dir))]
+}
+
+describe(runSmoke, () => {
+  it('runs a turn to its end, then stops, resumes and prompts a second session, and leaves neither its daemon nor its home', async () => {
+    expect.hasAssertions()
+    const output = smokeTest()
+    await expect(runSmoke(FAKE)).resolves.toBe(0)
+    expect(output.told()).toStrictEqual(
+      expect.arrayContaining([
+        'smoke: serve exited 0',
+        'smoke: run exited 0',
+        'smoke: src/hello.ts in the worktree: yes',
+        'smoke: sessions stop exited 0, its run 3, sessions resume 0',
+        'smoke: sessions prompt exited 0',
+        'smoke: sessions complete exited 0',
+        'smoke: serve --stop exited 0',
+        'smoke: the home and the repository are gone',
+      ]),
+    )
+    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+  })
+
+  it('adds the login profile SMOKE_PROFILE names to its home and runs under it', async () => {
+    expect.hasAssertions()
+    const output = smokeTest()
+    await expect(runSmoke({ ...FAKE, profile: 'fake/work' })).resolves.toBe(0)
+    expect(output.told()).toStrictEqual(
+      expect.arrayContaining(['smoke: profiles add exited 0', 'smoke: run exited 0']),
+    )
+    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+  })
+
+  it('refuses a profile of another provider before it makes a home or runs anything', async () => {
+    expect.hasAssertions()
+    const output = heard()
+    await expect(runSmoke({ ...FAKE, profile: 'claude/work' })).resolves.toBe(1)
+    expect([output.told(), output.printed()]).toStrictEqual([
+      ['smoke: SMOKE_PROFILE must be a profile id of fake, such as fake/work, not claude/work'],
+      [],
+    ])
+  })
+})
+
+describe(isThrowawayHome, () => {
+  it('takes a directory made under the temporary one, and never an unset, empty, relative or other home', () => {
+    const root = realpathSync(tmpdir())
+    const made = mkdtempSync(path.join(root, 'bb-smoke-test-'))
+    onTestFinished(() => {
+      rmSync(made, { recursive: true, force: true })
+    })
+    const homes = [made, undefined, '', 'bb-home', path.join(homedir(), '.bytebureau'), root]
+    expect(
+      [...homes, path.join(root, 'bb-smoke-gone')].map((home) => isThrowawayHome(home)),
+    ).toStrictEqual([true, false, false, false, false, false, false])
+  })
+})
+
+// A smoke whose commands would run on the home its environment names, unset when none is given
+const smokeOn = (dir: string, value?: string): Throwaway => ({
+  home: dir,
+  repo: dir,
+  env: value === undefined ? {} : { BYTEBUREAU_HOME: value },
+  stopping: { received: false },
+  running: new Set(),
+})
+
+describe('the home of a command of the smoke', () => {
+  it("is the smoke's own throwaway home: on an unset, empty or other home the command is refused before it runs", () => {
+    const prefix = path.join(realpathSync(tmpdir()), 'bb-smoke-test-')
+    const home = mkdtempSync(prefix)
+    const other = mkdtempSync(prefix)
+    onTestFinished(() => {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(other, { recursive: true, force: true })
+    })
+    const owner = path.join(homedir(), '.bytebureau')
+    // --version opens no home: should the guard ever let it through, it still touches none
+    const unset = 'refusing to run bytebureau --version on an unset home, ~/.bytebureau'
+    expect(() => started(smokeOn(home), ['--version'])).toThrow(unset)
+    expect(() => started(smokeOn(home, ''), ['--version'])).toThrow(unset)
+    expect(() => started(smokeOn(home, other), ['--version'])).toThrow(`on ${other}`)
+    expect(() => started(smokeOn(owner, owner), ['--version'])).toThrow(`on ${owner}`)
+  })
+})
+
+describe(stopperOf, () => {
+  it('stops the smoke at the first held signal, and passes a SIGTERM alone on to the commands it runs', () => {
+    const told = vi.spyOn(console, 'error').mockReturnValue()
+    const kill = vi.fn<(signal?: NodeJS.Signals | number) => boolean>().mockReturnValue(true)
+    const smoke = { stopping: { received: false }, running: new Set([{ kill }]) }
+    const stop = stopperOf(smoke)
+    stop('SIGINT')
+    stop('SIGHUP')
+    const before = kill.mock.calls.length
+    stop('SIGTERM')
+    expect([
+      smoke.stopping.received,
+      before,
+      kill.mock.calls,
+      told.mock.calls.length,
+    ]).toStrictEqual([true, 0, [['SIGTERM']], 1])
+  })
+})
+```
+
+`plugins/agent-acp/src/login-hint.ts` (as shipped):
+
+```ts
+import type { ProfileRef } from '@bytebureau/plugin-api'
+import type { Preset } from './presets.js'
+
+// A word a shell would split or expand is quoted, so the command can be pasted as it is (a copy of the Claude adapter's)
+const shellWord = (value: string): string =>
+  /^[\w./:@%+=,-]+$/u.test(value) ? value : `'${value.replaceAll("'", String.raw`'\''`)}'`
+
+// A login profile logs in where its agent looks: in the directory the preset's variable hands the agent; the bare command otherwise
+export const loginHintOf = (
+  preset: Pick<Preset, 'configDirEnv' | 'loginHint'>,
+  profile: ProfileRef,
+): string => {
+  const { configDirEnv, loginHint } = preset
+  const { kind, configDir } = profile
+  return kind === 'login' && configDir !== undefined && configDirEnv !== undefined
+    ? `${configDirEnv}=${shellWord(configDir)} ${loginHint}`
+    : loginHint
+}
+```
+
+**Semantics (as shipped, commits bd20caa, 83eb164, 458af1a, 933dcff, da239c9, c3940a4, 801dd84, c5f0411):** The smoke scripts run a real agent only with `SMOKE_REAL_AGENTS=1` (`bun run smoke:claude`, `bun run smoke:acp`; without it they print their usage and exit 0, running nothing) on a throwaway `BYTEBUREAU_HOME` (`secrets.backend: file`, so the keychain is never touched) and a throwaway repository, with a daemon from source they stop at the end (`serve --stop`, the lock's pid waited for 5 s and SIGKILLed if still alive, the home and the repository removed on every path, SIGINT/SIGTERM/SIGHUP held); the steps: `serve --json`, `profiles add <provider> <name>` with `SMOKE_PROFILE` (terminal-attached so the CLI's login wait works), a `run` with `--json --yes` reporting the exit code, the usage, whether `ratelimit.updated` and `contextPct` were seen and whether `src/hello.ts` landed, then a second run stopped at its first `session.waiting`, `sessions resume`, `sessions prompt … --yes`, `sessions complete`; the events go to stdout and the smoke's own `smoke: …` lines to stderr, so `bun run smoke:claude > events.ndjson` keeps the events; exit 0 when every step ended as expected, 1 otherwise, 130 after a signal; the pure part (`smoke-agent.ts`) is unit-tested and a CI test runs the smoke on the `fake` provider so it cannot rot between the owner's hand runs; they were not run on a real agent in this phase (the owner's Claude login is expired; no ACP agent is installed), so the `AskUserQuestion` shape through `canUseTool` stays unverified until the owner's smoke. `agents-and-profiles.md` documents the providers (what each needs installed, its login — `claude /login`, `CODEX_HOME=<dir> codex login` as the ACP adapter now prints for a login profile with a directory, `gemini`, `opencode auth login`, `pi` — and its API-key variable), the provider options keyed by the provider id (`providers.claude.{executable,settingSources}`, `providers["acp:custom"].{command,args,env,configDirEnv,apiKeyEnv,installHint,loginHint}`, `providers["acp:<preset>"]` overrides, `passEnv`), the profiles (ids, kinds, the commands, the login flow with the hint framed as "Log in with: …", the key rules, defaults, `run --profile` resolved against the employee's provider, the nameless login, the way out of `profile_in_use`, the JSON shapes, the exit codes), the secrets (`auto`/`keychain`/`file`, the 3 s probe, the sticky record file `~/.bytebureau/secrets.backend`, the unknown-value refusal), the asks and permissions (the modes, the policy, `AskUserQuestion` and the `(Recommended)` convention, what `--yes` answers), what the adapters report (ACP v1 carries no usage, model, effort or system prompt) and the limits of this phase. `daemon-and-api.md` gains the `profiles` endpoints and their codes, `GET /usage/profiles/{id}`, the percent-encoded id (`/profiles/claude%2Fwork`), the `profile_*` problems, the RPC procedures (`profiles.list` with `null`; reads draw from the budget), `run --profile` and the complete rule; `architecture.md` the package rows, `USER` in the allowlist, eleven decisions of phase C and the rewritten deferred list (the usage-limit pause, the age fallback, ACP `authenticate`-based status, the user configuration's `profiles` section, `listModels`/`setEffort`/attachments, subagents and `ask.withdrawn`, Windows process groups, a nightly smoke, the shared test-support package, `doctor`, steering mid-turn); `CONTRIBUTING.md` "Working on an agent adapter" (the import rules and scopes, the fixtures as the truth of the SDK shapes checked by the smoke, the fake ACP agent and Node ≥ 22.18, no real agent in tests or CI); the READMEs' status paragraph (phase C in place, the file fallback named). The spec gains one appended "(amended in Phase C …)" sentence per changed statement — §4 `SecretStore` and `ProfileService`, §5.3 (`complete` from stopped and errored), §6, §7, §8.1 (the init, result, limit, account and hook bullets as shipped; steering not shipped — a prompt while a turn runs answers 409), §8.2, §10 (`providers.<id>` keyed by the provider id), §11.1/§11.3, §13 (`USER`), §14 (provider crash, missing agent, usage limit), §15, §16 (acceptance 2 steering, acceptance 5 the file fallback) — never a rewrite; §5.4 is untouched until the final wave. `.github/labeler.yml` labels `plugins/agent-*/**` as `area: agents`. The fresh-clone gate on 933dcff: `bun install --frozen-lockfile && bun run check && bun run lint:actions && bun run build:binaries --host` green (2371 tests, 97.3 % lines / 92.8 % branches; zizmor through Docker; the contract drift and the docs build clean); the host binary on a temp home ran `plugins ls` (four plugins), the `acp:custom` run with the fake agent, the profile commands and `serve --stop`, all exit 0, no process left, the canary key nowhere; the binary starts in 33 ms against main's 13 ms (`plugins ls` 36 vs 15 ms) because both SDKs load eagerly — under the ruled 100 ms, so eager loading stays. For the owner: `claude /login`, then `bun run smoke:claude`; an installed, logged-in ACP agent, then `bun run smoke:acp`.
 
 - [ ] **Step 5: Fresh-clone gate**
 
