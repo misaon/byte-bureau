@@ -21,6 +21,7 @@ import {
   hasExited,
   MAX_RESTARTS,
   newTurn,
+  notLoadedOf,
   promptOf,
   refusalOf,
   restartOf,
@@ -120,6 +121,9 @@ export class AcpSession implements AgentSession {
     this.running = running
     this.ref = running.sessionId
     this.watching = this.watch(running)
+    if (resume !== undefined && running.notLoaded !== undefined) {
+      this.output.push(notLoadedOf(resume, running.notLoaded))
+    }
   }
 
   // The agent that runs, started again when it died idle; none once the session has ended

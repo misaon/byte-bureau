@@ -57,6 +57,8 @@ export interface Running {
   readonly process: AgentProcess
   readonly connection: ClientConnection
   readonly sessionId: string
+  // Why the session to resume was not loaded, a new one having been started instead
+  readonly notLoaded?: string | undefined
   // Set once its death is told
   gone: boolean
 }
@@ -133,18 +135,47 @@ export const connectAgent = async (
   return { connection, initialized }
 }
 
-// A session/load when the session to resume is known and the agent can load one, else a session/new
+// What opening a session gave: its id, and why the session to resume was not loaded, when it was not
+export interface Opened {
+  readonly sessionId: string
+  readonly notLoaded?: string | undefined
+}
+
+const newSession = async (connection: ClientConnection, cwd: string): Promise<string> => {
+  const { sessionId } = await connection.agent.request('session/new', { cwd, mcpServers: [] })
+  return sessionId
+}
+
+// The session to resume, loaded; when the agent answers the load with an error, a new one instead
+const loadedOr = async (
+  connection: ClientConnection,
+  cwd: string,
+  resume: string,
+): Promise<Opened> => {
+  try {
+    await connection.agent.request('session/load', { sessionId: resume, cwd, mcpServers: [] })
+    return { sessionId: resume }
+  } catch (error) {
+    if (!(error instanceof RequestError)) {
+      throw error
+    }
+    return { sessionId: await newSession(connection, cwd), notLoaded: reasonOf(error) }
+  }
+}
+
+// A session/load when there is a session to resume and the agent loads sessions; a session/new otherwise
 export const openSession = async (
   { connection, initialized }: Connected,
   cwd: string,
   resume: string | undefined,
-): Promise<string> => {
-  const capabilities = initialized.agentCapabilities
-  const canLoad = capabilities !== undefined && capabilities.loadSession === true
-  if (resume !== undefined && canLoad) {
-    await connection.agent.request('session/load', { sessionId: resume, cwd, mcpServers: [] })
-    return resume
+): Promise<Opened> => {
+  if (resume === undefined) {
+    return { sessionId: await newSession(connection, cwd) }
   }
-  const { sessionId } = await connection.agent.request('session/new', { cwd, mcpServers: [] })
-  return sessionId
+  const capabilities = initialized.agentCapabilities
+  if (capabilities === undefined || capabilities.loadSession !== true) {
+    return { sessionId: await newSession(connection, cwd), notLoaded: 'it does not load sessions' }
+  }
+  const opened = await loadedOr(connection, cwd, resume)
+  return opened
 }

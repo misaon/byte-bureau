@@ -25,6 +25,8 @@ export type FakeScript =
   | 'refuse-prompt'
   | 'auth-required'
   | 'protocol-v2'
+  | 'load-fails'
+  | 'no-load'
 
 interface Turn {
   readonly client: AgentContext
@@ -196,6 +198,8 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'refuse-prompt': refusePrompt,
   'auth-required': hello,
   'protocol-v2': hello,
+  'load-fails': hello,
+  'no-load': hello,
 }
 
 const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, name)
@@ -213,11 +217,18 @@ const prompt = async (turn: Turn): Promise<PromptResponse> => {
   return response
 }
 
+// What the agent says of itself: another ACP for protocol-v2, no session loading for no-load
+const initializedFor = (script: string): InitializeResponse => {
+  if (script === 'protocol-v2') {
+    return { ...INITIALIZED, protocolVersion: 2 }
+  }
+  const capabilities = { ...INITIALIZED.agentCapabilities, loadSession: script !== 'no-load' }
+  return { ...INITIALIZED, agentCapabilities: capabilities }
+}
+
 // An agent that loads a session streams its history back first, as ACP has it
 const fake = agent({ name: 'fake-acp-agent' })
-  .onRequest('initialize', () =>
-    SCRIPT === 'protocol-v2' ? { ...INITIALIZED, protocolVersion: 2 } : INITIALIZED,
-  )
+  .onRequest('initialize', () => initializedFor(SCRIPT))
   .onRequest('authenticate', () => ({}))
   .onRequest('session/new', ({ params }) => {
     if (SCRIPT === 'auth-required') {
@@ -227,6 +238,9 @@ const fake = agent({ name: 'fake-acp-agent' })
     return { sessionId: 'fake-acp-1' }
   })
   .onRequest('session/load', async ({ params, client }) => {
+    if (SCRIPT === 'load-fails') {
+      throw RequestError.resourceNotFound(params.sessionId)
+    }
     state.cwd = params.cwd
     await say({ client, sessionId: params.sessionId }, 'from the loaded history')
     return {}

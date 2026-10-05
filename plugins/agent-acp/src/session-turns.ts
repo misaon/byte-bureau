@@ -93,6 +93,13 @@ export const restartOf = (restart: number): AgentEvent => ({
   message: `the agent exited idle; starting it again (${restart} of ${MAX_RESTARTS})`,
 })
 
+// A resume the agent could not load leaves the session without its history
+export const notLoadedOf = (ref: string, why: string): AgentEvent => ({
+  type: 'session.warning',
+  kind: 'resume',
+  message: `the agent could not load session ${ref} (${why}); a new session was started`,
+})
+
 // Why a session ends with its agent: mid-turn the way it died, idle that it died once too often
 export const crashMessageOf = (ending: string, midTurn: boolean): string =>
   midTurn ? ending : `${ending}; it exited idle ${MAX_RESTARTS + 1} times and is not started again`

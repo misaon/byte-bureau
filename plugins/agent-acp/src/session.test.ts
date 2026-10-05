@@ -197,6 +197,37 @@ describe('the agent an ACP session starts', () => {
   })
 })
 
+// The warning of a resume the agent could not load, for the reason it gives
+const notLoaded = (why: string): unknown => ({
+  type: 'session.warning',
+  kind: 'resume',
+  message: `the agent could not load session fake-acp-earlier (${why}); a new session was started`,
+})
+
+describe('a session to resume that the agent cannot load', () => {
+  it('starts a new session, and says so, when the agent answers the load with an error', async () => {
+    expect.hasAssertions()
+    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
+    const providerConfig = customOf('load-fails')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
+    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
+      notLoaded('Resource not found: fake-acp-earlier'),
+    ])
+  })
+
+  it('starts a new session, and says so, when the agent does not load sessions', async () => {
+    expect.hasAssertions()
+    const resume = { providerId: 'acp:custom', ref: 'fake-acp-earlier' }
+    const providerConfig = customOf('no-load')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
+    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
+      notLoaded('it does not load sessions'),
+    ])
+  })
+})
+
 describe('the key of an ACP session', () => {
   it('is redacted from an error the agent answers a prompt with', async () => {
     expect.hasAssertions()

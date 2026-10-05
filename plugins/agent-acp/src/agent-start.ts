@@ -81,12 +81,17 @@ const failureOf = async (agent: AgentProcess, error: unknown, setup: Setup): Pro
 const sessionOf = async (
   agent: AgentProcess,
   handlers: ClientHandlers,
-  { cwd, resume }: { readonly cwd: string; readonly resume: string | undefined },
+  opening: {
+    readonly cwd: string
+    readonly resume: string | undefined
+    readonly secrets: readonly string[]
+  },
 ): Promise<Running> => {
   const connected = await connectAgent(agent, handlers)
-  const sessionId = await openSession(connected, cwd, resume)
+  const { sessionId, notLoaded } = await openSession(connected, opening.cwd, opening.resume)
   await settled()
-  return { process: agent, connection: connected.connection, sessionId, gone: false }
+  const why = notLoaded === undefined ? {} : { notLoaded: redacted(notLoaded, opening.secrets) }
+  return { process: agent, connection: connected.connection, sessionId, gone: false, ...why }
 }
 
 // The work of a start, which the kernel may give up on: the agent is killed then, so nothing waits on it
@@ -117,10 +122,14 @@ export const startAgent = async (
   resume: string | undefined,
 ): Promise<Running> => {
   const cwd = setup.request.workspace.path
-  const options = { cwd, env: envOf(setup), secrets: secretsOf(setup) }
-  const agent = await spawnAgent(setup.deps.spawn, setup.preset, options)
+  const secrets = secretsOf(setup)
+  const agent = await spawnAgent(setup.deps.spawn, setup.preset, {
+    cwd,
+    env: envOf(setup),
+    secrets,
+  })
   try {
-    const started = sessionOf(agent, handlers, { cwd, resume })
+    const started = sessionOf(agent, handlers, { cwd, resume, secrets })
     const running = await whileStarting(setup.request.signal, agent, started)
     return running
   } catch (error) {
