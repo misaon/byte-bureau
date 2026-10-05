@@ -190,6 +190,15 @@ it.layer(ApiTestLayer(), LIVE)('the RPC connection of @bytebureau/client', (suit
   )
 })
 
+it.layer(ApiTestLayer(), LIVE)('a procedure of the RPC connection without a payload', (suite) => {
+  suite.effect('is called without one', () =>
+    Effect.gen(function* callsWithoutPayload() {
+      const connection = yield* opened(connectRpc({ url: yield* wsUrl, token: TEST_TOKEN }))
+      assert.deepStrictEqual(yield* awaited(connection.call('profiles.list')), [])
+    }),
+  )
+})
+
 it.layer(ApiTestLayer(), LIVE)('the end of a stream of the RPC connection', (suite) => {
   suite.effect('opens no stream for a signal that has aborted already', () =>
     Effect.gen(function* opensNone() {

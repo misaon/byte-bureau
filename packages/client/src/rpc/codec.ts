@@ -98,12 +98,13 @@ export const decodeFrame = (text: string): ServerMessage[] => {
   return items.filter((item) => isServerMessage(item))
 }
 
+// A procedure without a payload takes null, as effect/rpc encodes void; JSON would drop an undefined one
 export const encodeRequest = ({ id, tag, payload, token }: RequestEnvelope): string =>
   JSON.stringify({
     _tag: 'Request',
     id,
     tag,
-    payload,
+    payload: payload ?? null,
     headers: [['authorization', `Bearer ${token}`]],
   })
 
