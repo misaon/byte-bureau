@@ -1,9 +1,9 @@
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentEvent } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import type { ClaudeSession } from './session.js'
 import { sessionRequest } from './testing/requests.js'
-import { init, modelUsage, resultSuccess } from './testing/sdk-fixtures.js'
+import { init, modelUsage, resultSuccess, textDelta } from './testing/sdk-fixtures.js'
 import { start, until } from './testing/session-harness.js'
 
 const TURN_END = 'turn.completed'
@@ -46,6 +46,30 @@ describe('a resumed Claude session', () => {
       usage: { inputTokens: 20, outputTokens: 5, cacheReadTokens: 0 },
     })
     expect(second).toHaveProperty('usage.costUsd', expect.closeTo(0.01, 10))
+    await session.close()
+  })
+})
+
+// A result the mapping cannot read: reading its usage fails
+const UNREADABLE_RESULT: SDKMessage = {
+  ...resultSuccess,
+  get modelUsage(): Record<string, ModelUsage> {
+    throw new Error('the usage cannot be read')
+  },
+}
+
+describe('a turn whose result cannot be read', () => {
+  it('still ends, counting nothing, with a warning, and the next turn starts afresh', async () => {
+    expect.hasAssertions()
+    const { session } = start({ turns: [[init, textDelta, UNREADABLE_RESULT], [textDelta]] })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.slice(-2)).toStrictEqual([
+      { type: 'session.warning', kind: 'mapping', message: 'the usage cannot be read' },
+      { type: TURN_END, stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 } },
+    ])
+    await session.prompt({ text: 'Again' })
+    await expect(until(session, 'turn.started')).resolves.toStrictEqual([{ type: 'turn.started' }])
     await session.close()
   })
 })

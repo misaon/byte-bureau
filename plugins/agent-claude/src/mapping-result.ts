@@ -125,6 +125,26 @@ export const mapResult = (message: SDKResultMessage, state: MapState): readonly 
   ]
 }
 
+// The stop reason a result names, read with care, as the rest of it could not be read
+const namedStopReason = (message: SDKResultMessage): string => {
+  try {
+    return stopReasonOf(message)
+  } catch {
+    return 'unknown'
+  }
+}
+
+// A result that cannot be read still ends its turn, with nothing counted
+export const unreadResult = (message: SDKResultMessage, state: MapState): AgentEvent => {
+  state.turnStarted = false
+  state.contextPct = undefined
+  return {
+    type: 'turn.completed',
+    stopReason: namedStopReason(message),
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
+}
+
 export const contextPctOf = (usage: SDKContextUsage): number =>
   usage.raw_max_tokens > 0 ? (usage.total_tokens / usage.raw_max_tokens) * 100 : usage.percentage
 

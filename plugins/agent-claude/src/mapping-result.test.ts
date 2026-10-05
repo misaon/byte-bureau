@@ -1,6 +1,6 @@
 import type { SDKMessage, SDKRateLimitEvent } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { mapMessage, newMapState } from './mapping.js'
+import { mapMessage, newMapState, unreadResult } from './mapping.js'
 import {
   assistantWithTool,
   modelUsage,
@@ -150,5 +150,26 @@ describe('a turn that failed on the API', () => {
       { type: 'usage.updated' },
       { type: TURN_END, stopReason: 'error' },
     ])
+  })
+})
+
+// A result of which not even the subtype can be read
+const UNNAMED_RESULT = {
+  ...resultSuccess,
+  get subtype(): 'success' {
+    throw new Error('the result cannot be read')
+  },
+}
+
+describe(unreadResult, () => {
+  it('ends the turn as unknown, counting nothing, when not even its stop reason can be read', () => {
+    expect.hasAssertions()
+    const state = { ...newMapState(), turnStarted: true }
+    expect(unreadResult(UNNAMED_RESULT, state)).toStrictEqual({
+      type: TURN_END,
+      stopReason: 'unknown',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    })
+    expect(state.turnStarted).toBe(false)
   })
 })

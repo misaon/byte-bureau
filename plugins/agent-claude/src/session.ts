@@ -14,7 +14,7 @@ import type {
 } from '@bytebureau/plugin-api'
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
-import { mapMessage, newMapState, type MapState } from './mapping.js'
+import { mapMessage, newMapState, unreadResult, type MapState } from './mapping.js'
 import { claudeResumeOf, optionsOf } from './options.js'
 import type { AgentQuery, ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
@@ -153,12 +153,17 @@ export class ClaudeSession implements AgentSession {
     }
   }
 
-  // A message the mapping cannot read is told as a warning; the session goes on
+  // A message the mapping cannot read is told as a warning and the session goes on; a result still ends its turn
   private mapped(message: SDKMessage): readonly AgentEvent[] {
     try {
       return mapMessage(message, this.state)
     } catch (error) {
-      return [{ type: 'session.warning', kind: 'mapping', message: reasonOf(error) }]
+      const warning: AgentEvent = {
+        type: 'session.warning',
+        kind: 'mapping',
+        message: reasonOf(error),
+      }
+      return message.type === 'result' ? [warning, unreadResult(message, this.state)] : [warning]
     }
   }
 
