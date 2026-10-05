@@ -60,6 +60,19 @@ describe('an ACP agent that dies while it is idle', () => {
     expect(run.spawned).toHaveLength(2)
   })
 
+  it('cancels the turn of a prompt interrupted while its agent was being started again', async () => {
+    expect.hasAssertions()
+    const { session, run } = await startedWith('crash-idle')
+    await turnThenDeath(session, run)
+    const prompting = session.prompt({ text: 'Again' })
+    await until(session, 'session.warning')
+    await session.interrupt()
+    const events = await until(session, TURN_END, ALLOW)
+    await prompting
+    expect(events).toContainEqual({ type: 'tool.failed', id: 'call-1', error: 'cancelled' })
+    expect(events.at(-1)).toMatchObject({ type: TURN_END, stopReason: 'interrupted' })
+  })
+
   it('is started again three times at most: its fourth death ends the session with a crash that is not retryable', async () => {
     expect.hasAssertions()
     const { session, run } = await startedWith('crash-idle')

@@ -3,16 +3,17 @@ import type { AgentEvent, Usage } from '@bytebureau/protocol'
 import { settled, type Running } from './connection.js'
 import { mapUpdate } from './mapping.js'
 
-// What a running turn has gathered: the text the agent said and the last usage it reported
+// What a turn has gathered: the text the agent said and the last usage it reported; an interrupt, from the moment of the prompt
 export interface Turn {
   text: string
   usage: Usage | undefined
+  interrupted: boolean
 }
 
 export const MAX_RESTARTS = 3
 const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 
-export const newTurn = (): Turn => ({ text: '', usage: undefined })
+export const newTurn = (): Turn => ({ text: '', usage: undefined, interrupted: false })
 
 const note = (turn: Turn, event: AgentEvent): void => {
   if (event.type === 'message.delta' && event.kind === 'text') {
@@ -36,23 +37,6 @@ export const toldOf = (
   return events
 }
 
-// The answer of the agent to a prompt, once the updates it sent before it are told
-export const promptOf = async (
-  { connection, sessionId }: Running,
-  text: string,
-): Promise<PromptResponse> => {
-  const response = await connection.agent.request('session/prompt', {
-    sessionId,
-    prompt: [{ type: 'text', text }],
-  })
-  await settled()
-  return response
-}
-
-// Whether the process of an agent has ended, which its watch may not have told yet
-export const hasExited = ({ process: { child } }: Running): boolean =>
-  child.exitCode !== null || child.signalCode !== null
-
 // A cancel to an agent that has gone is moot
 export const cancelTurn = async ({ connection, sessionId }: Running): Promise<void> => {
   if (!connection.signal.aborted) {
@@ -63,6 +47,29 @@ export const cancelTurn = async ({ connection, sessionId }: Running): Promise<vo
     }
   }
 }
+
+// The answer of the agent to a prompt, once the updates it sent before it are told
+// A turn interrupted before its prompt went out is cancelled right after it
+export const promptOf = async (
+  running: Running,
+  turn: Turn,
+  text: string,
+): Promise<PromptResponse> => {
+  const answer = running.connection.agent.request('session/prompt', {
+    sessionId: running.sessionId,
+    prompt: [{ type: 'text', text }],
+  })
+  if (turn.interrupted) {
+    await cancelTurn(running)
+  }
+  const response = await answer
+  await settled()
+  return response
+}
+
+// Whether the process of an agent has ended, which its watch may not have told yet
+export const hasExited = ({ process: { child } }: Running): boolean =>
+  child.exitCode !== null || child.signalCode !== null
 
 // What the agent said in the turn, told once
 const saidIn = (turn: Turn): readonly AgentEvent[] =>

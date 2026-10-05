@@ -92,10 +92,17 @@ export class PermissionBroker {
   private readonly pending = new Map<string, Pending>()
   private readonly sessionId: string
   private readonly tell: (event: AgentEvent) => void
+  // Whether the turn is interrupted: its requests are answered cancelled at once, as ACP has it
+  private readonly interrupted: () => boolean
 
-  public constructor(sessionId: string, tell: (event: AgentEvent) => void) {
+  public constructor(
+    sessionId: string,
+    tell: (event: AgentEvent) => void,
+    interrupted: () => boolean = (): boolean => false,
+  ) {
     this.sessionId = sessionId
     this.tell = tell
+    this.interrupted = interrupted
   }
 
   // A request the agent took back before it was asked is not asked; a new request for a tool call replaces the one before
@@ -103,7 +110,7 @@ export class PermissionBroker {
     params: RequestPermissionRequest,
     signal?: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    if (signal !== undefined && signal.aborted) {
+    if (this.interrupted() || (signal !== undefined && signal.aborted)) {
       return CANCELLED
     }
     const ask = askOf(this.sessionId, params)

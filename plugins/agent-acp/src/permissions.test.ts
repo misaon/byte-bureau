@@ -134,6 +134,21 @@ describe('a permission an agent names against its kinds', () => {
   })
 })
 
+const interrupted = (): boolean => true
+
+describe('a permission the agent asks for in an interrupted turn', () => {
+  it('is answered cancelled at once, and not asked of anybody', async () => {
+    expect.hasAssertions()
+    const told: AgentEvent[] = []
+    const tell = (event: AgentEvent): void => {
+      told.push(event)
+    }
+    const broker = new PermissionBroker(SESSION, tell, interrupted)
+    await expect(broker.request(request([ONCE, REJECT]))).resolves.toStrictEqual(CANCELLED)
+    expect(told).toStrictEqual([])
+  })
+})
+
 describe('a permission nobody answers', () => {
   it('is cancelled on interrupt or close, and an answer that comes later changes nothing', async () => {
     expect.hasAssertions()

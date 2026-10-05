@@ -65,7 +65,7 @@ const READ_OUTSIDE: ToolCall = {
 }
 
 // The workspace the client named, and the cancel of the running prompt
-const state = { cwd: '', cancel: Promise.withResolvers<null>() }
+const state = { cwd: '', cancelled: false, cancel: Promise.withResolvers<null>() }
 
 const update = async ({ client, sessionId }: Turn, payload: SessionUpdate): Promise<void> => {
   await client.notify('session/update', { sessionId, update: payload })
@@ -118,15 +118,15 @@ const refused = async (turn: Turn): Promise<void> => {
     sessionUpdate: 'tool_call_update',
     toolCallId: WRITE.toolCallId,
     status: 'failed',
-    rawOutput: 'denied',
+    rawOutput: state.cancelled ? 'cancelled' : 'denied',
   })
 }
 
-// Asks to write src/hello.ts, and writes it only when allowed
+// Asks to write src/hello.ts, and writes it only when allowed; a cancelled turn ends as cancelled
 const hello = async (turn: Turn): Promise<PromptResponse> => {
   await update(turn, { sessionUpdate: 'tool_call', ...WRITE })
   await ((await allowed(turn)) ? write(turn) : refused(turn))
-  return END_TURN
+  return state.cancelled ? { stopReason: 'cancelled' } : END_TURN
 }
 
 // Runs until the client cancels the prompt
@@ -226,6 +226,7 @@ const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, na
 
 // Every script thinks and says hello first, telling whether the key reached it, never its value
 const prompt = async (turn: Turn): Promise<PromptResponse> => {
+  state.cancelled = false
   state.cancel = Promise.withResolvers<null>()
   await update(turn, {
     sessionUpdate: 'agent_thought_chunk',
@@ -270,6 +271,7 @@ const fake = agent({ name: 'fake-acp-agent' })
     return response
   })
   .onNotification('session/cancel', () => {
+    state.cancelled = true
     state.cancel.resolve(null)
   })
 

@@ -37,7 +37,10 @@ export class AcpSession implements AgentSession {
   private readonly asks: PermissionBroker
   private readonly terminals: Terminals
   private running: Running | undefined
+  // The prompt in progress, from the moment it is asked for, its agent started again if need be
   private turn: Turn | undefined
+  // The turn an agent was sent and has not answered: its death in the meantime is a crash of the turn
+  private owing: { readonly running: Running; readonly turn: Turn } | undefined
   private ref: string | undefined
   private restarts = 0
   private closed = false
@@ -47,9 +50,10 @@ export class AcpSession implements AgentSession {
   private constructor(setup: Setup) {
     this.setup = setup
     const { request, deps } = setup
-    this.asks = new PermissionBroker(request.sessionId, (event) => {
+    const tell = (event: AgentEvent): void => {
       this.output.push(event)
-    })
+    }
+    this.asks = new PermissionBroker(request.sessionId, tell, () => this.interrupted())
     this.terminals = new Terminals(deps.process, request.workspace.path, terminalEnvOf(setup))
   }
 
@@ -67,27 +71,29 @@ export class AcpSession implements AgentSession {
   }
 
   public async prompt(input: PromptInput): Promise<void> {
-    const running = await this.alive()
-    if (running === undefined) {
-      return
-    }
     const turn = newTurn()
     this.turn = turn
-    this.output.push({ type: 'turn.started' })
     try {
-      const response = await promptOf(running, input.text)
-      this.ended(turn, completionOf(turn, response))
-    } catch (error) {
-      await this.failed(running, turn, error)
+      const running = await this.alive()
+      if (running !== undefined) {
+        await this.run(running, turn, input.text)
+      }
+    } finally {
+      if (this.turn === turn) {
+        this.turn = undefined
+      }
     }
   }
 
-  // What waits for an answer is moot once the turn is interrupted; the agent ends the turn as cancelled
+  // What waits for an answer is moot once the turn is interrupted; a turn whose prompt is out is cancelled now, one still starting right after its prompt
   public async interrupt(): Promise<void> {
+    const { turn, owing } = this
+    if (turn !== undefined) {
+      turn.interrupted = true
+    }
     this.asks.cancelAll()
-    const { running } = this
-    if (running !== undefined && this.turn !== undefined) {
-      await cancelTurn(running)
+    if (owing !== undefined && owing.turn === turn) {
+      await cancelTurn(owing.running)
     }
   }
 
@@ -139,9 +145,25 @@ export class AcpSession implements AgentSession {
     return this.closed ? undefined : this.running
   }
 
+  // The turn on the agent: owed until its answer comes
+  private async run(running: Running, turn: Turn, text: string): Promise<void> {
+    this.output.push({ type: 'turn.started' })
+    this.owing = { running, turn }
+    try {
+      const response = await promptOf(running, turn, text)
+      this.paid(turn, completionOf(turn, response))
+    } catch (error) {
+      await this.failed(running, turn, error)
+    }
+  }
+
+  private interrupted(): boolean {
+    return this.turn !== undefined && this.turn.interrupted
+  }
+
   private async stop(running: Running | undefined): Promise<void> {
     if (running !== undefined) {
-      if (this.turn !== undefined) {
+      if (this.owing !== undefined && this.owing.running === running) {
         await cancelTurn(running)
       }
       await endProcess(running.process.child, running.process.exited)
@@ -160,7 +182,8 @@ export class AcpSession implements AgentSession {
       return
     }
     this.release(running)
-    const midTurn = this.turn !== undefined
+    const { owing } = this
+    const midTurn = owing !== undefined && owing.running === running
     if (!midTurn && this.restarts < MAX_RESTARTS) {
       this.restarts += 1
       return
@@ -197,12 +220,13 @@ export class AcpSession implements AgentSession {
       await endProcess(running.process.child, running.process.exited)
       return
     }
-    this.ended(turn, refusalOf(turn, toldReason(error, this.setup)))
+    this.paid(turn, refusalOf(turn, toldReason(error, this.setup)))
   }
 
-  private ended(turn: Turn, events: readonly AgentEvent[]): void {
-    if (this.turn === turn) {
-      this.turn = undefined
+  // A turn the agent answered is no longer owed, and ends with what the answer tells
+  private paid(turn: Turn, events: readonly AgentEvent[]): void {
+    if (this.owing !== undefined && this.owing.turn === turn) {
+      this.owing = undefined
     }
     this.tell(events)
   }
