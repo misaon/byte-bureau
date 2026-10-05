@@ -15,6 +15,13 @@ import {
 const DELTA = 'message.delta'
 const TURN_END = 'turn.completed'
 const RESETS_AT = new Date(1_791_100_000 * 1000).toISOString()
+const NO_USAGE = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+}
 
 const SECOND_RESULT: SDKMessage = {
   ...resultSuccess,
@@ -35,15 +42,10 @@ describe('the end of a turn', () => {
     expect(completed).toHaveProperty('usage.costUsd', expect.closeTo(0.0177, 10))
   })
 
-  it('ends an interrupted turn as interrupted, and a turn that failed on the API by its stop reason', () => {
+  it('ends an interrupted turn as interrupted', () => {
     expect.hasAssertions()
-    const state = newMapState()
-    expect(mapMessage(resultInterrupted, state).at(-1)).toMatchObject({
+    expect(mapMessage(resultInterrupted, newMapState()).at(-1)).toMatchObject({
       stopReason: 'interrupted',
-    })
-    expect(mapMessage(resultApiError, state).at(-1)).toMatchObject({
-      stopReason: 'stop_sequence',
-      usage: { inputTokens: 0, outputTokens: 0 },
     })
   })
 
@@ -124,6 +126,29 @@ describe('a rate limit that is reached', () => {
         message: 'the usage limit is reached',
         retryable: true,
       },
+    ])
+  })
+})
+
+const OVERLOADED: SDKMessage = { ...resultApiError, result: 'API Error: 529 Overloaded' }
+const UNNAMED: SDKMessage = { ...resultSuccess, is_error: true, result: '' }
+
+describe('a turn that failed on the API', () => {
+  it('ends with its terminal reason and a warning that names the error, and leaves the session to retry', () => {
+    expect.hasAssertions()
+    expect(mapMessage(OVERLOADED, newMapState())).toStrictEqual([
+      { type: 'session.warning', kind: 'turn_error', message: 'API Error: 529 Overloaded' },
+      { type: 'usage.updated', usage: NO_USAGE },
+      { type: TURN_END, stopReason: 'api_error', usage: NO_USAGE },
+    ])
+  })
+
+  it('ends as an error when the result names no reason or text', () => {
+    expect.hasAssertions()
+    expect(mapMessage(UNNAMED, newMapState())).toMatchObject([
+      { type: 'session.warning', message: 'the turn ended on an error' },
+      { type: 'usage.updated' },
+      { type: TURN_END, stopReason: 'error' },
     ])
   })
 })

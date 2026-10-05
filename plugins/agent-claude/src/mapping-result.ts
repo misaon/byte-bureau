@@ -73,12 +73,29 @@ const turnUsage = (before: Totals, now: Totals, contextPct: number | undefined):
 
 const ABORTED: ReadonlySet<string> = new Set(['aborted_streaming', 'aborted_tools'])
 
-// An interrupted turn ends with an aborted terminal reason; a failed one is told by its subtype
+const isAborted = (message: SDKResultMessage): boolean =>
+  message.terminal_reason !== undefined && ABORTED.has(message.terminal_reason)
+
+// An interrupted turn ends with an aborted terminal reason; a failed one is told by its subtype or its terminal reason
 const stopReasonOf = (message: SDKResultMessage): string => {
-  if (message.terminal_reason !== undefined && ABORTED.has(message.terminal_reason)) {
+  if (isAborted(message)) {
     return 'interrupted'
   }
-  return message.subtype === 'success' ? (message.stop_reason ?? 'end_turn') : message.subtype
+  if (message.subtype !== 'success') {
+    return message.subtype
+  }
+  return message.is_error
+    ? (message.terminal_reason ?? 'error')
+    : (message.stop_reason ?? 'end_turn')
+}
+
+// A turn the API failed is a success that is an error, and its text says why; the session stays for a retry
+const failureOf = (message: SDKResultMessage): readonly AgentEvent[] => {
+  if (message.subtype !== 'success' || !message.is_error || isAborted(message)) {
+    return []
+  }
+  const text = message.result === '' ? 'the turn ended on an error' : message.result
+  return [{ type: 'session.warning', kind: 'turn_error', message: text }]
 }
 
 export const mapResult = (message: SDKResultMessage, state: MapState): readonly AgentEvent[] => {
@@ -88,6 +105,7 @@ export const mapResult = (message: SDKResultMessage, state: MapState): readonly 
   state.turnStarted = false
   state.contextPct = undefined
   return [
+    ...failureOf(message),
     { type: 'usage.updated', usage },
     { type: 'turn.completed', stopReason: stopReasonOf(message), usage },
   ]
