@@ -1,3 +1,4 @@
+// At the cap of ten imported modules (import/max-dependencies): a further helper goes into testing/
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import type { PluginContext, ProfileRef } from '@bytebureau/plugin-api'

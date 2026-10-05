@@ -1,3 +1,4 @@
+// At the cap of ten imported modules (import/max-dependencies): a further dependency goes into a helper module beside it
 import type {
   AgentEvent,
   AgentSession,

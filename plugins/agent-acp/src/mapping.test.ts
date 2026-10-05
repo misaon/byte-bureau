@@ -144,7 +144,7 @@ describe('the rest of what an agent reports', () => {
     ])
   })
 
-  it('leaves out commands, modes, the session info and the context it measures', () => {
+  it('leaves out commands, modes, config options, the session info, plan changes and the context it measures', () => {
     const ignored: SessionUpdate[] = [
       {
         sessionUpdate: 'available_commands_update',
@@ -153,6 +153,9 @@ describe('the rest of what an agent reports', () => {
       { sessionUpdate: 'current_mode_update', currentModeId: 'code' },
       { sessionUpdate: 'session_info_update', title: 'Hello' },
       { sessionUpdate: 'usage_update', used: 1000, size: 200_000 },
+      { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'plan-1', entries: [] } },
+      { sessionUpdate: 'plan_removed', planId: 'plan-1' },
+      { sessionUpdate: 'config_option_update', configOptions: [] },
     ]
     expect(ignored.flatMap((update) => mapUpdate(update))).toStrictEqual([])
   })
