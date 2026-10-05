@@ -61,66 +61,50 @@ describe('the ACP presets', () => {
 })
 
 describe('the preset a session runs', () => {
-  it('is the built-in one without providers.acp, and takes the overrides of its own entry only', () => {
+  it('is the built-in one without a section, and takes the overrides its own section gives', () => {
     expect(presetOf('opencode', {})).toStrictEqual(PRESETS.opencode)
-    const overridden = {
-      presets: {
-        codex: { command: '/opt/codex-acp', args: ['--quiet'], env: { RUST_LOG: 'warn' } },
-        gemini: { command: 'not-this-one' },
-      },
-    }
-    expect(presetOf('codex', overridden)).toStrictEqual({
-      ...CODEX,
-      command: '/opt/codex-acp',
-      args: ['--quiet'],
-      env: { RUST_LOG: 'warn' },
-    })
+    const overridden = { command: '/opt/codex-acp', args: ['--quiet'], env: { RUST_LOG: 'warn' } }
+    expect(presetOf('codex', overridden)).toStrictEqual({ ...CODEX, ...overridden })
   })
 
-  it('takes the variables of a login directory and a key from an override as well', () => {
-    const overridden = { presets: { pi: { configDirEnv: 'PI_HOME', apiKeyEnv: 'PI_API_KEY' } } }
-    expect(presetOf('pi', overridden)).toStrictEqual({
-      ...PI,
-      configDirEnv: 'PI_HOME',
-      apiKeyEnv: 'PI_API_KEY',
-    })
+  it('takes the variables of a login directory and a key, and the hints, from its section as well', () => {
+    const overridden = { configDirEnv: 'PI_HOME', apiKeyEnv: 'PI_API_KEY', loginHint: 'pi /login' }
+    expect(presetOf('pi', overridden)).toStrictEqual({ ...PI, ...overridden })
   })
 
-  it('runs the custom command with what its entry says, and nothing else', () => {
+  it('runs the custom command with what its section says, the hints it configures winning', () => {
     const custom = {
       command: '/usr/local/bin/my-agent',
       args: ['--acp'],
       env: { MY_AGENT_MODE: 'acp' },
       configDirEnv: 'MY_AGENT_HOME',
+      loginHint: 'my-agent login',
     }
-    expect(presetOf('custom', { presets: { custom } })).toStrictEqual({
+    expect(presetOf('custom', custom)).toStrictEqual({
       id: 'custom',
       displayName: 'Custom agent (ACP)',
       ...custom,
-      installHint: 'install it, or point providers.acp.presets.custom.command at the agent to run',
-      loginHint: 'the login command of that agent',
+      installHint: 'install it, or point providers["acp:custom"].command at the agent to run',
     })
-    expect(presetOf('custom', { presets: { custom: { command: 'my-agent' } } })).toMatchObject({
+    expect(presetOf('custom', { command: 'my-agent' })).toMatchObject({
       args: [],
       env: {},
+      loginHint: 'the login command of that agent',
     })
   })
 })
 
-describe('a providers.acp section the adapter cannot run', () => {
+describe('a provider section the adapter cannot run', () => {
   it('refuses a custom preset without a command, naming the key to set', () => {
-    const message = 'providers.acp.presets.custom.command is not configured'
+    const message = 'providers["acp:custom"].command is not configured'
     expect(() => presetOf('custom', {})).toThrow(message)
-    expect(() => presetOf('custom', { presets: { custom: { args: ['--acp'] } } })).toThrow(message)
+    expect(() => presetOf('custom', { args: ['--acp'] })).toThrow(message)
   })
 
-  it('refuses an entry it cannot read, naming the entry and the key', () => {
-    expect(() => presetOf('codex', { presets: { codex: { executable: 'x' } } })).toThrow(
-      /^providers\.acp\.presets\.codex: .*executable/u,
+  it('refuses a section it cannot read, naming the provider and the key', () => {
+    expect(() => presetOf('codex', { executable: 'x' })).toThrow(
+      /^providers\["acp:codex"\]: .*executable/u,
     )
-    expect(() => presetOf('gemini', { presets: { gemini: { args: 'acp' } } })).toThrow(
-      /^providers\.acp\.presets\.gemini: args: /u,
-    )
-    expect(() => presetOf('pi', { presets: [] })).toThrow(/^providers\.acp: presets: /u)
+    expect(() => presetOf('gemini', { args: 'acp' })).toThrow(/^providers\["acp:gemini"\]: args: /u)
   })
 })

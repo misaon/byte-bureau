@@ -34,12 +34,11 @@ const workspaceOf = (): string => {
   return workspace
 }
 
+// The providers["acp:custom"] section that runs the fake agent
 const customOf = (
   script: FakeScript,
   extra: Readonly<Record<string, unknown>> = {},
-): Readonly<Record<string, unknown>> => ({
-  presets: { custom: { ...fakeAgentCommand(script), ...extra } },
-})
+): Readonly<Record<string, unknown>> => ({ ...fakeAgentCommand(script), ...extra })
 
 // A session of the custom provider over the fake agent, closed when the test ends
 const sessionOf = async (

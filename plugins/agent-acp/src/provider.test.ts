@@ -83,10 +83,10 @@ describe('an ACP agent that cannot be started', () => {
     await expect(new AcpAgentProvider('codex', deps).createSession(request)).rejects.toThrow(
       CODEX_MISSING,
     )
-    const custom = { presets: { custom: { command: 'bb-no-such-agent' } } }
+    const custom = { command: 'bb-no-such-agent' }
     const missing = sessionRequest({ workspace: { path: workspaceOf() }, providerConfig: custom })
     await expect(new AcpAgentProvider('custom', deps).createSession(missing)).rejects.toThrow(
-      /^bb-no-such-agent is not installed; install it, or point providers\.acp\.presets\.custom\.command at the agent to run; then log in with: /u,
+      /^bb-no-such-agent is not installed; install it, or point providers\["acp:custom"\]\.command at the agent to run; then log in with: /u,
     )
   })
 
@@ -95,7 +95,7 @@ describe('an ACP agent that cannot be started', () => {
     const { deps, spawned } = harness()
     const request = sessionRequest({ workspace: { path: workspaceOf() } })
     await expect(new AcpAgentProvider('custom', deps).createSession(request)).rejects.toThrow(
-      'providers.acp.presets.custom.command is not configured',
+      'providers["acp:custom"].command is not configured',
     )
     expect(spawned).toStrictEqual([])
   })
@@ -149,7 +149,7 @@ describe('the key of an API-key profile', () => {
     const env = { PATH: '/usr/bin:/bin', OPENAI_API_KEY: CANARY_KEY }
     const request = sessionRequest({
       workspace: { path: workspaceOf() },
-      providerConfig: { presets: { codex } },
+      providerConfig: codex,
       env,
     })
     const session = await started(new AcpAgentProvider('codex', deps), request)

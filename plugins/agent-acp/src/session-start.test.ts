@@ -24,10 +24,9 @@ const starting = (
 ): { readonly session: Promise<AgentSession>; readonly run: Harness } => {
   const run = harness()
   const provider = new AcpAgentProvider(preset, run.deps)
-  const providerConfig = { presets: { [preset]: entry } }
   const workspace = { path: workspaceOf() }
   return {
-    session: started(provider, sessionRequest({ workspace, providerConfig, ...request })),
+    session: started(provider, sessionRequest({ workspace, providerConfig: entry, ...request })),
     run,
   }
 }

@@ -18,7 +18,7 @@ const startedWith = async (
   mkdirSync(workspace)
   const run = harness()
   const provider = new AcpAgentProvider('custom', run.deps)
-  const providerConfig = { presets: { custom: fakeAgentCommand(script) } }
+  const providerConfig = fakeAgentCommand(script)
   const request = sessionRequest({ workspace: { path: workspace }, providerConfig })
   const session = await started(provider, request)
   return { session, run }
