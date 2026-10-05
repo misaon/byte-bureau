@@ -1,9 +1,11 @@
 import { BunSecretStore, bunSecrets } from './bun-secret-store.js'
+import { TIMED_OUT, withinTime } from './within-time.js'
 
 // A keychain that is locked or waits on a prompt would hold the start of the daemon; this is all it is given
 const PROBE_TIMEOUT_MS = 3000
 
-const PROBE = `probe/${process.pid}`
+// One name for every start: a daemon killed between the write and the delete leaves one entry, which the next start overwrites and deletes
+const PROBE = 'probe'
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
@@ -30,19 +32,6 @@ async function roundTrip(store: BunSecretStore): Promise<string | undefined> {
   }
 }
 
-// What the probe came to, or why it came to nothing in time
-async function withinTime(probing: Promise<string | undefined>): Promise<string | undefined> {
-  const { promise: late, resolve } = Promise.withResolvers<string>()
-  const timer = setTimeout(() => {
-    resolve(`the keychain did not answer within ${PROBE_TIMEOUT_MS / 1000} s`)
-  }, PROBE_TIMEOUT_MS)
-  try {
-    return await Promise.race([probing, late])
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 // The keychain where it answers the probe in time, else why it is not available
 export async function probeKeychain(): Promise<BunSecretStore | string> {
   const secrets = bunSecrets()
@@ -50,6 +39,9 @@ export async function probeKeychain(): Promise<BunSecretStore | string> {
     return 'Bun.secrets is not available to this process'
   }
   const store = new BunSecretStore(secrets)
-  const reason = await withinTime(roundTrip(store))
+  const reason = await withinTime(roundTrip(store), PROBE_TIMEOUT_MS)
+  if (reason === TIMED_OUT) {
+    return `the keychain did not answer within ${PROBE_TIMEOUT_MS / 1000} s`
+  }
   return reason ?? store
 }

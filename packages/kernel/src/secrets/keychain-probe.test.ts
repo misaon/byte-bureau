@@ -52,11 +52,21 @@ describe('secretStoreFor and a keychain that does not answer the probe', () => {
     await chosen
     keychain.release()
     await vi.waitFor(() => {
-      expect([keychain.written, keychain.entries.size]).toStrictEqual([
-        [`bytebureau/probe/${process.pid}`],
-        0,
-      ])
+      expect([keychain.written, keychain.entries.size]).toStrictEqual([['bytebureau/probe'], 0])
     })
+  })
+})
+
+describe('secretStoreFor and a keychain that answers the probe in time', () => {
+  it('clears the timer of the probe and of every call it made', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    movedByTheTest()
+    await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).resolves.toHaveProperty(
+      'backend',
+      'keychain',
+    )
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 

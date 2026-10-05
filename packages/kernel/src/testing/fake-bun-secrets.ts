@@ -14,8 +14,10 @@ export interface FakeBun {
   readonly entries: Map<string, string>
   // Every service/name written so far, a held write included once it went through
   readonly written: readonly string[]
-  // Lets the writes a holding keychain held go through
+  // Lets the writes and the reads it held go through
   readonly release: () => void
+  // From now on every read waits until released, as one behind a dialog nobody answers does
+  readonly holdReads: () => void
 }
 
 const keyOf = ({ service, name }: Entry): string => `${service}/${name}`
@@ -26,7 +28,7 @@ const restoredWithTheTest = (): void => {
   })
 }
 
-// No Bun at all, as under Node, even when Vitest itself runs on Bun: nothing can reach a real keychain
+// No Bun at all, as under Node, where the tests run: Bun's own global is not configurable, so this stub serves Node runs alone
 export function withoutBun(): void {
   vi.stubGlobal('Bun', null)
   restoredWithTheTest()
@@ -37,9 +39,10 @@ export function fakeBun(keychain: FakeKeychain): FakeBun {
   const entries = new Map<string, string>()
   const written: string[] = []
   const held = Promise.withResolvers<boolean>()
+  const reads = { held: false }
   const secrets = {
     get: async (entry: Entry): Promise<string | null> => {
-      await Promise.resolve()
+      await (reads.held ? held.promise : Promise.resolve())
       return entries.get(keyOf(entry)) ?? null
     },
     set: async (entry: Entry): Promise<void> => {
@@ -62,6 +65,9 @@ export function fakeBun(keychain: FakeKeychain): FakeBun {
     written,
     release: () => {
       held.resolve(true)
+    },
+    holdReads: () => {
+      reads.held = true
     },
   }
 }
