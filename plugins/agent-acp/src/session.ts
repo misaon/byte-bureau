@@ -6,13 +6,13 @@ import type {
   PromptInput,
 } from '@bytebureau/plugin-api'
 import { startAgent, terminalEnvOf, toldReason, type Setup } from './agent-start.js'
-import { readTextFile, writeTextFile } from './client-fs.js'
 import { Terminals } from './client-terminal.js'
 import type { ClientHandlers, Running } from './connection.js'
 import { endProcess, sweepGroup } from './kill-ladder.js'
 import { PermissionBroker } from './permissions.js'
 import { endingOf } from './process.js'
 import { Queue } from './queue.js'
+import { clientOf } from './session-client.js'
 import {
   cancelTurn,
   completionOf,
@@ -244,36 +244,15 @@ export class AcpSession implements AgentSession {
 
   // Updates are told only while the agent is the session's: what a load replays before is history the session already told
   private handlers(): ClientHandlers {
-    const workspace = this.setup.request.workspace.path
-    return {
-      sessionUpdate: (notification) => {
+    return clientOf({
+      workspace: this.setup.request.workspace.path,
+      asks: this.asks,
+      terminals: this.terminals,
+      updated: (notification) => {
         if (this.running !== undefined) {
           this.tell(toldOf(notification, this.turn))
         }
       },
-      requestPermission: async (params, signal) => {
-        const response = await this.asks.request(params, signal)
-        return response
-      },
-      readTextFile: async (params) => {
-        const response = await readTextFile(workspace, params)
-        return response
-      },
-      writeTextFile: async (params) => {
-        const response = await writeTextFile(workspace, params)
-        return response
-      },
-      createTerminal: async (params) => {
-        const response = await this.terminals.create(params)
-        return response
-      },
-      terminalOutput: (params) => this.terminals.output(params),
-      waitForTerminalExit: async (params) => {
-        const response = await this.terminals.waitForExit(params)
-        return response
-      },
-      killTerminal: (params) => this.terminals.kill(params),
-      releaseTerminal: (params) => this.terminals.release(params),
-    }
+    })
   }
 }
