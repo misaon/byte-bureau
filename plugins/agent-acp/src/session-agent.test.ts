@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process'
 import type { AgentSession } from '@bytebureau/plugin-api'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { sessionRequest } from './testing/requests.js'
@@ -74,14 +75,31 @@ describe('a session to resume that the agent cannot load', () => {
   })
 })
 
-// The words of the first text the agent says that starts with the prefix
-const saying = async (session: AgentSession, prefix: string): Promise<readonly string[]> => {
+// The pid of the process the children script says it started
+const ownChildOf = async (session: AgentSession): Promise<number> => {
   for await (const event of session.events()) {
-    if (event.type === 'message.delta' && event.text.startsWith(prefix)) {
-      return event.text.split(' ')
+    if (event.type === 'message.delta' && event.text.startsWith('children ')) {
+      return Number(event.text.split(' ')[1])
     }
   }
-  return []
+  return 0
+}
+
+// Whether each of the processes is gone within three seconds
+const allGone = async (pids: readonly number[]): Promise<boolean[]> => {
+  const gone = await Promise.all(
+    pids.map(async (pid) => {
+      const one = await goneWithin(pid, 3000)
+      return one
+    }),
+  )
+  return gone
+}
+
+// The pid of the first of the processes, or one nobody has
+const firstPid = (children: readonly ChildProcess[]): number => {
+  const [first] = children
+  return first === undefined || first.pid === undefined ? 0 : first.pid
 }
 
 // A process the test learnt of is killed when it ends, should it outlive what the test checks
@@ -96,17 +114,16 @@ const killedAtEnd = (pid: number): void => {
 }
 
 describe('what an ACP agent starts', () => {
-  it('ends with the agent when the session closes, its own processes as well', async () => {
+  it('ends with the agent when the session closes, its own processes and its terminals as well', async () => {
     expect.hasAssertions()
-    const session = await sessionOf({
-      workspace: { path: workspaceOf() },
-      providerConfig: customOf('children'),
-    })
+    const run = harness()
+    const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('children') }
+    const session = await sessionOf(request, run)
     const prompting = session.prompt({ text: 'Start some work' })
-    const [, pid] = await saying(session, 'children ')
-    killedAtEnd(Number(pid))
+    const own = await ownChildOf(session)
+    killedAtEnd(own)
     await session.close()
     await prompting
-    await expect(goneWithin(Number(pid), 3000)).resolves.toBe(true)
+    await expect(allGone([own, firstPid(run.terminals)])).resolves.toStrictEqual([true, true])
   })
 })

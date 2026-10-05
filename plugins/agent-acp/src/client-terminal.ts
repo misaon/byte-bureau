@@ -129,6 +129,7 @@ export class Terminals {
   private readonly env: Readonly<Record<string, string>>
   private readonly terminals = new Map<string, Terminal>()
   private created = 0
+  private closed = false
 
   public constructor(
     spawner: ProcessSpawner,
@@ -141,6 +142,9 @@ export class Terminals {
   }
 
   public async create(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
+    if (this.closed) {
+      throw RequestError.invalidRequest(undefined, 'the session is closed')
+    }
     const cwd = confined(this.workspace, params.cwd ?? this.workspace)
     const env = { ...this.env, ...envOf(params.env) }
     const args = params.args ?? []
@@ -182,6 +186,12 @@ export class Terminals {
       endTerminal(terminal)
     }
     this.terminals.clear()
+  }
+
+  // The terminals of a closed session end, and no other is created
+  public close(): void {
+    this.closed = true
+    this.releaseAll()
   }
 
   private terminalOf(terminalId: string): Terminal {

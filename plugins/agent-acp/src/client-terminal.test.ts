@@ -122,3 +122,16 @@ describe('the life of a terminal', () => {
     )
   })
 })
+
+describe('the terminals of a closed session', () => {
+  it('end with it, and no terminal is created after', async () => {
+    expect.hasAssertions()
+    const { terminals } = terminalsIn()
+    const terminalId = await run(terminals, 'setInterval(() => {}, 1000)')
+    terminals.close()
+    await expect(run(terminals, '1')).rejects.toThrow('Invalid request: the session is closed')
+    await expect(terminals.waitForExit({ sessionId: SESSION, terminalId })).rejects.toThrow(
+      `no terminal ${terminalId}`,
+    )
+  })
+})

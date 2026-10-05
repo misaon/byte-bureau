@@ -23,6 +23,7 @@ import {
   newTurn,
   notLoadedOf,
   promptOf,
+  quietly,
   refusalOf,
   restartOf,
   toldOf,
@@ -44,8 +45,9 @@ export class AcpSession implements AgentSession {
   private ref: string | undefined
   private restarts = 0
   private closed = false
-  // The watch on the agent that runs, which close() waits for
+  // The watch on the agent that runs, and the start of an agent under way, which close() waits for
   private watching: Promise<void> = Promise.resolve()
+  private launching: Promise<void> = Promise.resolve()
 
   private constructor(setup: Setup) {
     this.setup = setup
@@ -106,19 +108,27 @@ export class AcpSession implements AgentSession {
     return this.output
   }
 
-  // A running turn is cancelled, then the agent ended by the ladder; the events end with session.closed
+  // A running turn is cancelled, the agent ended by the ladder, then its terminals; the events end with session.closed
+  // An agent still starting is ended once it has started, before close() is done
   public async close(): Promise<void> {
     if (!this.closed) {
       this.closed = true
       this.asks.cancelAll()
-      this.terminals.releaseAll()
       await this.stop(this.running)
+      this.terminals.close()
       this.finish([{ type: 'session.closed' }])
     }
+    await this.launching
     await this.watching
   }
 
   private async launch(resume?: string): Promise<void> {
+    const launched = this.started(resume)
+    this.launching = quietly(launched)
+    await launched
+  }
+
+  private async started(resume?: string): Promise<void> {
     const running = await startAgent(this.setup, this.handlers(), resume)
     if (this.closed) {
       await this.stop(running)

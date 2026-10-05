@@ -15,6 +15,15 @@ const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 
 export const newTurn = (): Turn => ({ text: '', usage: undefined, interrupted: false })
 
+// The end of a piece of work, whichever way it ends; whoever awaits the work itself hears how
+export const quietly = async (work: Promise<unknown>): Promise<void> => {
+  try {
+    await work
+  } catch {
+    // The work's own caller is told
+  }
+}
+
 const note = (turn: Turn, event: AgentEvent): void => {
   if (event.type === 'message.delta' && event.kind === 'text') {
     turn.text += event.text
