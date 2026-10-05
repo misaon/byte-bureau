@@ -1,8 +1,7 @@
 import { Schema, SchemaTransformation } from 'effect'
 import { AskAnswer } from '../ask.js'
-import { Id } from '../common.js'
+import { Id, ProfileKind } from '../common.js'
 import { PromptInput } from '../employee.js'
-import { ProfileKind } from './dto.js'
 
 export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annotate({
   title: 'RegisterProject',

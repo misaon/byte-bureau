@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { Effort, PermissionMode } from './common.js'
+import { Effort, PermissionMode, ProfileKind } from './common.js'
 import { Appearance, ToolPolicy } from './employee.js'
 
 export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
@@ -72,7 +72,7 @@ const UserDefaults = Schema.Struct({
 const UserProfile = Schema.Struct({
   providerId: Schema.String,
   name: Schema.String,
-  kind: Schema.Literals(['login', 'api_key']),
+  kind: ProfileKind,
   configDir: Schema.optionalKey(Schema.String),
 })
 const ProfilesSection = Schema.Record(Schema.String, UserProfile)

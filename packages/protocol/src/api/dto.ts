@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 import { RateLimit, Usage } from '../agent-event.js'
-import { Id, SessionStatus, Timestamp, TurnStatus } from '../common.js'
+import { Id, ProfileKind, SessionStatus, Timestamp, TurnStatus } from '../common.js'
 import { ProjectConfig } from '../config.js'
 import { EmployeeSpec, PromptInput } from '../employee.js'
 
@@ -86,7 +86,6 @@ export const PluginStatusDto = Schema.Struct({
   ports: Schema.Array(Schema.String),
 }).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
 
-export const ProfileKind = Schema.Literals(['login', 'api_key'])
 export const AuthState = Schema.Literals(['loggedIn', 'loggedOut', 'expired', 'unknown'])
 
 export const ProfileDto = Schema.Struct({
@@ -139,7 +138,6 @@ export type WorkspaceInfoDto = typeof WorkspaceInfoDto.Type
 export type PruneReportDto = typeof PruneReportDto.Type
 export type SessionUsageDto = typeof SessionUsageDto.Type
 export type PluginStatusDto = typeof PluginStatusDto.Type
-export type ProfileKind = typeof ProfileKind.Type
 export type AuthState = typeof AuthState.Type
 export type ProfileDto = typeof ProfileDto.Type
 export type ProfileStatusDto = typeof ProfileStatusDto.Type
