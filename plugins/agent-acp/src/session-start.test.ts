@@ -60,10 +60,12 @@ describe('an ACP agent that does not open a session', () => {
     expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual(['SIGINT'])
   })
 
-  it('is refused and ended when it speaks another version of ACP', async () => {
+  it('is refused and ended at once when it speaks another version of ACP', async () => {
     expect.hasAssertions()
+    const before = performance.now()
     const { session, run } = starting('custom', fakeAgentCommand('protocol-v2'))
     await expect(session).rejects.toThrow('the agent speaks ACP v2; ByteBureau speaks ACP v1')
+    expect(performance.now() - before).toBeLessThan(1500)
     expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual(['SIGINT'])
   })
 })

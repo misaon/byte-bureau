@@ -28,6 +28,7 @@ import {
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk'
 import type { AgentProcess } from './process.js'
+import { UnsupportedAgentError } from './unsupported-agent-error.js'
 
 // What the client serves the agent: the updates it reports, the permissions it asks for, its files and its terminals
 export interface ClientHandlers {
@@ -128,7 +129,7 @@ export const connectAgent = async (
     clientCapabilities: CLIENT_CAPABILITIES,
   })
   if (initialized.protocolVersion !== PROTOCOL_VERSION) {
-    throw new Error(
+    throw new UnsupportedAgentError(
       `the agent speaks ACP v${initialized.protocolVersion}; ByteBureau speaks ACP v${PROTOCOL_VERSION}`,
     )
   }

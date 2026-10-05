@@ -12,6 +12,7 @@ import { endProcess } from './kill-ladder.js'
 import type { Preset } from './presets.js'
 import { endingOf, spawnAgent, type AcpDeps, type AgentProcess } from './process.js'
 import { redacted } from './redaction.js'
+import { UnsupportedAgentError } from './unsupported-agent-error.js'
 import { withinLimit } from './within-limit.js'
 
 // What a session starts its agents from
@@ -76,17 +77,17 @@ const envOf = ({ request, preset, keyEnv }: Setup): Readonly<Record<string, stri
     : env
 }
 
-// Why an agent could not start a session: what it answered, with the login to perform when it asked for one
+// Why an agent could not start a session: what it answered, with the login to perform when it asked for one, or why the adapter refused it
 // Any other failure is its death, a write to it failing or its connection closing, when it ends within two seconds; it is ended either way
 const failureOf = async (agent: AgentProcess, error: unknown, setup: Setup): Promise<Error> => {
-  const answered = error instanceof RequestError
+  const answered = error instanceof RequestError || error instanceof UnsupportedAgentError
   const exit = answered ? null : await withinLimit(agent.exited, EXIT_WAIT_MS)
   await endProcess(agent.child, agent.exited)
   if (exit !== null) {
     return new Error(endingOf(agent, exit))
   }
   const reason = toldReason(error, setup)
-  const login = answered && error.code === AUTH_REQUIRED
+  const login = error instanceof RequestError && error.code === AUTH_REQUIRED
   return new Error(login ? `${reason}; log in with: ${setup.preset.loginHint}` : reason)
 }
 
