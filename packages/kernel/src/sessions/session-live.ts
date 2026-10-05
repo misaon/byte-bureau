@@ -135,6 +135,7 @@ export const settle = (
   })
 
 // The provider failed: the turn is errored, the session crashes and the provider session is let go
+// Its last reference is kept first, best effort, so a resume attaches to the provider session that failed
 // A session that cannot crash from where it stands (it was stopped meanwhile) is left as it is
 export const failSession = (
   deps: SessionDeps,
@@ -142,6 +143,7 @@ export const failSession = (
   failure: Failure,
 ): Effect.Effect<void, StoreError> =>
   Effect.gen(function* failsSession() {
+    yield* Effect.ignore(rememberRef(deps, live))
     yield* settle(deps, live.session, { status: 'errored', stopReason: failure.kind, usage: null })
     live.turn = null
     yield* dispose(deps, live)

@@ -120,6 +120,40 @@ it.layer(plain.layer)('SessionManager agent that reports an error', (suite) => {
   )
 })
 
+const FIRST = { providerId: 'scripted', ref: 'first' }
+const RESTARTED = { providerId: 'scripted', ref: 'restarted' }
+const referenced = driven({ externalRef: FIRST })
+const unreferenced = driven()
+
+it.layer(referenced.layer)(
+  'SessionManager agent whose reference changes before its error',
+  (suite) => {
+    suite.effect('keeps the reference the agent gave last, for a resume', () =>
+      Effect.gen(function* keepsLastReference() {
+        const session = yield* startSession(AGENT)
+        const { agent } = yield* prompted(referenced, session)
+        agent.externalRef = RESTARTED
+        agent.queue.push(AUTH)
+        yield* waitFor(session.id, ERRORED)
+        assert.deepStrictEqual((yield* sessionOf(session.id)).externalRef, RESTARTED)
+      }),
+    )
+  },
+)
+
+it.layer(unreferenced.layer)('SessionManager agent that errors in its first turn', (suite) => {
+  suite.effect('keeps the reference the agent gave meanwhile', () =>
+    Effect.gen(function* keepsFirstReference() {
+      const session = yield* startSession(AGENT)
+      const { agent } = yield* prompted(unreferenced, session)
+      agent.externalRef = FIRST
+      agent.queue.push(AUTH)
+      yield* waitFor(session.id, ERRORED)
+      assert.deepStrictEqual((yield* sessionOf(session.id)).externalRef, FIRST)
+    }),
+  )
+})
+
 const broken = driven({ eventsFailure: new Error('stream broke') })
 
 it.layer(broken.layer)('SessionManager agent whose events fail', (suite) => {
