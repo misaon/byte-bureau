@@ -69,6 +69,8 @@ const EDGES: readonly Edge[] = [
   ['waiting_for_human', 'crash', 'errored'],
   ['provisioning', 'crash', 'errored'],
   ['ready', 'complete', 'completed'],
+  ['stopped', 'complete', 'completed'],
+  ['errored', 'complete', 'completed'],
   ['stopped', 'resume', 'ready'],
   ['errored', 'resume', 'ready'],
 ]
@@ -78,6 +80,7 @@ const REFUSED: readonly (readonly [SessionStatus, SessionEvent])[] = [
   ['created', 'prompt'],
   ['ready', 'answer'],
   ['running', 'complete'],
+  ['waiting_for_human', 'complete'],
   ['errored', 'stop'],
   ['stopped', 'prompt'],
   ['ready', 'crash'],

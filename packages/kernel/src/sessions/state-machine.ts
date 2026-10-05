@@ -43,7 +43,8 @@ const EDGES: Readonly<
     waiting_for_human: 'errored',
     provisioning: 'errored',
   },
-  complete: { ready: 'completed' },
+  // A stopped or errored session is completed without its agent: an end on the books that starts nothing
+  complete: { ready: 'completed', stopped: 'completed', errored: 'completed' },
   resume: { stopped: 'ready', errored: 'ready' },
 }
 

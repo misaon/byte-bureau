@@ -4,7 +4,13 @@ import { Effect } from 'effect'
 import { AskService } from '../asks/ask-service.js'
 import { turnStatesOf, turnsOf } from './session-db-fixtures.js'
 import { sessionOf, startSession, typesOf, waitFor } from './session-fixtures.js'
-import { countOf, helloFileOf, refusalOf, workspaceOf } from './session-helper-fixtures.js'
+import {
+  countOf,
+  freeWorktree,
+  helloFileOf,
+  refusalOf,
+  workspaceOf,
+} from './session-helper-fixtures.js'
 import { sessionLayer } from './session-layer-fixtures.js'
 import { SessionManager } from './session-manager.js'
 
@@ -170,6 +176,25 @@ it.layer(sessionLayer())('SessionManager complete', (suite) => {
       yield* waitFor(session.id, READY, 1)
       yield* sessions.complete(session.id)
     }),
+  )
+})
+
+it.layer(sessionLayer())('SessionManager complete a stopped session', (suite) => {
+  suite.effect(
+    'completes a stopped session without its agent, and frees its worktree as for a ready one',
+    () =>
+      Effect.gen(function* completesStopped() {
+        const sessions = yield* SessionManager
+        const session = yield* startSession({ env: SLOW })
+        yield* sessions.prompt(session.id, { text: 'take your time' })
+        yield* sessions.stop(session.id)
+        yield* sessions.complete(session.id)
+        const completed = yield* sessionOf(session.id)
+        assert.ok(completed.status === 'completed' && completed.endedAt !== null)
+        const types = yield* typesOf(session.id)
+        assert.deepStrictEqual(types.slice(-2), ['session.stopped', 'session.completed'])
+        assert.ok(yield* freeWorktree(session))
+      }),
   )
 })
 

@@ -1,6 +1,8 @@
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { Effect, type Cause } from 'effect'
-import { SessionError, WorkspaceError } from '../errors.js'
+import { SessionError, WorkspaceError, type StoreError } from '../errors.js'
+import { WorkspaceManager } from '../workspace/workspace-manager.js'
 import type { Session } from './types.js'
 
 // The directory of the worktree of a session, empty for a session that has none
@@ -37,3 +39,19 @@ export const flush: Effect.Effect<void> = Effect.forEach(
 // How many of the types are the given one
 export const countOf = (types: readonly string[], type: string): number =>
   types.filter((candidate) => candidate === type).length
+
+// Whether the worktree of the session was on disk and held by no running session: then force removes it
+export const freeWorktree = (
+  session: Session,
+): Effect.Effect<
+  boolean,
+  WorkspaceError | StoreError | Cause.NoSuchElementError,
+  WorkspaceManager
+> =>
+  Effect.gen(function* removesFreeWorktree() {
+    const workspaces = yield* WorkspaceManager
+    const handle = yield* Effect.fromNullishOr(session.workspace)
+    const kept = existsSync(handle.path)
+    const outcome = yield* workspaces.destroy(session.id, handle, { force: true })
+    return kept && outcome.removed && !existsSync(handle.path)
+  })
