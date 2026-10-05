@@ -12,19 +12,27 @@ function recordOf(stdout: string, command: string): Record<string, unknown> | un
 
 interface TwoProfiles {
   readonly codes: readonly number[]
-  readonly defaults: readonly unknown[]
+  // The defaults the listing tells: once the API-key profile is added with --default, then once use gives the default back
+  readonly defaults: readonly (readonly unknown[])[]
 }
 
-// The login profile fake/work, then the API-key profile fake/key, made the default of the provider
-async function twoProfiles(env: Env): Promise<TwoProfiles> {
-  const work = await runCli(['profiles', 'add', 'fake', 'work'], env)
-  const key = await runCliWithStdin(['profiles', 'add', 'fake', 'key', '--api-key'], env, 'sk-1\n')
-  const used = await runCli(['profiles', 'use', 'fake/key'], env)
+// The ids of the profiles listed as the default of their provider
+async function defaultsIn(env: Env): Promise<readonly unknown[]> {
   const listed = await runCli(['profiles', 'ls', '--json'], env)
-  const defaults = listedUnder(listed.stdout, 'profiles')
+  return listedUnder(listed.stdout, 'profiles')
     .filter((profile) => profile['isDefault'] === true)
     .map((profile) => profile['id'])
-  return { codes: [work.code, key.code, used.code], defaults }
+}
+
+// The login profile fake/work, the API-key profile fake/key added as the default, then fake/work made the default again
+async function twoProfiles(env: Env): Promise<TwoProfiles> {
+  const work = await runCli(['profiles', 'add', 'fake', 'work'], env)
+  const add = ['profiles', 'add', 'fake', 'key', '--api-key', '--default']
+  const key = await runCliWithStdin(add, env, 'sk-1\n')
+  const keyFirst = await defaultsIn(env)
+  const used = await runCli(['profiles', 'use', 'fake/work'], env)
+  const workAgain = await defaultsIn(env)
+  return { codes: [work.code, key.code, used.code], defaults: [keyFirst, workAgain] }
 }
 
 // A run of the slow script under the profile, which Ctrl-C stops once its turn works: its session can resume
@@ -101,7 +109,7 @@ describe('bytebureau profiles and the sessions that run under them', () => {
     const bench = await benchWithDaemon()
     await expect(twoProfiles(bench.env)).resolves.toStrictEqual({
       codes: [0, 0, 0],
-      defaults: ['fake/key'],
+      defaults: [['fake/key'], ['fake/work']],
     })
     const run = await stoppedRunUnder(bench, 'fake/work')
     const held = await runCli(['profiles', 'rm', 'fake/work'], bench.env)
