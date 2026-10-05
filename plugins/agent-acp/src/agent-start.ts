@@ -26,7 +26,7 @@ export interface Setup {
 }
 
 // What a start may take when the kernel does not bound it, as for an agent started again for a prompt
-export const START_LIMIT_MS = 60_000
+const START_LIMIT_MS = 60_000
 const AUTH_REQUIRED = -32_000
 const EXIT_WAIT_MS = 2000
 // A variable named as a key or a token is the agent's to hold, never a terminal's
