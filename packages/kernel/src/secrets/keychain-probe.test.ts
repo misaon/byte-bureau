@@ -1,7 +1,11 @@
+import { createHash } from 'node:crypto'
+import { symlinkSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { capturedLogs, linesOf } from '../testing/captured-logs.js'
 import { fakeBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
+import { probeNameOf } from './keychain-probe.js'
 import { secretStoreFor } from './secret-store-for.js'
 
 // What became of a call: the error it was refused with, else that it went through
@@ -47,12 +51,16 @@ describe('secretStoreFor and a keychain that does not answer the probe', () => {
     expect.hasAssertions()
     const keychain = fakeBun('holds')
     movedByTheTest()
-    const chosen = secretStoreFor(tempDir('bb-home-'), 'auto')
+    const home = tempDir('bb-home-')
+    const chosen = secretStoreFor(home, 'auto')
     await vi.advanceTimersByTimeAsync(3000)
     await chosen
     keychain.release()
     await vi.waitFor(() => {
-      expect([keychain.written, keychain.entries.size]).toStrictEqual([['bytebureau/probe'], 0])
+      expect([keychain.written, keychain.entries.size]).toStrictEqual([
+        [`bytebureau/${probeNameOf(home)}`],
+        0,
+      ])
     })
   })
 })
@@ -77,5 +85,28 @@ describe('secretStoreFor and a keychain that refuses the probe', () => {
     await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).rejects.toThrow(
       /the keychain is locked.*secrets\.backend/u,
     )
+  })
+})
+
+// The name the probe of a home goes by, worked out apart from the code that names it: twelve hex digits of the SHA-256 of its real path
+const expectedProbeOf = (realHome: string): string =>
+  `probe-${createHash('sha256').update(realHome).digest('hex').slice(0, 12)}`
+
+describe('the probe of the keychain and the home it is made for', () => {
+  it('goes by a name of its home, the same for a link to it, so daemons of two homes never write the same entry', async () => {
+    expect.hasAssertions()
+    const keychain = fakeBun('answers')
+    const [first, second] = [tempDir('bb-home-'), tempDir('bb-home-')]
+    const link = path.join(tempDir('bb-link-'), 'home')
+    symlinkSync(first, link)
+    await Promise.all([secretStoreFor(first, 'keychain'), secretStoreFor(second, 'keychain')])
+    expect(new Set(keychain.written)).toStrictEqual(
+      new Set([`bytebureau/${expectedProbeOf(first)}`, `bytebureau/${expectedProbeOf(second)}`]),
+    )
+    expect([
+      expectedProbeOf(first) === expectedProbeOf(second),
+      keychain.entries.size,
+    ]).toStrictEqual([false, 0])
+    expect(probeNameOf(link)).toBe(expectedProbeOf(first))
   })
 })

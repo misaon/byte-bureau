@@ -22,8 +22,8 @@ const fileChoice = (home: string, reason: string): Choice => ({
 })
 
 // The keychain backend demands the keychain: one that is not available refuses the start, with the reason
-async function demanded(): Promise<Choice> {
-  const probed = await probeKeychain()
+async function demanded(home: string): Promise<Choice> {
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     return { store: probed, reason: 'secrets.backend is keychain' }
   }
@@ -34,7 +34,7 @@ async function demanded(): Promise<Choice> {
 
 // Auto at the first start of a home takes the keychain where it answers the probe, else the file, and keeps to it from then on
 async function chosen(home: string): Promise<Choice> {
-  const probed = await probeKeychain()
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     recordBackend(home, 'keychain')
     return { store: probed, reason: 'auto: the keychain answered' }
@@ -49,7 +49,7 @@ async function kept(home: string, recorded: ChosenBackend): Promise<Choice> {
   if (recorded === 'file') {
     return fileChoice(home, 'auto, as recorded in secrets.backend')
   }
-  const probed = await probeKeychain()
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     return { store: probed, reason: 'auto, as recorded in secrets.backend' }
   }
@@ -65,7 +65,7 @@ const choiceFor = async (home: string, backend: SecretsBackend): Promise<Choice>
     return fileChoice(home, 'secrets.backend is file')
   }
   if (backend === 'keychain') {
-    const demand = await demanded()
+    const demand = await demanded(home)
     return demand
   }
   const recorded = recordedBackend(home)
