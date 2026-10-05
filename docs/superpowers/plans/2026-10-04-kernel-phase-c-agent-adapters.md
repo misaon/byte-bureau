@@ -417,11 +417,28 @@ describe(decodeUserConfig, () => {
     expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
   })
 
+  it('accepts the projects and the commands the user trusts, and refuses anything else there', () => {
+    const trust = { projects: ['/home/me/app'], commands: ['bun', '/opt/codex/bin/codex-acp'] }
+    expect(decodeUserConfig({ trust }).trust).toStrictEqual(trust)
+    expect(() => decodeUserConfig({ trust: { commands: 'bun' } })).toThrow(/commands/u)
+    expect(() => decodeUserConfig({ trust: { everything: true } })).toThrow(/everything/u)
+  })
+
   it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
     expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({
       backend: 'file',
     })
     expect(() => decodeUserConfig({ secrets: { backend: 'vault' } })).toThrow(/backend/u)
+  })
+})
+
+describe('the projects the user trusts', () => {
+  it('refuses a trusted project named by a relative path, saying an absolute one is expected', () => {
+    expect(() => decodeUserConfig({ trust: { projects: ['code/app'] } })).toThrow(
+      /Expected an absolute path\n {2}at \["trust"\]\["projects"\]\[0\]/u,
+    )
+    const windows = { projects: [String.raw`C:\code\app`, String.raw`\\server\share\app`] }
+    expect(decodeUserConfig({ trust: windows }).trust).toStrictEqual(windows)
   })
 })
 ```
@@ -438,7 +455,7 @@ Expected: FAIL — `ProfileDto`, `ProfileStatusDto`, `UsageSnapshotDto`, `AddPro
 ```ts
 import { Schema } from 'effect'
 import { RateLimit, Usage } from '../agent-event.js'
-import { Id, SessionStatus, Timestamp, TurnStatus } from '../common.js'
+import { Id, ProfileKind, SessionStatus, Timestamp, TurnStatus } from '../common.js'
 import { ProjectConfig } from '../config.js'
 import { EmployeeSpec, PromptInput } from '../employee.js'
 
@@ -524,7 +541,6 @@ export const PluginStatusDto = Schema.Struct({
   ports: Schema.Array(Schema.String),
 }).annotate({ title: 'PluginStatus', identifier: 'PluginStatus' })
 
-export const ProfileKind = Schema.Literals(['login', 'api_key'])
 export const AuthState = Schema.Literals(['loggedIn', 'loggedOut', 'expired', 'unknown'])
 
 export const ProfileDto = Schema.Struct({
@@ -577,7 +593,6 @@ export type WorkspaceInfoDto = typeof WorkspaceInfoDto.Type
 export type PruneReportDto = typeof PruneReportDto.Type
 export type SessionUsageDto = typeof SessionUsageDto.Type
 export type PluginStatusDto = typeof PluginStatusDto.Type
-export type ProfileKind = typeof ProfileKind.Type
 export type AuthState = typeof AuthState.Type
 export type ProfileDto = typeof ProfileDto.Type
 export type ProfileStatusDto = typeof ProfileStatusDto.Type
@@ -593,9 +608,8 @@ export type HealthDto = typeof HealthDto.Type
 ```ts
 import { Schema, SchemaTransformation } from 'effect'
 import { AskAnswer } from '../ask.js'
-import { Id } from '../common.js'
+import { Id, ProfileKind } from '../common.js'
 import { PromptInput } from '../employee.js'
-import { ProfileKind } from './dto.js'
 
 export const RegisterProjectBody = Schema.Struct({ path: Schema.String }).annotate({
   title: 'RegisterProject',
@@ -688,7 +702,7 @@ export type AddProfileBody = typeof AddProfileBody.Type
 
 ```ts
 import { Schema } from 'effect'
-import { Effort, PermissionMode } from './common.js'
+import { Effort, PermissionMode, ProfileKind } from './common.js'
 import { Appearance, ToolPolicy } from './employee.js'
 
 export const LogLevel = Schema.Literals(['trace', 'debug', 'info', 'warn', 'error'])
@@ -761,7 +775,7 @@ const UserDefaults = Schema.Struct({
 const UserProfile = Schema.Struct({
   providerId: Schema.String,
   name: Schema.String,
-  kind: Schema.Literals(['login', 'api_key']),
+  kind: ProfileKind,
   configDir: Schema.optionalKey(Schema.String),
 })
 const ProfilesSection = Schema.Record(Schema.String, UserProfile)
@@ -775,6 +789,17 @@ const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
 const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
 
+// A path from the root, POSIX or Windows: a relative one would name a different project from every working directory
+const AbsolutePath = Schema.String.check(
+  Schema.isPattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/u, { expected: 'an absolute path' }),
+)
+
+// What a project's own files may run: the commands of providers.<id> run for a project listed by its path, or a command listed by its exact name or path
+const TrustSection = Schema.Struct({
+  projects: Schema.optionalKey(Schema.Array(AbsolutePath)),
+  commands: Schema.optionalKey(Schema.Array(Schema.String)),
+})
+
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
   profiles: Schema.optionalKey(ProfilesSection),
@@ -783,6 +808,7 @@ export const UserConfig = Schema.Struct({
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
   secrets: Schema.optionalKey(SecretsSection),
+  trust: Schema.optionalKey(TrustSection),
   ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 
@@ -877,13 +903,25 @@ export interface ExternalSessionRef {
   readonly ref: string
 }
 
+// What the user configuration trusts of the project a session runs in (its trust.projects and trust.commands)
+export interface ProjectTrust {
+  // The project is trusted as a whole: an adapter may load what the project configures for its agent, such as Claude Code's project settings
+  readonly project: boolean
+  // The keys of providerConfig the kernel withheld: a command, its arguments or environment, or a hint, that the project names without the user's trust
+  readonly withheld: readonly string[]
+  // Why a withheld command was withheld, and how the person trusts it, for the refusal it causes
+  readonly hint: string
+}
+
 export interface CreateSessionRequest {
   readonly sessionId: string
   readonly workspace: { readonly path: string }
   readonly employee: EmployeeSpec
   readonly profile: ProfileRef
-  // The providers.<id> section of the project's configuration, without passEnv (the kernel's); {} when there is none
+  // The providers.<id> section of the project's configuration, without passEnv (the kernel's) and without what trust withheld; {} when there is none
+  // A command trusted by its name arrives as the absolute path the daemon's PATH gives it
   readonly providerConfig: Readonly<Record<string, unknown>>
+  readonly trust: ProjectTrust
   readonly resume?: ExternalSessionRef | undefined
   readonly env: Readonly<Record<string, string>>
   readonly signal: AbortSignal
@@ -1011,6 +1049,7 @@ git commit -m "feat(plugin-api): let a provider declare the variable of an API k
 `packages/kernel/src/secrets/file-secret-store.test.ts`:
 
 ```ts
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -1024,6 +1063,23 @@ const REFUSED = /secrets\.json does not hold a secret store/u
 // The secrets file in a fresh directory removed after the test, or in a subdirectory of it that is not there yet
 const fileIn = (directory = ''): string =>
   path.join(tempDir('bb-secrets-'), directory, 'secrets.json')
+
+describe('the file store and the drafts beside its file', () => {
+  it('removes the draft a process that died mid-write left, and keeps the one of a live process', () => {
+    const file = fileIn()
+    const { pid: dead } = spawnSync(process.execPath, ['-e', ''])
+    const deadDraft = `${file}.${dead}.tmp`
+    const liveDraft = `${file}.${process.ppid}.tmp`
+    writeFileSync(deadDraft, '{ "k": "left behind" }')
+    writeFileSync(liveDraft, '{}')
+    const store = new FileSecretStore(file)
+    expect([store.backend, existsSync(deadDraft), existsSync(liveDraft)]).toStrictEqual([
+      'file',
+      false,
+      true,
+    ])
+  })
+})
 
 describe(FileSecretStore, () => {
   it('keeps a value across stores of the same file, in a file only the user can read', async () => {
@@ -1175,7 +1231,7 @@ export class Secrets extends Context.Service<Secrets, SecretsShape>()('bb/Secret
 
 ```ts
 import path from 'node:path'
-import { readIfPresent, writePrivate } from './private-file.js'
+import { readIfPresent, sweepDrafts, writePrivate } from './private-file.js'
 import type { SecretsShape } from './secrets.js'
 
 type Values = Readonly<Record<string, string>>
@@ -1218,8 +1274,10 @@ export class FileSecretStore implements SecretsShape {
   public readonly backend = 'file' as const
   private readonly file: string
 
+  // A draft a process left when it died mid-write holds secrets too: it goes when the store starts
   public constructor(file: string) {
     this.file = file
+    sweepDrafts(file)
   }
 
   public async get(key: string): Promise<string | undefined> {
@@ -1249,6 +1307,7 @@ export class FileSecretStore implements SecretsShape {
 `packages/kernel/src/secrets/bun-secret-store.ts`:
 
 ```ts
+import { TIMED_OUT, withinTime } from './within-time.js'
 import type { SecretsShape } from './secrets.js'
 
 interface Entry {
@@ -1263,6 +1322,9 @@ interface BunSecrets {
 }
 
 const METHODS = ['get', 'set', 'delete'] as const
+
+// A keychain item another binary stored makes macOS ask before it is read, and a daemon nobody watches would wait on that dialog for ever
+const KEYCHAIN_TIMEOUT_MS = 10_000
 
 const isBunSecrets = (value: unknown): value is BunSecrets =>
   typeof value === 'object' &&
@@ -1279,6 +1341,17 @@ export const bunSecrets = (): BunSecrets | undefined => {
   return isBunSecrets(secrets) ? secrets : undefined
 }
 
+// What the keychain answered, else an error that names the keychain and the way out
+async function answered<Value>(call: Promise<Value>): Promise<Value> {
+  const outcome = await withinTime(call, KEYCHAIN_TIMEOUT_MS)
+  if (outcome === TIMED_OUT) {
+    throw new Error(
+      `the keychain did not answer within ${KEYCHAIN_TIMEOUT_MS / 1000} s — a Keychain dialog may be waiting for approval, or set secrets.backend to file`,
+    )
+  }
+  return outcome
+}
+
 // The keychain of the system through Bun.secrets: Keychain Services on macOS, the Secret Service on Linux, the Credential Manager on Windows
 export class BunSecretStore implements SecretsShape {
   public readonly backend = 'keychain' as const
@@ -1291,16 +1364,16 @@ export class BunSecretStore implements SecretsShape {
   }
 
   public async get(key: string): Promise<string | undefined> {
-    const value = await this.secrets.get({ service: this.service, name: key })
+    const value = await answered(this.secrets.get({ service: this.service, name: key }))
     return value ?? undefined
   }
 
   public async set(key: string, value: string): Promise<void> {
-    await this.secrets.set({ service: this.service, name: key, value })
+    await answered(this.secrets.set({ service: this.service, name: key, value }))
   }
 
   public async delete(key: string): Promise<void> {
-    await this.secrets.delete({ service: this.service, name: key })
+    await answered(this.secrets.delete({ service: this.service, name: key }))
   }
 }
 ```
@@ -1334,8 +1407,8 @@ const fileChoice = (home: string, reason: string): Choice => ({
 })
 
 // The keychain backend demands the keychain: one that is not available refuses the start, with the reason
-async function demanded(): Promise<Choice> {
-  const probed = await probeKeychain()
+async function demanded(home: string): Promise<Choice> {
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     return { store: probed, reason: 'secrets.backend is keychain' }
   }
@@ -1346,7 +1419,7 @@ async function demanded(): Promise<Choice> {
 
 // Auto at the first start of a home takes the keychain where it answers the probe, else the file, and keeps to it from then on
 async function chosen(home: string): Promise<Choice> {
-  const probed = await probeKeychain()
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     recordBackend(home, 'keychain')
     return { store: probed, reason: 'auto: the keychain answered' }
@@ -1361,7 +1434,7 @@ async function kept(home: string, recorded: ChosenBackend): Promise<Choice> {
   if (recorded === 'file') {
     return fileChoice(home, 'auto, as recorded in secrets.backend')
   }
-  const probed = await probeKeychain()
+  const probed = await probeKeychain(home)
   if (typeof probed !== 'string') {
     return { store: probed, reason: 'auto, as recorded in secrets.backend' }
   }
@@ -1377,7 +1450,7 @@ const choiceFor = async (home: string, backend: SecretsBackend): Promise<Choice>
     return fileChoice(home, 'secrets.backend is file')
   }
   if (backend === 'keychain') {
-    const demand = await demanded()
+    const demand = await demanded(home)
     return demand
   }
   const recorded = recordedBackend(home)
@@ -1411,12 +1484,9 @@ import { Effect, Schema } from 'effect'
 import { readLayer, type LoadedFile } from '../config/files.js'
 import { isPlain } from '../config/merge.js'
 import { ConfigError } from '../errors.js'
-import { kernelLogger } from '../logging/logging.js'
 import { secretStoreFor } from '../secrets/secret-store-for.js'
 import type { SecretsShape } from '../secrets/secrets.js'
 import type { KernelOptions } from './types.js'
-
-const logger = kernelLogger(['bb', 'secrets'])
 
 const isBackend = Schema.is(SecretsBackend)
 
@@ -1451,16 +1521,11 @@ const userFile = async (home: string): Promise<UserFile> => {
 }
 
 // The secrets section of the user file on its own, so that a mistake in another section does not move the secrets elsewhere
-// A file that cannot be parsed leaves the choice to auto, and says so, as the daemon does for its server section
+// A file that cannot be read or parsed refuses the start as an unknown backend does: auto would probe the keychain and record it, where the file may say file
 async function configuredBackend(home: string): Promise<SecretsBackend> {
   const read = await userFile(home)
   if ('failure' in read) {
-    const { file, reason } = read.failure
-    logger.warn('the user configuration cannot be read: its secrets section is not applied', {
-      file,
-      reason,
-    })
-    return 'auto'
+    throw read.failure
   }
   return read.loaded === null ? 'auto' : backendIn(read.loaded)
 }
@@ -1477,12 +1542,11 @@ export async function bootSecrets(options: KernelOptions): Promise<SecretsShape>
 `packages/kernel/src/facade/boot-secrets.test.ts` (as shipped):
 
 ```ts
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigError } from '../errors.js'
 import { InMemorySecretStore } from '../secrets/in-memory-secret-store.js'
-import { capturedLogs, linesOf } from '../testing/captured-logs.js'
 import { withoutBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
 import { bootSecrets } from './boot-secrets.js'
@@ -1542,15 +1606,13 @@ describe('bootSecrets and a secrets section it cannot go by', () => {
     await expect(refused).rejects.toHaveProperty('pointer', '/secrets')
   })
 
-  it('leaves the choice to auto where the user file cannot be parsed, and says so', async () => {
+  it('refuses the start where the user file cannot be parsed, naming the file, and records no backend', async () => {
     expect.hasAssertions()
-    const home = homeWith('{ "secrets": ')
-    const logs = await capturedLogs()
-    await expect(bootSecrets({ home, env: {} })).resolves.toHaveProperty('backend', 'file')
-    expect(linesOf(logs, 'bb.secrets')[0]).toStrictEqual([
-      'warning',
-      'the user configuration cannot be read: its secrets section is not applied',
-    ])
+    const home = homeWith('{ "secrets": { "backend": "file" ')
+    const refused = bootSecrets({ home, env: {} })
+    await expect(refused).rejects.toBeInstanceOf(ConfigError)
+    await expect(refused).rejects.toHaveProperty('file', path.join(home, 'config.json'))
+    expect(existsSync(path.join(home, 'secrets.backend'))).toBe(false)
   })
 })
 ```
@@ -1558,19 +1620,34 @@ describe('bootSecrets and a secrets section it cannot go by', () => {
 `packages/kernel/src/secrets/keychain-probe.ts` (as shipped):
 
 ```ts
+import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import path from 'node:path'
 import { BunSecretStore, bunSecrets } from './bun-secret-store.js'
+import { TIMED_OUT, withinTime } from './within-time.js'
 
 // A keychain that is locked or waits on a prompt would hold the start of the daemon; this is all it is given
 const PROBE_TIMEOUT_MS = 3000
 
-const PROBE = `probe/${process.pid}`
+// A home as the file system has it, so a link to a home probes under the name of the home it leads to
+const realHomeOf = (home: string): string => {
+  try {
+    return realpathSync(home)
+  } catch {
+    return path.resolve(home)
+  }
+}
+
+// One name for every start of a home, and another for every other home: a daemon killed between the write and the delete leaves one entry, which the next start of its home overwrites and deletes, and two daemons on different homes never touch the same one
+export const probeNameOf = (home: string): string =>
+  `probe-${createHash('sha256').update(realHomeOf(home)).digest('hex').slice(0, 12)}`
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
-async function forget(store: BunSecretStore): Promise<void> {
+async function forget(store: BunSecretStore, probe: string): Promise<void> {
   try {
-    await store.delete(PROBE)
+    await store.delete(probe)
   } catch {
     // Best effort: the probe stays behind only where the keychain refuses its delete as well
   }
@@ -1578,39 +1655,29 @@ async function forget(store: BunSecretStore): Promise<void> {
 
 // The probe goes in and comes out again: nothing when it did, else why not
 // It is deleted whatever came of it, a write the keychain lets in after the time included
-async function roundTrip(store: BunSecretStore): Promise<string | undefined> {
+async function roundTrip(store: BunSecretStore, probe: string): Promise<string | undefined> {
   try {
-    await store.set(PROBE, 'probe')
-    const value = await store.get(PROBE)
+    await store.set(probe, 'probe')
+    const value = await store.get(probe)
     return value === 'probe' ? undefined : 'the keychain did not give the probe back'
   } catch (error) {
     return `the keychain refused the probe: ${messageOf(error)}`
   } finally {
-    await forget(store)
+    await forget(store, probe)
   }
 }
 
-// What the probe came to, or why it came to nothing in time
-async function withinTime(probing: Promise<string | undefined>): Promise<string | undefined> {
-  const { promise: late, resolve } = Promise.withResolvers<string>()
-  const timer = setTimeout(() => {
-    resolve(`the keychain did not answer within ${PROBE_TIMEOUT_MS / 1000} s`)
-  }, PROBE_TIMEOUT_MS)
-  try {
-    return await Promise.race([probing, late])
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-// The keychain where it answers the probe in time, else why it is not available
-export async function probeKeychain(): Promise<BunSecretStore | string> {
+// The keychain where it answers the probe of the home in time, else why it is not available
+export async function probeKeychain(home: string): Promise<BunSecretStore | string> {
   const secrets = bunSecrets()
   if (secrets === undefined) {
     return 'Bun.secrets is not available to this process'
   }
   const store = new BunSecretStore(secrets)
-  const reason = await withinTime(roundTrip(store))
+  const reason = await withinTime(roundTrip(store, probeNameOf(home)), PROBE_TIMEOUT_MS)
+  if (reason === TIMED_OUT) {
+    return `the keychain did not answer within ${PROBE_TIMEOUT_MS / 1000} s`
+  }
   return reason ?? store
 }
 ```
@@ -1658,12 +1725,14 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import { isAlive } from '../process/pid-alive.js'
 
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && 'code' in error && error.code === 'ENOENT'
@@ -1702,6 +1771,31 @@ const writeDraft = (draft: string, text: string): void => {
   }
 }
 
+// The pid in the name of a draft of the file, as writePrivate names it
+const draftPid = (name: string, base: string): number | undefined => {
+  const middle = name.startsWith(`${base}.`) ? name.slice(base.length + 1) : ''
+  const digits = /^(?<pid>\d+)\.tmp$/u.exec(middle)
+  return digits === null || digits.groups === undefined ? undefined : Number(digits.groups['pid'])
+}
+
+// The drafts of the file that processes which have died left behind, removed best effort; a live process may be writing its own
+export const sweepDrafts = (file: string): void => {
+  const directory = path.dirname(file)
+  const base = path.basename(file)
+  let names: readonly string[] = []
+  try {
+    names = readdirSync(directory)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const pid = draftPid(name, base)
+    if (pid !== undefined && pid !== process.pid && !isAlive(pid)) {
+      discard(path.join(directory, name))
+    }
+  }
+}
+
 // Written beside the file in a draft of this process, flushed and moved into place, so a reader never sees half of it
 // Two processes writing the same file never share a draft; a write that fails removes its draft and passes the failure on
 export const writePrivate = (file: string, text: string): void => {
@@ -1736,8 +1830,10 @@ export interface FakeBun {
   readonly entries: Map<string, string>
   // Every service/name written so far, a held write included once it went through
   readonly written: readonly string[]
-  // Lets the writes a holding keychain held go through
+  // Lets the writes and the reads it held go through
   readonly release: () => void
+  // From now on every read waits until released, as one behind a dialog nobody answers does
+  readonly holdReads: () => void
 }
 
 const keyOf = ({ service, name }: Entry): string => `${service}/${name}`
@@ -1748,7 +1844,7 @@ const restoredWithTheTest = (): void => {
   })
 }
 
-// No Bun at all, as under Node, even when Vitest itself runs on Bun: nothing can reach a real keychain
+// No Bun at all, as under Node, where the tests run: Bun's own global is not configurable, so this stub serves Node runs alone
 export function withoutBun(): void {
   vi.stubGlobal('Bun', null)
   restoredWithTheTest()
@@ -1759,9 +1855,10 @@ export function fakeBun(keychain: FakeKeychain): FakeBun {
   const entries = new Map<string, string>()
   const written: string[] = []
   const held = Promise.withResolvers<boolean>()
+  const reads = { held: false }
   const secrets = {
     get: async (entry: Entry): Promise<string | null> => {
-      await Promise.resolve()
+      await (reads.held ? held.promise : Promise.resolve())
       return entries.get(keyOf(entry)) ?? null
     },
     set: async (entry: Entry): Promise<void> => {
@@ -1784,6 +1881,9 @@ export function fakeBun(keychain: FakeKeychain): FakeBun {
     written,
     release: () => {
       held.resolve(true)
+    },
+    holdReads: () => {
+      reads.held = true
     },
   }
 }
@@ -1827,10 +1927,14 @@ export async function capturedLogs(): Promise<readonly LogRecord[]> {
 `packages/kernel/src/secrets/keychain-probe.test.ts` (as shipped):
 
 ```ts
+import { createHash } from 'node:crypto'
+import { symlinkSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { capturedLogs, linesOf } from '../testing/captured-logs.js'
 import { fakeBun } from '../testing/fake-bun-secrets.js'
 import { tempDir } from '../testing/temp-repo.js'
+import { probeNameOf } from './keychain-probe.js'
 import { secretStoreFor } from './secret-store-for.js'
 
 // What became of a call: the error it was refused with, else that it went through
@@ -1876,16 +1980,30 @@ describe('secretStoreFor and a keychain that does not answer the probe', () => {
     expect.hasAssertions()
     const keychain = fakeBun('holds')
     movedByTheTest()
-    const chosen = secretStoreFor(tempDir('bb-home-'), 'auto')
+    const home = tempDir('bb-home-')
+    const chosen = secretStoreFor(home, 'auto')
     await vi.advanceTimersByTimeAsync(3000)
     await chosen
     keychain.release()
     await vi.waitFor(() => {
       expect([keychain.written, keychain.entries.size]).toStrictEqual([
-        [`bytebureau/probe/${process.pid}`],
+        [`bytebureau/${probeNameOf(home)}`],
         0,
       ])
     })
+  })
+})
+
+describe('secretStoreFor and a keychain that answers the probe in time', () => {
+  it('clears the timer of the probe and of every call it made', async () => {
+    expect.hasAssertions()
+    fakeBun('answers')
+    movedByTheTest()
+    await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).resolves.toHaveProperty(
+      'backend',
+      'keychain',
+    )
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 
@@ -1896,6 +2014,29 @@ describe('secretStoreFor and a keychain that refuses the probe', () => {
     await expect(secretStoreFor(tempDir('bb-home-'), 'keychain')).rejects.toThrow(
       /the keychain is locked.*secrets\.backend/u,
     )
+  })
+})
+
+// The name the probe of a home goes by, worked out apart from the code that names it: twelve hex digits of the SHA-256 of its real path
+const expectedProbeOf = (realHome: string): string =>
+  `probe-${createHash('sha256').update(realHome).digest('hex').slice(0, 12)}`
+
+describe('the probe of the keychain and the home it is made for', () => {
+  it('goes by a name of its home, the same for a link to it, so daemons of two homes never write the same entry', async () => {
+    expect.hasAssertions()
+    const keychain = fakeBun('answers')
+    const [first, second] = [tempDir('bb-home-'), tempDir('bb-home-')]
+    const link = path.join(tempDir('bb-link-'), 'home')
+    symlinkSync(first, link)
+    await Promise.all([secretStoreFor(first, 'keychain'), secretStoreFor(second, 'keychain')])
+    expect(new Set(keychain.written)).toStrictEqual(
+      new Set([`bytebureau/${expectedProbeOf(first)}`, `bytebureau/${expectedProbeOf(second)}`]),
+    )
+    expect([
+      expectedProbeOf(first) === expectedProbeOf(second),
+      keychain.entries.size,
+    ]).toStrictEqual([false, 0])
+    expect(probeNameOf(link)).toBe(expectedProbeOf(first))
   })
 })
 ```
@@ -2296,7 +2437,7 @@ it.layer(locked.layer)('ProfileService over a secret store that refuses the key'
 ```ts
 import { rmSync } from 'node:fs'
 import { assert, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Effect, Fiber, Stream } from 'effect'
 import { SqlClient } from 'effect/sql'
 import { EventLog } from '../events/event-log.js'
 import { resolved } from '../plugins/plugin-call-fixtures.js'
@@ -2370,8 +2511,19 @@ it.layer(resolving.layer)('ProfileService resolve', (suite) => {
   )
 })
 
+// The statuses told live while a subscriber listens; the log keeps none of them, as a probe is a reading
+const storedStatuses = EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
+
+const listeningForStatuses = EventLog.use((log) =>
+  Effect.forkChild(
+    log.subscribe({ types: ['profile.status'] }).pipe(Stream.take(2), Stream.runCollect),
+    { startImmediately: true },
+  ),
+)
+
 const tellsStatus = Effect.gen(function* tellsStatus() {
   const profiles = yield* loadedProfiles
+  const listening = yield* listeningForStatuses
   const work = yield* profiles.add({ providerId: 'fake', name: 'work', kind: 'login' })
   const fine = yield* profiles.status(work.id)
   const dir = work.configDir ?? ''
@@ -2381,12 +2533,15 @@ const tellsStatus = Effect.gen(function* tellsStatus() {
     [fine.state, gone.state, gone.hint],
     ['loggedIn', 'loggedOut', `the directory ${dir} is gone; remove the profile and add it again`],
   )
-  const told = yield* EventLog.use((log) => log.read({ types: ['profile.status'] }, { from: 0 }))
+  const told = yield* Fiber.join(listening)
   assert.deepStrictEqual(
-    told.map((event) => event.payload),
+    [told.map((event) => [event.seq, event.payload]), yield* storedStatuses],
     [
-      { profileId: 'fake/work', state: 'loggedIn' },
-      { profileId: 'fake/work', state: 'loggedOut' },
+      [
+        [0, { profileId: 'fake/work', state: 'loggedIn' }],
+        [0, { profileId: 'fake/work', state: 'loggedOut' }],
+      ],
+      [],
     ],
   )
 })
@@ -2439,7 +2594,7 @@ it.layer(checking.layer)('ProfileService status', (suite) => {
     () => tellsUnknown,
   )
   suite.effect(
-    'tells an api_key profile whose key is gone from the secret store as logged out, without asking its provider',
+    'tells an api_key profile whose key is gone from the secret store as logged out, where its provider says logged in',
     () => tellsLostKey,
   )
 })
@@ -2544,7 +2699,7 @@ const firstProfile = (rows: readonly Row[]): Profile | undefined => {
   return row === undefined ? undefined : profileOf(row)
 }
 
-const missing = (id: string): ProfileError =>
+export const missingProfile = (id: string): ProfileError =>
   new ProfileError({ code: 'not_found', reason: `no profile "${id}"` })
 
 // By provider, then in the order they were added; the rowid parts two added within one millisecond
@@ -2570,7 +2725,7 @@ export const requireProfile = (
   id: string,
 ): Effect.Effect<Profile, ProfileError | StoreError> =>
   Effect.flatMap(loadProfile(sql, id), (profile) =>
-    profile === undefined ? Effect.fail(missing(id)) : Effect.succeed(profile),
+    profile === undefined ? Effect.fail(missingProfile(id)) : Effect.succeed(profile),
   )
 
 export const defaultProfileOf = (
@@ -2613,21 +2768,54 @@ export const forgetProfile = (
   sql`DELETE FROM profiles WHERE id = ${id}`.pipe(Effect.asVoid, Effect.mapError(toStoreError))
 
 // One default per provider: the one statement sets the flag on this profile and clears it on every other
-export const markDefault = (
+// A profile that is gone by now changes nothing, so the provider never loses its default to it
+const markDefault = (
   sql: SqlClient.SqlClient,
   providerId: string,
   id: string,
 ): Effect.Effect<void, StoreError> =>
-  sql`UPDATE profiles SET is_default = (id = ${id}) WHERE provider_id = ${providerId}`.pipe(
+  sql`UPDATE profiles SET is_default = (id = ${id}) WHERE provider_id = ${providerId}
+    AND EXISTS (SELECT 1 FROM profiles WHERE id = ${id} AND provider_id = ${providerId})`.pipe(
     Effect.asVoid,
     Effect.mapError(toStoreError),
   )
+
+// A transaction's own failure is the store's
+const inTransaction = <Value, Failure>(
+  sql: SqlClient.SqlClient,
+  work: Effect.Effect<Value, Failure>,
+): Effect.Effect<Value, Failure | StoreError> =>
+  sql
+    .withTransaction(work)
+    .pipe(Effect.catchTag('SqlError', (failure) => Effect.fail(toStoreError(failure))))
 
 export const makeDefault = (
   sql: SqlClient.SqlClient,
   id: string,
 ): Effect.Effect<void, ProfileError | StoreError> =>
-  Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id))
+  inTransaction(
+    sql,
+    Effect.flatMap(requireProfile(sql, id), (profile) => markDefault(sql, profile.providerId, id)),
+  )
+
+// A profile just claimed becomes the default of its provider when asked to, or when the provider has none, decided in one transaction
+// What it answers is the flag as stored once that is done: a removal in between may have made the profile the default, or taken it away
+export const settleDefault = (
+  sql: SqlClient.SqlClient,
+  profile: Profile,
+  asked: boolean,
+): Effect.Effect<boolean, StoreError> =>
+  inTransaction(
+    sql,
+    Effect.gen(function* settlesDefault() {
+      const current = yield* defaultProfileOf(sql, profile.providerId)
+      if (asked || current === undefined) {
+        yield* markDefault(sql, profile.providerId, profile.id)
+      }
+      const stored = yield* loadProfile(sql, profile.id)
+      return stored !== undefined && stored.isDefault
+    }),
+  )
 
 // The sessions under a profile that run or can still resume: every one but a completed session, as a stopped or errored one resumes
 const holdingSessionsOf = (
@@ -2644,7 +2832,7 @@ const holdingSessionsOf = (
 const inUse = (id: string, holding: number): ProfileError =>
   new ProfileError({
     code: 'in_use',
-    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete or remove them first`,
+    reason: `profile "${id}" is in use: ${holding} session(s) still run under it or can resume; complete them first`,
   })
 
 // The default passes to the oldest profile left of the provider, when the removed one held it
@@ -2659,6 +2847,7 @@ const passDefault = (
     : Effect.void
 
 // A session that runs or can resume keeps its profile; the completed ones let go of it, as the store refers to no profile that is gone
+// Its usage snapshots go with it, so a profile added again under the id starts with none
 // The count, the release, the delete and the passing of the default share one transaction: a session created in between cannot slip past, and two removals cannot leave a provider without its default
 export const deleteProfile = (
   sql: SqlClient.SqlClient,
@@ -2674,12 +2863,15 @@ export const deleteProfile = (
         yield* sql`UPDATE sessions SET profile_id = NULL WHERE profile_id = ${id} AND status = 'completed'`.pipe(
           Effect.mapError(toStoreError),
         )
+        yield* sql`DELETE FROM usage_snapshots WHERE profile_id = ${id}`.pipe(
+          Effect.mapError(toStoreError),
+        )
         const deleted = yield* sql<Row>`DELETE FROM profiles WHERE id = ${id} RETURNING *`.pipe(
           Effect.mapError(toStoreError),
           Effect.map(firstProfile),
         )
         if (deleted === undefined) {
-          return yield* missing(id)
+          return yield* missingProfile(id)
         }
         yield* passDefault(sql, deleted)
         return deleted
@@ -3195,7 +3387,7 @@ import { requireProvider } from '../sessions/session-provider.js'
 import { ensureProfileDir, profileDirOf } from './profile-dirs.js'
 import { isProfileName, profileIdOf } from './profile-ids.js'
 import { writeKey } from './profile-keys.js'
-import { claimProfile, defaultProfileOf, forgetProfile, markDefault } from './profile-records.js'
+import { claimProfile, forgetProfile, settleDefault } from './profile-records.js'
 import type { AddProfileInput, Profile, ProfileDeps } from './profile-types.js'
 
 const invalid = (reason: string): ProfileError => new ProfileError({ code: 'invalid', reason })
@@ -3262,6 +3454,7 @@ const claim = (
           ),
   )
 
+// The profile claims its row before the default is decided, which a removal in between cannot then leave the provider without
 // The first profile of a provider becomes its default, and makeDefault moves the default to the new one
 export const addProfile = (
   deps: ProfileDeps,
@@ -3269,24 +3462,21 @@ export const addProfile = (
 ): Effect.Effect<Profile, ProfileError | SessionError | StoreError> =>
   Effect.gen(function* addsProfile() {
     const id = yield* checkedId(deps, input)
-    const first = (yield* defaultProfileOf(deps.sql, input.providerId)) === undefined
-    const profile: Profile = {
+    const claimed: Profile = {
       id,
       providerId: input.providerId,
       name: input.name,
       kind: input.kind,
       configDir:
         input.kind === 'login' ? profileDirOf(deps.home, input.providerId, input.name) : null,
-      isDefault: first || input.makeDefault === true,
+      isDefault: false,
       createdAt: nowIso(),
     }
-    yield* claim(deps, profile, input.apiKey)
-    if (profile.isDefault) {
-      yield* markDefault(deps.sql, profile.providerId, id)
-    }
-    const payload = { profileId: id, providerId: profile.providerId }
+    yield* claim(deps, claimed, input.apiKey)
+    const isDefault = yield* settleDefault(deps.sql, claimed, input.makeDefault === true)
+    const payload = { profileId: id, providerId: claimed.providerId }
     yield* deps.log.publish({ type: 'profile.added', payload })
-    return profile
+    return { ...claimed, isDefault }
   })
 ```
 
@@ -3333,6 +3523,7 @@ const discard = (deps: ProfileDeps, profile: Profile, removal: Removal): Effect.
   })
 
 // The row goes, and the default with it to the next profile, in one transaction; the removal is told once that holds
+// What it kept outside its row is discarded whether or not the telling went through: the profile is gone either way
 export const removeProfile = (
   deps: ProfileDeps,
   id: string,
@@ -3340,8 +3531,9 @@ export const removeProfile = (
 ): Effect.Effect<void, ProfileError | StoreError> =>
   Effect.gen(function* removesProfile() {
     const removed = yield* deleteProfile(deps.sql, id)
-    yield* deps.log.publish({ type: 'profile.removed', payload: { profileId: id } })
-    yield* discard(deps, removed, removal)
+    yield* deps.log
+      .publish({ type: 'profile.removed', payload: { profileId: id } })
+      .pipe(Effect.ensuring(discard(deps, removed, removal)))
   })
 ```
 
@@ -3590,7 +3782,7 @@ import { SessionManager } from '../sessions/session-manager.js'
 import { codeOf, loadedProfiles } from './profile-fixtures.js'
 
 const IN_USE =
-  'profile "fake/work" is in use: 1 session(s) still run under it or can resume; complete or remove them first'
+  'profile "fake/work" is in use: 1 session(s) still run under it or can resume; complete them first'
 
 // The repository of the session goes with the test, so the whole life of the session is one test
 const heldUntilCompleted = Effect.gen(function* heldUntilCompleted() {
@@ -4048,6 +4240,21 @@ it.layer(ApiTestLayer())('GET /api/v1/usage/profiles/:id', (suite) => {
       assert.isString(decoded.observedAt)
     }),
   )
+
+  suite.effect(
+    'answers the snapshot of the nameless login under default, which no profile can be called',
+    () =>
+      Effect.gen(function* readsNameless() {
+        const before = yield* get('/usage/profiles/default')
+        yield* UsageService.use((usage) => usage.record(null, SEEN))
+        const after = yield* get('/usage/profiles/default')
+        assert.deepStrictEqual(
+          [before.status, before.body],
+          [200, { profileId: 'default', rateLimit: {}, observedAt: null }],
+        )
+        assert.containSubset(after.body, { profileId: 'default', rateLimit: SEEN })
+      }),
+  )
 })
 ```
 
@@ -4409,9 +4616,7 @@ describe('bytebureau profiles and the sessions that run under them', () => {
     expect([run.code, held.code, held.stderr]).toStrictEqual([
       3,
       1,
-      expect.stringContaining(
-        '1 session(s) still run under it or can resume; complete or remove them first',
-      ),
+      expect.stringContaining('1 session(s) still run under it or can resume; complete them first'),
     ])
     const released = await releasedAndRemoved(bench)
     expect([released.shown, released.completed, released.codes]).toStrictEqual([
@@ -4455,6 +4660,8 @@ describe('bytebureau profiles in the process of the command', () => {
 })
 
 const TYPED = 'sk-typed-123'
+const KEY_ARGUMENT =
+  'The API key is never an argument: the shell history and the process list keep it, so replace a key you typed there; pass --api-key alone and type it at the prompt, or pipe it on stdin'
 
 describe('bytebureau profiles add and a key typed as an argument', () => {
   it('refuses it before anything is read or sent, never repeating it, and adds nothing', async () => {
@@ -4469,8 +4676,7 @@ describe('bytebureau profiles add and a key typed as an argument', () => {
       env,
     )
     const listed = await runCli(['profiles', 'ls', '--json', NO_DAEMON], env)
-    const refusal =
-      'The API key is never an argument: pass --api-key alone and type it at the prompt, or pipe it on stdin\n'
+    const refusal = `${KEY_ARGUMENT}\n`
     expect([before.code, before.stderr, after.code, after.stderr]).toStrictEqual([
       1,
       refusal,
@@ -4479,6 +4685,19 @@ describe('bytebureau profiles add and a key typed as an argument', () => {
     ])
     expect([before.stdout, after.stdout].join('')).not.toContain(TYPED)
     expect(listedUnder(listed.stdout, 'profiles')).toStrictEqual([])
+  })
+
+  it.each([
+    ['as the value of --api-key=', ['fake', 'key', `--api-key=${TYPED}`]],
+    ['in place of the name', ['fake', TYPED, '--api-key']],
+    ['in place of the provider', [TYPED, 'key']],
+  ])('refuses one typed %s, before anything is read or sent', async (_where, args) => {
+    expect.hasAssertions()
+    const refused = await runCli(['profiles', 'add', ...args, NO_DAEMON], {
+      BYTEBUREAU_HOME: testHome(),
+    })
+    expect([refused.code, refused.stderr]).toStrictEqual([1, `${KEY_ARGUMENT}\n`])
+    expect(refused.stdout).not.toContain(TYPED)
   })
 })
 ```
@@ -4734,7 +4953,7 @@ async function statusAfterAdd(
 const loginHintOf = (status: ProfileStatusDto | undefined): string | undefined =>
   status !== undefined && status.state === 'loggedOut' ? status.hint : undefined
 
-// Once the person says they have logged in, the status is checked again and told
+// Once the person says they have logged in, the status is checked again and told; a check that fails says so
 async function checkedAfterLogin(
   bureau: Bureau,
   id: string,
@@ -4743,8 +4962,12 @@ async function checkedAfterLogin(
   if (wait === undefined || !(await wait())) {
     return
   }
-  const checked = await statusOf(bureau, id)
-  tellStatuses(context.output, checked === undefined ? [] : [checked])
+  try {
+    tellStatuses(context.output, [await bureau.profiles.status(id)])
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    context.output.warn(m.profiles_recheck_failed({ id, reason }))
+  }
 }
 
 // A logged-out profile is told where to log in, and waited for at a terminal; any other status is told as its row
@@ -4777,9 +5000,23 @@ interface KeyRead {
   readonly refusal?: string | undefined
 }
 
-// A positional beyond the provider and the name is a key typed as an argument, which the shell's history and the process list keep
-async function keyRead(args: KeyArgs, positionals: number): Promise<KeyRead> {
-  if (positionals > 2) {
+// A key typed as an argument stays in the shell's history: a third positional, an --api-key=<value> citty drops, an sk- provider or name
+const typedKey = (args: KeyArgs, positionals: number, rawArgs: readonly string[]): boolean => {
+  const end = rawArgs.indexOf('--')
+  const flags = end === -1 ? rawArgs : rawArgs.slice(0, end)
+  return (
+    positionals > 2 ||
+    flags.some((arg) => /^--api-?key=/iu.test(arg)) ||
+    [args.provider, args.name].some((word) => word.startsWith('sk-'))
+  )
+}
+
+async function keyRead(
+  args: KeyArgs,
+  positionals: number,
+  rawArgs: readonly string[],
+): Promise<KeyRead> {
+  if (typedKey(args, positionals, rawArgs)) {
     return { refusal: m.profiles_key_argument() }
   }
   if (!args['api-key']) {
@@ -4795,10 +5032,10 @@ export const addCommand = defineCommand({
     description: 'Add a profile: a login directory, or an API key read from the prompt or stdin',
   },
   args: ADD_ARGS,
-  async run({ args }) {
+  async run({ args, rawArgs }) {
     const context = processContext(args)
     const flags = bureauFlags(args)
-    const { apiKey, refusal } = await keyRead(args, args._.length)
+    const { apiKey, refusal } = await keyRead(args, args._.length, rawArgs)
     if (refusal !== undefined) {
       context.output.warn(refusal)
       process.exitCode = 1
@@ -4824,6 +5061,7 @@ import type { ProfileStatusDto } from '@bytebureau/protocol'
 import { defineCommand } from 'citty'
 import type { Bureau } from '../bureau/bureau.js'
 import { bureauFlags, globalArgs, processContext } from '../context.js'
+import { mapLimited } from '../limited.js'
 import { profileRows, profileStatusRows } from '../render/rows.js'
 import { table } from '../render/tables.js'
 import { addCommand } from './profiles-add.js'
@@ -4906,18 +5144,19 @@ async function profileIds(bureau: Bureau, id: string | undefined): Promise<reado
   return profiles.map((profile) => profile.id)
 }
 
-// Asked side by side; a status that fails refuses the command, as one a provider cannot give is unknown already
+// A check may start the provider's own agent for a while, a claude for up to 20 s: two at a time keep the machine usable
+const STATUS_LANES = 2
+
+// A status that fails refuses the command, as one a provider cannot give is unknown already
 async function statusesOf(
   bureau: Bureau,
   id: string | undefined,
 ): Promise<readonly ProfileStatusDto[]> {
   const ids = await profileIds(bureau, id)
-  const statuses = await Promise.all(
-    ids.map(async (each) => {
-      const checked = await bureau.profiles.status(each)
-      return checked
-    }),
-  )
+  const statuses = await mapLimited(ids, STATUS_LANES, async (each) => {
+    const checked = await bureau.profiles.status(each)
+    return checked
+  })
   return statuses
 }
 
@@ -4976,6 +5215,7 @@ import { tellAdded } from './profiles-add.js'
 const HINT = 'CLAUDE_CONFIG_DIR=/home/me/.bytebureau/profiles/fake/work claude /login'
 const LOGGED_OUT: ProfileStatusDto = { ...PROFILE_STATUS, state: 'loggedOut', hint: HINT }
 const ADDED_LOGIN = `Profile fake/work added. Log in with: ${HINT}`
+const STORE_DOWN = problemError(503, 'store_unavailable', 'the store is unavailable')
 
 interface Statuses {
   readonly bureau: Bureau
@@ -4993,6 +5233,21 @@ function answering(...statuses: ProfileStatusDto[]): Statuses {
     return statuses[asked.length - 1] ?? PROFILE_STATUS
   }
   return { bureau: { ...bureau, profiles: { ...bureau.profiles, status } }, asked }
+}
+
+// A Bureau whose first status is logged out and whose next one fails, as a store that went down meanwhile
+function failingOnRecheck(): Bureau {
+  const { bureau } = scripted([])
+  const state = { calls: 0 }
+  const status = async (): Promise<ProfileStatusDto> => {
+    state.calls += 1
+    await Promise.resolve()
+    if (state.calls > 1) {
+      throw STORE_DOWN
+    }
+    return LOGGED_OUT
+  }
+  return { ...bureau, profiles: { ...bureau.profiles, status } }
 }
 
 const saying = (done: boolean) => async (): Promise<boolean> => {
@@ -5019,6 +5274,20 @@ describe(tellAdded, () => {
     await tellAdded(bureau, PROFILE, { context: contextOf(), wait: saying(true) })
     expect(printed.out()).toStrictEqual([ADDED_LOGIN, 'fake/work  loggedIn  me@example.com'])
     expect(asked).toStrictEqual(['fake/work', 'fake/work'])
+  })
+
+  it('warns when the login cannot be checked again once the person says they have logged in', async () => {
+    expect.hasAssertions()
+    const printed = captureConsole()
+    await tellAdded(failingOnRecheck(), PROFILE, { context: contextOf(), wait: saying(true) })
+    expect([printed.out(), printed.err()]).toStrictEqual([
+      [ADDED_LOGIN],
+      [
+        expect.stringContaining(
+          'The login of fake/work could not be checked again: the store is unavailable (store_unavailable)',
+        ),
+      ],
+    ])
   })
 
   it('checks nothing more when the person does not say they have logged in', async () => {
@@ -5655,7 +5924,7 @@ const EXPORT_ASK = {
         id: '0',
         header: 'Export',
         options: [
-          { id: 'Named (Recommended)', label: 'Named', recommended: true },
+          { id: 'Named', label: 'Named', recommended: true },
           { id: 'Default', label: 'Default', recommended: false },
         ],
       },
@@ -5680,7 +5949,7 @@ describe('the asks of a permission prompt', () => {
     const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
     const [requested] = broker.drain()
     expect(requested).toMatchObject(EXPORT_ASK)
-    broker.answer('req-1', { selected: ['Named (Recommended)'] })
+    broker.answer('req-1', { selected: ['Named'] })
     await expect(pending).resolves.toStrictEqual({
       behavior: 'allow',
       updatedInput: { questions: exportQuestion.questions, answers: { 'Which export?': 'Named' } },
@@ -6079,6 +6348,7 @@ export const mapMessage = (message: SDKMessage, state: MapState): readonly Agent
 `plugins/agent-claude/src/config.ts`:
 
 ```ts
+import { ProviderConfigError } from '@bytebureau/plugin-api'
 import { z } from 'zod'
 
 const SettingSources = z.array(z.enum(['user', 'project', 'local']))
@@ -6096,7 +6366,8 @@ const describeIssue = (issue: z.core.$ZodIssue): string =>
 export const claudeConfigOf = (providerConfig: Readonly<Record<string, unknown>>): ClaudeConfig => {
   const parsed = ClaudeConfigSchema.safeParse(providerConfig)
   if (!parsed.success) {
-    throw new Error(`providers.claude: ${parsed.error.issues.map(describeIssue).join('; ')}`)
+    const issues = parsed.error.issues.map(describeIssue).join('; ')
+    throw new ProviderConfigError(`providers.claude: ${issues}`)
   }
   return parsed.data
 }
@@ -6109,9 +6380,9 @@ export const claudeConfigOf = (providerConfig: Readonly<Record<string, unknown>>
 `plugins/agent-claude/src/options.ts`:
 
 ```ts
-import type { CanUseTool, Options } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, Options, SettingSource } from '@anthropic-ai/claude-agent-sdk'
 import type { CreateSessionRequest } from '@bytebureau/plugin-api'
-import { claudeConfigOf } from './config.js'
+import { claudeConfigOf, type ClaudeConfig } from './config.js'
 import { permissionModeOf } from './permission.js'
 
 export const CLAUDE_CONVENTIONS = [
@@ -6142,6 +6413,18 @@ const envOf = ({ env, profile }: CreateSessionRequest): Record<string, string> =
 export const claudeResumeOf = ({ resume }: CreateSessionRequest): string | undefined =>
   resume !== undefined && resume.providerId === 'claude' ? resume.ref : undefined
 
+const ALL_SOURCES: readonly SettingSource[] = ['user', 'project', 'local']
+
+// What a session of a project the user does not trust tells, in its log and as a warning of the session
+export const UNTRUSTED_SETTINGS =
+  "Claude Code loads the user's settings alone, not the project's .claude settings, hooks or CLAUDE.md: the user configuration does not trust the project (trust.projects)"
+
+// The project's own settings, their hooks among them, and its CLAUDE.md load only for a project the user trusts
+const settingSourcesOf = (
+  { trust }: CreateSessionRequest,
+  config: ClaudeConfig,
+): SettingSource[] => (trust.project ? [...(config.settingSources ?? ALL_SOURCES)] : ['user'])
+
 const appendOf = (systemPrompt: string): string =>
   systemPrompt === '' ? CLAUDE_CONVENTIONS : `${systemPrompt}\n\n${CLAUDE_CONVENTIONS}`
 
@@ -6171,7 +6454,7 @@ export const optionsOf = ({
     includePartialMessages: true,
     permissionMode: permissionModeOf(employee.permissionMode),
     env: envOf(request),
-    settingSources: config.settingSources ?? ['user', 'project', 'local'],
+    settingSources: settingSourcesOf(request, config),
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
     ...(resume === undefined ? {} : { resume }),
     abortController: abort,
@@ -6206,7 +6489,7 @@ import type {
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
 import { mapMessage, measuredPctOf, newMapState, unreadResult, type MapState } from './mapping.js'
-import { claudeResumeOf, optionsOf } from './options.js'
+import { claudeResumeOf, optionsOf, UNTRUSTED_SETTINGS } from './options.js'
 import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
 import { withinLimit } from './within-limit.js'
@@ -6219,7 +6502,7 @@ const reasonOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
 // One query spans the session: prompts are user messages pushed into its input, its messages become the events
-// A follow-up while a turn runs steers it, as the SDK queues user messages
+// No follow-up reaches a running turn: the kernel refuses a prompt while one runs (409), though the SDK would queue it
 export class ClaudeSession implements AgentSession {
   private readonly input = new Queue<SDKUserMessage>()
   private readonly output = new Queue<AgentEvent>()
@@ -6250,8 +6533,17 @@ export class ClaudeSession implements AgentSession {
       hooks: this.hooks(),
       canUseTool: this.canUseTool,
     }
+    this.untrusted(request)
     this.query = startQuery(deps, { prompt: this.input, options: optionsOf(parts) })
     this.ended = this.read()
+  }
+
+  // A project the user does not trust runs without its own settings, which the session tells first, and logs
+  private untrusted({ trust, sessionId }: CreateSessionRequest): void {
+    if (!trust.project) {
+      this.logger.warn(UNTRUSTED_SETTINGS, { sessionId })
+      this.output.push({ type: 'session.warning', kind: 'trust', message: UNTRUSTED_SETTINGS })
+    }
   }
 
   public get externalRef(): ExternalSessionRef | null {
@@ -6419,7 +6711,9 @@ interface Probe {
 const PROBE_LIMIT_MS = 20_000
 const TOO_SLOW = 'the Claude login check did not answer within 20 s'
 const API_KEY_HINT = 'run a session to check an API-key profile'
-const LOGGED_OUT = /login|auth|credential|unauthorized|unauthorised|401|expired/iu
+// Whole words only, so a proxy's "authorization" or a book's "author" in an unrelated failure is no login error; the SDK throws no typed error for a login
+const LOGGED_OUT =
+  /\b(?:log(?:ged)?[ -]?in|logged[ -]out|auth|authentication(?:_failed)?|unauthorized|unauthorised|401)\b/iu
 // The variables of the daemon the check passes on, the fixed ones of the kernel's allowlist; Claude Code finds a login in the macOS keychain by USER
 const PASSED: ReadonlySet<string> = new Set([
   'PATH',
@@ -6727,9 +7021,16 @@ import type {
   Logger,
   LogLevel,
   ProfileRef,
+  ProjectTrust,
 } from '@bytebureau/plugin-api'
 
 const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000001'
+
+const TRUST_HINT =
+  'the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in /home/dev/.bytebureau/config.json'
+
+// A project the user trusts: its whole section reaches the adapter
+export const TRUSTED: ProjectTrust = { project: true, withheld: [], hint: TRUST_HINT }
 // A key that must never be seen anywhere but in the environment of the agent
 export const CANARY_KEY = 'sk-ant-canary-0000000000000000'
 
@@ -6783,6 +7084,7 @@ export const sessionRequest = (
   employee: employee(),
   profile: loginProfile,
   providerConfig: {},
+  trust: TRUSTED,
   env: { PATH: '/usr/bin', HOME: '/home/dev' },
   signal: new AbortController().signal,
   logger: recordingLogger().logger,
@@ -6846,7 +7148,7 @@ export const rest = async (session: AgentSession): Promise<AgentEvent[]> => {
 `plugins/agent-claude/src/mapping-result.test.ts` (as shipped):
 
 ```ts
-import type { SDKMessage, SDKRateLimitEvent } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKMessage, SDKRateLimitEvent, SDKResultError } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import { mapMessage, newMapState, unreadResult } from './mapping.js'
 import {
@@ -6856,12 +7158,14 @@ import {
   rateLimitedOnOverage,
   resultApiError,
   resultInterrupted,
+  resultMaxTurns,
   resultSuccess,
   textDelta,
 } from './testing/sdk-fixtures.js'
 
 const DELTA = 'message.delta'
 const TURN_END = 'turn.completed'
+const USAGE = 'usage.updated'
 const RESETS_AT = new Date(1_791_100_000 * 1000).toISOString()
 const NO_USAGE = {
   inputTokens: 0,
@@ -6906,7 +7210,7 @@ describe('the end of a turn', () => {
     expect(events.map((event) => event.type)).toStrictEqual([
       'turn.started',
       DELTA,
-      'usage.updated',
+      USAGE,
       TURN_END,
       'turn.started',
       DELTA,
@@ -6986,7 +7290,7 @@ describe('a turn that failed on the API', () => {
     expect.hasAssertions()
     expect(mapMessage(OVERLOADED, newMapState())).toStrictEqual([
       { type: 'session.warning', kind: 'turn_error', message: 'API Error: 529 Overloaded' },
-      { type: 'usage.updated', usage: NO_USAGE },
+      { type: USAGE, usage: NO_USAGE },
       { type: TURN_END, stopReason: 'api_error', usage: NO_USAGE },
     ])
   })
@@ -6995,9 +7299,41 @@ describe('a turn that failed on the API', () => {
     expect.hasAssertions()
     expect(mapMessage(UNNAMED, newMapState())).toMatchObject([
       { type: 'session.warning', message: 'the turn ended on an error' },
-      { type: 'usage.updated' },
+      { type: USAGE },
       { type: TURN_END, stopReason: 'error' },
     ])
+  })
+})
+
+const NO_ERRORS: SDKResultError = {
+  ...resultMaxTurns,
+  subtype: 'error_max_budget_usd',
+  errors: [''],
+}
+
+describe('a turn that ended on an error result', () => {
+  it('warns with the errors the result names, and with its subtype where it names none', () => {
+    expect.hasAssertions()
+    expect(mapMessage(resultMaxTurns, newMapState())).toMatchObject([
+      {
+        type: 'session.warning',
+        kind: 'turn_error',
+        message: 'Reached maximum number of turns (1)',
+      },
+      { type: USAGE },
+      { type: TURN_END, stopReason: 'error_max_turns' },
+    ])
+    expect(mapMessage(NO_ERRORS, newMapState()).at(0)).toStrictEqual({
+      type: 'session.warning',
+      kind: 'turn_error',
+      message: 'the turn ended with error_max_budget_usd',
+    })
+  })
+
+  it('warns of nothing for an interrupt', () => {
+    expect.hasAssertions()
+    const types = mapMessage(resultInterrupted, newMapState()).map((event) => event.type)
+    expect(types).toStrictEqual([USAGE, TURN_END])
   })
 })
 
@@ -7221,22 +7557,32 @@ Semantics (as planned): a provider per preset (`acp:codex` → `codex-acp`, `acp
 
 ```ts
 #!/usr/bin/env node
-// An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does, hello when unset
-// The last three scripts misbehave as real agents can: they refuse the prompt, demand a login, or speak another ACP
-import { spawn } from 'node:child_process'
-import path from 'node:path'
+// An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does (hello when unset), some misbehaving as real agents can
+// The scripts that end the process are here, with the process; the others are in fake-acp-scripts.ts, imported by its .ts name, as Node runs both files unbuilt
 import { Readable, Writable } from 'node:stream'
 import {
   agent,
   ndJsonStream,
   PROTOCOL_VERSION,
   RequestError,
-  type AgentContext,
   type InitializeResponse,
   type PromptResponse,
-  type SessionUpdate,
-  type ToolCall,
 } from '@agentclientprotocol/sdk'
+import {
+  allowed,
+  API_KEY,
+  children,
+  END_TURN,
+  escape,
+  failing,
+  hello,
+  say,
+  slow,
+  state,
+  terminal,
+  update,
+  type Turn,
+} from './fake-acp-scripts.ts'
 
 export type FakeScript =
   | 'hello'
@@ -7253,19 +7599,9 @@ export type FakeScript =
   | 'children'
   | 'quick-exit'
   | 'auth-lapsed'
-
-interface Turn {
-  readonly client: AgentContext
-  readonly sessionId: string
-}
+  | 'ask-again'
 
 const SCRIPT = process.env['BYTEBUREAU_FAKE_ACP_SCRIPT'] ?? 'hello'
-const API_KEY = process.env['FAKE_ACP_API_KEY']
-const HELLO = "export function hello(): string {\n  return 'hello'\n}\n"
-// A command that prints ok and the names of the variables of its environment that look like a key or a token
-const LIST_KEYS =
-  'console.log(["ok", ...Object.keys(process.env).filter((name) => /KEY|TOKEN/.test(name))].join(" "))'
-const END_TURN: PromptResponse = { stopReason: 'end_turn' }
 const INITIALIZED: InitializeResponse = {
   protocolVersion: PROTOCOL_VERSION,
   agentCapabilities: {
@@ -7274,117 +7610,12 @@ const INITIALIZED: InitializeResponse = {
   },
   authMethods: [],
 }
-const WRITE: ToolCall = {
-  toolCallId: 'call-1',
-  title: 'Write src/hello.ts',
-  kind: 'edit',
-  status: 'pending',
-  rawInput: { path: 'src/hello.ts' },
-}
-const READ_OUTSIDE: ToolCall = {
-  toolCallId: 'call-2',
-  title: 'Read ../outside.txt',
-  kind: 'read',
-  status: 'pending',
-}
-
-// The workspace the client named, and the cancel of the running prompt
-const state = { cwd: '', cancelled: false, cancel: Promise.withResolvers<null>() }
-
-const update = async ({ client, sessionId }: Turn, payload: SessionUpdate): Promise<void> => {
-  await client.notify('session/update', { sessionId, update: payload })
-}
-
-const say = async (turn: Turn, text: string): Promise<void> => {
-  await update(turn, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
-}
-
-const messageOf = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error)
 
 // The last word goes to stderr before the agent dies, as a real agent's would
 const die = (code: number, lastWord: string): void => {
   process.stderr.write(`${lastWord}\n`, () => {
     process.exit(code)
   })
-}
-
-const allowed = async ({ client, sessionId }: Turn): Promise<boolean> => {
-  const { outcome } = await client.request('session/request_permission', {
-    sessionId,
-    toolCall: WRITE,
-    options: [
-      { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
-      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
-    ],
-  })
-  return outcome.outcome === 'selected' && outcome.optionId === 'allow'
-}
-
-// Writes src/hello.ts through the client and reports the tool with the usage of the turn
-const write = async (turn: Turn): Promise<void> => {
-  await turn.client.request('fs/write_text_file', {
-    sessionId: turn.sessionId,
-    path: path.join(state.cwd, 'src', 'hello.ts'),
-    content: HELLO,
-  })
-  await update(turn, {
-    sessionUpdate: 'tool_call_update',
-    toolCallId: WRITE.toolCallId,
-    status: 'completed',
-    rawOutput: 'written',
-    _meta: { 'bytebureau.usage': { inputTokens: 7, outputTokens: 3 } },
-  })
-}
-
-const failedTool = async (turn: Turn, toolCallId: string, rawOutput: string): Promise<void> => {
-  await update(turn, { sessionUpdate: 'tool_call_update', toolCallId, status: 'failed', rawOutput })
-}
-
-// Asks to write src/hello.ts, and writes it only when allowed; a cancelled turn ends as cancelled
-const hello = async (turn: Turn): Promise<PromptResponse> => {
-  await update(turn, { sessionUpdate: 'tool_call', ...WRITE })
-  const answered = await allowed(turn)
-  const refusal = state.cancelled ? 'cancelled' : 'denied'
-  await (answered ? write(turn) : failedTool(turn, WRITE.toolCallId, refusal))
-  return state.cancelled ? { stopReason: 'cancelled' } : END_TURN
-}
-
-// Runs until the client cancels the prompt
-const slow = async (): Promise<PromptResponse> => {
-  await state.cancel.promise
-  return { stopReason: 'cancelled' }
-}
-
-// Reads a file one level above the workspace and tells what the client answered
-const escape = async (turn: Turn): Promise<PromptResponse> => {
-  const target = `${state.cwd}/../outside.txt`
-  await update(turn, { sessionUpdate: 'tool_call', ...READ_OUTSIDE, rawInput: { path: target } })
-  try {
-    const { content } = await turn.client.request('fs/read_text_file', {
-      sessionId: turn.sessionId,
-      path: target,
-    })
-    await say(turn, `outside.txt says ${content}`)
-  } catch (error) {
-    await failedTool(turn, READ_OUTSIDE.toolCallId, messageOf(error))
-  }
-  return END_TURN
-}
-
-// Runs a command in a terminal of the client and says what it printed
-const terminal = async (turn: Turn): Promise<PromptResponse> => {
-  const { client, sessionId } = turn
-  const { terminalId } = await client.request('terminal/create', {
-    sessionId,
-    command: process.execPath,
-    args: ['-e', LIST_KEYS],
-  })
-  await client.request('terminal/wait_for_exit', { sessionId, terminalId })
-  const { output } = await client.request('terminal/output', { sessionId, terminalId })
-  await client.request('terminal/release', { sessionId, terminalId })
-  await say(turn, `terminal said ${output.trim()}`)
-  return END_TURN
 }
 
 // Dies in the middle of the turn; its last word names the key it was given, which the client must not repeat
@@ -7394,26 +7625,6 @@ const crashMidTurn = async (): Promise<PromptResponse> => {
   return never
 }
 
-// Answers the prompt with the error once it has said hello
-const failing = (failure: Error) => async (): Promise<PromptResponse> => {
-  await Promise.resolve()
-  throw failure
-}
-
-// Starts a process of its own and a terminal of the client, both running until killed, then runs until cancelled
-const children = async (turn: Turn): Promise<PromptResponse> => {
-  const forever = ['-e', 'setInterval(() => {}, 1000)']
-  const own = spawn(process.execPath, forever, { stdio: 'ignore' })
-  const { terminalId } = await turn.client.request('terminal/create', {
-    sessionId: turn.sessionId,
-    command: process.execPath,
-    args: forever,
-  })
-  await say(turn, `children ${String(own.pid)} ${terminalId}`)
-  const ended = await slow()
-  return ended
-}
-
 // Answers and exits at once, its answer and its exit reaching the client together
 const quickExit = async (): Promise<PromptResponse> => {
   setImmediate(() => {
@@ -7421,6 +7632,16 @@ const quickExit = async (): Promise<PromptResponse> => {
   })
   await Promise.resolve()
   return END_TURN
+}
+
+// Holds on through a SIGINT, asks again once its ask is cancelled, and answers and leaves once that one is answered
+const askAgain = async (turn: Turn): Promise<PromptResponse> => {
+  process.on('SIGINT', () => {
+    state.cancelled = true
+  })
+  await allowed(turn)
+  await allowed(turn)
+  return quickExit()
 }
 
 // Ends the turn as hello does, then dies while idle
@@ -7447,6 +7668,7 @@ const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptRespons
   'no-load': hello,
   children,
   'quick-exit': quickExit,
+  'ask-again': askAgain,
   // A login lost by the time of the prompt
   'auth-lapsed': failing(RequestError.authRequired()),
 }
@@ -7462,8 +7684,7 @@ const prompt = async (turn: Turn): Promise<PromptResponse> => {
     content: { type: 'text', text: 'thinking' },
   })
   await say(turn, `hello; api key ${API_KEY === undefined ? 'absent' : 'present'}`)
-  const play = SCRIPTS[isScript(SCRIPT) ? SCRIPT : 'hello']
-  const response = await play(turn)
+  const response = await SCRIPTS[isScript(SCRIPT) ? SCRIPT : 'hello'](turn)
   return response
 }
 
@@ -7522,7 +7743,7 @@ process.exit(0)
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { until } from './testing/session-harness.js'
+import { rest, until } from './testing/session-harness.js'
 import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
 
 const HELLO_TYPES = [
@@ -7643,6 +7864,24 @@ describe('a turn the agent refuses', () => {
       kind: 'turn_error',
       message: 'Authentication required; log in with: fake-agent login',
     })
+  })
+})
+
+describe('an ACP agent that asks while its session closes', () => {
+  it('is answered cancelled at once, and no ask is told after the session began to close', async () => {
+    expect.hasAssertions()
+    const session = await sessionOf({
+      workspace: { path: workspaceOf() },
+      providerConfig: customOf('ask-again'),
+    })
+    const asked = until(session, 'ask.requested')
+    const prompting = session.prompt({ text: 'Create src/hello.ts' })
+    await asked
+    await session.close()
+    await prompting
+    const after = await rest(session)
+    const types = after.map((event) => event.type)
+    expect([types.includes('ask.requested'), types.at(-1)]).toStrictEqual([false, 'session.closed'])
   })
 })
 ```
@@ -8097,7 +8336,7 @@ export interface Setup {
 }
 
 // What a start may take when the kernel does not bound it, as for an agent started again for a prompt
-export const START_LIMIT_MS = 60_000
+const START_LIMIT_MS = 60_000
 const AUTH_REQUIRED = -32_000
 const EXIT_WAIT_MS = 2000
 // A variable named as a key or a token is the agent's to hold, never a terminal's
@@ -8214,6 +8453,7 @@ const limitText = (limitMs: number): string =>
   limitMs % 1000 === 0 ? `${limitMs / 1000} s` : `${limitMs} ms`
 
 // A start within its time; one that is not done by then is killed with its group and refused as too slow
+// The refusal waits for the kill to land, so the ladder that ends a failed start finds the agent gone and sends no SIGINT after the SIGKILL
 const inTime = async (
   agent: AgentProcess,
   started: Promise<Running>,
@@ -8222,6 +8462,7 @@ const inTime = async (
   const running = await withinLimit(started, limitMs)
   if (running === null) {
     killAll(agent)
+    await withinLimit(agent.exited, EXIT_WAIT_MS)
     throw new RefusedAgentError(`the agent did not start a session within ${limitText(limitMs)}`)
   }
   return running
@@ -8236,6 +8477,12 @@ interface Starting {
 
 // What a session asks of a start; the signal is its own
 export type Launching = Omit<Starting, 'signal'>
+
+// An agent started again for a session gets the start limit, and the session the one before had, to load
+export const relaunchOf = (setup: Setup, ref: string | undefined): Launching => ({
+  limitMs: setup.deps.startLimitMs ?? START_LIMIT_MS,
+  resume: ref,
+})
 
 // An agent of the preset in an ACP session: loaded when the session to resume is known, else new; one that fails is ended, and says why
 export const startAgent = async (
@@ -8386,10 +8633,17 @@ import type {
   Logger,
   LogLevel,
   ProfileRef,
+  ProjectTrust,
 } from '@bytebureau/plugin-api'
 import { onTestFinished } from 'vitest'
 
 const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000007'
+
+export const TRUST_HINT =
+  'the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in /home/dev/.bytebureau/config.json'
+
+// A project the user trusts: its whole section reaches the adapter
+export const TRUSTED: ProjectTrust = { project: true, withheld: [], hint: TRUST_HINT }
 // A key that must never be seen anywhere but in the environment of the agent
 export const CANARY_KEY = 'sk-acp-canary-0000000000000000'
 
@@ -8452,6 +8706,7 @@ export const sessionRequest = (
   employee,
   profile: loginProfile,
   providerConfig: {},
+  trust: TRUSTED,
   env: { PATH: '/usr/bin:/bin', HOME: '/home/dev' },
   signal: new AbortController().signal,
   logger: recordingLogger().logger,
@@ -8792,7 +9047,7 @@ describe('the kill ladder', () => {
 
 ```ts
 import path from 'node:path'
-import type { AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
+import type { AgentSession, CreateSessionRequest, ProfileRef } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import type { PresetId } from './presets.js'
 import { AcpAgentProvider } from './provider.js'
@@ -8898,6 +9153,21 @@ describe('a start that cannot go on', () => {
     })
     await expect(session).rejects.toThrow(`the workspace ${missing} does not exist`)
     expect(run.spawned).toStrictEqual([])
+  })
+})
+
+describe('an agent that asks for the login of a login profile', () => {
+  it("is refused with the login command run in the profile's directory", async () => {
+    expect.hasAssertions()
+    const configDir = path.join(tempDir('bb-acp-home-'), 'my home')
+    const profile: ProfileRef = {
+      id: 'acp:codex/home',
+      providerId: 'acp:codex',
+      kind: 'login',
+      configDir,
+    }
+    const { session } = starting('codex', fakeAgentCommand('auth-required'), { profile })
+    await expect(session).rejects.toThrow(`; log in with: CODEX_HOME='${configDir}' codex login`)
   })
 })
 ```
@@ -9249,12 +9519,26 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
 import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
+import { startDaemonProcess } from '../testing/daemon.js'
 import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
 import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
-import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
+import { commitExecutable, configureHome, trustProject } from '../testing/temp-repo.js'
+import { PROMPT, sessionIdIn, workbench, worktreesOf } from '../testing/workbench.js'
+
+const CUSTOM = 'acp:custom'
 
 // A run on the custom ACP agent through the daemon of the home, its events as JSON lines
-const ON_CUSTOM = ['--provider', 'acp:custom', '--json']
+const ON_CUSTOM = ['--provider', CUSTOM, '--json']
+
+// A run of a prompt of one word on the provider, which the tests that use it expect refused
+const runOn = (repo: string, provider: string): string[] => [
+  'run',
+  'x',
+  '--project',
+  repo,
+  '--provider',
+  provider,
+]
 
 // What a run prints once the agent asks for its permission
 const ASKED = '"type":"ask.requested"'
@@ -9265,16 +9549,17 @@ const CODEX_HINTS =
 
 const CANARY = 'sk-acp-canary-5d81e0b4'
 
-// A daemon for the home of a test, and a repository whose project file configures the providers
+// A daemon for the home of a test, and a repository whose project file configures the providers, trusted by the home
 async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Bench> {
   const bench = await benchWithDaemon()
   writeConfig(bench.repo, { providers })
+  trustProject(bench.home, bench.repo)
   return bench
 }
 
 // The custom provider runs the fake ACP agent, whose hello script asks one permission and then writes src/hello.ts
 async function onTheFake(): Promise<Bench> {
-  const bench = await benchOn({ 'acp:custom': fakeAcpPreset() })
+  const bench = await benchOn({ [CUSTOM]: fakeAcpPreset() })
   return bench
 }
 
@@ -9371,22 +9656,80 @@ describe('bytebureau run on an ACP agent that waits for a permission', () => {
 describe('bytebureau run on an ACP agent that cannot be started', () => {
   it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
     expect.hasAssertions()
-    const { repo, env, daemon } = await benchWithDaemon()
-    const withoutCommand = await runCli(
-      ['run', 'x', '--project', repo, '--provider', 'acp:custom'],
-      env,
-    )
+    const { repo, home, env, daemon } = await benchWithDaemon()
+    const withoutCommand = await runCli(runOn(repo, CUSTOM), env)
+    // The project is trusted, so its override runs, never the codex-acp the machine may have installed
+    trustProject(home, repo)
     writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
-    const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
+    const missing = await runCli(runOn(repo, 'acp:codex'), env)
     expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
       4,
-      'providers["acp:custom"].command is not configured (provider_crash)\n',
+      `the project's configuration: providers["acp:custom"].command is not configured (config_invalid)\n`,
     ])
     expect([missing.code, missing.stderr]).toStrictEqual([
       4,
       `codex-acp-definitely-missing is not installed; ${CODEX_HINTS} (provider_crash)\n`,
     ])
     await daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent that a cloned project names', () => {
+  it('refuses a command the user configuration does not trust with exit 4, the key and the way to trust it', async () => {
+    expect.hasAssertions()
+    const bench = await benchWithDaemon()
+    writeConfig(bench.repo, { providers: { [CUSTOM]: fakeAcpPreset() } })
+    const refused = await runCli(runOn(bench.repo, CUSTOM), bench.env)
+    expect([refused.code, refused.stderr]).toStrictEqual([
+      4,
+      `${path.join(bench.repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ${path.join(bench.home, 'config.json')} (config_invalid)\n`,
+    ])
+    expect(existsSync(helloIn(bench.repo))).toBe(false)
+    await bench.daemon.stop()
+  })
+})
+
+// What the kernel tells, in its log and as a warning of the session, of the environment of the project it did not use
+const WITHHELD_ENV = /not using providers\[\\?"acp:custom\\?"\]\.env of the project /u
+
+// The payloads of the warnings a run printed, as text
+const trustWarningsOf = (run: CliResult): readonly string[] =>
+  jsonLines(run.stdout)
+    .filter((event) => event['type'] === 'session.warning')
+    .map((event) => JSON.stringify(event['payload']))
+
+// A binary of the project under the name of a command the user trusts: it marks the worktree it runs in and fails
+const IMPOSTOR = '#!/bin/sh\necho ran > impostor-ran\nexit 1\n'
+
+// A daemon whose home trusts bun, and a repository that names bun with a PATH of its own, holding its own bin/bun
+// The daemon runs in the repository with a relative bin first on its PATH: a lookup of bun that took a relative entry would find the impostor
+async function onTrustedBun(): Promise<Bench> {
+  const { repo, home } = workbench()
+  configureHome(home, { trust: { commands: ['bun'] } })
+  commitExecutable(repo, 'bin/bun', IMPOSTOR)
+  const preset = fakeAcpPreset()
+  writeConfig(repo, {
+    providers: { [CUSTOM]: { ...preset, env: { ...preset.env, PATH: 'bin' } } },
+  })
+  const PATH = ['bin', process.env['PATH'] ?? ''].join(path.delimiter)
+  const daemon = await startDaemonProcess(home, ['--port', '0'], { cwd: repo, env: { PATH } })
+  return { repo, home, env: { BYTEBUREAU_HOME: home }, daemon }
+}
+
+describe('bytebureau run on a command the user trusts and the environment a project names', () => {
+  it("runs the binary the daemon finds, never the project's own under its name, and says it did not use the environment", async () => {
+    expect.hasAssertions()
+    const bench = await onTrustedBun()
+    const run = await runCli(
+      ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM, '--yes'],
+      bench.env,
+    )
+    const hello = helloIn(bench.repo)
+    const impostor = path.join(path.dirname(hello), '..', 'impostor-ran')
+    expect([run.code, existsSync(hello), existsSync(impostor)]).toStrictEqual([0, true, false])
+    expect(trustWarningsOf(run)).toStrictEqual([expect.stringMatching(WITHHELD_ENV)])
+    expect(bench.daemon.stderr()).toMatch(WITHHELD_ENV)
+    await bench.daemon.stop()
   })
 })
 
@@ -9477,12 +9820,26 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { firstField, jsonLines, listedUnder } from '../testing/json-lines.js'
 import { fakeAcpPreset, writeConfig } from '../testing/repo-config.js'
+import { startDaemonProcess } from '../testing/daemon.js'
 import { runCli, runCliWithStdin, type CliResult } from '../testing/run-cli.js'
 import { asksWaiting, benchWithDaemon, untilStatus, type Bench } from '../testing/session-bench.js'
-import { PROMPT, sessionIdIn, worktreesOf } from '../testing/workbench.js'
+import { commitExecutable, configureHome, trustProject } from '../testing/temp-repo.js'
+import { PROMPT, sessionIdIn, workbench, worktreesOf } from '../testing/workbench.js'
+
+const CUSTOM = 'acp:custom'
 
 // A run on the custom ACP agent through the daemon of the home, its events as JSON lines
-const ON_CUSTOM = ['--provider', 'acp:custom', '--json']
+const ON_CUSTOM = ['--provider', CUSTOM, '--json']
+
+// A run of a prompt of one word on the provider, which the tests that use it expect refused
+const runOn = (repo: string, provider: string): string[] => [
+  'run',
+  'x',
+  '--project',
+  repo,
+  '--provider',
+  provider,
+]
 
 // What a run prints once the agent asks for its permission
 const ASKED = '"type":"ask.requested"'
@@ -9493,16 +9850,17 @@ const CODEX_HINTS =
 
 const CANARY = 'sk-acp-canary-5d81e0b4'
 
-// A daemon for the home of a test, and a repository whose project file configures the providers
+// A daemon for the home of a test, and a repository whose project file configures the providers, trusted by the home
 async function benchOn(providers: Readonly<Record<string, unknown>>): Promise<Bench> {
   const bench = await benchWithDaemon()
   writeConfig(bench.repo, { providers })
+  trustProject(bench.home, bench.repo)
   return bench
 }
 
 // The custom provider runs the fake ACP agent, whose hello script asks one permission and then writes src/hello.ts
 async function onTheFake(): Promise<Bench> {
-  const bench = await benchOn({ 'acp:custom': fakeAcpPreset() })
+  const bench = await benchOn({ [CUSTOM]: fakeAcpPreset() })
   return bench
 }
 
@@ -9599,22 +9957,80 @@ describe('bytebureau run on an ACP agent that waits for a permission', () => {
 describe('bytebureau run on an ACP agent that cannot be started', () => {
   it('refuses a custom preset without a command, and a vendor agent that is not installed, with exit 4 and the hint', async () => {
     expect.hasAssertions()
-    const { repo, env, daemon } = await benchWithDaemon()
-    const withoutCommand = await runCli(
-      ['run', 'x', '--project', repo, '--provider', 'acp:custom'],
-      env,
-    )
+    const { repo, home, env, daemon } = await benchWithDaemon()
+    const withoutCommand = await runCli(runOn(repo, CUSTOM), env)
+    // The project is trusted, so its override runs, never the codex-acp the machine may have installed
+    trustProject(home, repo)
     writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
-    const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
+    const missing = await runCli(runOn(repo, 'acp:codex'), env)
     expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
       4,
-      'providers["acp:custom"].command is not configured (provider_crash)\n',
+      `the project's configuration: providers["acp:custom"].command is not configured (config_invalid)\n`,
     ])
     expect([missing.code, missing.stderr]).toStrictEqual([
       4,
       `codex-acp-definitely-missing is not installed; ${CODEX_HINTS} (provider_crash)\n`,
     ])
     await daemon.stop()
+  })
+})
+
+describe('bytebureau run on an ACP agent that a cloned project names', () => {
+  it('refuses a command the user configuration does not trust with exit 4, the key and the way to trust it', async () => {
+    expect.hasAssertions()
+    const bench = await benchWithDaemon()
+    writeConfig(bench.repo, { providers: { [CUSTOM]: fakeAcpPreset() } })
+    const refused = await runCli(runOn(bench.repo, CUSTOM), bench.env)
+    expect([refused.code, refused.stderr]).toStrictEqual([
+      4,
+      `${path.join(bench.repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ${path.join(bench.home, 'config.json')} (config_invalid)\n`,
+    ])
+    expect(existsSync(helloIn(bench.repo))).toBe(false)
+    await bench.daemon.stop()
+  })
+})
+
+// What the kernel tells, in its log and as a warning of the session, of the environment of the project it did not use
+const WITHHELD_ENV = /not using providers\[\\?"acp:custom\\?"\]\.env of the project /u
+
+// The payloads of the warnings a run printed, as text
+const trustWarningsOf = (run: CliResult): readonly string[] =>
+  jsonLines(run.stdout)
+    .filter((event) => event['type'] === 'session.warning')
+    .map((event) => JSON.stringify(event['payload']))
+
+// A binary of the project under the name of a command the user trusts: it marks the worktree it runs in and fails
+const IMPOSTOR = '#!/bin/sh\necho ran > impostor-ran\nexit 1\n'
+
+// A daemon whose home trusts bun, and a repository that names bun with a PATH of its own, holding its own bin/bun
+// The daemon runs in the repository with a relative bin first on its PATH: a lookup of bun that took a relative entry would find the impostor
+async function onTrustedBun(): Promise<Bench> {
+  const { repo, home } = workbench()
+  configureHome(home, { trust: { commands: ['bun'] } })
+  commitExecutable(repo, 'bin/bun', IMPOSTOR)
+  const preset = fakeAcpPreset()
+  writeConfig(repo, {
+    providers: { [CUSTOM]: { ...preset, env: { ...preset.env, PATH: 'bin' } } },
+  })
+  const PATH = ['bin', process.env['PATH'] ?? ''].join(path.delimiter)
+  const daemon = await startDaemonProcess(home, ['--port', '0'], { cwd: repo, env: { PATH } })
+  return { repo, home, env: { BYTEBUREAU_HOME: home }, daemon }
+}
+
+describe('bytebureau run on a command the user trusts and the environment a project names', () => {
+  it("runs the binary the daemon finds, never the project's own under its name, and says it did not use the environment", async () => {
+    expect.hasAssertions()
+    const bench = await onTrustedBun()
+    const run = await runCli(
+      ['run', PROMPT, '--project', bench.repo, ...ON_CUSTOM, '--yes'],
+      bench.env,
+    )
+    const hello = helloIn(bench.repo)
+    const impostor = path.join(path.dirname(hello), '..', 'impostor-ran')
+    expect([run.code, existsSync(hello), existsSync(impostor)]).toStrictEqual([0, true, false])
+    expect(trustWarningsOf(run)).toStrictEqual([expect.stringMatching(WITHHELD_ENV)])
+    expect(bench.daemon.stderr()).toMatch(WITHHELD_ENV)
+    await bench.daemon.stop()
   })
 })
 
@@ -9944,13 +10360,13 @@ export const tell = (line: string): void => {
   console.error(`smoke: ${line}`)
 }
 
-// A home the CLI may run on: a directory under the temporary one that is still there
-// An unset or empty BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
+// A home the CLI may run on: a directory under the temporary one that is still there, as its .. and links resolve
+// An unset BYTEBUREAU_HOME is ~/.bytebureau to the CLI, so it never is one
 export const isThrowawayHome = (home: string | undefined, root: string = TEMP_ROOT): boolean =>
   home !== undefined &&
   path.isAbsolute(home) &&
-  home.startsWith(`${root}${path.sep}`) &&
-  existsSync(home)
+  existsSync(home) &&
+  realpathSync(path.resolve(home)).startsWith(`${root}${path.sep}`)
 
 // The environment of a command of the CLI, which runs on the smoke's own throwaway home or not at all
 const cliEnv = (smoke: Throwaway, args: readonly string[]): Throwaway['env'] => {
@@ -10161,14 +10577,27 @@ export const stopperOf =
     }
   }
 
-export function heldSignals(smoke: Throwaway): () => void {
+// The signals are held while the smoke runs; an abort of its caller stops it as a SIGTERM does, so a bounded caller leaves nothing
+export function heldSignals(smoke: Throwaway, abort?: AbortSignal): () => void {
   const stop = stopperOf(smoke)
+  const aborted = (): void => {
+    stop('SIGTERM')
+  }
   for (const signal of HELD) {
     process.on(signal, stop)
+  }
+  if (abort !== undefined) {
+    abort.addEventListener('abort', aborted, { once: true })
+  }
+  if (abort !== undefined && abort.aborted) {
+    aborted()
   }
   return () => {
     for (const signal of HELD) {
       process.off(signal, stop)
+    }
+    if (abort !== undefined) {
+      abort.removeEventListener('abort', aborted)
     }
   }
 }
@@ -10349,9 +10778,13 @@ const flagsOf = (plan: SmokePlan, choice: ProfileChoice): readonly string[] => [
 ]
 
 // The steps on a throwaway home, whose daemon is stopped and which is removed whatever happens
-async function onThrowaway(plan: SmokePlan, choice: ProfileChoice): Promise<number> {
+async function onThrowaway(
+  plan: SmokePlan,
+  choice: ProfileChoice,
+  abort: AbortSignal | undefined,
+): Promise<number> {
   const smoke: Smoke = { ...throwaway(), plan, flags: flagsOf(plan, choice) }
-  const release = heldSignals(smoke)
+  const release = heldSignals(smoke, abort)
   try {
     prepare(smoke)
     return await steps(smoke, choice)
@@ -10361,14 +10794,14 @@ async function onThrowaway(plan: SmokePlan, choice: ProfileChoice): Promise<numb
   }
 }
 
-// A run to its end, then a stop, resume and prompt of a second session
-export async function runSmoke(plan: SmokePlan): Promise<number> {
+// A run to its end, then a stop, resume and prompt of a second session; an abort stops it as a SIGTERM does
+export async function runSmoke(plan: SmokePlan, abort?: AbortSignal): Promise<number> {
   const choice = profileChoiceOf(plan)
   if (choice.kind === 'refused') {
     tell(choice.reason)
     return 1
   }
-  const code = await onThrowaway(plan, choice)
+  const code = await onThrowaway(plan, choice, abort)
   return code
 }
 ```
@@ -10586,8 +11019,8 @@ describe(reportOf, () => {
 `scripts/smoke-run.test.ts` (as shipped):
 
 ```ts
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { devNull, homedir, tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest'
 import { recordOf, type SmokePlan } from './smoke-agent.js'
@@ -10626,22 +11059,22 @@ function heard(): Heard {
   return { told: () => linesOf(told), printed: () => linesOf(printed) }
 }
 
-// The daemon the smoke started, as the record of serve names it
+// The daemon the smoke started, as the record of serve names it; a pid of 0 or below names a process group, never a daemon
 function daemonOf(printed: readonly string[]): number | undefined {
   const served = printed
     .map((line) => recordOf(line))
     .find((record) => record !== undefined && record['command'] === 'serve')
   const pid = served === undefined ? undefined : served['pid']
-  return typeof pid === 'number' ? pid : undefined
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
 }
 
-// A daemon that a failing smoke left is killed with the test; the git of the daemon reads no configuration of whoever runs it
+// Well within the time of a test: a smoke still running then stops as a SIGTERM stops it, and cleans up
+const BOUND_MS = 45_000
+
+// A daemon that a failing smoke left is killed with the test
 function smokeTest(): Heard {
-  vi.stubEnv('GIT_CONFIG_GLOBAL', devNull)
-  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1')
   const output = heard()
   onTestFinished(() => {
-    vi.unstubAllEnvs()
     const pid = daemonOf(output.printed())
     if (pid !== undefined && alive(pid)) {
       process.kill(pid, 'SIGKILL')
@@ -10650,25 +11083,30 @@ function smokeTest(): Heard {
   return output
 }
 
-// The home and the repository the smoke named in its first line
+const NAMED = /on the throwaway home (?<home>\S+) and repository (?<repo>\S+)$/u
+
+// The home and the repository the smoke named as it began
 const throwawaysOf = (told: readonly string[]): readonly string[] => {
-  const [first = ''] = told
-  const named = /on the throwaway home (?<home>\S+) and repository (?<repo>\S+)$/u.exec(first)
-  const { home, repo } = named === null || named.groups === undefined ? {} : named.groups
+  const named = told.map((line) => NAMED.exec(line)).find((match) => match !== null)
+  const { home, repo } = named === undefined || named.groups === undefined ? {} : named.groups
   return [home, repo].filter((dir) => dir !== undefined)
 }
 
-// Whether the daemon and the directories of the smoke are gone
+// Whether the serve record named the daemon, and whether the daemon and the directories of the smoke are left
 const leftOf = ({ told, printed }: Heard): readonly unknown[] => {
   const pid = daemonOf(printed())
-  return [pid !== undefined && alive(pid), throwawaysOf(told()).map((dir) => existsSync(dir))]
+  return [
+    pid !== undefined,
+    pid !== undefined && alive(pid),
+    throwawaysOf(told()).map((dir) => existsSync(dir)),
+  ]
 }
 
 describe(runSmoke, () => {
   it('runs a turn to its end, then stops, resumes and prompts a second session, and leaves neither its daemon nor its home', async () => {
     expect.hasAssertions()
     const output = smokeTest()
-    await expect(runSmoke(FAKE)).resolves.toBe(0)
+    await expect(runSmoke(FAKE, AbortSignal.timeout(BOUND_MS))).resolves.toBe(0)
     expect(output.told()).toStrictEqual(
       expect.arrayContaining([
         'smoke: serve exited 0',
@@ -10681,17 +11119,18 @@ describe(runSmoke, () => {
         'smoke: the home and the repository are gone',
       ]),
     )
-    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+    expect(leftOf(output)).toStrictEqual([true, false, [false, false]])
   })
 
   it('adds the login profile SMOKE_PROFILE names to its home and runs under it', async () => {
     expect.hasAssertions()
     const output = smokeTest()
-    await expect(runSmoke({ ...FAKE, profile: 'fake/work' })).resolves.toBe(0)
+    const plan = { ...FAKE, profile: 'fake/work' }
+    await expect(runSmoke(plan, AbortSignal.timeout(BOUND_MS))).resolves.toBe(0)
     expect(output.told()).toStrictEqual(
       expect.arrayContaining(['smoke: profiles add exited 0', 'smoke: run exited 0']),
     )
-    expect(leftOf(output)).toStrictEqual([false, [false, false]])
+    expect(leftOf(output)).toStrictEqual([true, false, [false, false]])
   })
 
   it('refuses a profile of another provider before it makes a home or runs anything', async () => {
@@ -10702,6 +11141,22 @@ describe(runSmoke, () => {
       ['smoke: SMOKE_PROFILE must be a profile id of fake, such as fake/work, not claude/work'],
       [],
     ])
+  })
+})
+
+describe('runSmoke and an abort of its caller', () => {
+  it('stops as a SIGTERM stops it when its caller aborts, runs nothing more and leaves nothing', async () => {
+    expect.hasAssertions()
+    const output = smokeTest()
+    await expect(runSmoke(FAKE, AbortSignal.abort())).resolves.toBe(130)
+    expect(output.told()).toStrictEqual(
+      expect.arrayContaining([
+        'smoke: SIGTERM: no further command starts; the daemon is stopped and the home removed',
+        'smoke: serve exited 130',
+        'smoke: the home and the repository are gone',
+      ]),
+    )
+    expect(leftOf(output)).toStrictEqual([false, false, [false, false]])
   })
 })
 
@@ -10716,6 +11171,18 @@ describe(isThrowawayHome, () => {
     expect(
       [...homes, path.join(root, 'bb-smoke-gone')].map((home) => isThrowawayHome(home)),
     ).toStrictEqual([true, false, false, false, false, false, false])
+  })
+
+  it('never takes a home under the temporary one by its text that resolves outside it, by .. or by a link', () => {
+    const root = realpathSync(tmpdir())
+    const made = mkdtempSync(path.join(root, 'bb-smoke-test-'))
+    onTestFinished(() => {
+      rmSync(made, { recursive: true, force: true })
+    })
+    const link = path.join(made, 'home')
+    symlinkSync(homedir(), link)
+    const climbing = `${made}${path.sep}..${path.sep}..`
+    expect([climbing, link].map((home) => isThrowawayHome(home))).toStrictEqual([false, false])
   })
 })
 
@@ -10803,3 +11270,23 @@ git add scripts package.json apps/docs CONTRIBUTING.md README.md README.cs.md do
 git commit -m "docs(repo): describe the agent providers, the profiles and the secrets; amend the spec for phase c"
 git commit -m "ci(ci): label the agent plugins and accept their commit scopes"
 ```
+
+## Final fix wave (as shipped, commits 13dd1e7..f09e7e6 (48 commits in three rounds))
+
+The wave closed the whole-branch review's findings and the minors every task review deferred (`.superpowers/sdd/…/final-wave-c.md`, sections 0–7 and 0b; the implementer's report `final-wave-report.md`), in three rounds, each re-reviewed (the implementer's rounds 2 and 3 in the same report).
+
+**Trust (a spec silence ruled against a reasonable person's expectation):** a project's files may name a command to run as the agent, so the kernel now gates the command-bearing keys of a project's `providers.<id>` section — `command`, `args`, `env`, `executable`, `installHint`, `loginHint` — behind the user configuration's `trust` section (`UserConfig.trust { projects?: absolute paths, commands?: exact command names or paths }`): a project in `trust.projects` (compared by realpath) releases everything; a command in `trust.commands` trusts that command alone — a bare name is resolved on the daemon's own PATH at trust time and the adapter receives the absolute path, the project's `args` come with it, its `env` does not (so trust agent binaries, never interpreters); a value equal to the defaults needs no trust; withheld keys are logged and published as a `session.warning` of kind `trust` naming the key, the project and the way to trust it; an untrusted project gives the Claude adapter `settingSources: ['user']` (a repository's `.claude` settings, hooks and `CLAUDE.md` are not loaded, warned); a withheld custom command is refused as `config_invalid` with the hint, a withheld preset override falls back to the preset's own command. The test homes trust their temporary project (`trustProject(home, repo)`; one e2e commits its own `bin/bun` and sets `env.PATH: "bin"` to prove the impostor never runs); the children's PATH drops relative and empty entries, and the Claude adapter's executable resolver skips relative entries and anything that is not an executable file. Not gated yet (Phase D's trust ruling, documented): `passEnv`, a preset's `apiKeyEnv` and `configDirEnv`, a project's `employees.*.tools.allow`/`permissionMode`, and the project-local settings ACP agents read from the worktree themselves (MCP servers and the like); Windows is untested in this phase.
+
+**Secrets:** every keychain `get`/`set`/`delete` is bounded at 10 s (a timeout is a `StoreError` saying a Keychain dialog may be waiting, or to set `secrets.backend` to `file`) — an ACL check under a `bytebureau-test-<pid>` service proved that a binary which did not create an item blocks on an approval dialog (source `bun` versus a compiled `bytebureau`, and any release that changes the code hash; documented); the probe uses a per-home name (`probe-` + twelve hex digits of the SHA-256 of the home's real path) overwritten and deleted every start, so two daemons on different homes never share it; stale `secrets.json.<pid>.tmp` drafts of dead processes are swept; a user `config.json` that cannot be parsed refuses the start (`serve` exit 2) instead of putting `auto` on the keychain.
+
+**Profiles and sessions:** `failSession` remembers the provider's last reference, so a resume after a respawn-then-crash loads the right agent session; `add` and `makeDefault` settle the default inside one transaction with an `EXISTS` guard, and `settleDefault` answers the stored flag; a removal discards the key and the directory even when `profile.removed` cannot be published, and deletes the profile's usage snapshots; the `in_use` text says "complete them first"; `profile.status` is an ephemeral event (spec §5.4); `GET /usage/profiles/default` answers the nameless login's snapshot (`usage/profile-usage.ts`, read by the facade and the API alike); a `ProviderConfigError` (exported by the plugin-api, thrown by both adapters for configuration problems, recognised by name beside `instanceof`) is mapped at the start to `ConfigError` (422 `config_invalid`, not retryable, the session stays `ready`, `run` exits 4), named against the project file the section came from when known; ENOENT stays the crash with its hints.
+
+**CLI:** an empty or blank `BYTEBUREAU_HOME` is refused by every command that uses the home and by the daemon (exit 2 naming the variable — the incident of 2026-10-05 wrote into the owner's real home through an empty variable; the test helpers refuse an empty or missing home too); `--api-key=<value>` and a `sk-` provider or name are refused as a key typed as an argument (the message names the shell history and the process list); a failed login re-check prints a warning; `profiles status` probes at most two profiles at a time; the client's RPC connection sends `null` for an undefined payload; a 400 detail names only the place and the expected shape.
+
+**Claude adapter:** an `AskUserQuestion` option id is the plain label and an `other` free text answers the first question only; the logged-out heuristic matches whole words only; an error-subtype result tells its `errors` in the turn warning.
+
+**ACP adapter:** a relaunch after an idle death passes `resume` so an agent implementing `loadSession` keeps the conversation (the fallback and its warning stay); a terminal is admitted and registered in one step and refused across a release (a release counter); an ask raised during the close ladder is answered `cancelled` and never emitted after `session.closed`; the fake agent is split into `fake-acp-agent.ts` (the protocol, the script table and the scripts that end the process, 175 lines) and `fake-acp-scripts.ts` (149 lines, imported with a `.ts` specifier under `allowImportingTsExtensions`), and gained the `ask-again` and `load-fails` scripts; a start past its time now waits up to 2 s for the killed agent's exit before the refusal, so the ladder never follows a SIGKILL with a SIGINT (a race the stability runs exposed).
+
+**Smoke and tests:** the CI smoke test bounds `runSmoke` by its caller's abort (cleanup included) and kills only a positive pid after a seen `serve` record; `isThrowawayHome` resolves the path before the tmpdir check; new tests pin the DTO refusals, one `ProfileKind`, the sweep, the `GIT_TERMINAL_PROMPT=0` of the local runtime's git through the port, the profile procedures over the socket, and the purged directory. Verification on the final head: `bun run check` (every gate, 2451+ tests, ≥ 97 % lines), the docs build, the contract drift, three stability runs, nothing left running; the fresh-clone gate re-run on the final head.
+
+Deferred as documented: a removed profile's completed sessions lose their profile id (a later migration); `profiles status` of a preset whose project overrides `command` checks the built-in command (Phase D `doctor`); the first-start keychain timeout's stickiness; the Windows process-group limit; a `terminal/create` buffered from a dead agent's stdout after `releaseAll()`; the copies of `Queue`, `within-limit.ts` and `shellWord` in both plugins; ad-hoc signed releases bringing a Keychain dialog per stored key until "Always Allow".
