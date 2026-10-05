@@ -7203,8 +7203,8 @@ git commit -m "fix(kernel): answer an agent's ask with the id the agent asked wi
 ### Task 7: `plugins/agent-acp` — any ACP v1 agent over stdio, with the fake ACP agent for the tests
 
 **Files:**
-- Create: `plugins/agent-acp/package.json`, `plugins/agent-acp/tsconfig.json`, `plugins/agent-acp/vitest.config.ts`, `plugins/agent-acp/src/plugin.ts`, `plugins/agent-acp/src/presets.ts`, `plugins/agent-acp/src/custom-preset.ts`, `plugins/agent-acp/src/provider.ts`, `plugins/agent-acp/src/process.ts`, `plugins/agent-acp/src/kill-ladder.ts`, `plugins/agent-acp/src/connection.ts`, `plugins/agent-acp/src/session.ts`, `plugins/agent-acp/src/session-turns.ts`, `plugins/agent-acp/src/mapping.ts`, `plugins/agent-acp/src/client-fs.ts`, `plugins/agent-acp/src/client-terminal.ts`, `plugins/agent-acp/src/permissions.ts`, `plugins/agent-acp/src/queue.ts` (the same `Queue<T>` as the Claude plugin's — a copy; the shared test-support package stays deferred), `plugins/agent-acp/src/testing/fake-acp-agent.ts`, `plugins/agent-acp/src/testing/run-fake.ts`, tests `presets.test.ts`, `client-fs.test.ts`, `client-terminal.test.ts`, `mapping.test.ts`, `permissions.test.ts`, `session.test.ts`, `session-crash.test.ts`, `provider.test.ts`
-- Modify: `vitest.config.ts` (project `plugins/agent-acp`), `cspell-words.txt`, `.github/workflows/semantic-pr.yml` (the `agent-acp` scope, which `scripts/github-settings.test.ts` demands once the workspace exists)
+- Create: `plugins/agent-acp/package.json`, `plugins/agent-acp/tsconfig.json`, `plugins/agent-acp/vitest.config.ts`, `plugins/agent-acp/src/{plugin,presets,custom-preset,provider,process,kill-ladder,connection,session,session-turns,mapping,client-fs,client-terminal,permissions,queue}.ts`, `plugins/agent-acp/src/agent-start.ts` (spawn, connect and open a session; the environment with the key moved to the overridden variable; an abandoned start SIGKILLs the group; a failed start says why), `plugins/agent-acp/src/session-client.ts` (the agent's fs, terminal and permission requests served beside the session), `plugins/agent-acp/src/redaction.ts` (the key masked at intake, whole or cut), `plugins/agent-acp/src/refused-agent-error.ts` (a protocol mismatch or a start past its bound, refused without waiting for an exit), `plugins/agent-acp/src/within-limit.ts` (the bounded await), `plugins/agent-acp/src/testing/{fake-acp-agent,run-fake,requests,sessions,session-harness}.ts`, tests `presets.test.ts`, `kill-ladder.test.ts`, `client-fs.test.ts`, `client-terminal.test.ts`, `mapping.test.ts`, `permissions.test.ts`, `session.test.ts`, `session-agent.test.ts`, `session-keys.test.ts`, `session-start.test.ts`, `session-turns.test.ts`, `session-crash.test.ts`, `provider.test.ts`
+- Modify: `vitest.config.ts` (project `plugins/agent-acp`), `cspell-words.txt`, `.github/workflows/semantic-pr.yml` (the `agent-acp` scope), `bun.lock`
 - Test: the plugin's tests under Node; the session tests spawn the fake agent with `process.execPath`
 
 **Interfaces:**
@@ -7220,47 +7220,296 @@ Semantics (as planned): a provider per preset (`acp:codex` → `codex-acp`, `acp
 `plugins/agent-acp/src/testing/fake-acp-agent.ts` — an ACP agent over stdio built with the SDK's agent side (`AgentSideConnection` with `ndJsonStream(process.stdout web, process.stdin web)`), scripted by `BYTEBUREAU_FAKE_ACP_SCRIPT`:
 
 ```ts
+#!/usr/bin/env node
+// An ACP agent for the tests, run as `node|bun fake-acp-agent.ts`; BYTEBUREAU_FAKE_ACP_SCRIPT picks what it does, hello when unset
+// The last three scripts misbehave as real agents can: they refuse the prompt, demand a login, or speak another ACP
+import { spawn } from 'node:child_process'
+import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, type Agent, type Client } from '@agentclientprotocol/sdk'
+import {
+  agent,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  RequestError,
+  type AgentContext,
+  type InitializeResponse,
+  type PromptResponse,
+  type SessionUpdate,
+  type ToolCall,
+} from '@agentclientprotocol/sdk'
 
-const script = process.env['BYTEBUREAU_FAKE_ACP_SCRIPT'] ?? 'hello'
-const apiKeyPresent = process.env['FAKE_ACP_API_KEY'] !== undefined
+export type FakeScript =
+  | 'hello'
+  | 'slow'
+  | 'crash-mid-turn'
+  | 'crash-idle'
+  | 'escape'
+  | 'terminal'
+  | 'refuse-prompt'
+  | 'auth-required'
+  | 'protocol-v2'
+  | 'load-fails'
+  | 'no-load'
+  | 'children'
+  | 'quick-exit'
+  | 'auth-lapsed'
 
-const text = (value: string) => ({ type: 'text' as const, text: value })
-
-// What the hello script does: thinks, says hello, asks for permission to write src/hello.ts, writes it through the client, reports the tool
-class FakeAgent implements Agent {
-  private readonly client: Client
-  private cancelled = false
-  public constructor(client: Client) { this.client = client }
-
-  public async initialize() {
-    return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } }, authMethods: [] }
-  }
-  public async newSession(params: { cwd: string }) { this.cwd = params.cwd; return { sessionId: 'fake-acp-1' } }
-  public async loadSession(params: { sessionId: string; cwd: string }) { this.cwd = params.cwd; return {} }
-  public async cancel() { this.cancelled = true }
-  public async prompt(params: { sessionId: string }) {
-    const update = async (payload: object) => this.client.sessionUpdate({ sessionId: params.sessionId, update: payload })
-    await update({ sessionUpdate: 'agent_thought_chunk', content: text('thinking') })
-    await update({ sessionUpdate: 'agent_message_chunk', content: text(`hello; api key ${apiKeyPresent ? 'present' : 'absent'}`) })
-    if (script === 'crash-mid-turn') { process.exit(1) }
-    if (script === 'slow') { while (!this.cancelled) { await new Promise((resolve) => setTimeout(resolve, 50)) } return { stopReason: 'cancelled' } }
-    if (script === 'escape') { await this.client.readTextFile({ sessionId: params.sessionId, path: `${this.cwd}/../outside.txt` }); return { stopReason: 'end_turn' } }
-    if (script === 'terminal') { const term = await this.client.createTerminal({ sessionId: params.sessionId, command: process.execPath, args: ['-e', 'console.log("ok")'] }); await this.client.waitForTerminalExit({ sessionId: params.sessionId, terminalId: term.terminalId }); const out = await this.client.terminalOutput({ sessionId: params.sessionId, terminalId: term.terminalId }); await this.client.releaseTerminal({ sessionId: params.sessionId, terminalId: term.terminalId }); await update({ sessionUpdate: 'agent_message_chunk', content: text(`terminal said ${out.output.trim()}`) }); return { stopReason: 'end_turn' } }
-    await update({ sessionUpdate: 'tool_call', toolCallId: 'call-1', title: 'Write src/hello.ts', kind: 'edit', status: 'pending', rawInput: { path: 'src/hello.ts' } })
-    const permission = await this.client.requestPermission({ sessionId: params.sessionId, toolCall: { toolCallId: 'call-1', title: 'Write src/hello.ts', kind: 'edit', status: 'pending', rawInput: { path: 'src/hello.ts' } }, options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }] })
-    if (permission.outcome.outcome !== 'selected' || permission.outcome.optionId !== 'allow') { await update({ sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'failed', rawOutput: 'denied' }); return { stopReason: 'end_turn' } }
-    await this.client.writeTextFile({ sessionId: params.sessionId, path: `${this.cwd}/src/hello.ts`, content: "export function hello(): string {\n  return 'hello'\n}\n" })
-    await update({ sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed', rawOutput: 'written', _meta: { 'bytebureau.usage': { inputTokens: 7, outputTokens: 3 } } })
-    if (script === 'crash-idle') { setTimeout(() => process.exit(0), 100) }
-    return { stopReason: 'end_turn' }
-  }
-  private cwd = ''
+interface Turn {
+  readonly client: AgentContext
+  readonly sessionId: string
 }
 
-const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
-new AgentSideConnection((client) => new FakeAgent(client), stream)
+const SCRIPT = process.env['BYTEBUREAU_FAKE_ACP_SCRIPT'] ?? 'hello'
+const API_KEY = process.env['FAKE_ACP_API_KEY']
+const HELLO = "export function hello(): string {\n  return 'hello'\n}\n"
+// A command that prints ok and the names of the variables of its environment that look like a key or a token
+const LIST_KEYS =
+  'console.log(["ok", ...Object.keys(process.env).filter((name) => /KEY|TOKEN/.test(name))].join(" "))'
+const END_TURN: PromptResponse = { stopReason: 'end_turn' }
+const INITIALIZED: InitializeResponse = {
+  protocolVersion: PROTOCOL_VERSION,
+  agentCapabilities: {
+    loadSession: true,
+    promptCapabilities: { image: false, audio: false, embeddedContext: false },
+  },
+  authMethods: [],
+}
+const WRITE: ToolCall = {
+  toolCallId: 'call-1',
+  title: 'Write src/hello.ts',
+  kind: 'edit',
+  status: 'pending',
+  rawInput: { path: 'src/hello.ts' },
+}
+const READ_OUTSIDE: ToolCall = {
+  toolCallId: 'call-2',
+  title: 'Read ../outside.txt',
+  kind: 'read',
+  status: 'pending',
+}
+
+// The workspace the client named, and the cancel of the running prompt
+const state = { cwd: '', cancelled: false, cancel: Promise.withResolvers<null>() }
+
+const update = async ({ client, sessionId }: Turn, payload: SessionUpdate): Promise<void> => {
+  await client.notify('session/update', { sessionId, update: payload })
+}
+
+const say = async (turn: Turn, text: string): Promise<void> => {
+  await update(turn, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+}
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
+// The last word goes to stderr before the agent dies, as a real agent's would
+const die = (code: number, lastWord: string): void => {
+  process.stderr.write(`${lastWord}\n`, () => {
+    process.exit(code)
+  })
+}
+
+const allowed = async ({ client, sessionId }: Turn): Promise<boolean> => {
+  const { outcome } = await client.request('session/request_permission', {
+    sessionId,
+    toolCall: WRITE,
+    options: [
+      { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+    ],
+  })
+  return outcome.outcome === 'selected' && outcome.optionId === 'allow'
+}
+
+// Writes src/hello.ts through the client and reports the tool with the usage of the turn
+const write = async (turn: Turn): Promise<void> => {
+  await turn.client.request('fs/write_text_file', {
+    sessionId: turn.sessionId,
+    path: path.join(state.cwd, 'src', 'hello.ts'),
+    content: HELLO,
+  })
+  await update(turn, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: WRITE.toolCallId,
+    status: 'completed',
+    rawOutput: 'written',
+    _meta: { 'bytebureau.usage': { inputTokens: 7, outputTokens: 3 } },
+  })
+}
+
+const failedTool = async (turn: Turn, toolCallId: string, rawOutput: string): Promise<void> => {
+  await update(turn, { sessionUpdate: 'tool_call_update', toolCallId, status: 'failed', rawOutput })
+}
+
+// Asks to write src/hello.ts, and writes it only when allowed; a cancelled turn ends as cancelled
+const hello = async (turn: Turn): Promise<PromptResponse> => {
+  await update(turn, { sessionUpdate: 'tool_call', ...WRITE })
+  const answered = await allowed(turn)
+  const refusal = state.cancelled ? 'cancelled' : 'denied'
+  await (answered ? write(turn) : failedTool(turn, WRITE.toolCallId, refusal))
+  return state.cancelled ? { stopReason: 'cancelled' } : END_TURN
+}
+
+// Runs until the client cancels the prompt
+const slow = async (): Promise<PromptResponse> => {
+  await state.cancel.promise
+  return { stopReason: 'cancelled' }
+}
+
+// Reads a file one level above the workspace and tells what the client answered
+const escape = async (turn: Turn): Promise<PromptResponse> => {
+  const target = `${state.cwd}/../outside.txt`
+  await update(turn, { sessionUpdate: 'tool_call', ...READ_OUTSIDE, rawInput: { path: target } })
+  try {
+    const { content } = await turn.client.request('fs/read_text_file', {
+      sessionId: turn.sessionId,
+      path: target,
+    })
+    await say(turn, `outside.txt says ${content}`)
+  } catch (error) {
+    await failedTool(turn, READ_OUTSIDE.toolCallId, messageOf(error))
+  }
+  return END_TURN
+}
+
+// Runs a command in a terminal of the client and says what it printed
+const terminal = async (turn: Turn): Promise<PromptResponse> => {
+  const { client, sessionId } = turn
+  const { terminalId } = await client.request('terminal/create', {
+    sessionId,
+    command: process.execPath,
+    args: ['-e', LIST_KEYS],
+  })
+  await client.request('terminal/wait_for_exit', { sessionId, terminalId })
+  const { output } = await client.request('terminal/output', { sessionId, terminalId })
+  await client.request('terminal/release', { sessionId, terminalId })
+  await say(turn, `terminal said ${output.trim()}`)
+  return END_TURN
+}
+
+// Dies in the middle of the turn; its last word names the key it was given, which the client must not repeat
+const crashMidTurn = async (): Promise<PromptResponse> => {
+  die(1, `the fake agent crashed mid-turn holding ${API_KEY ?? 'no key'}`)
+  const never = await Promise.withResolvers<PromptResponse>().promise
+  return never
+}
+
+// Answers the prompt with the error once it has said hello
+const failing = (failure: Error) => async (): Promise<PromptResponse> => {
+  await Promise.resolve()
+  throw failure
+}
+
+// Starts a process of its own and a terminal of the client, both running until killed, then runs until cancelled
+const children = async (turn: Turn): Promise<PromptResponse> => {
+  const forever = ['-e', 'setInterval(() => {}, 1000)']
+  const own = spawn(process.execPath, forever, { stdio: 'ignore' })
+  const { terminalId } = await turn.client.request('terminal/create', {
+    sessionId: turn.sessionId,
+    command: process.execPath,
+    args: forever,
+  })
+  await say(turn, `children ${String(own.pid)} ${terminalId}`)
+  const ended = await slow()
+  return ended
+}
+
+// Answers and exits at once, its answer and its exit reaching the client together
+const quickExit = async (): Promise<PromptResponse> => {
+  setImmediate(() => {
+    die(0, 'the fake agent answered and left')
+  })
+  await Promise.resolve()
+  return END_TURN
+}
+
+// Ends the turn as hello does, then dies while idle
+const crashIdle = async (turn: Turn): Promise<PromptResponse> => {
+  const ended = await hello(turn)
+  setTimeout(() => {
+    die(0, 'the fake agent exited idle')
+  }, 100)
+  return ended
+}
+
+const SCRIPTS: Readonly<Record<FakeScript, (turn: Turn) => Promise<PromptResponse>>> = {
+  hello,
+  slow,
+  'crash-mid-turn': crashMidTurn,
+  'crash-idle': crashIdle,
+  escape,
+  terminal,
+  // A model that failed, its error naming the key the agent was given
+  'refuse-prompt': failing(new Error(`the model is overloaded for ${API_KEY ?? 'nobody'}`)),
+  'auth-required': hello,
+  'protocol-v2': hello,
+  'load-fails': hello,
+  'no-load': hello,
+  children,
+  'quick-exit': quickExit,
+  // A login lost by the time of the prompt
+  'auth-lapsed': failing(RequestError.authRequired()),
+}
+
+const isScript = (name: string): name is FakeScript => Object.hasOwn(SCRIPTS, name)
+
+// Every script thinks and says hello first, telling whether the key reached it, never its value
+const prompt = async (turn: Turn): Promise<PromptResponse> => {
+  state.cancelled = false
+  state.cancel = Promise.withResolvers<null>()
+  await update(turn, {
+    sessionUpdate: 'agent_thought_chunk',
+    content: { type: 'text', text: 'thinking' },
+  })
+  await say(turn, `hello; api key ${API_KEY === undefined ? 'absent' : 'present'}`)
+  const play = SCRIPTS[isScript(SCRIPT) ? SCRIPT : 'hello']
+  const response = await play(turn)
+  return response
+}
+
+// What the agent says of itself: another ACP for protocol-v2, no session loading for no-load
+const initializedFor = (script: string): InitializeResponse => {
+  if (script === 'protocol-v2') {
+    return { ...INITIALIZED, protocolVersion: 2 }
+  }
+  const capabilities = { ...INITIALIZED.agentCapabilities, loadSession: script !== 'no-load' }
+  return { ...INITIALIZED, agentCapabilities: capabilities }
+}
+
+// An agent that loads a session streams its history back first, as ACP has it
+const fake = agent({ name: 'fake-acp-agent' })
+  .onRequest('initialize', () => initializedFor(SCRIPT))
+  .onRequest('authenticate', () => ({}))
+  .onRequest('session/new', ({ params }) => {
+    if (SCRIPT === 'auth-required') {
+      throw RequestError.authRequired({ details: `no login for ${API_KEY ?? 'nobody'}` })
+    }
+    state.cwd = params.cwd
+    return { sessionId: 'fake-acp-1' }
+  })
+  .onRequest('session/load', async ({ params, client }) => {
+    if (SCRIPT === 'load-fails') {
+      throw RequestError.resourceNotFound(params.sessionId)
+    }
+    state.cwd = params.cwd
+    await say({ client, sessionId: params.sessionId }, 'from the loaded history')
+    return {}
+  })
+  .onRequest('session/prompt', async ({ params, client }) => {
+    const response = await prompt({ client, sessionId: params.sessionId })
+    return response
+  })
+  .onNotification('session/cancel', () => {
+    state.cancelled = true
+    state.cancel.resolve(null)
+  })
+
+// The agent ends with its client: once stdin closes, nobody is left to serve
+const connection = fake.connect(
+  ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)),
+)
+await connection.closed
+process.exit(0)
 ```
 
 (Match the SDK's `Agent` interface method names and the request/response types the compiler shows — `newSession`, `loadSession`, `prompt`, `cancel`, `authenticate`; the `sessionUpdate` payloads are typed `SessionNotification['update']`; `writeTextFile` of a path whose parent is missing must be created by the client — the adapter's `writeTextFile` does `mkdirSync(dirname, { recursive: true })` inside the workspace. `run-fake.ts` exports `fakeAgentCommand(script) = { command: process.execPath, args: [path to fake-acp-agent.ts], env: { BYTEBUREAU_FAKE_ACP_SCRIPT: script } }` — under Node the file must run as TypeScript: the tests run on Node 24+ with `--experimental-strip-types`? Phase A's `node-spawner.ts` already runs TypeScript test helpers; follow its approach (`process.execPath` with `--experimental-strip-types`, or the compiled JS path Vitest provides). Under the daemon (Bun) in Task 8, `bun <path>.ts` runs directly.)
@@ -7270,27 +7519,132 @@ new AgentSideConnection((client) => new FakeAgent(client), stream)
 `plugins/agent-acp/src/session.test.ts` (the hello flow end to end against the fake agent; the test supplies `AcpDeps` with `spawn` = `node:child_process.spawn` and a tiny `ProcessSpawner` over `child_process` for terminals, plus a recording logger):
 
 ```ts
-it('runs a prompt through a real ACP agent: thinking, text, a permission brokered as an ask, the file written inside the workspace, usage from _meta', async () => {
-  expect.hasAssertions()
-  const workspace = tempDir('bb-acp-ws-')
-  const provider = new AcpAgentProvider('custom', deps)
-  const session = await provider.createSession(requestWith({ workspace, providerConfig: { presets: { custom: fakeAgentCommand('hello') } } }))
-  const seen: AgentEvent[] = []
-  const reading = (async () => { for await (const event of session.events()) { seen.push(event); if (event.type === 'ask.requested') { await session.answer(event.ask.id, { selected: ['allow'] }) } if (event.type === 'turn.completed') { break } } })()
-  await session.prompt({ text: 'Create src/hello.ts' })
-  await reading
-  expect(seen.map((event) => event.type)).toStrictEqual(['turn.started', 'message.delta', 'message.delta', 'tool.started', 'ask.requested', 'tool.completed', 'usage.updated', 'message.completed', 'turn.completed'])
-  expect(seen[1]).toStrictEqual({ type: 'message.delta', kind: 'thinking', text: 'thinking' })
-  expect(readFileSync(path.join(workspace, 'src', 'hello.ts'), 'utf8')).toContain('export function hello')
-  expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
-  await session.close()
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { until } from './testing/session-harness.js'
+import { customOf, prompted, sessionOf, TURN_END, workspaceOf } from './testing/sessions.js'
+
+const HELLO_TYPES = [
+  'turn.started',
+  'message.delta',
+  'message.delta',
+  'tool.started',
+  'ask.requested',
+  'tool.completed',
+  'usage.updated',
+  'message.completed',
+  TURN_END,
+]
+
+describe('a session of an ACP agent', () => {
+  it('runs a prompt through a real ACP agent: thinking, text, a permission brokered as an ask, the file written inside the workspace, usage from _meta', async () => {
+    expect.hasAssertions()
+    const workspace = workspaceOf()
+    const session = await sessionOf({
+      workspace: { path: workspace },
+      providerConfig: customOf('hello'),
+    })
+    const seen = await prompted(session, 'Create src/hello.ts')
+    expect(seen.map((event) => event.type)).toStrictEqual(HELLO_TYPES)
+    expect(seen[1]).toStrictEqual({ type: 'message.delta', kind: 'thinking', text: 'thinking' })
+    expect(readFileSync(path.join(workspace, 'src', 'hello.ts'), 'utf8')).toContain(
+      'export function hello',
+    )
+    expect(session.externalRef).toStrictEqual({ providerId: 'acp:custom', ref: 'fake-acp-1' })
+    await session.close()
+  })
+
+  it('ends the turn with the text the agent said and the usage it reported', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('hello')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
+    const seen = await prompted(session, 'Create src/hello.ts')
+    expect(seen.slice(-2)).toStrictEqual([
+      { type: 'message.completed', role: 'assistant', content: [], text: 'hello; api key absent' },
+      { type: TURN_END, stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 3 } },
+    ])
+    expect(seen).toContainEqual({
+      type: 'tool.started',
+      id: 'call-1',
+      name: 'Write src/hello.ts',
+      kind: 'builtin',
+      input: { path: 'src/hello.ts' },
+    })
+  })
+
+  it('refuses a read outside the workspace, so the agent gets an error instead of the file', async () => {
+    expect.hasAssertions()
+    const workspace = workspaceOf()
+    writeFileSync(path.join(workspace, '..', 'outside.txt'), 'the outside secret')
+    const session = await sessionOf({
+      workspace: { path: workspace },
+      providerConfig: customOf('escape'),
+    })
+    const seen = await prompted(session, 'Read ../outside.txt')
+    const error = `Invalid params: ${workspace}/../outside.txt is outside the workspace`
+    expect(seen).toContainEqual({ type: 'tool.failed', id: 'call-2', error })
+    expect(JSON.stringify(seen)).not.toContain('the outside secret')
+  })
 })
 
-it('refuses a read outside the workspace, so the agent gets an error instead of the file', async () => { /* script escape: the turn completes and the agent's error is a tool.failed or a session.warning kind 'fs'; outside.txt is never read: the test writes it one level above the workspace and asserts the agent's message does not carry its content */ })
+describe('a session of an ACP agent at work', () => {
+  it('cancels a slow turn on interrupt and ends it as interrupted', async () => {
+    expect.hasAssertions()
+    const session = await sessionOf({
+      workspace: { path: workspaceOf() },
+      providerConfig: customOf('slow'),
+    })
+    const prompting = session.prompt({ text: 'Take your time' })
+    await until(session, 'turn.started')
+    await session.interrupt()
+    const ended = await until(session, TURN_END)
+    await prompting
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    expect(ended.at(-1)).toStrictEqual({ type: TURN_END, stopReason: 'interrupted', usage })
+  })
 
-it('cancels a slow turn on interrupt and ends it as interrupted', async () => { /* script slow: prompt, wait for turn.started, interrupt(), expect turn.completed stopReason 'interrupted' */ })
+  it('serves a terminal to the agent inside the workspace and gives it the output', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('terminal')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
+    await expect(prompted(session, 'Run node')).resolves.toContainEqual({
+      type: 'message.delta',
+      kind: 'text',
+      text: 'terminal said ok',
+    })
+  })
+})
 
-it('serves a terminal to the agent inside the workspace and gives it the output', async () => { /* script terminal: expect a message.delta containing 'terminal said ok' */ })
+describe('a turn the agent refuses', () => {
+  it('ends a turn the agent refuses with the reason it gives, and takes the next prompt', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('refuse-prompt')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
+    const refused = await prompted(session, 'Create src/hello.ts')
+    expect(refused.slice(-3)).toStrictEqual([
+      { type: 'message.completed', role: 'assistant', content: [], text: 'hello; api key absent' },
+      {
+        type: 'session.warning',
+        kind: 'turn_error',
+        message: 'Internal error: the model is overloaded for nobody',
+      },
+      { type: TURN_END, stopReason: 'error', usage: { inputTokens: 0, outputTokens: 0 } },
+    ])
+    await expect(prompted(session, 'Again')).resolves.toContainEqual({ type: 'turn.started' })
+  })
+
+  it('ends a turn whose agent lost its login with the login to perform', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('auth-lapsed', { loginHint: 'fake-agent login' })
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig })
+    await expect(prompted(session, 'Go on')).resolves.toContainEqual({
+      type: 'session.warning',
+      kind: 'turn_error',
+      message: 'Authentication required; log in with: fake-agent login',
+    })
+  })
+})
 ```
 
 `plugins/agent-acp/src/session-crash.test.ts`: `crash-mid-turn` → `session.error { kind: 'crash', retryable: true }` then `session.closed`; `crash-idle` → after the first turn completes, the agent exits; the second `prompt()` emits `session.warning { kind: 'restart' }` and completes; a provider told to crash idle every time ends with `session.error { retryable: false }` on the fourth start. `provider.test.ts`: `ENOENT` → rejection naming the install and login hints; `custom` without a command → rejection naming `providers.acp.presets.custom.command`; `authStatus` outcomes; `apiKeyEnv` per preset; capabilities. `client-fs.test.ts`: inside/outside judgements including a symlink out of the workspace. `client-terminal.test.ts`: output cap and `truncated`, exit status, kill. `mapping.test.ts`: every update kind to its event. `permissions.test.ts`: the ask shape and the outcome mapping incl. `remember: 'always'` → `allow_always` when offered. `presets.test.ts`: the four commands and hints as the fact sheet lists them.
@@ -7318,15 +7672,50 @@ export interface Preset {
   // The variable an API-key profile's key travels in, where the agent takes one
   readonly apiKeyEnv?: string | undefined
   readonly installHint: string
-  // A bare command: the CLI prints it after "Log in with: " (ruled after Task 5); pi asks for its provider login on first run
+  // A bare command: the CLI prints it after "Log in with: "; pi asks for its provider login on first run
   readonly loginHint: string
 }
 
 export const PRESETS: Readonly<Record<Exclude<PresetId, 'custom'>, Preset>> = {
-  codex: { id: 'codex', displayName: 'Codex (ACP)', command: 'codex-acp', args: [], env: {}, configDirEnv: 'CODEX_HOME', apiKeyEnv: 'OPENAI_API_KEY', installHint: 'install it with: npm install -g @agentclientprotocol/codex-acp', loginHint: 'codex login' },
-  gemini: { id: 'gemini', displayName: 'Gemini CLI (ACP)', command: 'gemini', args: ['--acp'], env: {}, apiKeyEnv: 'GEMINI_API_KEY', installHint: 'install it with: npm install -g @google/gemini-cli', loginHint: 'gemini' },
-  opencode: { id: 'opencode', displayName: 'OpenCode (ACP)', command: 'opencode', args: ['acp'], env: {}, installHint: 'install it with: npm install -g opencode-ai', loginHint: 'opencode auth login' },
-  pi: { id: 'pi', displayName: 'pi (ACP)', command: 'pi-acp', args: [], env: {}, installHint: 'install it with: npm install -g pi-acp @earendil-works/pi-coding-agent', loginHint: 'pi' },
+  codex: {
+    id: 'codex',
+    displayName: 'Codex (ACP)',
+    command: 'codex-acp',
+    args: [],
+    env: {},
+    configDirEnv: 'CODEX_HOME',
+    apiKeyEnv: 'OPENAI_API_KEY',
+    installHint: 'install it with: npm install -g @agentclientprotocol/codex-acp',
+    loginHint: 'codex login',
+  },
+  gemini: {
+    id: 'gemini',
+    displayName: 'Gemini CLI (ACP)',
+    command: 'gemini',
+    args: ['--acp'],
+    env: {},
+    apiKeyEnv: 'GEMINI_API_KEY',
+    installHint: 'install it with: npm install -g @google/gemini-cli',
+    loginHint: 'gemini',
+  },
+  opencode: {
+    id: 'opencode',
+    displayName: 'OpenCode (ACP)',
+    command: 'opencode',
+    args: ['acp'],
+    env: {},
+    installHint: 'install it with: npm install -g opencode-ai',
+    loginHint: 'opencode auth login',
+  },
+  pi: {
+    id: 'pi',
+    displayName: 'pi (ACP)',
+    command: 'pi-acp',
+    args: [],
+    env: {},
+    installHint: 'install it with: npm install -g pi-acp @earendil-works/pi-coding-agent',
+    loginHint: 'pi',
+  },
 }
 
 export const providerIdOf = (preset: PresetId): string => `acp:${preset}`
@@ -7337,31 +7726,147 @@ export const providerIdOf = (preset: PresetId): string => `acp:${preset}`
 `plugins/agent-acp/src/process.ts`:
 
 ```ts
-import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import type { Readable } from 'node:stream'
+import type { Logger, ProcessSpawner } from '@bytebureau/plugin-api'
 import type { Preset } from './presets.js'
+import { cutRedacted } from './redaction.js'
+import { withinLimit } from './within-limit.js'
 
-export type SpawnFn = typeof nodeSpawn
+// The spawn of node:child_process as the adapter calls it, with the three pipes it needs
+export type SpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio,
+) => ChildProcessWithoutNullStreams
+
+// What a provider is given: the spawn of its agents, the process port its terminals run on, its logger
+export interface AcpDeps {
+  readonly spawn: SpawnFn
+  readonly process: ProcessSpawner
+  readonly logger: Logger
+  // How long an agent started again for a prompt may take to open its session; 60 s when not given
+  readonly startLimitMs?: number | undefined
+}
+
+export interface Exit {
+  readonly code: number | null
+  readonly signal: string | null
+}
 
 export interface AgentProcess {
-  readonly child: ChildProcess
-  readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
+  readonly child: ChildProcessWithoutNullStreams
+  // Settles once the agent has ended and what it wrote to stderr before is read, a quarter of a second at most
+  readonly exited: Promise<Exit>
   readonly recentStderr: () => readonly string[]
 }
 
 const STDERR_LINES = 50
+// A line is kept to its first 2000 characters, so a progress bar that never ends its line holds no more
+const LINE_LIMIT = 2000
+const STDERR_GRACE_MS = 250
 
-// The agent of a preset, started in the workspace with the environment the kernel allowed and what the preset and the profile add
-export const spawnAgent = (spawn: SpawnFn, preset: Preset, options: { readonly cwd: string; readonly env: Readonly<Record<string, string>> }): Promise<AgentProcess> =>
-  new Promise((resolve, reject) => {
-    const child = spawn(preset.command, [...preset.args], { cwd: options.cwd, env: { ...options.env, ...preset.env }, stdio: ['pipe', 'pipe', 'pipe'] })
-    const stderr: string[] = []
-    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { for (const line of chunk.split('\n')) { if (line !== '') { stderr.push(line); if (stderr.length > STDERR_LINES) { stderr.shift() } } } })
-    const exited = new Promise<{ code: number | null; signal: string | null }>((done) => { child.once('exit', (code, signal) => done({ code, signal })) })
-    child.once('error', (error: NodeJS.ErrnoException) => {
-      reject(error.code === 'ENOENT' ? new Error(`${preset.command} is not installed; ${preset.installHint}; then log in with: ${preset.loginHint}`) : error)
-    })
-    child.once('spawn', () => resolve({ child, exited, recentStderr: () => [...stderr] }))
+// The last lines of stderr, kept for the message of a crash and never logged; a secret is redacted as a line comes in
+const keepLines = (stderr: Readable, lines: string[], secrets: readonly string[]): void => {
+  let partial = ''
+  const keep = (line: string): void => {
+    const told = cutRedacted(line, LINE_LIMIT, secrets).trimEnd()
+    if (told.trim() !== '') {
+      lines.push(told)
+      lines.splice(0, Math.max(0, lines.length - STDERR_LINES))
+    }
+  }
+  stderr.setEncoding('utf8')
+  stderr.on('data', (chunk: string) => {
+    const parts = `${partial}${chunk}`.split('\n')
+    // One character past the limit tells keep() that the line ran on past the cut
+    partial = (parts.pop() ?? '').slice(0, LINE_LIMIT + 1)
+    for (const line of parts) {
+      keep(line)
+    }
   })
+  stderr.on('end', () => {
+    keep(partial)
+  })
+  stderr.on('error', () => {
+    // What the agent wrote before is all there is
+  })
+}
+
+const closedOf = async (stream: Readable): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<null>()
+  stream.once('close', () => {
+    resolve(null)
+  })
+  await promise
+}
+
+const exitedOf = async (child: ChildProcessWithoutNullStreams): Promise<Exit> => {
+  const stderrClosed = closedOf(child.stderr)
+  const { promise, resolve } = Promise.withResolvers<Exit>()
+  child.once('exit', (code, signal) => {
+    resolve({ code, signal })
+  })
+  const exit = await promise
+  await withinLimit(stderrClosed, STDERR_GRACE_MS)
+  return exit
+}
+
+// A command that is not there is told with what to install and how to log in; any other failure as it is
+const startedOf = async (child: ChildProcessWithoutNullStreams, preset: Preset): Promise<void> => {
+  const { promise, resolve, reject } = Promise.withResolvers<null>()
+  child.once('spawn', () => {
+    resolve(null)
+  })
+  child.on('error', (error: NodeJS.ErrnoException) => {
+    const missing = `${preset.command} is not installed; ${preset.installHint}; then log in with: ${preset.loginHint}`
+    reject(error.code === 'ENOENT' ? new Error(missing) : error)
+  })
+  await promise
+}
+
+// The agent of a preset, started in the workspace with the environment the session gives it and what the preset adds
+// A pipe to an agent that has gone fails; its exit tells that, so the pipe's error is not one of its own
+export const spawnAgent = async (
+  spawn: SpawnFn,
+  preset: Preset,
+  options: {
+    readonly cwd: string
+    readonly env: Readonly<Record<string, string>>
+    readonly secrets: readonly string[]
+  },
+): Promise<AgentProcess> => {
+  if (!existsSync(options.cwd)) {
+    throw new Error(`the workspace ${options.cwd} does not exist`)
+  }
+  // A group of its own, so what the agent starts is signalled with it
+  const child = spawn(preset.command, [...preset.args], {
+    cwd: options.cwd,
+    env: { ...options.env, ...preset.env },
+    detached: true,
+    // No console window of its own on Windows; ignored elsewhere
+    windowsHide: true,
+  })
+  const lines: string[] = []
+  keepLines(child.stderr, lines, options.secrets)
+  child.stdin.on('error', () => {
+    // The exit of the agent tells it
+  })
+  const exited = exitedOf(child)
+  await startedOf(child, preset)
+  return { child, exited, recentStderr: () => [...lines] }
+}
+
+// How the agent ended, with its last word on stderr
+export const endingOf = (agent: AgentProcess, exit: Exit): string => {
+  const how =
+    exit.code === null
+      ? `was killed by ${exit.signal ?? 'a signal'}`
+      : `exited with code ${exit.code}`
+  const last = agent.recentStderr().at(-1)
+  return `the agent ${how}${last === undefined ? '' : `: ${last}`}`
+}
 ```
 
 (No `?.` — write `const err = child.stderr; if (err !== null) { … }`.)
@@ -7372,25 +7877,1340 @@ export const spawnAgent = (spawn: SpawnFn, preset: Preset, options: { readonly c
 
 ```ts
 import { Readable, Writable } from 'node:stream'
-import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client, type InitializeResponse } from '@agentclientprotocol/sdk'
+import { setImmediate as nextTurn } from 'node:timers/promises'
+import {
+  client,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  RequestError,
+  type ClientApp,
+  type ClientCapabilities,
+  type ClientConnection,
+  type CreateTerminalRequest,
+  type CreateTerminalResponse,
+  type InitializeResponse,
+  type KillTerminalRequest,
+  type KillTerminalResponse,
+  type ReadTextFileRequest,
+  type ReadTextFileResponse,
+  type ReleaseTerminalRequest,
+  type ReleaseTerminalResponse,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type SessionNotification,
+  type TerminalOutputRequest,
+  type TerminalOutputResponse,
+  type WaitForTerminalExitRequest,
+  type WaitForTerminalExitResponse,
+  type WriteTextFileRequest,
+  type WriteTextFileResponse,
+} from '@agentclientprotocol/sdk'
 import type { AgentProcess } from './process.js'
+import { RefusedAgentError } from './refused-agent-error.js'
 
-export interface Connected { readonly connection: ClientSideConnection; readonly initialized: InitializeResponse }
+// What the client serves the agent: the updates it reports, the permissions it asks for, its files and its terminals
+export interface ClientHandlers {
+  readonly sessionUpdate: (notification: SessionNotification) => void
+  readonly requestPermission: (
+    params: RequestPermissionRequest,
+    signal: AbortSignal,
+  ) => Promise<RequestPermissionResponse>
+  readonly readTextFile: (params: ReadTextFileRequest) => Promise<ReadTextFileResponse>
+  readonly writeTextFile: (params: WriteTextFileRequest) => Promise<WriteTextFileResponse>
+  readonly createTerminal: (params: CreateTerminalRequest) => Promise<CreateTerminalResponse>
+  readonly terminalOutput: (params: TerminalOutputRequest) => TerminalOutputResponse
+  readonly waitForTerminalExit: (
+    params: WaitForTerminalExitRequest,
+  ) => Promise<WaitForTerminalExitResponse>
+  readonly killTerminal: (params: KillTerminalRequest) => KillTerminalResponse
+  readonly releaseTerminal: (params: ReleaseTerminalRequest) => ReleaseTerminalResponse
+}
 
-// The agent's stdio as ACP: the client handlers serve the agent's requests, the connection carries ours
-export const connectAgent = async (agent: AgentProcess, handlers: (connection: ClientSideConnection) => Client): Promise<Connected> => {
-  const { stdin, stdout } = agent.child
-  if (stdin === null || stdout === null) { throw new Error('the agent has no stdio') }
-  const stream = ndJsonStream(Writable.toWeb(stdin), Readable.toWeb(stdout))
-  const connection = new ClientSideConnection(handlers, stream)
-  const initialized = await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true } })
+export interface Connected {
+  readonly connection: ClientConnection
+  readonly initialized: InitializeResponse
+}
+
+// An agent that serves the session: its process, its connection and its ACP session
+export interface Running {
+  readonly process: AgentProcess
+  readonly connection: ClientConnection
+  readonly sessionId: string
+  // Why the session to resume was not loaded, a new one having been started instead
+  readonly notLoaded?: string | undefined
+  // Set once its death is told
+  gone: boolean
+}
+
+const CLIENT_CAPABILITIES: ClientCapabilities = {
+  fs: { readTextFile: true, writeTextFile: true },
+  terminal: true,
+}
+
+// The SDK handles an update a few microtasks after it reads it, and an answer at once; a turn of the event loop lets the updates sent before an answer through
+export const settled = async (): Promise<void> => {
+  await nextTurn()
+}
+
+// What an error of the agent says, with the details an internal error carries
+export const reasonOf = (error: unknown): string => {
+  if (!(error instanceof Error)) {
+    return String(error)
+  }
+  const { data } = error instanceof RequestError ? error : { data: undefined }
+  const details =
+    typeof data === 'object' && data !== null && 'details' in data ? data.details : data
+  return typeof details === 'string' && details !== ''
+    ? `${error.message}: ${details}`
+    : error.message
+}
+
+// Updates are registered first: an update is told before anything the agent asks after it
+const appOf = (handlers: ClientHandlers): ClientApp =>
+  client({ name: 'bytebureau' })
+    .onNotification('session/update', ({ params }) => {
+      handlers.sessionUpdate(params)
+    })
+    .onRequest('session/request_permission', async ({ params, signal }) => {
+      const response = await handlers.requestPermission(params, signal)
+      return response
+    })
+    .onRequest('fs/read_text_file', async ({ params }) => {
+      const response = await handlers.readTextFile(params)
+      return response
+    })
+    .onRequest('fs/write_text_file', async ({ params }) => {
+      const response = await handlers.writeTextFile(params)
+      return response
+    })
+    .onRequest('terminal/create', async ({ params }) => {
+      const response = await handlers.createTerminal(params)
+      return response
+    })
+    .onRequest('terminal/output', ({ params }) => handlers.terminalOutput(params))
+    .onRequest('terminal/wait_for_exit', async ({ params }) => {
+      const response = await handlers.waitForTerminalExit(params)
+      return response
+    })
+    .onRequest('terminal/kill', ({ params }) => handlers.killTerminal(params))
+    .onRequest('terminal/release', ({ params }) => handlers.releaseTerminal(params))
+
+// The agent's stdio as ACP v1: the handlers serve the agent's requests, the connection carries ours
+export const connectAgent = async (
+  agent: AgentProcess,
+  handlers: ClientHandlers,
+): Promise<Connected> => {
+  const stream = ndJsonStream(Writable.toWeb(agent.child.stdin), Readable.toWeb(agent.child.stdout))
+  const connection = appOf(handlers).connect(stream)
+  const initialized = await connection.agent.request('initialize', {
+    protocolVersion: PROTOCOL_VERSION,
+    clientCapabilities: CLIENT_CAPABILITIES,
+  })
+  if (initialized.protocolVersion !== PROTOCOL_VERSION) {
+    throw new RefusedAgentError(
+      `the agent speaks ACP v${initialized.protocolVersion}; ByteBureau speaks ACP v${PROTOCOL_VERSION}`,
+    )
+  }
   return { connection, initialized }
+}
+
+// What opening a session gave: its id, and why the session to resume was not loaded, when it was not
+export interface Opened {
+  readonly sessionId: string
+  readonly notLoaded?: string | undefined
+}
+
+const newSession = async (connection: ClientConnection, cwd: string): Promise<string> => {
+  const { sessionId } = await connection.agent.request('session/new', { cwd, mcpServers: [] })
+  return sessionId
+}
+
+// The session to resume, loaded; when the agent answers the load with an error, a new one instead
+const loadedOr = async (
+  connection: ClientConnection,
+  cwd: string,
+  resume: string,
+): Promise<Opened> => {
+  try {
+    await connection.agent.request('session/load', { sessionId: resume, cwd, mcpServers: [] })
+    return { sessionId: resume }
+  } catch (error) {
+    if (!(error instanceof RequestError)) {
+      throw error
+    }
+    return { sessionId: await newSession(connection, cwd), notLoaded: reasonOf(error) }
+  }
+}
+
+// A session/load when there is a session to resume and the agent loads sessions; a session/new otherwise
+export const openSession = async (
+  { connection, initialized }: Connected,
+  cwd: string,
+  resume: string | undefined,
+): Promise<Opened> => {
+  if (resume === undefined) {
+    return { sessionId: await newSession(connection, cwd) }
+  }
+  const capabilities = initialized.agentCapabilities
+  if (capabilities === undefined || capabilities.loadSession !== true) {
+    return { sessionId: await newSession(connection, cwd), notLoaded: 'it does not load sessions' }
+  }
+  const opened = await loadedOr(connection, cwd, resume)
+  return opened
 }
 ```
 
 - [ ] **Step 5: Client handlers, mapping, permissions, the session, the provider, the plugin**
 
 `client-fs.ts`: `insideWorkspace(workspace, target)` (realpath of the existing part of `target`'s path, `path.relative` not climbing), `readTextFile` (`line`/`limit` honoured when given), `writeTextFile` (`mkdirSync` of the parent inside the workspace, write utf8); outside → `throw RequestError.invalidParams(\`${path} is outside the workspace\`)`. `client-terminal.ts`: `Terminals` class over `ProcessSpawner` (create/output/waitForExit/kill/release; the buffer with `outputByteLimit`, default 1 MiB). `permissions.ts`: `PermissionBroker` (pending by `toolCallId`; `request(params)` returns the response promise and queues `ask.requested`; `answer(askId, answer)`; `cancelAll()`). `mapping.ts`: `mapUpdate(update): readonly AgentEvent[]` as the semantics say, plus `metaEvents(update._meta)`. `session.ts` + `session-turns.ts`: `AcpSession` holding `request`, `preset`, `deps`, the queues, `attempt` (restarts), `agent` (process + connection + sessionId), `turn` (running prompt promise, accumulated text, last usage); `start()` (spawn, connect, new/load, watch `exited`: mid-turn → `session.error` crash + `session.closed`; idle → `respawnable = true`); `prompt()` (respawn if needed, `turn.started`, the prompt call, the completion events); `interrupt()`; `answer()`; `events()`; `close()`. `provider.ts`: `AcpAgentProvider(preset, deps)` with `id = providerIdOf(preset)`, `displayName`, `apiKeyEnv` from the preset (custom: from the config at session time — `apiKeyEnv` is static per provider; for `acp:custom` it is `undefined` unless `BYTEBUREAU_ACP_CUSTOM_API_KEY_ENV`… keep `acp:custom` without API-key profiles in SP1, documented), capabilities `{ resume: true, interrupt: true, askUser: false, permissions: true, structuredOutput: false, usage: false, rateLimits: false, contextUsage: false, thinking: true, setModel: false, setEffort: false, attachments: false }`, `authStatus` as the semantics say, `createSession` → `AcpSession.start(...)`. `plugin.ts`: `acpAgentPlugin` registering the five providers with `deps = { spawn, process: context.process, logger: context.logger }`.
+
+**Added files (as shipped):**
+
+`plugins/agent-acp/src/agent-start.ts` (as shipped):
+
+```ts
+import { RequestError } from '@agentclientprotocol/sdk'
+import type { CreateSessionRequest } from '@bytebureau/plugin-api'
+import {
+  connectAgent,
+  openSession,
+  reasonOf,
+  settled,
+  type ClientHandlers,
+  type Running,
+} from './connection.js'
+import { endProcess, sweepGroup } from './kill-ladder.js'
+import type { Preset } from './presets.js'
+import { endingOf, spawnAgent, type AcpDeps, type AgentProcess } from './process.js'
+import { redacted } from './redaction.js'
+import { RefusedAgentError } from './refused-agent-error.js'
+import { withinLimit } from './within-limit.js'
+
+// What a session starts its agents from
+export interface Setup {
+  readonly request: CreateSessionRequest
+  readonly preset: Preset
+  readonly deps: AcpDeps
+  readonly providerId: string
+  // The variable the provider declares for the key of an API-key profile, the one the kernel hands the key in
+  readonly keyEnv: string | undefined
+}
+
+// What a start may take when the kernel does not bound it, as for an agent started again for a prompt
+export const START_LIMIT_MS = 60_000
+const AUTH_REQUIRED = -32_000
+const EXIT_WAIT_MS = 2000
+// A variable named as a key or a token is the agent's to hold, never a terminal's
+const SECRET_NAME = /_(?:API_KEY|TOKEN)$/iu
+
+// The values a session never repeats: the key of an API-key profile, under either variable it can travel in
+const secretsOf = ({ request, preset, keyEnv }: Setup): readonly string[] =>
+  [keyEnv, preset.apiKeyEnv].flatMap((name) => {
+    const value = name === undefined ? undefined : request.env[name]
+    return value === undefined || value === '' ? [] : [value]
+  })
+
+// The environment of the agent's terminals: the session's without the key of the profile or anything named as a key or a token
+export const terminalEnvOf = ({
+  request,
+  preset,
+  keyEnv,
+}: Setup): Readonly<Record<string, string>> =>
+  Object.fromEntries(
+    Object.entries(request.env).filter(
+      ([name]) => name !== keyEnv && name !== preset.apiKeyEnv && !SECRET_NAME.test(name),
+    ),
+  )
+
+// What an error the agent answered says, with no secret of the session in it, and the login to perform when it asked for one
+export const toldReason = (error: unknown, setup: Setup): string => {
+  const reason = redacted(reasonOf(error), secretsOf(setup))
+  const login = error instanceof RequestError && error.code === AUTH_REQUIRED
+  return login ? `${reason}; log in with: ${setup.preset.loginHint}` : reason
+}
+
+// A key the kernel handed under the variable the provider declares travels under the one the preset names, when that is another
+const movedKey = (
+  env: Readonly<Record<string, string>>,
+  declared: string | undefined,
+  wanted: string | undefined,
+): Readonly<Record<string, string>> => {
+  const key = declared === undefined ? undefined : env[declared]
+  if (key === undefined || wanted === undefined || wanted === declared) {
+    return env
+  }
+  const others = Object.entries(env).filter(([name]) => name !== declared)
+  return { ...Object.fromEntries(others), [wanted]: key }
+}
+
+// The environment of the agent: the request's (the kernel's allowlist and the key of the profile) and the directory of a login profile; the preset's own is added at the spawn
+const envOf = ({ request, preset, keyEnv }: Setup): Readonly<Record<string, string>> => {
+  const env = movedKey(request.env, keyEnv, preset.apiKeyEnv)
+  const { kind, configDir } = request.profile
+  const { configDirEnv } = preset
+  return kind === 'login' && configDir !== undefined && configDirEnv !== undefined
+    ? { ...env, [configDirEnv]: configDir }
+    : env
+}
+
+// Why an agent could not start a session: what it answered, with the login to perform when it asked for one, or why the adapter refused it
+// Any other failure is its death, a write to it failing or its connection closing, when it ends within two seconds; it is ended either way
+const failureOf = async (agent: AgentProcess, error: unknown, setup: Setup): Promise<Error> => {
+  const answered = error instanceof RequestError || error instanceof RefusedAgentError
+  const exit = answered ? null : await withinLimit(agent.exited, EXIT_WAIT_MS)
+  await endProcess(agent.child, agent.exited)
+  if (exit !== null) {
+    return new Error(endingOf(agent, exit))
+  }
+  return new Error(toldReason(error, setup))
+}
+
+// The agent connected and in an ACP session
+// The updates a loaded session replays are let through before the agent is the session's, so none of them is told
+const sessionOf = async (
+  agent: AgentProcess,
+  handlers: ClientHandlers,
+  opening: {
+    readonly cwd: string
+    readonly resume: string | undefined
+    readonly secrets: readonly string[]
+  },
+): Promise<Running> => {
+  const connected = await connectAgent(agent, handlers)
+  const { sessionId, notLoaded } = await openSession(connected, opening.cwd, opening.resume)
+  await settled()
+  const why = notLoaded === undefined ? {} : { notLoaded: redacted(notLoaded, opening.secrets) }
+  return { process: agent, connection: connected.connection, sessionId, gone: false, ...why }
+}
+
+// The agent killed with its whole group: a wrapper's agent that holds the pipes would otherwise keep a start waiting
+const killAll = (agent: AgentProcess): void => {
+  sweepGroup(agent.child)
+  agent.child.kill('SIGKILL')
+}
+
+// The work of a start, which its caller may give up on: the agent is killed then, so nothing waits on it
+const whileStarting = async <Value>(
+  signal: AbortSignal,
+  agent: AgentProcess,
+  work: Promise<Value>,
+): Promise<Value> => {
+  const abandon = (): void => {
+    killAll(agent)
+  }
+  signal.addEventListener('abort', abandon, { once: true })
+  if (signal.aborted) {
+    abandon()
+  }
+  try {
+    const value = await work
+    return value
+  } finally {
+    signal.removeEventListener('abort', abandon)
+  }
+}
+
+const limitText = (limitMs: number): string =>
+  limitMs % 1000 === 0 ? `${limitMs / 1000} s` : `${limitMs} ms`
+
+// A start within its time; one that is not done by then is killed with its group and refused as too slow
+const inTime = async (
+  agent: AgentProcess,
+  started: Promise<Running>,
+  limitMs: number,
+): Promise<Running> => {
+  const running = await withinLimit(started, limitMs)
+  if (running === null) {
+    killAll(agent)
+    throw new RefusedAgentError(`the agent did not start a session within ${limitText(limitMs)}`)
+  }
+  return running
+}
+
+// How a start goes: the session to resume, the signal that gives it up, and the time it has when the kernel does not bound it
+interface Starting {
+  readonly resume?: string | undefined
+  readonly signal: AbortSignal
+  readonly limitMs?: number | undefined
+}
+
+// What a session asks of a start; the signal is its own
+export type Launching = Omit<Starting, 'signal'>
+
+// An agent of the preset in an ACP session: loaded when the session to resume is known, else new; one that fails is ended, and says why
+export const startAgent = async (
+  setup: Setup,
+  handlers: ClientHandlers,
+  { resume, signal, limitMs }: Starting,
+): Promise<Running> => {
+  const cwd = setup.request.workspace.path
+  const secrets = secretsOf(setup)
+  const agent = await spawnAgent(setup.deps.spawn, setup.preset, {
+    cwd,
+    env: envOf(setup),
+    secrets,
+  })
+  try {
+    const started = sessionOf(agent, handlers, { cwd, resume, secrets })
+    const timed = limitMs === undefined ? started : inTime(agent, started, limitMs)
+    const running = await whileStarting(signal, agent, timed)
+    return running
+  } catch (error) {
+    throw await failureOf(agent, error, setup)
+  }
+}
+```
+
+`plugins/agent-acp/src/session-client.ts` (as shipped):
+
+```ts
+import type { SessionNotification } from '@agentclientprotocol/sdk'
+import { readTextFile, writeTextFile } from './client-fs.js'
+import type { Terminals } from './client-terminal.js'
+import type { ClientHandlers } from './connection.js'
+import type { PermissionBroker } from './permissions.js'
+
+// What a session serves its agent with
+interface Serving {
+  readonly workspace: string
+  readonly asks: PermissionBroker
+  readonly terminals: Terminals
+  readonly updated: (notification: SessionNotification) => void
+}
+
+// The client side of a session: the updates it tells, the permissions it brokers, the files of the workspace and its terminals
+export const clientOf = ({ workspace, asks, terminals, updated }: Serving): ClientHandlers => ({
+  sessionUpdate: updated,
+  requestPermission: async (params, signal) => {
+    const response = await asks.request(params, signal)
+    return response
+  },
+  readTextFile: async (params) => {
+    const response = await readTextFile(workspace, params)
+    return response
+  },
+  writeTextFile: async (params) => {
+    const response = await writeTextFile(workspace, params)
+    return response
+  },
+  createTerminal: async (params) => {
+    const response = await terminals.create(params)
+    return response
+  },
+  terminalOutput: (params) => terminals.output(params),
+  waitForTerminalExit: async (params) => {
+    const response = await terminals.waitForExit(params)
+    return response
+  },
+  killTerminal: (params) => terminals.kill(params),
+  releaseTerminal: (params) => terminals.release(params),
+})
+```
+
+`plugins/agent-acp/src/redaction.ts` (as shipped):
+
+```ts
+const REDACTED = '[redacted]'
+
+// Every whole occurrence of a secret in a text is replaced
+export const redacted = (text: string, secrets: readonly string[]): string => {
+  let told = text
+  for (const secret of secrets) {
+    told = told.replaceAll(secret, REDACTED)
+  }
+  return told
+}
+
+// How much of the end of a text begins a secret, which is what a cut through the secret leaves
+const cutSecretLength = (text: string, secret: string): number => {
+  let length = Math.min(secret.length - 1, text.length)
+  while (length > 0 && !text.endsWith(secret.slice(0, length))) {
+    length -= 1
+  }
+  return length
+}
+
+// A text cut to a limit with no secret in it, whole or the part of one the cut ran through
+export const cutRedacted = (text: string, limit: number, secrets: readonly string[]): string => {
+  const cut = redacted(text.slice(0, limit), secrets)
+  if (text.length <= limit) {
+    return cut
+  }
+  const left = Math.max(0, ...secrets.map((secret) => cutSecretLength(cut, secret)))
+  return left === 0 ? cut : `${cut.slice(0, cut.length - left)}${REDACTED}`
+}
+```
+
+`plugins/agent-acp/src/refused-agent-error.ts` (as shipped):
+
+```ts
+// The adapter's own refusal of an agent that has not died: one that speaks another version of ACP, or does not start in time
+export class RefusedAgentError extends Error {
+  public constructor(message: string) {
+    super(message)
+    this.name = 'RefusedAgentError'
+  }
+}
+```
+
+`plugins/agent-acp/src/within-limit.ts` (as shipped):
+
+```ts
+// The value of the work, or null once the limit is over; the timer does not outlive the race
+export const withinLimit = async <Value>(
+  work: Promise<Value>,
+  limitMs: number,
+): Promise<Value | null> => {
+  const { promise, resolve } = Promise.withResolvers<null>()
+  const timer = setTimeout(() => {
+    resolve(null)
+  }, limitMs)
+  try {
+    const value = await Promise.race([work, promise])
+    return value
+  } finally {
+    clearTimeout(timer)
+  }
+}
+```
+
+`plugins/agent-acp/src/testing/requests.ts` (as shipped):
+
+```ts
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import type {
+  CreateSessionRequest,
+  EmployeeSpec,
+  Logger,
+  LogLevel,
+  ProfileRef,
+} from '@bytebureau/plugin-api'
+import { onTestFinished } from 'vitest'
+
+const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000007'
+// A key that must never be seen anywhere but in the environment of the agent
+export const CANARY_KEY = 'sk-acp-canary-0000000000000000'
+
+export interface LogEntry {
+  readonly level: LogLevel
+  readonly message: string
+  readonly properties: Readonly<Record<string, unknown>> | undefined
+}
+
+// A logger that keeps what it is told, for the tests that look at what was logged
+export function recordingLogger(): { readonly logger: Logger; readonly entries: LogEntry[] } {
+  const entries: LogEntry[] = []
+  const at =
+    (level: LogLevel): Logger['debug'] =>
+    (message, properties) => {
+      entries.push({ level, message, properties })
+    }
+  const logger: Logger = {
+    category: ['test'],
+    debug: at('debug'),
+    info: at('info'),
+    warn: at('warn'),
+    error: at('error'),
+    child: () => logger,
+  }
+  return { logger, entries }
+}
+
+// A directory of the test's own, real path resolved (macOS keeps temporary files behind /var -> /private/var), removed when the test ends
+export function tempDir(prefix: string): string {
+  const created = mkdtempSync(path.join(tmpdir(), prefix))
+  const dir = realpathSync(created)
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+
+const employee: EmployeeSpec = {
+  id: 'dev',
+  name: 'Dev',
+  provider: 'acp:custom',
+  model: 'default',
+  effort: null,
+  systemPrompt: 'You write TypeScript.',
+  tools: { allow: [], deny: [] },
+  permissionMode: 'supervised',
+  skills: [],
+  appearance: {},
+}
+
+const loginProfile: ProfileRef = { id: 'default', providerId: 'acp:custom', kind: 'login' }
+
+// A request as the kernel makes it: the allowlisted environment, the profile and the provider options
+export const sessionRequest = (
+  overrides: Partial<CreateSessionRequest> = {},
+): CreateSessionRequest => ({
+  sessionId: SESSION_ID,
+  workspace: { path: '/w' },
+  employee,
+  profile: loginProfile,
+  providerConfig: {},
+  env: { PATH: '/usr/bin:/bin', HOME: '/home/dev' },
+  signal: new AbortController().signal,
+  logger: recordingLogger().logger,
+  ...overrides,
+})
+```
+
+`plugins/agent-acp/src/testing/sessions.ts` (as shipped):
+
+```ts
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
+import type {
+  AgentEvent,
+  AgentSession,
+  AskAnswer,
+  CreateSessionRequest,
+} from '@bytebureau/plugin-api'
+import { AcpAgentProvider } from '../provider.js'
+import type { FakeScript } from './fake-acp-agent.js'
+import { sessionRequest, tempDir } from './requests.js'
+import { fakeAgentCommand } from './run-fake.js'
+import { harness, started, until, type Harness } from './session-harness.js'
+
+export const TURN_END = 'turn.completed'
+const ALLOW: AskAnswer = { selected: ['allow'] }
+
+// A workspace with a parent of its own, so a file above it is the test's too
+export const workspaceOf = (): string => {
+  const workspace = path.join(tempDir('bb-acp-ws-'), 'ws')
+  mkdirSync(workspace)
+  return workspace
+}
+
+// The providers["acp:custom"] section that runs the fake agent
+export const customOf = (
+  script: FakeScript,
+  extra: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> => ({ ...fakeAgentCommand(script), ...extra })
+
+// A session of the custom provider over the fake agent, closed when the test ends
+export const sessionOf = async (
+  request: Partial<CreateSessionRequest>,
+  run: Harness = harness(),
+): Promise<AgentSession> => {
+  const provider = new AcpAgentProvider('custom', run.deps)
+  const session = await started(provider, sessionRequest(request))
+  return session
+}
+
+// The events of a prompt up to the first of the type, its asks allowed as they come
+export const prompted = async (
+  session: AgentSession,
+  text: string,
+  last: AgentEvent['type'] = TURN_END,
+): Promise<AgentEvent[]> => {
+  const reading = until(session, last, ALLOW)
+  await session.prompt({ text })
+  const seen = await reading
+  return seen
+}
+```
+
+`plugins/agent-acp/src/testing/session-harness.ts` (as shipped):
+
+```ts
+import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from 'node:child_process'
+import { once } from 'node:events'
+import { setTimeout } from 'node:timers/promises'
+import { createInterface } from 'node:readline'
+import type { Readable } from 'node:stream'
+import type {
+  AgentEvent,
+  AgentProvider,
+  AgentSession,
+  AskAnswer,
+  CreateSessionRequest,
+  ExecHandle,
+  ProcessSpawner,
+} from '@bytebureau/plugin-api'
+import { onTestFinished } from 'vitest'
+import type { AcpDeps, SpawnFn } from '../process.js'
+import { recordingLogger, type LogEntry } from './requests.js'
+
+// An agent the adapter started, with what it was started with
+interface Spawned {
+  readonly child: ChildProcess
+  readonly command: string
+  readonly args: readonly string[]
+  readonly options: SpawnOptionsWithoutStdio
+}
+
+export interface Harness {
+  readonly deps: AcpDeps
+  readonly logged: LogEntry[]
+  readonly spawned: Spawned[]
+  readonly terminals: ChildProcess[]
+}
+
+// Whatever of a process group is left when its test ends is killed; a child that leads none is killed alone
+const killGroup = (child: ChildProcess): void => {
+  try {
+    process.kill(-(child.pid ?? 0), 'SIGKILL')
+  } catch {
+    child.kill('SIGKILL')
+  }
+}
+
+// A process that still runs when its test ends is killed, its group with it, and waited for
+const endNow = async (child: ChildProcess): Promise<void> => {
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    const exit = once(child, 'exit')
+    killGroup(child)
+    await exit
+  } else if (child.pid !== undefined) {
+    killGroup(child)
+  }
+}
+
+const isRunning = (pid: number): boolean => {
+  try {
+    return process.kill(pid, 0)
+  } catch {
+    return false
+  }
+}
+
+// Whether a process is gone within the time given; a pid is polled, as nothing else tells of a grandchild
+export const goneWithin = async (pid: number, limitMs: number): Promise<boolean> => {
+  if (!isRunning(pid)) {
+    return true
+  }
+  if (limitMs <= 0) {
+    return false
+  }
+  await setTimeout(50)
+  const gone = await goneWithin(pid, limitMs - 50)
+  return gone
+}
+
+async function* linesOf(stream: Readable): AsyncIterable<string> {
+  for await (const line of createInterface({
+    input: stream,
+    crlfDelay: Number.POSITIVE_INFINITY,
+  })) {
+    yield line
+  }
+}
+
+// A process the test learnt of is killed when the test ends, should it outlive what the test checks
+export const killedAtEnd = (pid: number): void => {
+  onTestFinished(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Gone already
+    }
+  })
+}
+
+// The first line the first agent of a harness writes to stderr
+export const firstWordOf = async ({ spawned }: Harness): Promise<string> => {
+  const { promise, resolve } = Promise.withResolvers<string>()
+  const [agent] = spawned
+  if (agent !== undefined && agent.child.stderr !== null) {
+    agent.child.stderr.once('data', (chunk: string) => {
+      resolve(chunk.split('\n')[0] ?? '')
+    })
+  }
+  const line = await promise
+  return line
+}
+
+// The exit of a child that has started; the listener is set before anything can end it
+export const exitOf = async (child: ChildProcess): Promise<Awaited<ExecHandle['exited']>> => {
+  const { promise, resolve } = Promise.withResolvers<Awaited<ExecHandle['exited']>>()
+  child.once('exit', (code, signal) => {
+    resolve({ code, signal })
+  })
+  const exit = await promise
+  return exit
+}
+
+// The end of a process; one that has already ended is not waited for
+export const endOf = async (child: ChildProcess): Promise<void> => {
+  if (child.exitCode === null && child.signalCode === null) {
+    await exitOf(child)
+  }
+}
+
+// The process port of the plugin context as the tests give it: plain child processes, killed when the test ends
+const nodeProcesses = (children: ChildProcess[]): ProcessSpawner => ({
+  async spawn(spec) {
+    const child = spawn(spec.command, [...spec.args], { cwd: spec.cwd, env: { ...spec.env } })
+    children.push(child)
+    await once(child, 'spawn')
+    const exited = exitOf(child)
+    return {
+      pid: child.pid ?? -1,
+      stdout: linesOf(child.stdout),
+      stderr: linesOf(child.stderr),
+      exited,
+      kill(signal = 'SIGTERM') {
+        child.kill(signal)
+      },
+    }
+  },
+})
+
+// Deps whose spawn runs the real agent and records it, with every process ended when the test ends
+export const harness = (): Harness => {
+  const spawned: Spawned[] = []
+  const terminals: ChildProcess[] = []
+  const { logger, entries } = recordingLogger()
+  const recording: SpawnFn = (command, args, options) => {
+    const child = spawn(command, args, options)
+    spawned.push({ child, command, args, options })
+    return child
+  }
+  onTestFinished(async () => {
+    const children = [...spawned.map(({ child }) => child), ...terminals]
+    await Promise.all(
+      children.map(async (child) => {
+        await endNow(child)
+      }),
+    )
+  })
+  const deps: AcpDeps = { spawn: recording, process: nodeProcesses(terminals), logger }
+  return { deps, logged: entries, spawned, terminals }
+}
+
+// A session closed when its test ends, whatever happened in it
+export const started = async (
+  provider: AgentProvider,
+  request: CreateSessionRequest,
+): Promise<AgentSession> => {
+  const session = await provider.createSession(request)
+  onTestFinished(async () => {
+    await session.close()
+  })
+  return session
+}
+
+// The events of a session up to the first of the type, that one included; an ask is answered as it comes when an answer is given
+export const until = async (
+  session: AgentSession,
+  type: AgentEvent['type'],
+  answer?: AskAnswer,
+): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for await (const event of session.events()) {
+    seen.push(event)
+    if (event.type === 'ask.requested' && answer !== undefined) {
+      await session.answer(event.ask.id, answer)
+    }
+    if (event.type === type) {
+      break
+    }
+  }
+  return seen
+}
+
+// Every event a session still has to tell, up to its end
+export const rest = async (session: AgentSession): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for await (const event of session.events()) {
+    seen.push(event)
+  }
+  return seen
+}
+```
+
+`plugins/agent-acp/src/kill-ladder.test.ts` (as shipped):
+
+```ts
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { describe, expect, it, onTestFinished } from 'vitest'
+import { endProcess } from './kill-ladder.js'
+import type { Exit } from './process.js'
+import { exitOf } from './testing/session-harness.js'
+
+const STEP_MS = 300
+
+// A node process that ignores the signals named, started and listening for them
+const running = async (
+  ...ignored: readonly string[]
+): Promise<{ readonly child: ReturnType<typeof spawn>; readonly exited: Promise<Exit> }> => {
+  const handlers = ignored.map((signal) => `process.on('${signal}', () => {});`).join(' ')
+  const script = `${handlers} setInterval(() => {}, 1000); console.log('ready')`
+  const child = spawn(process.execPath, ['-e', script])
+  onTestFinished(() => {
+    child.kill('SIGKILL')
+  })
+  const exited = exitOf(child)
+  await once(child.stdout, 'data')
+  return { child, exited }
+}
+
+describe('the kill ladder', () => {
+  it('ends an agent with SIGINT when it heeds it', async () => {
+    expect.hasAssertions()
+    const { child, exited } = await running()
+    await expect(endProcess(child, exited, STEP_MS)).resolves.toStrictEqual({
+      code: null,
+      signal: 'SIGINT',
+    })
+  })
+
+  it('climbs to SIGTERM, then to SIGKILL, for an agent that ignores what came before', async () => {
+    expect.hasAssertions()
+    const polite = await running('SIGINT')
+    await expect(endProcess(polite.child, polite.exited, STEP_MS)).resolves.toStrictEqual({
+      code: null,
+      signal: 'SIGTERM',
+    })
+    const stubborn = await running('SIGINT', 'SIGTERM')
+    await expect(endProcess(stubborn.child, stubborn.exited, STEP_MS)).resolves.toStrictEqual({
+      code: null,
+      signal: 'SIGKILL',
+    })
+  })
+
+  it('signals nothing to an agent that has already ended, and tells its exit', async () => {
+    expect.hasAssertions()
+    const { child, exited } = await running()
+    child.kill('SIGTERM')
+    await exited
+    await expect(endProcess(child, exited, STEP_MS)).resolves.toStrictEqual({
+      code: null,
+      signal: 'SIGTERM',
+    })
+  })
+})
+```
+
+`plugins/agent-acp/src/session-start.test.ts` (as shipped):
+
+```ts
+import path from 'node:path'
+import type { AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
+import { describe, expect, it } from 'vitest'
+import type { PresetId } from './presets.js'
+import { AcpAgentProvider } from './provider.js'
+import { CANARY_KEY, sessionRequest, tempDir } from './testing/requests.js'
+import { fakeAgentCommand } from './testing/run-fake.js'
+import {
+  firstWordOf,
+  goneWithin,
+  harness,
+  killedAtEnd,
+  started,
+  type Harness,
+} from './testing/session-harness.js'
+import { workspaceOf } from './testing/sessions.js'
+
+const node = process.execPath
+// A wrapper whose agent inherits its pipes, as a shell script's does; it tells the agent's pid on stderr and never answers
+const WRAPPER = {
+  command: node,
+  args: [
+    '-e',
+    String.raw`const inner = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' }); process.stderr.write(inner.pid + '\n'); setInterval(() => {}, 1000)`,
+  ],
+}
+
+// The start of a session whose preset runs what the entry says, with every agent it starts recorded
+const starting = (
+  preset: PresetId,
+  entry: Readonly<Record<string, unknown>>,
+  request: Partial<CreateSessionRequest> = {},
+): { readonly session: Promise<AgentSession>; readonly run: Harness } => {
+  const run = harness()
+  const provider = new AcpAgentProvider(preset, run.deps)
+  const workspace = { path: workspaceOf() }
+  return {
+    session: started(provider, sessionRequest({ workspace, providerConfig: entry, ...request })),
+    run,
+  }
+}
+
+describe('an ACP agent that does not open a session', () => {
+  it('is refused with how it died and its last word, when it dies before it answers', async () => {
+    expect.hasAssertions()
+    const script = String.raw`process.stderr.write('not logged in\n', () => process.exit(3))`
+    const { session } = starting('custom', { command: node, args: ['-e', script] })
+    await expect(session).rejects.toThrow(/^the agent exited with code 3: not logged in$/u)
+  })
+
+  it('redacts a key that the cut of a long last word runs through', async () => {
+    expect.hasAssertions()
+    const script = String.raw`process.stderr.write('x'.repeat(1995) + process.env.FAKE_ACP_API_KEY + 'tail', () => process.exit(3))`
+    const entry = { command: node, args: ['-e', script], apiKeyEnv: 'FAKE_ACP_API_KEY' }
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
+    const { session } = starting('custom', entry, { env })
+    await expect(session).rejects.toThrow(/^the agent exited with code 3: x{1995}\[redacted\]$/u)
+  })
+
+  it('keeps a last word that never ends its line to its first 2000 characters', async () => {
+    expect.hasAssertions()
+    const script = String.raw`process.stderr.write('x'.repeat(100000), () => process.exit(3))`
+    const { session } = starting('custom', { command: node, args: ['-e', script] })
+    await expect(session).rejects.toThrow(/^the agent exited with code 3: x{2000}$/u)
+  })
+
+  it('is refused with the login to perform, when it asks for one, the key it echoes redacted', async () => {
+    expect.hasAssertions()
+    const codex = { ...fakeAgentCommand('auth-required'), apiKeyEnv: 'FAKE_ACP_API_KEY' }
+    const env = { PATH: '/usr/bin:/bin', OPENAI_API_KEY: CANARY_KEY }
+    const { session, run } = starting('codex', codex, { env })
+    await expect(session).rejects.toThrow(
+      /^Authentication required: no login for \[redacted\]; log in with: codex login$/u,
+    )
+    expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual(['SIGINT'])
+  })
+
+  it('is refused and ended at once when it speaks another version of ACP', async () => {
+    expect.hasAssertions()
+    const before = performance.now()
+    const { session, run } = starting('custom', fakeAgentCommand('protocol-v2'))
+    await expect(session).rejects.toThrow('the agent speaks ACP v2; ByteBureau speaks ACP v1')
+    expect(performance.now() - before).toBeLessThan(1500)
+    expect(run.spawned.map(({ child }) => child.signalCode)).toStrictEqual(['SIGINT'])
+  })
+})
+
+describe('a start that cannot go on', () => {
+  it('kills the agent of a start the kernel gives up on, what it started holding its pipes as well', async () => {
+    expect.hasAssertions()
+    const controller = new AbortController()
+    const { session, run } = starting('custom', WRAPPER, { signal: controller.signal })
+    const inner = Number(await firstWordOf(run))
+    killedAtEnd(inner)
+    controller.abort()
+    await expect(session).rejects.toThrow('the agent was killed by SIGKILL')
+    await expect(goneWithin(inner, 3000)).resolves.toBe(true)
+  })
+
+  it('refuses a workspace that is not there, and starts nothing', async () => {
+    expect.hasAssertions()
+    const missing = path.join(tempDir('bb-acp-start-'), 'gone')
+    const { session, run } = starting('custom', fakeAgentCommand('hello'), {
+      workspace: { path: missing },
+    })
+    await expect(session).rejects.toThrow(`the workspace ${missing} does not exist`)
+    expect(run.spawned).toStrictEqual([])
+  })
+})
+```
+
+`plugins/agent-acp/src/session-agent.test.ts` (as shipped):
+
+```ts
+import type { ChildProcess } from 'node:child_process'
+import type { AgentSession, ExecHandle, ProcessSpawner } from '@bytebureau/plugin-api'
+import { describe, expect, it } from 'vitest'
+import { sessionRequest } from './testing/requests.js'
+import { AcpAgentProvider } from './provider.js'
+import {
+  goneWithin,
+  harness,
+  killedAtEnd,
+  rest,
+  started,
+  until,
+  type Harness,
+} from './testing/session-harness.js'
+import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.js'
+
+const CUSTOM = 'acp:custom'
+
+describe('the agent an ACP session starts', () => {
+  it('runs in the workspace with the environment of the request, the preset and the login directory, in a group of its own with no window', async () => {
+    expect.hasAssertions()
+    const workspace = workspaceOf()
+    const run = harness()
+    const profile = {
+      id: 'acp:custom/work',
+      providerId: CUSTOM,
+      kind: 'login',
+      configDir: '/h/p',
+    } as const
+    const providerConfig = customOf('hello', { configDirEnv: 'FAKE_ACP_HOME' })
+    await sessionOf({ workspace: { path: workspace }, providerConfig, profile }, run)
+    const env = {
+      ...sessionRequest().env,
+      BYTEBUREAU_FAKE_ACP_SCRIPT: 'hello',
+      FAKE_ACP_HOME: '/h/p',
+    }
+    const spawnedWith = run.spawned.map(({ options }) => [
+      options.cwd,
+      options.env,
+      options.detached,
+      options.windowsHide,
+    ])
+    expect(spawnedWith).toStrictEqual([[workspace, env, true, true]])
+  })
+
+  it('loads the session a resume names when the agent can, and starts a new one for a resume of another provider', async () => {
+    expect.hasAssertions()
+    const base = { workspace: { path: workspaceOf() }, providerConfig: customOf('hello') }
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
+    const loaded = await sessionOf({ ...base, resume })
+    expect(loaded.externalRef).toStrictEqual(resume)
+    const [first] = await prompted(loaded, 'Go on')
+    expect(first).toStrictEqual({ type: 'turn.started' })
+    const fresh = await sessionOf({
+      ...base,
+      resume: { providerId: 'claude', ref: 'session-0001' },
+    })
+    expect(fresh.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
+  })
+})
+
+// The warning of a resume the agent could not load, for the reason it gives
+const notLoaded = (why: string): unknown => ({
+  type: 'session.warning',
+  kind: 'resume',
+  message: `the agent could not load session fake-acp-earlier (${why}); a new session was started`,
+})
+
+describe('a session to resume that the agent cannot load', () => {
+  it('starts a new session, and says so, when the agent answers the load with an error', async () => {
+    expect.hasAssertions()
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
+    const providerConfig = customOf('load-fails')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
+    expect(session.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
+    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
+      notLoaded('Resource not found: fake-acp-earlier'),
+    ])
+  })
+
+  it('starts a new session, and says so, when the agent does not load sessions', async () => {
+    expect.hasAssertions()
+    const resume = { providerId: CUSTOM, ref: 'fake-acp-earlier' }
+    const providerConfig = customOf('no-load')
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, resume })
+    expect(session.externalRef).toStrictEqual({ providerId: CUSTOM, ref: 'fake-acp-1' })
+    await expect(until(session, 'session.warning')).resolves.toStrictEqual([
+      notLoaded('it does not load sessions'),
+    ])
+  })
+})
+
+// The pid of the process the children script says it started
+const ownChildOf = async (session: AgentSession): Promise<number> => {
+  for await (const event of session.events()) {
+    if (event.type === 'message.delta' && event.text.startsWith('children ')) {
+      return Number(event.text.split(' ')[1])
+    }
+  }
+  return 0
+}
+
+// Whether each of the processes is gone within three seconds
+const allGone = async (pids: readonly number[]): Promise<boolean[]> => {
+  const gone = await Promise.all(
+    pids.map(async (pid) => {
+      const one = await goneWithin(pid, 3000)
+      return one
+    }),
+  )
+  return gone
+}
+
+// The pid of the first of the processes, or one nobody has
+const firstPid = (children: readonly ChildProcess[]): number => {
+  const [first] = children
+  return first === undefined || first.pid === undefined ? 0 : first.pid
+}
+
+describe('what an ACP agent starts', () => {
+  it('ends with the agent when the session closes, its own processes and its terminals as well', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('children') }
+    const session = await sessionOf(request, run)
+    const prompting = session.prompt({ text: 'Start some work' })
+    const own = await ownChildOf(session)
+    killedAtEnd(own)
+    await session.close()
+    await prompting
+    await expect(allGone([own, firstPid(run.terminals)])).resolves.toStrictEqual([true, true])
+  })
+})
+
+// The process port of a harness that holds the start of every terminal until it is released
+const holding = (
+  run: Harness,
+): {
+  readonly provider: AcpAgentProvider
+  readonly asked: Promise<null>
+  readonly release: () => void
+  readonly spawned: Promise<ExecHandle>
+} => {
+  const asked = Promise.withResolvers<null>()
+  const gate = Promise.withResolvers<null>()
+  const spawned = Promise.withResolvers<ExecHandle>()
+  const held: ProcessSpawner = {
+    async spawn(spec) {
+      asked.resolve(null)
+      await gate.promise
+      const handle = await run.deps.process.spawn(spec)
+      spawned.resolve(handle)
+      return handle
+    },
+  }
+  const release = (): void => {
+    gate.resolve(null)
+  }
+  const provider = new AcpAgentProvider('custom', { ...run.deps, process: held })
+  return { provider, asked: asked.promise, release, spawned: spawned.promise }
+}
+
+// Every agent of the harness dies, as a crash kills it
+const crash = (run: Harness): void => {
+  for (const { child } of run.spawned) {
+    child.kill('SIGKILL')
+  }
+}
+
+// The children script's agent killed while the start of its terminal is held, and the session ended by the crash
+const crashedWithTerminalHeld = async (): Promise<{
+  readonly release: () => void
+  readonly spawned: Promise<ExecHandle>
+  readonly prompting: Promise<void>
+}> => {
+  const run = harness()
+  const { provider, asked, release, spawned } = holding(run)
+  const request = { workspace: { path: workspaceOf() }, providerConfig: customOf('children') }
+  const session = await started(provider, sessionRequest(request))
+  const ending = rest(session)
+  const prompting = session.prompt({ text: 'Start some work' })
+  await asked
+  crash(run)
+  await ending
+  return { release, spawned, prompting }
+}
+
+describe('a terminal of an agent that crashed', () => {
+  it('is ended once it has started, when its start was under way at the crash', async () => {
+    expect.hasAssertions()
+    const { release, spawned, prompting } = await crashedWithTerminalHeld()
+    release()
+    await prompting
+    const { pid } = await spawned
+    await expect(goneWithin(pid, 3000)).resolves.toBe(true)
+  })
+})
+```
+
+`plugins/agent-acp/src/session-keys.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { CANARY_KEY } from './testing/requests.js'
+import { harness } from './testing/session-harness.js'
+import { customOf, prompted, sessionOf, workspaceOf } from './testing/sessions.js'
+
+describe('the key of an ACP session', () => {
+  it('is redacted from an error the agent answers a prompt with', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const providerConfig = customOf('refuse-prompt', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
+    const session = await sessionOf(
+      { workspace: { path: workspaceOf() }, providerConfig, env },
+      run,
+    )
+    const told = JSON.stringify([await prompted(session, 'Create src/hello.ts'), run.logged])
+    expect(told).toContain('Internal error: the model is overloaded for [redacted]')
+    expect(told).not.toContain(CANARY_KEY)
+  })
+
+  it('keeps the key, and any variable named as a key or a token, out of the terminals of the agent', async () => {
+    expect.hasAssertions()
+    const providerConfig = customOf('terminal', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY, GITHUB_TOKEN: 'ghp-canary' }
+    const session = await sessionOf({ workspace: { path: workspaceOf() }, providerConfig, env })
+    const seen = await prompted(session, 'Run node')
+    expect(seen).toContainEqual({
+      type: 'message.delta',
+      kind: 'text',
+      text: 'hello; api key present',
+    })
+    expect(seen).toContainEqual({ type: 'message.delta', kind: 'text', text: 'terminal said ok' })
+    expect(JSON.stringify(seen)).not.toContain(CANARY_KEY)
+  })
+
+  it('hands the API key to the agent alone: no event or log line holds it', async () => {
+    expect.hasAssertions()
+    const run = harness()
+    const providerConfig = customOf('crash-mid-turn', { apiKeyEnv: 'FAKE_ACP_API_KEY' })
+    const env = { PATH: '/usr/bin:/bin', FAKE_ACP_API_KEY: CANARY_KEY }
+    const session = await sessionOf(
+      { workspace: { path: workspaceOf() }, providerConfig, env },
+      run,
+    )
+    const told = JSON.stringify([
+      await prompted(session, 'Show me the key', 'session.closed'),
+      run.logged,
+    ])
+    expect(told).toContain('hello; api key present')
+    expect(told).toContain('the fake agent crashed mid-turn holding [redacted]')
+    expect(told).not.toContain(CANARY_KEY)
+  })
+})
+```
+
+`plugins/agent-acp/src/session-turns.test.ts` (as shipped):
+
+```ts
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { answeredIn, newTurn, type Turn } from './session-turns.js'
+
+// A turn whose prompt went out, the agent's answer settling as given
+const sent = (answered: Promise<boolean>): Turn => ({ ...newTurn(), answered })
+const came = sent(Promise.resolve(true))
+const failed = sent(Promise.resolve(false))
+
+describe('whether an agent that died answered its turn', () => {
+  it('goes by the turn: answered when its answer came, not when it failed or the prompt never went out', async () => {
+    expect.hasAssertions()
+    await expect(answeredIn(came)).resolves.toBe(true)
+    await expect(answeredIn(failed)).resolves.toBe(false)
+    await expect(answeredIn(newTurn())).resolves.toBe(false)
+  })
+
+  it('counts an answer read within that second, as one the agent wrote before it died is', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const late = Promise.withResolvers<boolean>()
+    setTimeout(() => {
+      late.resolve(true)
+    }, 500)
+    const deciding = answeredIn(sent(late.promise))
+    await vi.advanceTimersByTimeAsync(500)
+    await expect(deciding).resolves.toBe(true)
+  })
+
+  it('waits a second for an answer the agent may have written before it died, and no longer', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const never = sent(Promise.withResolvers<boolean>().promise)
+    const deciding = answeredIn(never)
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(deciding).resolves.toBe(false)
+  })
+})
+```
+
+**Semantics (as shipped, commits 2958598, 200a78b, 4a52e27 … 6c65def, 1b87bb8 … dff279d):** `plugins/agent-acp` (`@bytebureau/agent-acp`, FSL-1.1-MIT; `@agentclientprotocol/sdk` 1.7.0 and `zod` 4.6.5 pinned) runs any ACP v1 agent over stdio as the providers `acp:codex|gemini|opencode|pi|custom` (`apiKeyEnv` `OPENAI_API_KEY` for codex and `GEMINI_API_KEY` for gemini, none for the others). The project section is keyed by the provider id (ruled, per spec §10): `providers["acp:custom"]` is the custom preset itself (`{ command, args?, env?, apiKeyEnv?, configDirEnv?, installHint?, loginHint? }`, `command` required — else `providers["acp:custom"].command is not configured`) and `providers["acp:<preset>"]` holds that preset's overrides (a renamed API-key variable among them: the key is moved to the variable the override names); a malformed entry is refused by name. `PRESETS` as planned, with bare `loginHint`s (`codex login`, `gemini`, `opencode auth login`, `pi`); the SDK's `client()`/`agent()` API replaces the deprecated `ClientSideConnection`/`AgentSideConnection` (ruled: the lint refuses deprecated APIs). `createSession` spawns the agent itself with `node:child_process.spawn` (three pipes, `cwd` = workspace, `env` = the request's env plus the preset's plus `[configDirEnv]: configDir` for a login profile with a directory, detached and signalled as a process group); ENOENT → `<command> is not installed; <installHint>; then log in with: <loginHint>`; the last 50 stderr lines (each redacted as it arrives and only then cut to 2000 characters, so a key straddling the cut cannot survive as a prefix) feed crash messages only and are never logged; every agent error answer (message and `data.details`) is redacted through `toldReason` before it reaches a `createSession` rejection or a `session.warning`; the kill ladder is `SIGINT` → 5 s → `SIGTERM` → 5 s → `SIGKILL` with its timers cleared and no signal to a child that already exited; a start the kernel aborts SIGKILLs the agent; a failed start ends the agent and says why (how it died, what it answered, the login hint for `auth_required`, a protocol-version mismatch (`UnsupportedAgentError`) without waiting for a death); a kernel-aborted start SIGKILLs the whole process group. The connection initializes with `PROTOCOL_VERSION` and the capabilities fs read/write and terminal, refuses another protocol version, calls `session/load` when the resume is this provider's and the agent advertises `loadSession` — a `RequestError` from it falls back to one `session/new` with a `session.warning` (a failing `session/new` is a start failure, never a retry loop) — else `session/new`; `externalRef` is the agent's session id (a respawned agent's new id reaches the kernel through `rememberRef` at the session's end); history replayed by `session/load` is not re-told. Turns: `prompt` → `turn.started`, `session/prompt`, then `message.completed` (once, when text arrived) and `turn.completed` (`cancelled` → `interrupted`; usage from the last `_meta['bytebureau.usage']`, else `{0, 0}` — ACP v1 carries no usage, model, effort or system prompt); `interrupt` cancels pending permissions and sends `session/cancel` (a per-turn interrupted flag: an interrupt during a respawn is sent right after the next `session/prompt`, and a permission request arriving while interrupted is answered `cancelled`); a prompt the agent refuses ends the turn with a `session.warning` instead of a crash (`auth_required` with the login hint). Crash contract: mid-turn → `session.error { kind: 'crash', message: 'the agent exited with code <n>: <last stderr line>' | 'the agent was killed by <signal>', retryable: true }` then `session.closed`, one warn log `{ sessionId, ref, reason }`; idle → the next prompt warns `restart` and starts a new agent with a new ACP session, at most three times, the fourth idle death a non-retryable `session.error` then `session.closed`; a death the watch has not told yet is noticed by `prompt`; a death while a turn runs is decided from the turn's own answer (an agent that answers and exits at once is told as dead idle, not as a mid-turn crash — the SDK rejects a pending prompt of a closed connection with a plain Error, an error answer with a `RequestError`); a respawn's start is bounded like the first one. `close` cancels the asks and a running turn, runs the ladder, closes the connection, ends the terminals after the ladder, pushes `session.closed`, then awaits an in-flight launch (an agent that started late is stopped) and the watch. `mapUpdate`: `agent_message_chunk`/`agent_thought_chunk` text → `message.delta` text/thinking; `tool_call` → `tool.started` (`execute` → `bash`, else `builtin`; `rawInput` as the input); `tool_call_update` completed → `tool.completed` (the content's text, else the raw output, 32 KB) and failed → `tool.failed`; `plan` → `session.warning { plan }`; `_meta['bytebureau.usage']` → `usage.updated` and `_meta['bytebureau.rateLimit']` → `ratelimit.updated` (zod-validated); every other kind maps to nothing. `client-fs.ts`: `confined(workspace, target)` resolves the path part by part with `lstat`/`readlink` (a 40-hop limit), so `ws/link/../x` through a link that points outside is refused — Node's and Bun's `realpath` normalise `..` away first — and a link that stays inside is accepted; outside targets are `RequestError.invalidParams`; `readTextFile` honours `line`/`limit`; `writeTextFile` makes parent directories inside the workspace. `client-terminal.ts`: terminals run through the plugin's process port with `cwd` confined, an environment without the API-key variables (the declared one, the preset's, and any name matching `/_(?:API_KEY|TOKEN)$/i` — §13: the key goes only into the agent's own environment), output capped at `outputByteLimit` (floored and clamped to 0..16 MiB, 1 MiB when missing — the SDK accepts any number, and -1 or 0.5 would have spun the daemon's event loop forever) cut at a UTF-8 boundary with `truncated`, `output`/`wait_for_exit`/`kill`/`release`/`releaseAll`, `create` refused once closed (re-checked after the spawn resolves). `permissions.ts`: `PermissionBroker` keyed by the `toolCallId`; the ask is the brief's shape plus `policy { wait, 30m }`; the person's allow/deny goes to the agent's option by KIND (`allow_once|allow_always` vs `reject_once|reject_always`), never by name (an agent naming an allow option "deny" could have inverted a Deny), with the `remember: 'always'` upgrade; a request the agent takes back (`$/cancel_request`), an interrupt, a close or a death settles the pending ask as `cancelled`. `authStatus`: the command not on the daemon's PATH (a file-and-executable-bit check with win32 suffixes, never a spawn) → `unknown` with `installHint`; a login profile whose directory is gone → `loggedOut` with `loginHint`; otherwise `unknown` with `loginHint`; the custom preset has no PATH check. The agent's requests are served from `session-client.ts` beside the session. The fake agent (`testing/fake-acp-agent.ts`, built with the SDK's `agent()` app, run as `node|bun fake-acp-agent.ts` — Node strips its types unflagged from 22.18, `.node-version` is 26): the brief's `hello|slow|crash-mid-turn|crash-idle|escape|terminal` plus `refuse-prompt`, `auth-required`, `protocol-v2` and the fix rounds' scripts; `session/load` replays one history chunk. Tests (80 and the second round's, across `session`, `session-agent`, `session-keys`, `session-start`, `session-crash`, `session-turns` and the module tests; `session-harness.ts` SIGKILLs every agent and terminal at test end; the kill-ladder tests use 300 ms steps): the presets and the custom entry, the ladder, the confinement cases (`out/../outside`, dangling links, a loop, a link that stays inside), the terminals, the mapping, the broker (the inverted-names case), the start failures, the hello order exactly, an exact-env assertion (nothing of `process.env` reaches the agent), the key-variable move, the crash canaries, resume with replay suppression, 12 runs under contention green; the fake also ran under Bun by hand. `semantic-pr.yml` lists the `agent-acp` scope. Heads-ups: the fake agent is a file path for Task 8/9 (`bun plugins/agent-acp/src/testing/fake-acp-agent.ts`); the SDK prints raw malformed agent messages to the daemon's stderr.
 
 - [ ] **Step 6: Run the plugin suite and the gates**
 
@@ -7417,6 +9237,8 @@ git commit -m "feat(agent-acp): run any acp v1 agent over stdio as a bytebureau 
 - Consumes: Tasks 6–7's plugins; Phase B's daemon-backed test helpers (`startDaemonProcess`, `runCli`, `testHome`, `createTempRepo`, `writeConfig`, `jsonLines`, `Interruption`).
 - Produces: a daemon whose `plugins ls` lists `workspace-local`, `agent-fake`, `agent-claude`, `agent-acp` as loaded, whose `plugins providers` lists `fake`, `claude`, `acp:codex`, `acp:gemini`, `acp:opencode`, `acp:pi`, `acp:custom`; `run --provider acp:custom` end to end with the fake ACP agent as the custom command.
 
+Config shape (ruled after Task 7, per spec §10): the project section is keyed by the provider id — `providers["acp:custom"]` is the custom preset itself (`{ command, args?, env?, apiKeyEnv?, configDirEnv?, installHint?, loginHint? }`) and `providers["acp:<preset>"]` holds that preset's overrides; there is no `providers.acp.presets` family section.
+
 - [ ] **Step 1: The failing end-to-end tests**
 
 `apps/bytebureau/src/commands/run-acp.test.ts`:
@@ -7429,7 +9251,7 @@ it('runs a prompt through an ACP agent over the daemon: the permission is answer
   const home = testHome()
   const daemon = await startDaemonProcess(home)
   const repo = createTempRepo()
-  writeConfig(repo, { providers: { acp: { presets: { custom: customPreset } } } })
+  writeConfig(repo, { providers: { 'acp:custom': customPreset } })
   const run = await runCli(['run', 'Create src/hello.ts exporting hello()', '--project', repo, '--provider', 'acp:custom', '--json', '--yes'], { home })
   expect(run.code).toBe(0)
   const types = jsonLines(run.stdout).map((event) => event['type'])
@@ -7448,8 +9270,8 @@ it('refuses a custom preset without a command, and a vendor agent that is not in
   const daemon = await startDaemonProcess(home)
   const repo = createTempRepo()
   const unconfigured = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:custom'], { home })
-  expect([unconfigured.code, unconfigured.stderr]).toStrictEqual([4, expect.stringContaining('providers.acp.presets.custom.command')])
-  writeConfig(repo, { providers: { acp: { presets: { codex: { command: 'codex-acp-definitely-missing' } } } } })
+  expect([unconfigured.code, unconfigured.stderr]).toStrictEqual([4, expect.stringContaining('providers["acp:custom"].command')])
+  writeConfig(repo, { providers: { 'acp:codex': { command: 'codex-acp-definitely-missing' } } })
   const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], { home })
   expect([missing.code, missing.stderr]).toStrictEqual([4, expect.stringContaining('npm install -g @agentclientprotocol/codex-acp')])
   await daemon.stop()
@@ -7512,7 +9334,7 @@ Semantics: Phase C is done when a fresh clone passes every gate, `bytebureau plu
 
 - [ ] **Step 2: Docs**
 
-`apps/docs/src/content/docs/agents-and-profiles.md`: *Providers* (`fake`, `claude`, `acp:<preset>`; what each needs installed; `providers.<id>` options — `claude.executable`, `claude.settingSources`, `acp.presets.<id>.{command,args,env,configDirEnv,apiKeyEnv}`, `passEnv`); *Profiles* (`profiles add <provider> <name>` login flow with the printed command, `--api-key` from the prompt or stdin, the default per provider, `run --profile`, `profiles status`, where a login profile lives — `~/.bytebureau/profiles/<provider>/<name>`, `profiles rm --purge`); *Secrets* (the keychain through `Bun.secrets`, the file fallback `~/.bytebureau/secrets.json` 0600, `secrets.backend` in `config.json`, what `doctor` will show); *Permissions and questions* (supervised vs autonomous, how an ask looks for Claude and for ACP agents, the recommended option convention); *What the adapters report* (usage, rate limits, context, compaction, retries; what ACP agents cannot report); *Limits in this phase* (API-key profiles for `acp:custom`, ACP `authStatus` unknown, no age-encrypted fallback, the restart policy as shipped). `architecture.md`: the two plugin rows (FSL), "Phase C decisions" (profile ids `provider/name`; the store as the one source of profiles; `Bun.secrets` + file fallback instead of age; the adapter spawns its ACP agent because the process port has no stdin; `providerConfig` per session; `apiKeyEnv` declared by the provider; the Agent SDK's `permissionMode: 'default'` given explicitly; `authStatus` through `accountInfo()`; lazy respawn ≤ 3), the deferred list rewritten (age-encrypted fallback and a passphrase; ACP `authenticate`-based status; `profiles` in the user configuration; model lists (`listModels`); `setEffort` for Claude; attachments; the nightly real-agent workflow; `doctor` (Phase D) showing the secrets backend and the agent CLIs). `daemon-and-api.md`: the `profiles` rows and codes. `CONTRIBUTING.md` "Working on an agent adapter": fixtures are the truth of the SDK's shapes, how to re-record them (the smoke scripts with `--json`), the fake ACP agent and its scripts, never a real agent in CI, where keys may travel. READMEs: "Phase C in place: real agents through the Claude Agent SDK and any ACP agent, under named auth profiles with keys in the keychain" / the Czech twin ("Fáze C hotová: skuteční agenti přes Claude Agent SDK a libovolný ACP agent, pod pojmenovanými přihlašovacími profily s klíči v klíčence").
+`apps/docs/src/content/docs/agents-and-profiles.md`: *Providers* (`fake`, `claude`, `acp:<preset>`; what each needs installed; `providers.<id>` options — `claude.executable`, `claude.settingSources`, `"acp:<id>".{command,args,env,configDirEnv,apiKeyEnv}`, `passEnv`); *Profiles* (`profiles add <provider> <name>` login flow with the printed command, `--api-key` from the prompt or stdin, the default per provider, `run --profile`, `profiles status`, where a login profile lives — `~/.bytebureau/profiles/<provider>/<name>`, `profiles rm --purge`); *Secrets* (the keychain through `Bun.secrets`, the file fallback `~/.bytebureau/secrets.json` 0600, `secrets.backend` in `config.json`, what `doctor` will show); *Permissions and questions* (supervised vs autonomous, how an ask looks for Claude and for ACP agents, the recommended option convention); *What the adapters report* (usage, rate limits, context, compaction, retries; what ACP agents cannot report); *Limits in this phase* (API-key profiles for `acp:custom`, ACP `authStatus` unknown, no age-encrypted fallback, the restart policy as shipped). `architecture.md`: the two plugin rows (FSL), "Phase C decisions" (profile ids `provider/name`; the store as the one source of profiles; `Bun.secrets` + file fallback instead of age; the adapter spawns its ACP agent because the process port has no stdin; `providerConfig` per session; `apiKeyEnv` declared by the provider; the Agent SDK's `permissionMode: 'default'` given explicitly; `authStatus` through `accountInfo()`; lazy respawn ≤ 3), the deferred list rewritten (age-encrypted fallback and a passphrase; ACP `authenticate`-based status; `profiles` in the user configuration; model lists (`listModels`); `setEffort` for Claude; attachments; the nightly real-agent workflow; `doctor` (Phase D) showing the secrets backend and the agent CLIs). `daemon-and-api.md`: the `profiles` rows and codes. `CONTRIBUTING.md` "Working on an agent adapter": fixtures are the truth of the SDK's shapes, how to re-record them (the smoke scripts with `--json`), the fake ACP agent and its scripts, never a real agent in CI, where keys may travel. READMEs: "Phase C in place: real agents through the Claude Agent SDK and any ACP agent, under named auth profiles with keys in the keychain" / the Czech twin ("Fáze C hotová: skuteční agenti přes Claude Agent SDK a libovolný ACP agent, pod pojmenovanými přihlašovacími profily s klíči v klíčence").
 
 - [ ] **Step 3: Spec amendments (one sentence each, marked "(amended in Phase C …)")**
 
