@@ -5105,8 +5105,8 @@ git add apps/bytebureau vitest.config.ts && git commit -m "feat(cli): manage the
 ### Task 6: `plugins/agent-claude` — Claude Code through the Agent SDK
 
 **Files:**
-- Create: `plugins/agent-claude/package.json`, `plugins/agent-claude/tsconfig.json`, `plugins/agent-claude/vitest.config.ts`, `plugins/agent-claude/src/plugin.ts`, `plugins/agent-claude/src/provider.ts`, `plugins/agent-claude/src/config.ts`, `plugins/agent-claude/src/executable.ts`, `plugins/agent-claude/src/options.ts`, `plugins/agent-claude/src/permission.ts`, `plugins/agent-claude/src/queue.ts` (one `Queue<T>` for the SDK input and the events), `plugins/agent-claude/src/session.ts`, `plugins/agent-claude/src/mapping.ts`, `plugins/agent-claude/src/mapping-result.ts`, `plugins/agent-claude/src/asks.ts`, `plugins/agent-claude/src/ask-questions.ts`, `plugins/agent-claude/src/auth.ts`, `plugins/agent-claude/src/testing/fake-query.ts`, `plugins/agent-claude/src/testing/sdk-fixtures.ts`, tests `provider.test.ts`, `options.test.ts`, `mapping.test.ts`, `asks.test.ts`, `session.test.ts`, `auth.test.ts`, `executable.test.ts`
-- Modify: `packages/kernel/src/sessions/session-ask.ts` and `live-sessions.ts` (the kernel remembers the agent's own ask id and answers the agent with it — `live.askIds: Map<kernelAskId, providerAskId>`), `packages/kernel/src/sessions/session-agent-asks.test.ts` (pins it), `vitest.config.ts` (project `plugins/agent-claude`), `.dependency-cruiser.cjs` only if the plugin rule needs the new path (it matches `plugins/*`), `cspell-words.txt` (genuine words only), `scripts/license.test.ts` (the manifest list, if it enumerates paths)
+- Create: `plugins/agent-claude/package.json`, `plugins/agent-claude/tsconfig.json`, `plugins/agent-claude/vitest.config.ts`, `plugins/agent-claude/src/{plugin,provider,config,executable,options,permission,queue,session,mapping,mapping-result,asks,ask-questions,auth}.ts`, `plugins/agent-claude/src/deps.ts` (`ClaudeDeps`, `QueryFn`, `AgentQuery` — the part of the SDK `Query` the adapter uses — and `startQuery`/`failedQuery`, which turn a synchronous throw of `query()` into a failed query), `plugins/agent-claude/src/within-limit.ts` (a bounded await with its timer cleared), `plugins/agent-claude/src/testing/{fake-query,sdk-fixtures,requests,session-harness}.ts`, tests `provider.test.ts`, `options.test.ts`, `mapping.test.ts`, `mapping-result.test.ts`, `asks.test.ts`, `session.test.ts`, `session-turns.test.ts`, `auth.test.ts`, `executable.test.ts`
+- Modify: `packages/kernel/src/process/{env-allowlist,env-allowlist.test}.ts` (`USER` in the fixed allowlist — Claude Code finds its keychain login by it), `.github/workflows/semantic-pr.yml` (the `agent-claude` scope; `agent-acp` waits for its workspace in Task 7, as `scripts/github-settings.test.ts` refuses a scope without one), `vitest.config.ts` (project `plugins/agent-claude`), `cspell-words.txt`, `bun.lock`; no kernel change for the ask ids (`session-ask.ts` has answered the agent with the agent's own ask id since Phase A, pinned by `session-agent-asks.test.ts`)
 - Test: the plugin's tests under Node with the fake `query`
 
 **Interfaces:**
@@ -5128,25 +5128,43 @@ Semantics (as planned): one `query()` in streaming-input mode spans the session:
   "license": "FSL-1.1-MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./src/plugin.ts", "default": "./src/plugin.ts" },
-    "./plugin": { "types": "./src/plugin.ts", "default": "./src/plugin.ts" }
+    ".": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
+    }
   },
-  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.288",
-    "@anthropic-ai/sdk": "<newest version at least a day old at install>",
+    "@anthropic-ai/sdk": "0.131.0",
     "@bytebureau/plugin-api": "workspace:*",
     "@bytebureau/protocol": "workspace:*",
-    "@modelcontextprotocol/sdk": "<newest 1.x at least a day old>",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "zod": "4.6.5"
   },
-  "devDependencies": { "@bytebureau/tsconfig": "workspace:*" },
+  "devDependencies": {
+    "@bytebureau/tsconfig": "workspace:*"
+  },
   "bytebureau": {
     "name": "agent-claude",
     "hostApi": "^0",
     "kind": "in-process",
-    "capabilities": ["process", "net", "secrets"],
-    "contributes": { "agentProviders": ["claude"] }
+    "capabilities": [
+      "process",
+      "net",
+      "secrets"
+    ],
+    "contributes": {
+      "agentProviders": [
+        "claude"
+      ]
+    }
   }
 }
 ```
@@ -5158,22 +5176,291 @@ Semantics (as planned): one `query()` in streaming-input mode spans the session:
 `plugins/agent-claude/src/testing/sdk-fixtures.ts` — recorded shapes (typed as the SDK's `SDKMessage` so the compiler checks the fields):
 
 ```ts
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { UUID } from 'node:crypto'
+import type {
+  ModelUsage,
+  NonNullableUsage,
+  SDKAssistantMessage,
+  SDKAuthStatusMessage,
+  SDKCompactBoundaryMessage,
+  SDKControlGetContextUsageResponse,
+  SDKMessage,
+  SDKPartialAssistantMessage,
+  SDKRateLimitEvent,
+  SDKResultError,
+  SDKResultSuccess,
+  SDKSystemMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk'
 
-export const SESSION = 'sess-0001'
-const uuid = (n: number): string => `00000000-0000-7000-8000-00000000000${n}`
+// Recorded shapes of the Agent SDK's messages, checked by the compiler against the installed declarations
+// The init, the failed login and the error result follow what the real SDK sent in the probe of Task 6
 
-export const init: SDKMessage = { type: 'system', subtype: 'init', apiKeySource: 'none', claude_code_version: '2.1.288', cwd: '/w', tools: ['Read', 'Edit', 'Bash', 'AskUserQuestion'], mcp_servers: [], model: 'claude-opus-5-5', permissionMode: 'default', slash_commands: [], session_id: SESSION, uuid: uuid(1) } as SDKMessage
-export const textDelta: SDKMessage = { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }, parent_tool_use_id: null, session_id: SESSION, uuid: uuid(2) } as SDKMessage
-export const thinkingDelta: SDKMessage = { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'hm' } }, parent_tool_use_id: null, session_id: SESSION, uuid: uuid(3) } as SDKMessage
-export const assistantWithTool: SDKMessage = { type: 'assistant', message: { id: 'msg_1', role: 'assistant', model: 'claude-opus-5-5', type: 'message', stop_reason: 'tool_use', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text: 'Editing.' }, { type: 'tool_use', id: 'toolu_1', name: 'Edit', input: { file_path: '/w/src/hello.ts' } }] }, parent_tool_use_id: null, session_id: SESSION, uuid: uuid(4) } as SDKMessage
-export const toolResult: SDKMessage = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok', is_error: false }] }, parent_tool_use_id: null, session_id: SESSION, uuid: uuid(5) } as SDKMessage
-export const resultSuccess: SDKMessage = { type: 'result', subtype: 'success', duration_ms: 1200, duration_api_ms: 900, is_error: false, num_turns: 2, result: 'done', stop_reason: 'end_turn', total_cost_usd: 0.0123, usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, modelUsage: { 'claude-opus-5-5': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 2, cacheCreationInputTokens: 1, webSearchRequests: 0, costUSD: 0.0123, contextWindow: 200000, maxOutputTokens: 32000 } }, permission_denials: [], session_id: SESSION, uuid: uuid(6) } as SDKMessage
-export const resultMaxTurns: SDKMessage = { ...resultSuccess, subtype: 'error_max_turns', is_error: true } as SDKMessage
-export const rateLimited: SDKMessage = { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791100000, rateLimitType: 'five_hour', utilization: 1 }, session_id: SESSION, uuid: uuid(7) } as SDKMessage
-export const compacted: SDKMessage = { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000, post_tokens: 20000 }, session_id: SESSION, uuid: uuid(8) } as SDKMessage
-export const retried: SDKMessage = { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 3, retry_delay_ms: 2000, error_status: 529, error: 'overloaded', session_id: SESSION, uuid: uuid(9) } as SDKMessage
-export const authFailed: SDKMessage = { type: 'auth_status', isAuthenticating: false, output: [], error: 'Not logged in', session_id: SESSION, uuid: uuid(10) } as SDKMessage
+export const SESSION = 'session-0001'
+const MODEL = 'claude-opus-5-5'
+
+const uuid = (serial: number): UUID => `00000000-0000-7000-8000-${String(serial).padStart(12, '0')}`
+
+// The usage of a result: every field present, as the probe saw it
+const resultUsage = (input: number, output: number): NonNullableUsage => ({
+  input_tokens: input,
+  output_tokens: output,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 },
+  server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  service_tier: 'standard',
+  inference_geo: '',
+  iterations: [],
+  speed: 'standard',
+  output_tokens_details: { thinking_tokens: 0 },
+  fallback_credit: null,
+})
+
+// The running totals of one model, as a result reports them
+export const modelUsage = (
+  input: number,
+  output: number,
+  costUSD: number,
+): Readonly<Record<string, ModelUsage>> => ({
+  [MODEL]: {
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadInputTokens: 2,
+    cacheCreationInputTokens: 1,
+    webSearchRequests: 0,
+    costUSD,
+    contextWindow: 200_000,
+    maxOutputTokens: 32_000,
+  },
+})
+
+// What getContextUsage answers with a summary: a quarter of the window in use
+export const contextMeasured: SDKControlGetContextUsageResponse = {
+  categories: [],
+  totalTokens: 50_000,
+  maxTokens: 200_000,
+  rawMaxTokens: 200_000,
+  percentage: 25,
+  gridRows: [],
+  model: MODEL,
+  memoryFiles: [],
+  mcpTools: [],
+  agents: [],
+  isAutoCompactEnabled: true,
+  apiUsage: null,
+}
+
+export const init: SDKSystemMessage = {
+  type: 'system',
+  subtype: 'init',
+  apiKeySource: 'none',
+  claude_code_version: '2.1.285',
+  cwd: '/w',
+  tools: ['Task', 'AskUserQuestion', 'Bash', 'Edit', 'Read', 'Skill', 'Write'],
+  mcp_servers: [],
+  model: MODEL,
+  permissionMode: 'default',
+  slash_commands: [],
+  output_style: 'default',
+  skills: [],
+  plugins: [],
+  session_id: SESSION,
+  uuid: uuid(1),
+}
+
+const delta = (
+  event: SDKPartialAssistantMessage['event'],
+  serial: number,
+): SDKPartialAssistantMessage => ({
+  type: 'stream_event',
+  event,
+  parent_tool_use_id: null,
+  session_id: SESSION,
+  uuid: uuid(serial),
+})
+
+export const textDelta = delta(
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
+  2,
+)
+export const thinkingDelta = delta(
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'thinking_delta', thinking: 'hm', estimated_tokens: null },
+  },
+  3,
+)
+
+const assistant = (
+  content: SDKAssistantMessage['message']['content'],
+  serial: number,
+): SDKAssistantMessage => ({
+  type: 'assistant',
+  message: {
+    id: 'msg_1',
+    container: null,
+    content,
+    context_management: null,
+    diagnostics: null,
+    model: MODEL,
+    role: 'assistant',
+    stop_details: null,
+    stop_reason: null,
+    stop_sequence: null,
+    type: 'message',
+    usage: resultUsage(10, 5),
+  },
+  parent_tool_use_id: null,
+  session_id: SESSION,
+  uuid: uuid(serial),
+})
+
+export const assistantWithTool = assistant(
+  [
+    { type: 'text', text: 'Editing.', citations: null },
+    { type: 'tool_use', id: 'toolu_1', name: 'Edit', input: { file_path: '/w/src/hello.ts' } },
+  ],
+  4,
+)
+
+const toolResultOf = (content: string, isError: boolean, serial: number): SDKUserMessage => ({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content, is_error: isError }],
+  },
+  parent_tool_use_id: null,
+  session_id: SESSION,
+  uuid: uuid(serial),
+})
+
+export const toolResult = toolResultOf('ok', false, 5)
+export const toolFailed = toolResultOf('permission denied', true, 11)
+
+// What every result of the fixtures shares: one model's running totals, nothing denied
+const resultCommon = {
+  duration_ms: 1200,
+  duration_api_ms: 900,
+  num_turns: 2,
+  stop_reason: 'end_turn',
+  total_cost_usd: 0.0123,
+  usage: resultUsage(10, 5),
+  modelUsage: modelUsage(10, 5, 0.0123),
+  permission_denials: [],
+  session_id: SESSION,
+}
+
+export const resultSuccess: SDKResultSuccess = {
+  ...resultCommon,
+  type: 'result',
+  subtype: 'success',
+  is_error: false,
+  result: 'done',
+  uuid: uuid(6),
+}
+
+export const resultMaxTurns: SDKResultError = {
+  ...resultCommon,
+  type: 'result',
+  subtype: 'error_max_turns',
+  is_error: true,
+  errors: ['Reached maximum number of turns (1)'],
+  uuid: uuid(13),
+}
+
+// The result of a turn that was interrupted: the CLI ends it with an aborted terminal reason
+export const resultInterrupted: SDKResultError = {
+  ...resultCommon,
+  type: 'result',
+  subtype: 'error_during_execution',
+  is_error: true,
+  stop_reason: null,
+  errors: [],
+  terminal_reason: 'aborted_streaming',
+  uuid: uuid(14),
+}
+
+export const rateLimited: SDKRateLimitEvent = {
+  type: 'rate_limit_event',
+  rate_limit_info: {
+    status: 'rejected',
+    resetsAt: 1_791_100_000,
+    rateLimitType: 'five_hour',
+    utilization: 1,
+  },
+  session_id: SESSION,
+  uuid: uuid(7),
+}
+
+// A window used up while extra usage serves the turns, as the CLI tells it: rejected, and using the overage
+export const rateLimitedOnOverage: SDKRateLimitEvent = {
+  ...rateLimited,
+  rate_limit_info: {
+    ...rateLimited.rate_limit_info,
+    overageStatus: 'allowed',
+    isUsingOverage: true,
+  },
+  uuid: uuid(15),
+}
+
+export const compacted: SDKCompactBoundaryMessage = {
+  type: 'system',
+  subtype: 'compact_boundary',
+  compact_metadata: { trigger: 'auto', pre_tokens: 150_000, post_tokens: 20_000 },
+  session_id: SESSION,
+  uuid: uuid(8),
+}
+
+export const retried: Extract<SDKMessage, { subtype: 'api_retry' }> = {
+  type: 'system',
+  subtype: 'api_retry',
+  attempt: 1,
+  max_retries: 3,
+  retry_delay_ms: 2000,
+  error_status: 529,
+  error: 'overloaded',
+  session_id: SESSION,
+  uuid: uuid(9),
+}
+
+export const authFailed: SDKAuthStatusMessage = {
+  type: 'auth_status',
+  isAuthenticating: false,
+  output: [],
+  error: 'Not logged in',
+  session_id: SESSION,
+  uuid: uuid(10),
+}
+
+// A login that lapsed, as the probe saw it: a synthetic assistant message that carries the error, then an error result
+export const authExpired: SDKAssistantMessage = {
+  ...assistant(
+    [
+      {
+        type: 'text',
+        text: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        citations: null,
+      },
+    ],
+    12,
+  ),
+  error: 'authentication_failed',
+}
+
+export const resultApiError: SDKResultSuccess = {
+  ...resultSuccess,
+  duration_api_ms: 0,
+  is_error: true,
+  num_turns: 1,
+  result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+  stop_reason: 'stop_sequence',
+  total_cost_usd: 0,
+  usage: resultUsage(0, 0),
+  modelUsage: {},
+  terminal_reason: 'api_error',
+}
 ```
 
 (The `as SDKMessage` casts in a fixture file are the one place the plan allows the cast: the fixtures are literals of a foreign union; keep the file in `testing/` and, if the lint refuses `as`, type each constant through a `const fixture = <T extends SDKMessage>(message: T): T => message` helper and satisfy the union by adding the fields the compiler names. Where a fixture's field names disagree with the installed SDK's declarations, the compiler says so — fix the fixture, not the mapping's reading of the real field; the declarations are the truth.)
@@ -5181,33 +5468,156 @@ export const authFailed: SDKMessage = { type: 'auth_status', isAuthenticating: f
 `plugins/agent-claude/src/mapping.test.ts`:
 
 ```ts
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { mapMessage, newMapState } from './mapping.js'
-import * as sdk from './testing/sdk-fixtures.js'
+import { mapMessage, newMapState, toolKindOf } from './mapping.js'
+import {
+  SESSION,
+  assistantWithTool,
+  authExpired,
+  authFailed,
+  compacted,
+  init,
+  rateLimited,
+  resultMaxTurns,
+  resultSuccess,
+  retried,
+  textDelta,
+  thinkingDelta,
+  toolFailed,
+  toolResult,
+} from './testing/sdk-fixtures.js'
+
+const DELTA = 'message.delta'
+const TURN_END = 'turn.completed'
+
+const ONE_TURN = [init, textDelta, thinkingDelta, assistantWithTool, toolResult, resultSuccess]
+const ONE_TURN_TYPES = [
+  'turn.started',
+  DELTA,
+  DELTA,
+  'message.completed',
+  'tool.started',
+  'tool.completed',
+  'usage.updated',
+  TURN_END,
+]
+const FIRST_USAGE = {
+  inputTokens: 10,
+  outputTokens: 5,
+  cacheReadTokens: 2,
+  cacheWriteTokens: 1,
+  costUsd: 0.0123,
+}
+const RESETS_AT = new Date(1_791_100_000 * 1000).toISOString()
+const RETRY_WARNING = 'attempt 1 of 3 in 2000 ms: overloaded (529)'
+const LAPSED = 'Failed to authenticate: OAuth session expired and could not be refreshed'
 
 describe(mapMessage, () => {
   it('turns the messages of one turn into the canonical events, starting the turn at the first delta', () => {
+    expect.hasAssertions()
     const state = newMapState()
-    const events = [sdk.init, sdk.textDelta, sdk.thinkingDelta, sdk.assistantWithTool, sdk.toolResult, sdk.resultSuccess].flatMap((message) => mapMessage(message, state))
-    expect(events.map((event) => event.type)).toStrictEqual(['turn.started', 'message.delta', 'message.delta', 'message.completed', 'tool.started', 'tool.completed', 'usage.updated', 'turn.completed'])
-    expect(events[1]).toStrictEqual({ type: 'message.delta', kind: 'text', text: 'Hello' })
-    expect(events[4]).toMatchObject({ type: 'tool.started', id: 'toolu_1', name: 'Edit', kind: 'builtin' })
-    expect(events[7]).toStrictEqual({ type: 'turn.completed', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1, costUsd: 0.0123 } })
-    expect(state.sessionId).toBe(sdk.SESSION)
+    const events = ONE_TURN.flatMap((message) => mapMessage(message, state))
+    expect(events.map((event) => event.type)).toStrictEqual(ONE_TURN_TYPES)
+    expect(events[1]).toStrictEqual({ type: DELTA, kind: 'text', text: 'Hello' })
+    expect(events[4]).toMatchObject({ id: 'toolu_1', name: 'Edit', kind: 'builtin' })
+    expect(events[7]).toStrictEqual({
+      type: TURN_END,
+      stopReason: 'end_turn',
+      usage: FIRST_USAGE,
+    })
+    expect(state.sessionId).toBe(SESSION)
   })
 
-  it('tells an error result by its subtype, a rate limit as both an update and a pause-worthy error, a compaction, a retry and a lost login', () => {
+  it('tells an error result by its subtype, and a rate limit as both an update and a pause-worthy error', () => {
+    expect.hasAssertions()
     const state = newMapState()
-    expect(mapMessage(sdk.resultMaxTurns, state).at(-1)).toMatchObject({ type: 'turn.completed', stopReason: 'error_max_turns' })
-    expect(mapMessage(sdk.rateLimited, state).map((event) => event.type)).toStrictEqual(['ratelimit.updated', 'session.error'])
-    expect(mapMessage(sdk.rateLimited, state)[0]).toMatchObject({ rateLimit: { fiveHourPct: 100, fiveHourResetsAt: new Date(1791100000 * 1000).toISOString() } })
-    expect(mapMessage(sdk.compacted, state)).toStrictEqual([{ type: 'compaction.completed' }])
-    expect(mapMessage(sdk.retried, state)).toStrictEqual([{ type: 'session.warning', kind: 'api_retry', message: 'attempt 1 of 3 in 2000 ms: overloaded (529)' }])
-    expect(mapMessage(sdk.authFailed, state)).toStrictEqual([{ type: 'session.error', kind: 'auth', message: 'Not logged in', retryable: false }])
+    expect(mapMessage(resultMaxTurns, state).at(-1)).toMatchObject({
+      type: TURN_END,
+      stopReason: 'error_max_turns',
+    })
+    const limited = mapMessage(rateLimited, state)
+    expect(limited.map((event) => event.type)).toStrictEqual(['ratelimit.updated', 'session.error'])
+    expect(limited[0]).toMatchObject({
+      rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT },
+    })
+  })
+})
+
+describe('the warnings and errors of a session', () => {
+  it('tells a compaction, a retry and a lost login', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    expect(mapMessage(compacted, state)).toStrictEqual([{ type: 'compaction.completed' }])
+    expect(mapMessage(retried, state)).toStrictEqual([
+      { type: 'session.warning', kind: 'api_retry', message: RETRY_WARNING },
+    ])
+    expect(mapMessage(authFailed, state)).toStrictEqual([
+      { type: 'session.error', kind: 'auth', message: 'Not logged in', retryable: false },
+    ])
   })
 
-  it('names the kind of a tool by its name', () => {
-    expect(['Bash', 'Task', 'Skill', 'mcp__jira__search', 'Read'].map(toolKindOf)).toStrictEqual(['bash', 'subagent', 'skill', 'mcp', 'builtin'])
+  it('tells a lapsed login, which comes on an assistant message, as an auth error', () => {
+    expect.hasAssertions()
+    expect(mapMessage(authExpired, newMapState())).toStrictEqual([
+      { type: 'turn.started' },
+      { type: 'session.error', kind: 'auth', message: LAPSED, retryable: false },
+    ])
+  })
+
+  it('names the kind of a tool by its name, and tells a tool that failed by its error', () => {
+    expect.hasAssertions()
+    const names = ['Bash', 'Task', 'Skill', 'mcp__jira__search', 'Read']
+    expect(names.map((name) => toolKindOf(name))).toStrictEqual([
+      'bash',
+      'subagent',
+      'skill',
+      'mcp',
+      'builtin',
+    ])
+    expect(mapMessage(toolFailed, newMapState())).toStrictEqual([
+      { type: 'tool.failed', id: 'toolu_1', error: 'permission denied' },
+    ])
+  })
+})
+
+const HIDDEN: readonly SDKMessage[] = [
+  { type: 'system', subtype: 'status', status: 'requesting', session_id: SESSION, uuid: init.uuid },
+  {
+    type: 'user',
+    message: { role: 'user', content: '[Request interrupted by user]' },
+    parent_tool_use_id: null,
+  },
+  {
+    type: 'auth_status',
+    isAuthenticating: true,
+    output: ['Opening the browser'],
+    session_id: SESSION,
+    uuid: init.uuid,
+  },
+]
+
+describe('the messages a session does not show', () => {
+  it('maps them to nothing', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    expect(HIDDEN.flatMap((message) => mapMessage(message, state))).toStrictEqual([])
+  })
+})
+
+// What a Task subagent says and does: its messages name the tool use of the Task that started it
+const OF_SUBAGENT: readonly SDKMessage[] = [
+  { ...textDelta, parent_tool_use_id: 'toolu_task' },
+  { ...assistantWithTool, parent_tool_use_id: 'toolu_task' },
+  { ...toolResult, parent_tool_use_id: 'toolu_task' },
+]
+
+describe('the messages of a subagent', () => {
+  it('are left out, deltas, messages and tools alike; the result of the Task tells what it did', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    expect(OF_SUBAGENT.flatMap((message) => mapMessage(message, state))).toStrictEqual([])
+    expect(state.turnStarted).toBe(false)
   })
 })
 ```
@@ -5215,31 +5625,193 @@ describe(mapMessage, () => {
 `plugins/agent-claude/src/asks.test.ts`:
 
 ```ts
+import type { AskUserQuestionInput } from '@anthropic-ai/claude-agent-sdk/sdk-tools'
+import { describe, expect, it } from 'vitest'
+import { AskBroker } from './asks.js'
+
+// The input of AskUserQuestion as the SDK declares it: questions with a header, two to four options and multiSelect
+const exportQuestion: AskUserQuestionInput = {
+  questions: [
+    {
+      question: 'Which export?',
+      header: 'Export',
+      options: [
+        { label: 'Named (Recommended)', description: 'Matches the modules' },
+        { label: 'Default', description: '' },
+      ],
+      multiSelect: false,
+    },
+  ],
+}
+
+const EXPORT_ASK = {
+  type: 'ask.requested',
+  ask: {
+    id: 'req-1',
+    kind: 'question',
+    recommendationSource: 'agent',
+    questions: [
+      {
+        id: '0',
+        header: 'Export',
+        options: [
+          { id: 'Named (Recommended)', label: 'Named', recommended: true },
+          { id: 'Default', label: 'Default', recommended: false },
+        ],
+      },
+    ],
+  },
+}
+
+const BASH_ASK = {
+  ask: {
+    kind: 'permission',
+    title: 'Bash',
+    toolCall: { name: 'Bash', input: { command: 'rm -rf dist' } },
+    recommendationSource: 'none',
+  },
+}
+
 describe('the asks of a permission prompt', () => {
   it('turns AskUserQuestion into a question ask with the recommended option found by its suffix, and answers the SDK with the labels', async () => {
     expect.hasAssertions()
     const broker = new AskBroker()
-    const pending = broker.ask('AskUserQuestion', { questions: [{ question: 'Which export?', header: 'Export', options: [{ label: 'Named (Recommended)', description: 'Matches the modules' }, { label: 'Default', description: '' }], multiSelect: false }] }, { requestId: 'req-1', toolUseID: 'toolu_9' })
+    const ids = { requestId: 'req-1', toolUseID: 'toolu_9' }
+    const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
     const [requested] = broker.drain()
-    expect(requested).toMatchObject({ type: 'ask.requested', ask: { id: 'req-1', kind: 'question', recommendationSource: 'agent', questions: [{ id: '0', header: 'Export', options: [{ id: 'Named (Recommended)', label: 'Named', recommended: true }, { id: 'Default', label: 'Default', recommended: false }] }] } })
+    expect(requested).toMatchObject(EXPORT_ASK)
     broker.answer('req-1', { selected: ['Named (Recommended)'] })
-    await expect(pending).resolves.toStrictEqual({ behavior: 'allow', updatedInput: { questions: expect.any(Array), answers: { 'Which export?': 'Named' } } })
+    await expect(pending).resolves.toStrictEqual({
+      behavior: 'allow',
+      updatedInput: { questions: exportQuestion.questions, answers: { 'Which export?': 'Named' } },
+    })
   })
 
-  it('turns any other tool into a permission ask the kernel recommends on, allows or denies by the answer, and denies everything on interrupt', async () => {
+  it('turns any other tool into a permission ask the kernel recommends on, and allows or denies by the answer', async () => {
     expect.hasAssertions()
     const broker = new AskBroker()
-    const allow = broker.ask('Bash', { command: 'rm -rf dist' }, { requestId: 'req-2', toolUseID: 'toolu_2' })
-    const [requested] = broker.drain()
-    expect(requested).toMatchObject({ ask: { kind: 'permission', title: 'Bash', toolCall: { name: 'Bash', input: { command: 'rm -rf dist' } }, recommendationSource: 'none' } })
+    const input = { command: 'rm -rf dist' }
+    const allow = broker.ask('Bash', input, { requestId: 'req-2', toolUseID: 'toolu_2' })
+    expect(broker.drain()).toMatchObject([BASH_ASK])
     broker.answer('req-2', { selected: ['allow'] })
-    await expect(allow).resolves.toStrictEqual({ behavior: 'allow', updatedInput: { command: 'rm -rf dist' } })
+    await expect(allow).resolves.toStrictEqual({ behavior: 'allow', updatedInput: input })
     const deny = broker.ask('Edit', {}, { requestId: 'req-3', toolUseID: 'toolu_3' })
     broker.answer('req-3', { selected: ['deny'] })
-    await expect(deny).resolves.toMatchObject({ behavior: 'deny' })
+    await expect(deny).resolves.toStrictEqual({
+      behavior: 'deny',
+      message: 'denied through ByteBureau',
+    })
+  })
+
+  it('denies everything that is pending on interrupt', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
     const hanging = broker.ask('Edit', {}, { requestId: 'req-4', toolUseID: 'toolu_4' })
     broker.denyAll('interrupted')
     await expect(hanging).resolves.toStrictEqual({ behavior: 'deny', message: 'interrupted' })
+  })
+})
+
+const PENDING_QUESTION = {
+  ask: {
+    sessionId: 'session-1',
+    title: 'Which export?',
+    status: 'pending',
+    turnId: null,
+    deadlineAt: null,
+    policy: { onTimeout: 'wait', timeout: '30m' },
+  },
+}
+
+describe('the answers an ask passes on', () => {
+  it('answers a question with the text of a person who chose none of the options', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker('session-1')
+    const ids = { requestId: 'req-5', toolUseID: 'toolu_5' }
+    const pending = broker.ask('AskUserQuestion', { ...exportQuestion }, ids)
+    expect(broker.drain()).toMatchObject([PENDING_QUESTION])
+    broker.answer('req-5', { selected: 'other', otherText: 'Both' })
+    await expect(pending).resolves.toMatchObject({
+      updatedInput: { answers: { 'Which export?': 'Both' } },
+    })
+  })
+
+  it('denies with the reason the answer gives, as the kernel does when nobody approved in time', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const reason = 'nobody available to approve; do not retry'
+    const ids = { requestId: 'req-6', toolUseID: 'toolu_6' }
+    const pending = broker.ask('Bash', { command: 'ls' }, ids)
+    broker.answer('req-6', { selected: ['deny'], otherText: reason })
+    await expect(pending).resolves.toStrictEqual({ behavior: 'deny', message: reason })
+  })
+})
+
+const UNMARKED: AskUserQuestionInput = {
+  questions: [
+    {
+      question: 'Which?',
+      header: 'A very long header',
+      options: [
+        { label: 'A', description: 'a' },
+        { label: 'B', description: 'b' },
+      ],
+      multiSelect: false,
+    },
+  ],
+}
+
+const UNMARKED_AND_MALFORMED = [
+  { ask: { recommendationSource: 'none', questions: [{ header: 'A very long ' }] } },
+  { ask: { kind: 'permission', title: 'AskUserQuestion' } },
+]
+
+describe('the questions an agent did not mark or could not ask', () => {
+  it('recommends nothing when no option is marked, asks a malformed question as a permission, and ignores an answer to nothing', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const asked = broker.ask(
+      'AskUserQuestion',
+      { ...UNMARKED },
+      {
+        requestId: 'req-7',
+        toolUseID: 'toolu_7',
+      },
+    )
+    const malformed = broker.ask(
+      'AskUserQuestion',
+      { questions: 'none' },
+      { requestId: 'req-8', toolUseID: 'toolu_8' },
+    )
+    expect(broker.drain()).toMatchObject(UNMARKED_AND_MALFORMED)
+    broker.answer('req-unknown', { selected: ['allow'] })
+    broker.denyAll('closed')
+    const closed = { behavior: 'deny', message: 'closed' }
+    await expect(Promise.all([asked, malformed])).resolves.toStrictEqual([closed, closed])
+  })
+})
+
+describe('an ask the SDK takes back', () => {
+  it('is denied as cancelled when the SDK aborts it, and a later answer changes nothing', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const controller = new AbortController()
+    const ids = { requestId: 'req-9', toolUseID: 'toolu_9', signal: controller.signal }
+    const pending = broker.ask('Bash', { command: 'ls' }, ids)
+    controller.abort()
+    broker.answer('req-9', { selected: ['allow'] })
+    await expect(pending).resolves.toStrictEqual({ behavior: 'deny', message: 'cancelled' })
+  })
+
+  it('is not asked at all when the SDK took it back before it was raised', async () => {
+    expect.hasAssertions()
+    const broker = new AskBroker()
+    const ids = { requestId: 'req-10', toolUseID: 'toolu_10', signal: AbortSignal.abort() }
+    await expect(broker.ask('Bash', {}, ids)).resolves.toStrictEqual({
+      behavior: 'deny',
+      message: 'cancelled',
+    })
+    expect(broker.drain()).toStrictEqual([])
   })
 })
 ```
@@ -5308,91 +5880,194 @@ export class EventQueue implements AsyncIterable<AgentEvent> {
 `plugins/agent-claude/src/mapping.ts` (with `mapping-result.ts` for the result and rate-limit parts, to stay under the caps):
 
 ```ts
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type {
+  SDKAssistantMessage,
+  SDKAuthStatusMessage,
+  SDKMessage,
+  SDKPartialAssistantMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk'
 import type { AgentEvent, ToolKind } from '@bytebureau/protocol'
-import { mapResult, mapRateLimit } from './mapping-result.js'
+import { contextPctOf, mapRateLimit, mapResult, type MapState } from './mapping-result.js'
 
-export interface MapState {
-  sessionId: string | null
-  turnStarted: boolean
-  contextPct: number | undefined
-}
+export { measuredPctOf, newMapState, unreadResult, type MapState } from './mapping-result.js'
 
-export const newMapState = (): MapState => ({ sessionId: null, turnStarted: false, contextPct: undefined })
+type Block = SDKAssistantMessage['message']['content'][number]
+type Delta = Extract<SDKPartialAssistantMessage['event'], { type: 'content_block_delta' }>['delta']
+type UserBlock = Exclude<SDKUserMessage['message']['content'], string>[number]
+type ToolResult = Extract<UserBlock, { type: 'tool_result' }>
+type SystemMessage = Extract<SDKMessage, { type: 'system' }>
+type RetryMessage = Extract<SystemMessage, { subtype: 'api_retry' }>
+
+const SUMMARY_LIMIT = 32 * 1024
+// The errors of an assistant message that say the login is gone; the CLI sends them instead of an auth_status
+const AUTH_ERRORS: ReadonlySet<string> = new Set([
+  'authentication_failed',
+  'oauth_org_not_allowed',
+  'cloud_credential_error',
+])
 
 export const toolKindOf = (name: string): ToolKind => {
-  if (name === 'Bash') return 'bash'
-  if (name === 'Task') return 'subagent'
-  if (name === 'Skill') return 'skill'
+  if (name === 'Bash') {
+    return 'bash'
+  }
+  if (name === 'Task') {
+    return 'subagent'
+  }
+  if (name === 'Skill') {
+    return 'skill'
+  }
   return name.startsWith('mcp__') ? 'mcp' : 'builtin'
 }
 
-const SUMMARY_LIMIT = 32 * 1024
-
-const textOf = (content: unknown): string => {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.map((block: unknown) => (typeof block === 'object' && block !== null && Reflect.get(block, 'type') === 'text' ? String(Reflect.get(block, 'text')) : '')).join('')
+// The plain text of content: its text blocks joined, anything else left out
+const textOf = (content: string | readonly { readonly type: string }[] | undefined): string => {
+  if (content === undefined || typeof content === 'string') {
+    return content ?? ''
+  }
+  return content
+    .map((block) =>
+      block.type === 'text' && 'text' in block && typeof block.text === 'string' ? block.text : '',
+    )
+    .join('')
 }
 
-// The first event of a turn announces it; the flag falls with the result
+// The first event of a turn announces it; the result lets the next turn announce itself again
 const started = (state: MapState): readonly AgentEvent[] => {
-  if (state.turnStarted) return []
+  if (state.turnStarted) {
+    return []
+  }
   state.turnStarted = true
   return [{ type: 'turn.started' }]
 }
 
-const mapDelta = (event: unknown, state: MapState): readonly AgentEvent[] => {
-  const delta = typeof event === 'object' && event !== null ? Reflect.get(event, 'delta') : undefined
-  const kind = typeof delta === 'object' && delta !== null ? Reflect.get(delta, 'type') : undefined
-  if (kind === 'text_delta') return [...started(state), { type: 'message.delta', kind: 'text', text: String(Reflect.get(delta, 'text')) }]
-  if (kind === 'thinking_delta') return [...started(state), { type: 'message.delta', kind: 'thinking', text: String(Reflect.get(delta, 'thinking')) }]
+const deltaOf = (delta: Delta): readonly AgentEvent[] => {
+  if (delta.type === 'text_delta') {
+    return [{ type: 'message.delta', kind: 'text', text: delta.text }]
+  }
+  if (delta.type === 'thinking_delta') {
+    return [{ type: 'message.delta', kind: 'thinking', text: delta.thinking }]
+  }
   return []
 }
 
-const mapAssistant = (message: { readonly content: readonly unknown[] }, state: MapState): readonly AgentEvent[] => {
-  const tools: AgentEvent[] = message.content.flatMap((block: unknown) => {
-    if (typeof block !== 'object' || block === null || Reflect.get(block, 'type') !== 'tool_use') return []
-    const name = String(Reflect.get(block, 'name'))
-    return [{ type: 'tool.started', id: String(Reflect.get(block, 'id')), name, kind: toolKindOf(name), input: Reflect.get(block, 'input') }]
-  })
-  return [...started(state), { type: 'message.completed', role: 'assistant', content: [...message.content], text: textOf(message.content) }, ...tools]
+const mapStream = (message: SDKPartialAssistantMessage, state: MapState): readonly AgentEvent[] => {
+  const { event } = message
+  return [...started(state), ...(event.type === 'content_block_delta' ? deltaOf(event.delta) : [])]
 }
 
-const mapToolResults = (content: unknown): readonly AgentEvent[] => {
-  if (!Array.isArray(content)) return []
-  return content.flatMap((block: unknown) => {
-    if (typeof block !== 'object' || block === null || Reflect.get(block, 'type') !== 'tool_result') return []
-    const id = String(Reflect.get(block, 'tool_use_id'))
-    const text = textOf(Reflect.get(block, 'content'))
-    return Reflect.get(block, 'is_error') === true
-      ? [{ type: 'tool.failed', id, error: text.slice(0, SUMMARY_LIMIT) }]
-      : [{ type: 'tool.completed', id, outputSummary: text.slice(0, SUMMARY_LIMIT), bytes: Buffer.byteLength(text) }]
-  })
+const toolStarted = (block: Block): readonly AgentEvent[] =>
+  block.type === 'tool_use'
+    ? [
+        {
+          type: 'tool.started',
+          id: block.id,
+          name: block.name,
+          kind: toolKindOf(block.name),
+          input: block.input,
+        },
+      ]
+    : []
+
+// A lost login comes as an assistant message with an error; the session cannot go on, so it is an error of the session
+const mapAssistant = (message: SDKAssistantMessage, state: MapState): readonly AgentEvent[] => {
+  if (message.context_usage !== undefined) {
+    state.contextPct = contextPctOf(message.context_usage)
+  }
+  const { content } = message.message
+  const text = textOf(content)
+  if (message.error !== undefined && AUTH_ERRORS.has(message.error)) {
+    const reason = text === '' ? message.error : text
+    return [
+      ...started(state),
+      { type: 'session.error', kind: 'auth', message: reason, retryable: false },
+    ]
+  }
+  return [
+    ...started(state),
+    { type: 'message.completed', role: 'assistant', content: [...content], text },
+    ...content.flatMap((block) => toolStarted(block)),
+  ]
 }
 
-const mapSystem = (message: SDKMessage & { readonly type: 'system' }, state: MapState): readonly AgentEvent[] => {
-  switch (message.subtype) {
-    case 'init': state.sessionId = message.session_id; return []
-    case 'compact_boundary': return [{ type: 'compaction.completed' }]
-    case 'api_retry': return [{ type: 'session.warning', kind: 'api_retry', message: `attempt ${message.attempt} of ${message.max_retries} in ${message.retry_delay_ms} ms: ${String(message.error)} (${String(message.error_status)})` }]
-    default: return []
+const toolEnded = (block: ToolResult): AgentEvent => {
+  const text = textOf(block.content)
+  return block.is_error === true
+    ? { type: 'tool.failed', id: block.tool_use_id, error: text.slice(0, SUMMARY_LIMIT) }
+    : {
+        type: 'tool.completed',
+        id: block.tool_use_id,
+        outputSummary: text.slice(0, SUMMARY_LIMIT),
+        bytes: Buffer.byteLength(text),
+      }
+}
+
+const mapToolResults = (content: SDKUserMessage['message']['content']): readonly AgentEvent[] =>
+  typeof content === 'string'
+    ? []
+    : content.flatMap((block) => (block.type === 'tool_result' ? [toolEnded(block)] : []))
+
+const retryWarning = (message: RetryMessage): AgentEvent => {
+  const status = message.error_status === null ? '' : ` (${message.error_status})`
+  const attempt = `attempt ${message.attempt} of ${message.max_retries} in ${message.retry_delay_ms} ms`
+  return {
+    type: 'session.warning',
+    kind: 'api_retry',
+    message: `${attempt}: ${message.error}${status}`,
   }
 }
 
-// The canonical events of one SDK message; messages ByteBureau does not show map to nothing
-export const mapMessage = (message: SDKMessage, state: MapState): readonly AgentEvent[] => {
-  switch (message.type) {
-    case 'system': return mapSystem(message, state)
-    case 'stream_event': return mapDelta(message.event, state)
-    case 'assistant': if (message.context_usage !== undefined) state.contextPct = contextPctOf(message.context_usage); return mapAssistant(message.message, state)
-    case 'user': return mapToolResults(message.message.content)
-    case 'result': return mapResult(message, state)
-    case 'rate_limit_event': return mapRateLimit(message.rate_limit_info)
-    case 'auth_status': return message.error === undefined ? [] : [{ type: 'session.error', kind: 'auth', message: message.error, retryable: false }]
-    default: return []
+const mapSystem = (message: SystemMessage, state: MapState): readonly AgentEvent[] => {
+  if (message.subtype === 'init') {
+    state.sessionId = message.session_id
+    return []
   }
+  if (message.subtype === 'compact_boundary') {
+    return [{ type: 'compaction.completed' }]
+  }
+  return message.subtype === 'api_retry' ? [retryWarning(message)] : []
 }
+
+const authErrorOf = (message: SDKAuthStatusMessage): readonly AgentEvent[] =>
+  message.error === undefined
+    ? []
+    : [{ type: 'session.error', kind: 'auth', message: message.error, retryable: false }]
+
+type Handlers = {
+  readonly [Type in SDKMessage['type']]?: (
+    message: Extract<SDKMessage, { readonly type: Type }>,
+    state: MapState,
+  ) => readonly AgentEvent[]
+}
+
+// The messages ByteBureau shows, by their type; any other maps to nothing
+const HANDLERS: Handlers = {
+  system: mapSystem,
+  stream_event: mapStream,
+  assistant: mapAssistant,
+  user: (message) => mapToolResults(message.message.content),
+  result: mapResult,
+  rate_limit_event: (message, state) => mapRateLimit(message.rate_limit_info, state),
+  auth_status: authErrorOf,
+}
+
+// The lookup is generic in the type, which is what lets the compiler pair a message with its handler
+const run = <Type extends SDKMessage['type']>(
+  type: Type,
+  message: Extract<SDKMessage, { readonly type: Type }>,
+  state: MapState,
+): readonly AgentEvent[] => {
+  const handler = HANDLERS[type]
+  return handler === undefined ? [] : handler(message, state)
+}
+
+// A Task subagent's own messages are left out until a later phase shows subagents; the Task's result tells what it did
+const ofSubagent = (message: SDKMessage): boolean =>
+  'parent_tool_use_id' in message && message.parent_tool_use_id !== null
+
+// The canonical events of one message of the SDK
+export const mapMessage = (message: SDKMessage, state: MapState): readonly AgentEvent[] =>
+  ofSubagent(message) ? [] : run(message.type, message, state)
 ```
 
 (`mapping-result.ts`: `mapResult` sums `modelUsage` into `Usage` (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `costUsd: total_cost_usd`, `contextPct: state.contextPct`), emits `usage.updated` then `turn.completed { stopReason: subtype === 'success' ? (stop_reason ?? 'end_turn') : subtype, usage }`, and resets `turnStarted`; `mapRateLimit` builds `RateLimit` from `rateLimitType` (`five_hour` → `fiveHourPct = utilization * 100`, `fiveHourResetsAt = new Date(resetsAt * 1000).toISOString()`; `seven_day*` → the seven-day fields) and adds `session.error { kind: 'ratelimit', message: 'the usage limit is reached', retryable: true }` when `status === 'rejected'`; `contextPctOf(usage)` = `total_tokens / <window> * 100` using the window field the installed declarations name. Where the SDK's union makes a `switch` on `message.type` lose narrowing, read fields through `Reflect.get` with runtime checks as above — the mapping must never throw on an unexpected message: wrap `mapMessage` in `try/catch` in the session and emit `session.warning { kind: 'mapping', message }`.)
@@ -5406,18 +6081,22 @@ export const mapMessage = (message: SDKMessage, state: MapState): readonly Agent
 ```ts
 import { z } from 'zod'
 
-export const ClaudeConfig = z.object({
-  executable: z.string().min(1).optional(),
-  settingSources: z.array(z.enum(['user', 'project', 'local'])).optional(),
-}).strict()
+const SettingSources = z.array(z.enum(['user', 'project', 'local']))
+const ClaudeConfigSchema = z.strictObject({
+  executable: z.optional(z.string().min(1)),
+  settingSources: z.optional(SettingSources),
+})
 
-export type ClaudeConfig = z.infer<typeof ClaudeConfig>
+export type ClaudeConfig = z.infer<typeof ClaudeConfigSchema>
+
+const describeIssue = (issue: z.core.$ZodIssue): string =>
+  issue.path.length === 0 ? issue.message : `${issue.path.join('.')}: ${issue.message}`
 
 // The providers.claude section as the adapter reads it; a key it does not know is a configuration error, told as such
 export const claudeConfigOf = (providerConfig: Readonly<Record<string, unknown>>): ClaudeConfig => {
-  const parsed = ClaudeConfig.safeParse(providerConfig)
+  const parsed = ClaudeConfigSchema.safeParse(providerConfig)
   if (!parsed.success) {
-    throw new Error(`providers.claude: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`)
+    throw new Error(`providers.claude: ${parsed.error.issues.map(describeIssue).join('; ')}`)
   }
   return parsed.data
 }
@@ -5430,7 +6109,7 @@ export const claudeConfigOf = (providerConfig: Readonly<Record<string, unknown>>
 `plugins/agent-claude/src/options.ts`:
 
 ```ts
-import type { Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, Options } from '@anthropic-ai/claude-agent-sdk'
 import type { CreateSessionRequest } from '@bytebureau/plugin-api'
 import { claudeConfigOf } from './config.js'
 import { permissionModeOf } from './permission.js'
@@ -5445,26 +6124,47 @@ export interface OptionParts {
   readonly request: CreateSessionRequest
   readonly executable: string | undefined
   readonly abort: AbortController
-  readonly hooks: Options['hooks']
-  readonly canUseTool: Options['canUseTool']
+  readonly hooks: NonNullable<Options['hooks']>
+  readonly canUseTool: CanUseTool
 }
 
 // The environment of the child: what the kernel allowed, and the login directory of a login profile
-const envOf = (request: CreateSessionRequest): Record<string, string> => {
-  const { profile } = request
-  const configDir = profile.kind === 'login' && profile.configDir !== undefined ? { CLAUDE_CONFIG_DIR: profile.configDir } : {}
-  return { ...request.env, ...configDir }
+// The key of an api_key profile is already in it, under ANTHROPIC_API_KEY, put there by the kernel
+const envOf = ({ env, profile }: CreateSessionRequest): Record<string, string> => {
+  const loginDir =
+    profile.kind === 'login' && profile.configDir !== undefined
+      ? { CLAUDE_CONFIG_DIR: profile.configDir }
+      : {}
+  return { ...env, ...loginDir }
 }
 
-export const optionsOf = ({ request, executable, abort, hooks, canUseTool }: OptionParts): Options => {
+// The Claude session a request resumes; a reference of another provider is no session of Claude
+export const claudeResumeOf = ({ resume }: CreateSessionRequest): string | undefined =>
+  resume !== undefined && resume.providerId === 'claude' ? resume.ref : undefined
+
+const appendOf = (systemPrompt: string): string =>
+  systemPrompt === '' ? CLAUDE_CONVENTIONS : `${systemPrompt}\n\n${CLAUDE_CONVENTIONS}`
+
+// The options of the one query a session runs; the user's own claude when there is one, the SDK's bundled binary otherwise
+export const optionsOf = ({
+  request,
+  executable,
+  abort,
+  hooks,
+  canUseTool,
+}: OptionParts): Options => {
   const config = claudeConfigOf(request.providerConfig)
   const { employee } = request
-  const resume = request.resume !== undefined && request.resume.providerId === 'claude' ? { resume: request.resume.ref } : {}
+  const resume = claudeResumeOf(request)
   return {
     cwd: request.workspace.path,
     model: employee.model,
     ...(employee.effort === null ? {} : { effort: employee.effort }),
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: `${employee.systemPrompt}\n\n${CLAUDE_CONVENTIONS}` },
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',
+      append: appendOf(employee.systemPrompt),
+    },
     allowedTools: [...employee.tools.allow],
     disallowedTools: [...employee.tools.deny],
     ...(employee.maxTurns === undefined ? {} : { maxTurns: employee.maxTurns }),
@@ -5473,7 +6173,7 @@ export const optionsOf = ({ request, executable, abort, hooks, canUseTool }: Opt
     env: envOf(request),
     settingSources: config.settingSources ?? ['user', 'project', 'local'],
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
-    ...resume,
+    ...(resume === undefined ? {} : { resume }),
     abortController: abort,
     hooks,
     canUseTool,
@@ -5489,53 +6189,99 @@ export const optionsOf = ({ request, executable, abort, hooks, canUseTool }: Opt
 `plugins/agent-claude/src/session.ts`:
 
 ```ts
-import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentSession, AskAnswer, CreateSessionRequest, ExternalSessionRef } from '@bytebureau/plugin-api'
+import type {
+  CanUseTool,
+  HookCallbackMatcher,
+  HookInput,
+  SDKMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk'
+import type {
+  AgentSession,
+  AskAnswer,
+  CreateSessionRequest,
+  ExternalSessionRef,
+  Logger,
+} from '@bytebureau/plugin-api'
 import type { AgentEvent, PromptInput } from '@bytebureau/protocol'
 import { AskBroker } from './asks.js'
-import { mapMessage, newMapState, type MapState } from './mapping.js'
-import { optionsOf } from './options.js'
+import { mapMessage, measuredPctOf, newMapState, unreadResult, type MapState } from './mapping.js'
+import { claudeResumeOf, optionsOf } from './options.js'
+import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
-import type { ClaudeDeps } from './provider.js'
+import { withinLimit } from './within-limit.js'
+
+type SubagentEvent = 'subagent.started' | 'subagent.stopped'
+
+const CONTEXT_LIMIT_MS = 5000
+
+const reasonOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
 
 // One query spans the session: prompts are user messages pushed into its input, its messages become the events
+// A follow-up while a turn runs steers it, as the SDK queues user messages
 export class ClaudeSession implements AgentSession {
   private readonly input = new Queue<SDKUserMessage>()
   private readonly output = new Queue<AgentEvent>()
-  private readonly asks = new AskBroker()
   private readonly abort = new AbortController()
-  private readonly state: MapState = newMapState()
-  private readonly request: CreateSessionRequest
-  private readonly query: Query
+  private readonly state: MapState
+  private readonly asks: AskBroker
+  private readonly logger: Logger
+  // The kernel's id of the session, which a warning names beside the reference of Claude's session
+  private readonly sessionId: string
+  private readonly query: AgentQuery
+  // Settles once every message of the query is read and the events have ended
+  public readonly ended: Promise<void>
   private closed = false
 
-  public constructor(deps: ClaudeDeps, request: CreateSessionRequest, executable: string | undefined) {
-    this.request = request
-    this.query = deps.query({
-      prompt: this.input,
-      options: optionsOf({ request, executable, abort: this.abort, hooks: this.hooksOf(), canUseTool: this.canUseTool() }),
-    })
-    void this.read(deps)
+  public constructor(
+    deps: ClaudeDeps,
+    request: CreateSessionRequest,
+    executable: string | undefined,
+  ) {
+    this.asks = new AskBroker(request.sessionId)
+    this.logger = deps.logger
+    this.sessionId = request.sessionId
+    this.state = newMapState(claudeResumeOf(request) !== undefined)
+    const parts = {
+      request,
+      executable,
+      abort: this.abort,
+      hooks: this.hooks(),
+      canUseTool: this.canUseTool,
+    }
+    this.query = startQuery(deps, { prompt: this.input, options: optionsOf(parts) })
+    this.ended = this.read()
   }
 
   public get externalRef(): ExternalSessionRef | null {
-    return this.state.sessionId === null ? null : { providerId: 'claude', ref: this.state.sessionId }
+    return this.state.sessionId === undefined
+      ? null
+      : { providerId: 'claude', ref: this.state.sessionId }
   }
 
   public async prompt(input: PromptInput): Promise<void> {
     await Promise.resolve()
-    this.input.push({ type: 'user', session_id: this.state.sessionId ?? '', parent_tool_use_id: null, message: { role: 'user', content: input.text } })
+    this.input.push({
+      type: 'user',
+      message: { role: 'user', content: input.text },
+      parent_tool_use_id: null,
+    })
   }
 
+  // The asks of the turn are moot once it is interrupted; the agent ends the turn with a result
   public async interrupt(): Promise<void> {
     this.asks.denyAll('interrupted')
-    this.flushAsks()
     await this.query.interrupt()
   }
 
   public async answer(askId: string, answer: AskAnswer): Promise<void> {
     await Promise.resolve()
     this.asks.answer(askId, answer)
+  }
+
+  public async setModel(model: string): Promise<void> {
+    await this.query.setModel(model)
   }
 
   public events(): AsyncIterable<AgentEvent> {
@@ -5549,54 +6295,103 @@ export class ClaudeSession implements AgentSession {
       this.input.end()
       this.abort.abort()
       this.query.close()
+      this.output.push({ type: 'session.closed' })
       this.output.end()
     }
     await Promise.resolve()
   }
 
-  private flushAsks(): void {
-    for (const event of this.asks.drain()) {
+  // The SDK waits for the answer; the ask is told at once, so the kernel can open it
+  private readonly canUseTool: CanUseTool = async (toolName, input, options) => {
+    const { requestId, toolUseID, signal } = options
+    const pending = this.asks.ask(toolName, input, { requestId, toolUseID, signal })
+    this.tell(this.asks.drain())
+    const result = await pending
+    return result
+  }
+
+  private hooks(): Partial<Record<'SubagentStart' | 'SubagentStop', HookCallbackMatcher[]>> {
+    const telling = (type: SubagentEvent): HookCallbackMatcher[] => [
+      {
+        hooks: [
+          async (input) => {
+            await Promise.resolve()
+            this.tellSubagent(type, input)
+            return {}
+          },
+        ],
+      },
+    ]
+    return { SubagentStart: telling('subagent.started'), SubagentStop: telling('subagent.stopped') }
+  }
+
+  private tellSubagent(type: SubagentEvent, input: HookInput): void {
+    if (input.hook_event_name === 'SubagentStart' || input.hook_event_name === 'SubagentStop') {
+      this.output.push({ type, id: input.agent_id, name: input.agent_type })
+    }
+  }
+
+  private tell(events: readonly AgentEvent[]): void {
+    for (const event of events) {
       this.output.push(event)
     }
   }
 
-  private canUseTool(): NonNullable<Parameters<typeof optionsOf>[0]['canUseTool']> {
-    return async (toolName, input, options) => {
-      const pending = this.asks.ask(toolName, input, { requestId: options.requestId, toolUseID: options.toolUseID })
-      this.flushAsks()
-      return pending
-    }
-  }
-
-  private hooksOf(): Parameters<typeof optionsOf>[0]['hooks'] {
-    const subagent = (type: 'subagent.started' | 'subagent.stopped') => [{ hooks: [async (hookInput: unknown) => { this.output.push({ type, id: String(Reflect.get(hookInput as object, 'agent_id') ?? ''), name: String(Reflect.get(hookInput as object, 'agent_type') ?? 'subagent') }); return {} }] }]
-    return { SubagentStart: subagent('subagent.started'), SubagentStop: subagent('subagent.stopped') }
-  }
-
   // The messages of the SDK, read for as long as the query gives them; a query that fails is a crash of the session
-  private async read(deps: ClaudeDeps): Promise<void> {
+  private async read(): Promise<void> {
     try {
       for await (const message of this.query) {
-        for (const event of this.safeMap(message)) {
-          this.output.push(event)
+        if (message.type === 'result') {
+          await this.measureContext()
         }
+        this.tell(this.mapped(message))
       }
     } catch (error) {
-      if (!this.closed) {
-        this.output.push({ type: 'session.error', kind: 'crash', message: error instanceof Error ? error.message : String(error), retryable: true })
-        deps.logger.warn('the Claude query ended with an error', { reason: String(error) })
-      }
+      this.crashed(error)
     } finally {
       this.output.push({ type: 'session.closed' })
       this.output.end()
     }
   }
 
-  private safeMap(message: Parameters<typeof mapMessage>[0]): readonly AgentEvent[] {
+  // The share of the context a turn left in use, asked after every turn by a summary that makes no request
+  // A measure that fails or takes more than 5 s leaves the turn with what the SDK told during it, if anything
+  private async measureContext(): Promise<void> {
+    try {
+      const measured = await withinLimit(
+        this.query.getContextUsage({ detail: 'summary' }),
+        CONTEXT_LIMIT_MS,
+      )
+      if (measured !== null) {
+        this.state.contextPct = measuredPctOf(measured)
+      }
+    } catch {
+      // Not measured: the turn keeps what it had
+    }
+  }
+
+  // A message the mapping cannot read is told as a warning and the session goes on; a result still ends its turn
+  private mapped(message: SDKMessage): readonly AgentEvent[] {
     try {
       return mapMessage(message, this.state)
     } catch (error) {
-      return [{ type: 'session.warning', kind: 'mapping', message: error instanceof Error ? error.message : String(error) }]
+      const warning: AgentEvent = {
+        type: 'session.warning',
+        kind: 'mapping',
+        message: reasonOf(error),
+      }
+      return message.type === 'result' ? [warning, unreadResult(message, this.state)] : [warning]
+    }
+  }
+
+  // A failure after close is the close itself
+  private crashed(error: unknown): void {
+    if (!this.closed) {
+      const message = reasonOf(error)
+      this.output.push({ type: 'session.error', kind: 'crash', message, retryable: true })
+      const ref = this.state.sessionId === undefined ? {} : { ref: this.state.sessionId }
+      const named = { sessionId: this.sessionId, ...ref, reason: message }
+      this.logger.warn('the Claude query ended with an error', named)
     }
   }
 }
@@ -5609,41 +6404,129 @@ export class ClaudeSession implements AgentSession {
 ```ts
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import type { AccountInfo, Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AuthStatus, ProfileRef } from '@bytebureau/plugin-api'
+import { startQuery, type AgentQuery, type ClaudeDeps } from './deps.js'
 import { Queue } from './queue.js'
-import type { ClaudeDeps } from './provider.js'
+import { withinLimit } from './within-limit.js'
+
+interface Probe {
+  readonly deps: ClaudeDeps
+  readonly profile: ProfileRef
+  readonly executable: string | undefined
+}
 
 const PROBE_LIMIT_MS = 20_000
-const LOGGED_OUT = /login|auth|credential|unauthori[sz]ed|401|expired/iu
+const TOO_SLOW = 'the Claude login check did not answer within 20 s'
+const API_KEY_HINT = 'run a session to check an API-key profile'
+const LOGGED_OUT = /login|auth|credential|unauthorized|unauthorised|401|expired/iu
+// The variables of the daemon the check passes on, the fixed ones of the kernel's allowlist; Claude Code finds a login in the macOS keychain by USER
+const PASSED: ReadonlySet<string> = new Set([
+  'PATH',
+  'HOME',
+  'USER',
+  'LANG',
+  'TMPDIR',
+  'TERM',
+  'SSH_AUTH_SOCK',
+  'TRACEPARENT',
+])
 
-export const loginHint = (profile: ProfileRef): string =>
-  profile.kind === 'api_key' ? 'remove the profile and add it again with a valid key' : `${profile.configDir === undefined ? '' : `CLAUDE_CONFIG_DIR=${profile.configDir} `}claude /login`
+// A word a shell would split or expand is quoted, so a command can be pasted as it is
+const shellWord = (value: string): string =>
+  /^[\w./:@%+=,-]+$/u.test(value) ? value : `'${value.replaceAll("'", String.raw`'\''`)}'`
 
-const stateOf = (reason: string): AuthStatus['state'] => (/expired/iu.test(reason) ? 'expired' : LOGGED_OUT.test(reason) ? 'loggedOut' : 'unknown')
+// The command that logs a login profile in, which the CLI prints after "Log in with:"
+const loginHint = (profile: ProfileRef): string =>
+  profile.configDir === undefined
+    ? 'claude /login'
+    : `CLAUDE_CONFIG_DIR=${shellWord(profile.configDir)} claude /login`
 
-// A query that is given nothing to say, only to learn who is logged in; closed whatever happens
-export const authStatusOf = async (deps: ClaudeDeps, profile: ProfileRef, executable: string | undefined): Promise<AuthStatus> => {
-  if (profile.kind === 'login' && profile.configDir !== undefined && !existsSync(profile.configDir)) {
+const envOf = (profile: ProfileRef): Record<string, string> => {
+  const env: Record<string, string> = {}
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && (PASSED.has(name) || name.startsWith('LC_'))) {
+      env[name] = value
+    }
+  }
+  return profile.configDir === undefined ? env : { ...env, CLAUDE_CONFIG_DIR: profile.configDir }
+}
+
+// A login has an account or the source of a credential; a CLI that has none answers without either, and throws nothing
+const statusOf = (account: AccountInfo, profile: ProfileRef): AuthStatus => {
+  const name = account.email ?? account.organization
+  if (name !== undefined) {
+    return { state: 'loggedIn', account: name }
+  }
+  const sources = [account.tokenSource, account.apiKeySource]
+  const credential = sources.some((source) => source !== undefined && source !== 'none')
+  return credential ? { state: 'loggedIn' } : { state: 'loggedOut', hint: loginHint(profile) }
+}
+
+const failedStatus = (error: unknown, profile: ProfileRef): AuthStatus => {
+  const reason = error instanceof Error ? error.message : String(error)
+  if (/expired/iu.test(reason)) {
+    return { state: 'expired', hint: loginHint(profile) }
+  }
+  return LOGGED_OUT.test(reason)
+    ? { state: 'loggedOut', hint: loginHint(profile) }
+    : { state: 'unknown', hint: reason }
+}
+
+// A query given nothing to say, only to learn who is logged in
+const startProbe = ({ deps, profile, executable }: Probe, abort: AbortController): AgentQuery => {
+  const input = new Queue<SDKUserMessage>()
+  input.end()
+  const options: Options = {
+    cwd: tmpdir(),
+    env: envOf(profile),
+    settingSources: [],
+    permissionMode: 'default',
+    maxTurns: 1,
+    abortController: abort,
+    ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
+  }
+  return startQuery(deps, { prompt: input, options })
+}
+
+const accountOf = async (probe: AgentQuery): Promise<AccountInfo> => {
+  await probe.initializationResult()
+  const account = await probe.accountInfo()
+  return account
+}
+
+// The probe is closed whatever happens, and given 20 s, after which it is aborted
+const probed = async (probe: Probe): Promise<AuthStatus> => {
+  const abort = new AbortController()
+  const query = startProbe(probe, abort)
+  try {
+    const account = await withinLimit(accountOf(query), PROBE_LIMIT_MS)
+    if (account === null) {
+      abort.abort()
+      return { state: 'unknown', hint: TOO_SLOW }
+    }
+    return statusOf(account, probe.profile)
+  } catch (error) {
+    return failedStatus(error, probe.profile)
+  } finally {
+    query.close()
+  }
+}
+
+// A login profile whose directory is gone needs a login; an API-key profile is checked by the session it runs, as the kernel passes no key here
+export const authStatusOf = async (
+  deps: ClaudeDeps,
+  profile: ProfileRef,
+  executable: string | undefined,
+): Promise<AuthStatus> => {
+  if (profile.kind === 'api_key') {
+    return { state: 'unknown', hint: API_KEY_HINT }
+  }
+  if (profile.configDir !== undefined && !existsSync(profile.configDir)) {
     return { state: 'loggedOut', hint: loginHint(profile) }
   }
-  const input = new Queue<never>()
-  input.end()
-  const abort = new AbortController()
-  const timer = setTimeout(() => abort.abort(), PROBE_LIMIT_MS)
-  const env = profile.kind === 'login' && profile.configDir !== undefined ? { ...process.env, CLAUDE_CONFIG_DIR: profile.configDir } : { ...process.env }
-  const probe = deps.query({ prompt: input, options: { cwd: tmpdir(), env, settingSources: [], permissionMode: 'default', maxTurns: 1, abortController: abort, ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }) } })
-  try {
-    await probe.initializationResult()
-    const account = await probe.accountInfo()
-    return { state: 'loggedIn', ...(account.email === undefined && account.organization === undefined ? {} : { account: account.email ?? account.organization }) }
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    const state = stateOf(reason)
-    return { state, hint: state === 'unknown' ? reason : loginHint(profile) }
-  } finally {
-    clearTimeout(timer)
-    probe.close()
-  }
+  const status = await probed({ deps, profile, executable })
+  return status
 }
 ```
 
@@ -5654,22 +6537,34 @@ export const authStatusOf = async (deps: ClaudeDeps, profile: ProfileRef, execut
 `plugins/agent-claude/src/provider.ts`:
 
 ```ts
-import type { query } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentCapabilities, AgentProvider, AgentSession, AuthStatus, CreateSessionRequest, Logger, ProfileRef } from '@bytebureau/plugin-api'
+import type {
+  AgentCapabilities,
+  AgentProvider,
+  AgentSession,
+  AuthStatus,
+  CreateSessionRequest,
+  ProfileRef,
+} from '@bytebureau/plugin-api'
 import { authStatusOf } from './auth.js'
 import { claudeConfigOf } from './config.js'
+import type { ClaudeDeps } from './deps.js'
 import { resolveExecutable } from './executable.js'
 import { ClaudeSession } from './session.js'
 
-export type QueryFn = typeof query
-
-export interface ClaudeDeps {
-  readonly query: QueryFn
-  readonly logger: Logger
-  readonly resolveExecutable?: ((name: string) => string | undefined) | undefined
+const CAPABILITIES: AgentCapabilities = {
+  resume: true,
+  interrupt: true,
+  askUser: true,
+  permissions: true,
+  structuredOutput: false,
+  usage: true,
+  rateLimits: true,
+  contextUsage: true,
+  thinking: true,
+  setModel: true,
+  setEffort: false,
+  attachments: false,
 }
-
-const CAPABILITIES: AgentCapabilities = { resume: true, interrupt: true, askUser: true, permissions: true, structuredOutput: false, usage: true, rateLimits: true, contextUsage: true, thinking: true, setModel: true, setEffort: false, attachments: false }
 
 export class ClaudeAgentProvider implements AgentProvider {
   public readonly id = 'claude'
@@ -5683,7 +6578,8 @@ export class ClaudeAgentProvider implements AgentProvider {
   }
 
   public async authStatus(profile: ProfileRef): Promise<AuthStatus> {
-    return authStatusOf(this.deps, profile, this.executableOf({}))
+    const status = await authStatusOf(this.deps, profile, this.executableOf({}))
+    return status
   }
 
   public async createSession(request: CreateSessionRequest): Promise<AgentSession> {
@@ -5691,10 +6587,19 @@ export class ClaudeAgentProvider implements AgentProvider {
     return new ClaudeSession(this.deps, request, this.executableOf(request.providerConfig))
   }
 
-  // The user's claude where it is installed or configured; the SDK's bundled binary when none is found
+  // The user's claude where it is configured or installed; the SDK's bundled binary when none is found
+  // A configured one that is not found is warned of, by the name it was given, and passed over
   private executableOf(providerConfig: Readonly<Record<string, unknown>>): string | undefined {
     const resolve = this.deps.resolveExecutable ?? resolveExecutable
-    return resolve(claudeConfigOf(providerConfig).executable ?? 'claude')
+    const { executable } = claudeConfigOf(providerConfig)
+    const configured = executable === undefined ? undefined : resolve(executable)
+    if (executable !== undefined && configured === undefined) {
+      this.deps.logger.warn(
+        'the claude of providers.claude.executable is not found; the default one runs',
+        { executable },
+      )
+    }
+    return configured ?? resolve('claude')
   }
 }
 ```
@@ -5706,7 +6611,10 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { definePlugin, type Plugin } from '@bytebureau/plugin-api'
 import { ClaudeAgentProvider } from './provider.js'
 
-export { ClaudeAgentProvider, type ClaudeDeps, type QueryFn } from './provider.js'
+export type { ClaudeConfig } from './config.js'
+export { CLAUDE_CONVENTIONS } from './options.js'
+export type { ClaudeDeps, QueryFn } from './deps.js'
+export { ClaudeAgentProvider } from './provider.js'
 
 export const claudeAgentPlugin: Plugin = definePlugin({
   manifest: {
@@ -5730,6 +6638,553 @@ export const claudeAgentPlugin: Plugin = definePlugin({
 
 `packages/kernel/src/sessions/live-sessions.ts`: `Live` gains `readonly askIds: Map<string, string>` (kernel ask id → the agent's id); `session-ask.ts` `open` stores `live.askIds.set(record.id, event.ask.id)` after `deps.asks.open(...)` and the answer path (`answerAgent` or where `live.agent.answer(record.id, answer)` is called) uses `live.askIds.get(record.id) ?? record.id` and deletes the entry; `session-agent-asks.test.ts` pins that the fake agent receives the id it asked with (give the fake ask a distinctive id and assert `FakeSession.answer` received it — extend the fake to record it). Run `bunx vitest run --project kernel`.
 
+**Added files (as shipped):**
+
+`plugins/agent-claude/src/deps.ts` (as shipped):
+
+```ts
+import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Logger } from '@bytebureau/plugin-api'
+
+// The part of the SDK's query the adapter drives; the SDK's own query() is one, and so is the fake of the tests
+export type AgentQuery = AsyncIterable<SDKMessage> &
+  Pick<
+    Query,
+    'interrupt' | 'close' | 'setModel' | 'initializationResult' | 'accountInfo' | 'getContextUsage'
+  >
+
+export type QueryFn = (params: {
+  readonly prompt: AsyncIterable<SDKUserMessage>
+  readonly options: Options
+}) => AgentQuery
+
+// What the provider, its sessions and its login check are given
+export interface ClaudeDeps {
+  readonly query: QueryFn
+  readonly logger: Logger
+  readonly resolveExecutable?: ((name: string) => string | undefined) | undefined
+}
+
+type QueryParams = Parameters<QueryFn>[0]
+
+// A query the SDK could not start: everything asked of it fails with the reason, and closing it is harmless
+const failedQuery = (cause: unknown): AgentQuery => {
+  const reason = cause instanceof Error ? cause : new Error(String(cause))
+  const failing = async (): Promise<never> => {
+    await Promise.resolve()
+    throw reason
+  }
+  return {
+    [Symbol.asyncIterator]: () => ({ next: failing }),
+    interrupt: failing,
+    close: () => {
+      // Nothing was started, so there is nothing to close
+    },
+    setModel: failing,
+    initializationResult: failing,
+    accountInfo: failing,
+    getContextUsage: failing,
+  }
+}
+
+// The SDK throws at once when it finds no Claude Code to run; the caller hears of it as of any query that fails
+export const startQuery = (deps: ClaudeDeps, params: QueryParams): AgentQuery => {
+  try {
+    return deps.query(params)
+  } catch (error) {
+    return failedQuery(error)
+  }
+}
+```
+
+`plugins/agent-claude/src/within-limit.ts` (as shipped):
+
+```ts
+// The value of the work, or null once the limit is over; the timer does not outlive the race
+export const withinLimit = async <Value>(
+  work: Promise<Value>,
+  limitMs: number,
+): Promise<Value | null> => {
+  const { promise, resolve } = Promise.withResolvers<null>()
+  const timer = setTimeout(() => {
+    resolve(null)
+  }, limitMs)
+  try {
+    const value = await Promise.race([work, promise])
+    return value
+  } finally {
+    clearTimeout(timer)
+  }
+}
+```
+
+`plugins/agent-claude/src/testing/requests.ts` (as shipped):
+
+```ts
+import type {
+  CreateSessionRequest,
+  EmployeeSpec,
+  Logger,
+  LogLevel,
+  ProfileRef,
+} from '@bytebureau/plugin-api'
+
+const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000001'
+// A key that must never be seen anywhere but in the environment of the agent
+export const CANARY_KEY = 'sk-ant-canary-0000000000000000'
+
+export interface LogEntry {
+  readonly level: LogLevel
+  readonly message: string
+  readonly properties: Readonly<Record<string, unknown>> | undefined
+}
+
+// A logger that keeps what it is told, for the tests that look at what was logged
+export function recordingLogger(): { readonly logger: Logger; readonly entries: LogEntry[] } {
+  const entries: LogEntry[] = []
+  const at =
+    (level: LogLevel): Logger['debug'] =>
+    (message, properties) => {
+      entries.push({ level, message, properties })
+    }
+  const logger: Logger = {
+    category: ['test'],
+    debug: at('debug'),
+    info: at('info'),
+    warn: at('warn'),
+    error: at('error'),
+    child: () => logger,
+  }
+  return { logger, entries }
+}
+
+export const employee = (overrides: Partial<EmployeeSpec> = {}): EmployeeSpec => ({
+  id: 'dev',
+  name: 'Dev',
+  provider: 'claude',
+  model: 'claude-opus-5-5',
+  effort: 'high',
+  systemPrompt: 'You write TypeScript.',
+  tools: { allow: ['Read', 'Edit'], deny: ['WebFetch'] },
+  permissionMode: 'supervised',
+  skills: [],
+  appearance: {},
+  ...overrides,
+})
+
+export const loginProfile: ProfileRef = { id: 'default', providerId: 'claude', kind: 'login' }
+
+// A request as the kernel makes it: the allowlisted environment, the profile and the provider options
+export const sessionRequest = (
+  overrides: Partial<CreateSessionRequest> = {},
+): CreateSessionRequest => ({
+  sessionId: SESSION_ID,
+  workspace: { path: '/w' },
+  employee: employee(),
+  profile: loginProfile,
+  providerConfig: {},
+  env: { PATH: '/usr/bin', HOME: '/home/dev' },
+  signal: new AbortController().signal,
+  logger: recordingLogger().logger,
+  ...overrides,
+})
+```
+
+`plugins/agent-claude/src/testing/session-harness.ts` (as shipped):
+
+```ts
+import type { AgentEvent, AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
+import { ClaudeSession } from '../session.js'
+import { fakeQuery, type FakeQuery, type FakeScript } from './fake-query.js'
+import { recordingLogger, sessionRequest, type LogEntry } from './requests.js'
+
+export interface Started {
+  readonly session: ClaudeSession
+  readonly fake: FakeQuery
+  readonly logged: LogEntry[]
+}
+
+// A session over a fake query that plays the script, with a logger that keeps what it is told
+export const start = (
+  script: FakeScript,
+  request: CreateSessionRequest = sessionRequest(),
+): Started => {
+  const fake = fakeQuery(script)
+  const { logger, entries } = recordingLogger()
+  return {
+    session: new ClaudeSession({ query: fake.query, logger }, request, undefined),
+    fake,
+    logged: entries,
+  }
+}
+
+// The events of a session up to the first of the type, that one included
+export const until = async (
+  session: AgentSession,
+  type: AgentEvent['type'],
+): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for await (const event of session.events()) {
+    seen.push(event)
+    if (event.type === type) {
+      break
+    }
+  }
+  return seen
+}
+
+// Every event a session still has to tell, up to its end
+export const rest = async (session: AgentSession): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for await (const event of session.events()) {
+    seen.push(event)
+  }
+  return seen
+}
+```
+
+`plugins/agent-claude/src/mapping-result.test.ts` (as shipped):
+
+```ts
+import type { SDKMessage, SDKRateLimitEvent } from '@anthropic-ai/claude-agent-sdk'
+import { describe, expect, it } from 'vitest'
+import { mapMessage, newMapState, unreadResult } from './mapping.js'
+import {
+  assistantWithTool,
+  modelUsage,
+  rateLimited,
+  rateLimitedOnOverage,
+  resultApiError,
+  resultInterrupted,
+  resultSuccess,
+  textDelta,
+} from './testing/sdk-fixtures.js'
+
+const DELTA = 'message.delta'
+const TURN_END = 'turn.completed'
+const RESETS_AT = new Date(1_791_100_000 * 1000).toISOString()
+const NO_USAGE = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+}
+
+const SECOND_RESULT: SDKMessage = {
+  ...resultSuccess,
+  total_cost_usd: 0.03,
+  modelUsage: modelUsage(25, 9, 0.03),
+}
+
+describe('the end of a turn', () => {
+  it('counts each turn on its own, as the SDK reports the totals of the whole query', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    mapMessage(resultSuccess, state)
+    const [, completed] = mapMessage(SECOND_RESULT, state)
+    expect(completed).toMatchObject({
+      type: TURN_END,
+      usage: { inputTokens: 15, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    expect(completed).toHaveProperty('usage.costUsd', expect.closeTo(0.0177, 10))
+  })
+
+  it('ends an interrupted turn as interrupted', () => {
+    expect.hasAssertions()
+    expect(mapMessage(resultInterrupted, newMapState()).at(-1)).toMatchObject({
+      stopReason: 'interrupted',
+    })
+  })
+
+  it('starts the next turn afresh once a turn has ended', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    const events = [textDelta, resultSuccess, textDelta].flatMap((message) =>
+      mapMessage(message, state),
+    )
+    expect(events.map((event) => event.type)).toStrictEqual([
+      'turn.started',
+      DELTA,
+      'usage.updated',
+      TURN_END,
+      'turn.started',
+      DELTA,
+    ])
+  })
+})
+
+const WEEKLY: SDKRateLimitEvent = {
+  ...rateLimited,
+  rate_limit_info: { status: 'allowed', rateLimitType: 'seven_day', utilization: 0.25 },
+}
+const OVERAGE: SDKRateLimitEvent = {
+  ...rateLimited,
+  rate_limit_info: { status: 'allowed', rateLimitType: 'overage' },
+}
+const CONTEXT_USAGE = {
+  model: 'claude-opus-5-5',
+  total_tokens: 50_000,
+  raw_max_tokens: 200_000,
+  percentage: 25,
+  categories: [],
+  mcp_tools: [],
+  memory_files: [],
+  agents: [],
+}
+
+describe('the usage of a session', () => {
+  it('keeps both windows of the rate limit, and says nothing of an event that names neither', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    mapMessage(rateLimited, state)
+    expect(mapMessage(WEEKLY, state)).toStrictEqual([
+      {
+        type: 'ratelimit.updated',
+        rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT, sevenDayPct: 25 },
+      },
+    ])
+    expect(mapMessage(OVERAGE, state)).toStrictEqual([])
+  })
+
+  it('reports the share of the context a turn used, when the SDK told it', () => {
+    expect.hasAssertions()
+    const state = newMapState()
+    mapMessage({ ...assistantWithTool, context_usage: CONTEXT_USAGE }, state)
+    expect(mapMessage(resultSuccess, state).at(-1)).toHaveProperty('usage.contextPct', 25)
+    expect(mapMessage(resultSuccess, state).at(-1)).not.toHaveProperty('usage.contextPct')
+  })
+})
+
+describe('a rate limit that is reached', () => {
+  it('lets the session go on when extra usage serves the turns past the limit', () => {
+    expect.hasAssertions()
+    expect(mapMessage(rateLimitedOnOverage, newMapState())).toStrictEqual([
+      { type: 'ratelimit.updated', rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT } },
+    ])
+  })
+
+  it('stops the session when nothing covers the turns past the limit', () => {
+    expect.hasAssertions()
+    expect(mapMessage(rateLimited, newMapState())).toStrictEqual([
+      { type: 'ratelimit.updated', rateLimit: { fiveHourPct: 100, fiveHourResetsAt: RESETS_AT } },
+      {
+        type: 'session.error',
+        kind: 'ratelimit',
+        message: 'the usage limit is reached',
+        retryable: true,
+      },
+    ])
+  })
+})
+
+const OVERLOADED: SDKMessage = { ...resultApiError, result: 'API Error: 529 Overloaded' }
+const UNNAMED: SDKMessage = { ...resultSuccess, is_error: true, result: '' }
+
+describe('a turn that failed on the API', () => {
+  it('ends with its terminal reason and a warning that names the error, and leaves the session to retry', () => {
+    expect.hasAssertions()
+    expect(mapMessage(OVERLOADED, newMapState())).toStrictEqual([
+      { type: 'session.warning', kind: 'turn_error', message: 'API Error: 529 Overloaded' },
+      { type: 'usage.updated', usage: NO_USAGE },
+      { type: TURN_END, stopReason: 'api_error', usage: NO_USAGE },
+    ])
+  })
+
+  it('ends as an error when the result names no reason or text', () => {
+    expect.hasAssertions()
+    expect(mapMessage(UNNAMED, newMapState())).toMatchObject([
+      { type: 'session.warning', message: 'the turn ended on an error' },
+      { type: 'usage.updated' },
+      { type: TURN_END, stopReason: 'error' },
+    ])
+  })
+})
+
+// A result of which not even the subtype can be read
+const UNNAMED_RESULT = {
+  ...resultSuccess,
+  get subtype(): 'success' {
+    throw new Error('the result cannot be read')
+  },
+}
+
+describe(unreadResult, () => {
+  it('ends the turn as unknown, counting nothing, when not even its stop reason can be read', () => {
+    expect.hasAssertions()
+    const state = { ...newMapState(), turnStarted: true }
+    expect(unreadResult(UNNAMED_RESULT, state)).toStrictEqual({
+      type: TURN_END,
+      stopReason: 'unknown',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    })
+    expect(state.turnStarted).toBe(false)
+  })
+})
+```
+
+`plugins/agent-claude/src/session-turns.test.ts` (as shipped):
+
+```ts
+import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { AgentEvent } from '@bytebureau/plugin-api'
+import { describe, expect, it, vi } from 'vitest'
+import { ClaudeAgentProvider } from './provider.js'
+import type { ClaudeSession } from './session.js'
+import { fakeQuery } from './testing/fake-query.js'
+import { recordingLogger, sessionRequest } from './testing/requests.js'
+import {
+  contextMeasured,
+  init,
+  modelUsage,
+  resultSuccess,
+  textDelta,
+} from './testing/sdk-fixtures.js'
+import { rest, start, until } from './testing/session-harness.js'
+
+const TURN_END = 'turn.completed'
+
+// The results of a resumed session: the first carries the totals of the session it resumed, and its own turn in usage
+const RESUMED_FIRST: SDKMessage = {
+  ...resultSuccess,
+  total_cost_usd: 0.05,
+  modelUsage: modelUsage(110, 25, 0.05),
+}
+const RESUMED_SECOND: SDKMessage = {
+  ...resultSuccess,
+  total_cost_usd: 0.06,
+  modelUsage: modelUsage(130, 30, 0.06),
+}
+
+// The ends of two turns, prompted one after the other
+const twoTurnEnds = async (session: ClaudeSession): Promise<(AgentEvent | undefined)[]> => {
+  await session.prompt({ text: 'Go on' })
+  const first = await until(session, TURN_END)
+  await session.prompt({ text: 'And on' })
+  const second = await until(session, TURN_END)
+  return [first.at(-1), second.at(-1)]
+}
+
+describe('a resumed Claude session', () => {
+  it("counts its first turn by the turn's own usage, not by the totals of the session it resumed", async () => {
+    expect.hasAssertions()
+    const request = sessionRequest({ resume: { providerId: 'claude', ref: 'session-earlier' } })
+    const { session, fake } = start({ turns: [[init, RESUMED_FIRST], [RESUMED_SECOND]] }, request)
+    const [first, second] = await twoTurnEnds(session)
+    expect(fake.options[0]).toHaveProperty('resume', 'session-earlier')
+    expect(first).toHaveProperty('usage', {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    })
+    expect(second).toMatchObject({
+      usage: { inputTokens: 20, outputTokens: 5, cacheReadTokens: 0 },
+    })
+    expect(second).toHaveProperty('usage.costUsd', expect.closeTo(0.01, 10))
+    await session.close()
+  })
+})
+
+// A result the mapping cannot read: reading its usage fails
+const UNREADABLE_RESULT: SDKMessage = {
+  ...resultSuccess,
+  get modelUsage(): Record<string, ModelUsage> {
+    throw new Error('the usage cannot be read')
+  },
+}
+
+describe('a turn whose result cannot be read', () => {
+  it('still ends, counting nothing, with a warning, and the next turn starts afresh', async () => {
+    expect.hasAssertions()
+    const { session } = start({ turns: [[init, textDelta, UNREADABLE_RESULT], [textDelta]] })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.slice(-2)).toStrictEqual([
+      { type: 'session.warning', kind: 'mapping', message: 'the usage cannot be read' },
+      { type: TURN_END, stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 } },
+    ])
+    await session.prompt({ text: 'Again' })
+    await expect(until(session, 'turn.started')).resolves.toStrictEqual([{ type: 'turn.started' }])
+    await session.close()
+  })
+})
+
+// What the SDK throws when it finds no Claude Code to run, before any process starts
+const NO_BINARY = new Error(
+  'Native CLI binary for darwin-arm64 not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.',
+)
+
+describe('a Claude Code that cannot be started', () => {
+  it('gives a session that ends with a crash naming the reason, rather than a refused start', async () => {
+    expect.hasAssertions()
+    const fake = fakeQuery({ throws: NO_BINARY })
+    const provider = new ClaudeAgentProvider({
+      query: fake.query,
+      logger: recordingLogger().logger,
+    })
+    const session = await provider.createSession(sessionRequest())
+    await expect(rest(session)).resolves.toStrictEqual([
+      { type: 'session.error', kind: 'crash', message: NO_BINARY.message, retryable: true },
+      { type: 'session.closed' },
+    ])
+    await session.close()
+  })
+})
+
+describe('the context a turn leaves in use', () => {
+  it('is measured after every turn, by a summary that makes no request, and told with the usage', async () => {
+    expect.hasAssertions()
+    const { session, fake } = start({ turns: [[init, resultSuccess]], context: contextMeasured })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.at(-1)).toHaveProperty('usage.contextPct', 25)
+    expect(fake.contextDetails).toStrictEqual(['summary'])
+    await session.close()
+  })
+
+  it('is left out when the SDK cannot tell it', async () => {
+    expect.hasAssertions()
+    const { session } = start({ turns: [[init, resultSuccess]], context: new Error('no measure') })
+    await session.prompt({ text: 'Hello' })
+    const ended = await until(session, TURN_END)
+    expect(ended.at(-1)).not.toHaveProperty('usage.contextPct')
+    await session.close()
+  })
+
+  it('is given up after 5 s, and the turn ends without it', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    try {
+      const { session } = start({ turns: [[init, resultSuccess]], context: 'hangs' })
+      await session.prompt({ text: 'Hello' })
+      await vi.advanceTimersByTimeAsync(5000)
+      const ended = await until(session, TURN_END)
+      expect(ended.at(-1)).not.toHaveProperty('usage.contextPct')
+      await session.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('a permission prompt the SDK takes back', () => {
+  it('is answered as denied, so the agent does not wait on it', async () => {
+    expect.hasAssertions()
+    const cancelled = {
+      ask: { toolName: 'Bash', input: {}, requestId: 'req-1', cancel: true },
+    } as const
+    const { session, fake } = start({ turns: [[init, cancelled, resultSuccess]] })
+    await session.prompt({ text: 'Hello' })
+    await until(session, TURN_END)
+    expect(fake.permissions).toStrictEqual([{ behavior: 'deny', message: 'cancelled' }])
+    await session.close()
+  })
+})
+```
+
+**Semantics (as shipped, commits 99e95f1, 6124aa1, b6e1b3e, 0ff7c43, 094e674, 8da030f, 5dc1fc8, f4c17e1, 8bdfd87, 0d25401, 72d54f7, 1941252, 8ba9ea3, 8c2d3fb, 0628fe2, 50d922d, 43ca384):** `plugins/agent-claude` (`@bytebureau/agent-claude`, FSL-1.1-MIT; `@anthropic-ai/claude-agent-sdk` 0.3.288 with `@anthropic-ai/sdk` 0.131.0, `@modelcontextprotocol/sdk` 1.32.0 and `zod` 4.6.5 pinned exactly) runs Claude Code through the SDK as the provider `claude` (`apiKeyEnv: 'ANTHROPIC_API_KEY'`). Step 0 on this machine (the owner's login, `persistSession: false`, an explicit allowlisted env): a CLI that finds no login answers `initializationResult()`/`accountInfo()` with neither an identity nor a credential source and does not throw — so `auth.ts` treats that as `loggedOut` with the hint; Claude Code finds the macOS keychain login by `USER`, which therefore joins the kernel's fixed env allowlist and the probe's; a lapsed login arrives as an `assistant` message with `error: 'authentication_failed'` (no `auth_status` message), mapped to `session.error auth`; probe (b) never reached the model because the owner's CLI login had expired, so the `AskUserQuestion` shape follows `sdk-tools.d.ts` (`questions[1..4] { question, header ≤ 12, options[2..4] { label, description }, multiSelect }`, `answers` keyed by question text) and is verified by Task 9's smoke. One streaming-input `query()` spans the session: `prompt()` pushes an `SDKUserMessage`; `interrupt()` denies every pending ask as `'interrupted'` then calls `query.interrupt()`; `answer()` resolves the ask of that id into a `PermissionResult`; `close()` runs once — asks denied as `'closed'`, the input ended, the controller aborted, `query.close()`, `session.closed` pushed, the events ended; a failing query becomes `session.error crash` (retryable) then `session.closed`, with a `warn` carrying only the reason. `mapMessage` (a typed handler table; unknown kinds map to nothing): `system/init` sets the external ref; `stream_event` starts the turn and gives text/thinking `message.delta`; `assistant` → `message.completed` + one `tool.started` per `tool_use` (`toolKindOf`); a user `tool_result` → `tool.completed` (32 K chars) or `tool.failed`; `result` → `usage.updated` then `turn.completed`, the usage being the difference from the previous result (the SDK's totals are cumulative; the baseline resets when a new query starts, never goes negative, and keeps itself on zeroed results), an aborted turn ending `interrupted`, a non-auth `is_error` result ending with `terminal_reason ?? 'error'` plus a `session.warning`, an unreadable result still ending the turn with zero usage; `rate_limit_event` → `ratelimit.updated` always, and the limit-reached `session.error ratelimit` only when `rejected` and not covered by extra usage (`isUsingOverage !== true`) — the kernel turns every `session.error` into `failSession`; `compact_boundary` → `compaction.completed`; `api_retry` → `session.warning`; `auth_status` with an error → `session.error auth`; messages with `parent_tool_use_id !== null` (a Task subagent) are dropped (subagent visibility is a later phase); `SubagentStart|Stop` hooks → `subagent.started|stopped`; after each result the session asks `getContextUsage({ detail: 'summary' })` best effort under a 5 s bound (`within-limit.ts`) for `contextPct` — a failure or a hang leaves it unset and the turn still completes. `AskBroker`: the ask id is the SDK's `requestId`; `AskUserQuestion` → a `question` ask (the `(Recommended)` suffix marks the recommended option and is dropped, `allowOther: true`, `recommendationSource: 'agent'` only when every question has exactly one recommended option; the answer goes back as `updatedInput.answers[questionText]`), any other tool → a `permission` ask (`Allow <tool>?`, allow/deny, the tool call); every ask carries `policy { wait, 30m }`; an unknown answer id is ignored; the SDK's cancel signal settles the pending ask. `optionsOf`: `cwd` = workspace; `model`, `effort`; `systemPrompt` preset `claude_code` with `employee.systemPrompt` + `CLAUDE_CONVENTIONS` appended; `allowedTools`/`disallowedTools`; `maxTurns`; `includePartialMessages: true`; `permissionMode` `'default'` for supervised, `'auto'` for autonomous, `yolo` throws; `env` = `request.env` plus `CLAUDE_CONFIG_DIR` for a login profile with a directory and nothing else (the SDK replaces `process.env` with it); `settingSources` default user/project/local; `resume` only for a `claude` ref; `mcpServers: {}`; `pathToClaudeCodeExecutable` only when `providers.claude.executable` (validated by `z.strictObject`, default `claude`) resolves on PATH or as a path — an unresolved configured one is warned about and the SDK's bundled binary used. `authStatus(ref)`: an `api_key` profile → `unknown` with "run a session to check an API-key profile" (the kernel checks the key itself first); a gone login directory → `loggedOut` without a query; otherwise a probe query (ended input, `cwd: tmpdir()`, the allowlist plus `USER` and `CLAUDE_CONFIG_DIR`, `settingSources: []`, `maxTurns: 1`, 20 s deadline that resolves rather than rejects, the probe closed in a finally): an identity or a credential source → `loggedIn` (with the account), neither → `loggedOut` with the bare hint `CLAUDE_CONFIG_DIR=<dir> claude /login` (quoted when the directory holds spaces) or `claude /login`, an error matching /expired/ → `expired`, one naming login/auth/credential/401 → `loggedOut`, anything else (a synchronous throw of `query()` included, through `startQuery`) → `unknown` with the reason; in a session the same throw reports through the crash contract (`session.error crash`, then `session.closed` once). No kernel change for the ask ids: `session-ask.ts` has answered the agent with the agent's own ask id since Phase A (`session-agent-asks.test.ts` pins it). `semantic-pr.yml` lists the `agent-claude` scope. Tests (67, all on the fake `query` of `testing/fake-query.ts`, which plays scripted turns per user message and records options, prompts, permission results, models, interrupts and closes; the fixtures typed against the SDK's own types without casts): the mapping of every kind, the asks, the options (the key only from the request — the daemon's own `ANTHROPIC_API_KEY` stubbed away — and `CLAUDE_CONFIG_DIR` only for a login profile with a directory), the executable, the session lifecycle, the auth states and the 20 s bound under fake timers, the provider and the manifest against `package.json`, and the canary: no event or log line holds the API key while the SDK's env does. The compiled binary of Task 8 cannot reach the SDK's bundled CLI, so a real run needs `claude` on PATH, as planned.
+
 - [ ] **Step 8: Run the plugin suite and the gates**
 
 Run: `bun install && bunx vitest run --project agent-claude --project kernel && bun run typecheck && bun run lint && bun run format:check && bun run spell && bun run knip && bun run depcruise && bun run lint:long-tail`
@@ -5749,7 +7204,7 @@ git commit -m "fix(kernel): answer an agent's ask with the id the agent asked wi
 
 **Files:**
 - Create: `plugins/agent-acp/package.json`, `plugins/agent-acp/tsconfig.json`, `plugins/agent-acp/vitest.config.ts`, `plugins/agent-acp/src/plugin.ts`, `plugins/agent-acp/src/presets.ts`, `plugins/agent-acp/src/custom-preset.ts`, `plugins/agent-acp/src/provider.ts`, `plugins/agent-acp/src/process.ts`, `plugins/agent-acp/src/kill-ladder.ts`, `plugins/agent-acp/src/connection.ts`, `plugins/agent-acp/src/session.ts`, `plugins/agent-acp/src/session-turns.ts`, `plugins/agent-acp/src/mapping.ts`, `plugins/agent-acp/src/client-fs.ts`, `plugins/agent-acp/src/client-terminal.ts`, `plugins/agent-acp/src/permissions.ts`, `plugins/agent-acp/src/queue.ts` (the same `Queue<T>` as the Claude plugin's — a copy; the shared test-support package stays deferred), `plugins/agent-acp/src/testing/fake-acp-agent.ts`, `plugins/agent-acp/src/testing/run-fake.ts`, tests `presets.test.ts`, `client-fs.test.ts`, `client-terminal.test.ts`, `mapping.test.ts`, `permissions.test.ts`, `session.test.ts`, `session-crash.test.ts`, `provider.test.ts`
-- Modify: `vitest.config.ts` (project `plugins/agent-acp`), `cspell-words.txt`
+- Modify: `vitest.config.ts` (project `plugins/agent-acp`), `cspell-words.txt`, `.github/workflows/semantic-pr.yml` (the `agent-acp` scope, which `scripts/github-settings.test.ts` demands once the workspace exists)
 - Test: the plugin's tests under Node; the session tests spawn the fake agent with `process.execPath`
 
 **Interfaces:**
@@ -6070,7 +7525,7 @@ Semantics: Phase C is done when a fresh clone passes every gate, `bytebureau plu
 - §8.2: the preset commands as shipped (`codex-acp` from `@agentclientprotocol/codex-acp`, `gemini --acp`, `opencode acp`, `pi-acp`), `acp:custom`, the lazy respawn, `authStatus` unknown.
 - §10: `UserConfig.secrets.backend`; `providers.<id>` reaches the adapter per session.
 - §11.1/§11.3: the `profiles` endpoints and commands as shipped; `--api-key` never an argument.
-- §13: profile variables as shipped (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, the API-key variable).
+- §13: profile variables as shipped (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, the API-key variable). `USER` joins the fixed environment allowlist (Claude Code finds its keychain login by it) — also in `apps/docs/src/content/docs/architecture.md`'s allowlist line and `docs/superpowers/specs/2026-10-02-kernel-and-agent-runtime-design.md` §13.
 - §14: provider crash as shipped (mid-turn → errored + `session.error retryable`; idle → lazy respawn ≤ 3).
 - §15: the fixtures and the fake ACP agent; the smoke scripts.
 
