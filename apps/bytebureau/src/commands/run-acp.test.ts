@@ -134,7 +134,7 @@ describe('bytebureau run on an ACP agent that cannot be started', () => {
     const missing = await runCli(['run', 'x', '--project', repo, '--provider', 'acp:codex'], env)
     expect([withoutCommand.code, withoutCommand.stderr]).toStrictEqual([
       4,
-      'providers["acp:custom"].command is not configured (provider_crash)\n',
+      `${path.join(repo, 'bytebureau.json')}: providers["acp:custom"].command is not configured (config_invalid)\n`,
     ])
     expect([missing.code, missing.stderr]).toStrictEqual([
       4,

@@ -21,6 +21,10 @@ describe('problems of the daemon in the CLI', () => {
     expect(isRefusal(problemError(422, 'profile_invalid', 'x'))).toBe(true)
   })
 
+  it('counts a configuration the kernel cannot use, a provider section included, as a refusal', () => {
+    expect(isRefusal(problemError(422, 'config_invalid', 'x'))).toBe(true)
+  })
+
   it('counts no answer, or an answer without a problem, as no refusal', () => {
     expect(isRefusal(new ApiError(0, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(false)
     expect(isRefusal(new ApiError(502, undefined, 'http://127.0.0.1:1/api/v1/projects'))).toBe(

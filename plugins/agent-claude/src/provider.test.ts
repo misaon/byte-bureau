@@ -1,4 +1,4 @@
-import type { PluginContext } from '@bytebureau/plugin-api'
+import { ProviderConfigError, type PluginContext } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
 import { claudeAgentPlugin } from './plugin.js'
@@ -64,9 +64,9 @@ describe(ClaudeAgentProvider, () => {
   it('refuses a session whose providers.claude has a key it does not know, and checks a login', async () => {
     expect.hasAssertions()
     const { provider } = providerWith({})
-    await expect(
-      provider.createSession(sessionRequest({ providerConfig: { model: 'x' } })),
-    ).rejects.toThrow(/^providers\.claude: /u)
+    const refused = provider.createSession(sessionRequest({ providerConfig: { model: 'x' } }))
+    await expect(refused).rejects.toThrow(/^providers\.claude: /u)
+    await expect(refused).rejects.toBeInstanceOf(ProviderConfigError)
     await expect(
       provider.authStatus({ id: 'claude/ci', providerId: 'claude', kind: 'api_key' }),
     ).resolves.toMatchObject({ state: 'unknown' })

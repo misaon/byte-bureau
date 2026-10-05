@@ -113,14 +113,14 @@ describe('bytebureau run when it cannot start', () => {
 })
 
 describe('bytebureau run with an invalid configuration of its project', () => {
-  it('exits 2 with the place of the error named once, in the process of the command', async () => {
+  it('is refused with exit 4 and the place of the error named once, in the process of the command', async () => {
     expect.hasAssertions()
     const { repo, home } = workbench()
     writeFileSync(path.join(repo, 'bytebureau.json'), '{ "version": 2 }\n')
     const result = await runCli(['run', 'x', '--project', repo, ...ON_FAKE, NO_DAEMON], {
       BYTEBUREAU_HOME: home,
     })
-    expect(result.code).toBe(2)
+    expect(result.code).toBe(4)
     expect(result.stderr.trim()).toMatch(
       /^ConfigError: \S+\/bytebureau\.json\/version: Expected 1$/u,
     )

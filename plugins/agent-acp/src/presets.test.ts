@@ -1,3 +1,4 @@
+import { ProviderConfigError } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import { presetOf } from './custom-preset.js'
 import { PRESETS, providerIdOf } from './presets.js'
@@ -98,7 +99,7 @@ describe('a provider section the adapter cannot run', () => {
   it('refuses a custom preset without a command, naming the key to set', () => {
     const message = 'providers["acp:custom"].command is not configured'
     expect(() => presetOf('custom', {})).toThrow(message)
-    expect(() => presetOf('custom', { args: ['--acp'] })).toThrow(message)
+    expect(() => presetOf('custom', { args: ['--acp'] })).toThrow(ProviderConfigError)
   })
 
   it('refuses a section it cannot read, naming the provider and the key', () => {
@@ -106,5 +107,6 @@ describe('a provider section the adapter cannot run', () => {
       /^providers\["acp:codex"\]: .*executable/u,
     )
     expect(() => presetOf('gemini', { args: 'acp' })).toThrow(/^providers\["acp:gemini"\]: args: /u)
+    expect(() => presetOf('gemini', { args: 'acp' })).toThrow(ProviderConfigError)
   })
 })

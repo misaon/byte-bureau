@@ -1,9 +1,10 @@
+import path from 'node:path'
 import type { ProfileRef } from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
 import type { ConfigError, ProfileError, SessionError, StoreError } from '../errors.js'
 import { namelessRefOf } from '../profiles/profile-ids.js'
 import type { SessionDeps } from './session-deps.js'
-import { currentProject, providerOptionsOf, requireProject } from './session-project.js'
+import { providerOptionsOf, requireProject } from './session-project.js'
 import type { Session } from './types.js'
 
 // What the profile adds to the start: the ref the provider sees, and the key in the variable the provider named
@@ -28,13 +29,24 @@ export const profilePartOf = (
         }),
       )
 
+// What the provider is started with from the project's configuration
+export interface ProviderSetup {
+  readonly providerConfig: Readonly<Record<string, unknown>>
+  // The project file a section the provider cannot use is told against: the one that exists, else where it would go
+  readonly configFile: string
+}
+
 // The providers.<id> section of the project as it stands now, as the passEnv names of a resumed session are read
-export const providerConfigOf = (
+export const providerSetupOf = (
   deps: SessionDeps,
   session: Session,
-): Effect.Effect<Readonly<Record<string, unknown>>, SessionError | ConfigError | StoreError> =>
-  Effect.gen(function* readsProviderConfig() {
+): Effect.Effect<ProviderSetup, SessionError | ConfigError | StoreError> =>
+  Effect.gen(function* readsProviderSetup() {
     const registered = yield* requireProject(deps, session.projectId)
-    const project = yield* currentProject(deps, registered)
-    return providerOptionsOf(project, session.providerId)
+    const resolved = yield* deps.config.load({ projectPath: registered.path, env: deps.env })
+    const project = { ...registered, config: resolved.project }
+    return {
+      providerConfig: providerOptionsOf(project, session.providerId),
+      configFile: resolved.files.project ?? path.join(registered.path, 'bytebureau.json'),
+    }
   })

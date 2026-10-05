@@ -1,5 +1,5 @@
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk'
-import type { CreateSessionRequest } from '@bytebureau/plugin-api'
+import { ProviderConfigError, type CreateSessionRequest } from '@bytebureau/plugin-api'
 import { describe, expect, it, vi } from 'vitest'
 import { CLAUDE_CONVENTIONS, optionsOf } from './options.js'
 import { CANARY_KEY, employee, sessionRequest } from './testing/requests.js'
@@ -116,5 +116,6 @@ describe('the provider options of a session', () => {
     expect(optionsFor(project).settingSources).toStrictEqual(['project'])
     const unknown = sessionRequest({ providerConfig: { executable: 'claude', colour: 'blue' } })
     expect(() => optionsFor(unknown)).toThrow(/^providers\.claude: .*colour/u)
+    expect(() => optionsFor(unknown)).toThrow(ProviderConfigError)
   })
 })

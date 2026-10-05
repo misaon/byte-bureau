@@ -40,6 +40,7 @@ export {
   type PromptSendInput,
   type SessionCreateInput,
 } from './plugin.js'
+export { ProviderConfigError } from './provider-config-error.js'
 export type {
   AgentEvent,
   Ask,

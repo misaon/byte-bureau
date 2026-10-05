@@ -1,6 +1,12 @@
 import { ApiError } from '@bytebureau/client'
 import { m } from '@bytebureau/i18n'
-import { ProfileError, ProviderError, SessionError, WorkspaceError } from '@bytebureau/kernel'
+import {
+  ConfigError,
+  ProfileError,
+  ProviderError,
+  SessionError,
+  WorkspaceError,
+} from '@bytebureau/kernel'
 import type { CreateSessionBody } from '@bytebureau/protocol'
 import type { Bureau } from '../bureau/bureau.js'
 import type { Context } from '../context.js'
@@ -18,7 +24,8 @@ const RUN_ENDS: Ends = {
 }
 
 // Through the daemon a refusal of the kernel comes as a problem with the code the API gives its error
-const REMOTE_REFUSALS = /^(?:workspace_|provider_|profile_|session_provider_missing$)/u
+const REMOTE_REFUSALS =
+  /^(?:workspace_|provider_|profile_|session_provider_missing$|config_invalid$)/u
 
 export interface RunOptions {
   readonly prompt: string
@@ -34,12 +41,16 @@ export interface RunOptions {
   readonly yes: boolean
 }
 
-// Failures that end a run with exit code 4: a project, a runtime or a worktree that cannot be used, a provider or a profile that is missing or fails
+// Failures that end a run with exit code 4: a project, its configuration, a runtime or a worktree that cannot be used, a provider or a profile that is missing or fails
 export function isRefusal(error: unknown): boolean {
   if (error instanceof ApiError) {
     return error.problem !== undefined && REMOTE_REFUSALS.test(error.problem.code)
   }
-  if (error instanceof WorkspaceError || error instanceof ProfileError) {
+  if (
+    error instanceof WorkspaceError ||
+    error instanceof ProfileError ||
+    error instanceof ConfigError
+  ) {
     return true
   }
   if (error instanceof SessionError) {

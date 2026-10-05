@@ -1,3 +1,4 @@
+import { ProviderConfigError } from '@bytebureau/plugin-api'
 import { z } from 'zod'
 
 const SettingSources = z.array(z.enum(['user', 'project', 'local']))
@@ -15,7 +16,8 @@ const describeIssue = (issue: z.core.$ZodIssue): string =>
 export const claudeConfigOf = (providerConfig: Readonly<Record<string, unknown>>): ClaudeConfig => {
   const parsed = ClaudeConfigSchema.safeParse(providerConfig)
   if (!parsed.success) {
-    throw new Error(`providers.claude: ${parsed.error.issues.map(describeIssue).join('; ')}`)
+    const issues = parsed.error.issues.map(describeIssue).join('; ')
+    throw new ProviderConfigError(`providers.claude: ${issues}`)
   }
   return parsed.data
 }

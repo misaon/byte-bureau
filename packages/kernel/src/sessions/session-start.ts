@@ -1,8 +1,13 @@
-import type { AgentProvider, AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
+import {
+  ProviderConfigError,
+  type AgentProvider,
+  type AgentSession,
+  type CreateSessionRequest,
+} from '@bytebureau/plugin-api'
 import { Effect } from 'effect'
 import {
+  ConfigError,
   ProviderError,
-  type ConfigError,
   type ProfileError,
   type SessionError,
   type StoreError,
@@ -12,7 +17,7 @@ import { reasonOf } from '../plugins/reason.js'
 import { allowlistEnv, bytebureauEnv } from '../process/env-allowlist.js'
 import type { SessionDeps } from './session-deps.js'
 import { attempt } from './session-live.js'
-import { profilePartOf, providerConfigOf } from './session-profile.js'
+import { profilePartOf, providerSetupOf } from './session-profile.js'
 import type { Session } from './types.js'
 
 // What the start of a provider session is made of: the signal of its controller is the one the provider gets
@@ -29,18 +34,24 @@ export type StartFailure = ProviderError | SessionError | ConfigError | StoreErr
 const authRefusal = (refused: ProfileError): ProviderError =>
   new ProviderError({ kind: 'auth', reason: refused.reason, retryable: false })
 
+// The request, and the project file a configuration error of the provider is told against
+interface Prepared {
+  readonly request: CreateSessionRequest
+  readonly configFile: string
+}
+
 // The agent gets the environment of the kernel through the allowlist, widened by the passEnv names of its provider, the names of ByteBureau among the extra variables given at creation, the key of its profile and the id of its session
 const requestOf = (
   deps: SessionDeps,
   { session, workspacePath, controller }: Start,
-): Effect.Effect<CreateSessionRequest, StartFailure> =>
+): Effect.Effect<Prepared, StartFailure> =>
   Effect.gen(function* buildsRequest() {
     const part = yield* profilePartOf(deps, session).pipe(
       Effect.catchTag('ProfileError', (refused) => Effect.fail(authRefusal(refused))),
     )
-    const providerConfig = yield* providerConfigOf(deps, session)
+    const { providerConfig, configFile } = yield* providerSetupOf(deps, session)
     const { extra, passEnv } = deps.live.environmentOf(session.id)
-    return {
+    const request = {
       sessionId: session.id,
       workspace: { path: workspacePath },
       employee: session.employee,
@@ -56,13 +67,19 @@ const requestOf = (
       signal: controller.signal,
       logger: kernelLogger(['bb', 'agent', session.providerId]),
     }
+    return { request, configFile }
   })
 
 // A provider that has not started a session within this time is given up on, so it cannot hold a session for ever
 export const START_LIMIT = '60 seconds'
 
-const startFailure = (cause: unknown): ProviderError =>
-  new ProviderError({ kind: 'crash', reason: reasonOf(cause), retryable: true })
+// A provider section the adapter cannot use is the project's configuration error, never a crash of an agent that did not run
+const startFailure =
+  (configFile: string) =>
+  (cause: unknown): ProviderError | ConfigError =>
+    cause instanceof ProviderConfigError
+      ? new ConfigError({ file: configFile, pointer: '', reason: cause.reason })
+      : new ProviderError({ kind: 'crash', reason: reasonOf(cause), retryable: true })
 
 // The start is a promise of its own, so what is left of it can still be dealt with when the kernel has given up on it
 const begin = async (
@@ -113,7 +130,7 @@ export const startAgent = (
   provider: AgentProvider,
   start: Start,
 ): Effect.Effect<AgentSession, StartFailure> =>
-  Effect.flatMap(requestOf(deps, start), (request) =>
+  Effect.flatMap(requestOf(deps, start), ({ request, configFile }) =>
     Effect.uninterruptibleMask((restore) => {
       const starting = begin(provider, request)
       const awaited = Effect.tryPromise({
@@ -125,7 +142,7 @@ export const startAgent = (
       })
       return restore(Effect.timeout(awaited, START_LIMIT)).pipe(
         Effect.onError(() => abandon(deps, starting, start)),
-        Effect.mapError(startFailure),
+        Effect.mapError(startFailure(configFile)),
       )
     }),
   )

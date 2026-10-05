@@ -1,7 +1,7 @@
 // At the cap of ten imported modules (import/max-dependencies): a further helper goes into testing/
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import type { PluginContext, ProfileRef } from '@bytebureau/plugin-api'
+import { ProviderConfigError, type PluginContext, type ProfileRef } from '@bytebureau/plugin-api'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
 import { acpAgentPlugin } from './plugin.js'
@@ -88,9 +88,9 @@ describe('an ACP agent that cannot be started', () => {
       workspace: { path: workspaceOf() },
       env: { PATH: pathWith() },
     })
-    await expect(new AcpAgentProvider('codex', deps).createSession(request)).rejects.toThrow(
-      CODEX_MISSING,
-    )
+    const notInstalled = new AcpAgentProvider('codex', deps).createSession(request)
+    await expect(notInstalled).rejects.toThrow(CODEX_MISSING)
+    await expect(notInstalled).rejects.not.toBeInstanceOf(ProviderConfigError)
     const custom = { command: 'bb-no-such-agent' }
     const missing = sessionRequest({ workspace: { path: workspaceOf() }, providerConfig: custom })
     await expect(new AcpAgentProvider('custom', deps).createSession(missing)).rejects.toThrow(
@@ -102,9 +102,9 @@ describe('an ACP agent that cannot be started', () => {
     expect.hasAssertions()
     const { deps, spawned } = harness()
     const request = sessionRequest({ workspace: { path: workspaceOf() } })
-    await expect(new AcpAgentProvider('custom', deps).createSession(request)).rejects.toThrow(
-      'providers["acp:custom"].command is not configured',
-    )
+    const refused = new AcpAgentProvider('custom', deps).createSession(request)
+    await expect(refused).rejects.toThrow('providers["acp:custom"].command is not configured')
+    await expect(refused).rejects.toBeInstanceOf(ProviderConfigError)
     expect(spawned).toStrictEqual([])
   })
 })

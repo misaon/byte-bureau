@@ -1,3 +1,4 @@
+import { ProviderConfigError } from '@bytebureau/plugin-api'
 import { z } from 'zod'
 import { PRESETS, providerIdOf, type Preset, type PresetId } from './presets.js'
 
@@ -31,7 +32,7 @@ const entryOf = (id: PresetId, providerConfig: Readonly<Record<string, unknown>>
   const parsed = PresetEntry.safeParse(providerConfig)
   if (!parsed.success) {
     const issues = parsed.error.issues.map(describeIssue).join('; ')
-    throw new Error(`providers["${providerIdOf(id)}"]: ${issues}`)
+    throw new ProviderConfigError(`providers["${providerIdOf(id)}"]: ${issues}`)
   }
   return parsed.data
 }
@@ -40,7 +41,7 @@ const entryOf = (id: PresetId, providerConfig: Readonly<Record<string, unknown>>
 const customOf = (entry: Entry): Preset => {
   const { command } = entry
   if (command === undefined) {
-    throw new Error('providers["acp:custom"].command is not configured')
+    throw new ProviderConfigError('providers["acp:custom"].command is not configured')
   }
   return { id: 'custom', args: [], env: {}, ...CUSTOM, ...entry, command }
 }
