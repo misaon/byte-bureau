@@ -109,6 +109,19 @@ describe('a login check that fails', () => {
     expect(missing.fake.calls.close).toBe(1)
   })
 
+  it('takes only whole words of a login for a login error, never an authorization or an author', async () => {
+    expect.hasAssertions()
+    const refused = await checked({
+      initFailure: new Error('API Error: 401 authentication_failed'),
+    })
+    expect(refused.status).toStrictEqual({ state: 'loggedOut', hint: 'claude /login' })
+    const proxy = 'fetch failed: the proxy refused the request without Proxy-Authorization'
+    const unrelated = await checked({ initFailure: new Error(proxy) })
+    expect(unrelated.status).toStrictEqual({ state: 'unknown', hint: proxy })
+    const author = await checked({ initFailure: new Error('git: the author identity is unknown') })
+    expect(author.status.state).toBe('unknown')
+  })
+
   it('tells a Claude Code that cannot even be started as unknown, with the reason', async () => {
     expect.hasAssertions()
     const reason = 'Native CLI binary for darwin-arm64 not found.'

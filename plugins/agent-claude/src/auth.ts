@@ -15,7 +15,9 @@ interface Probe {
 const PROBE_LIMIT_MS = 20_000
 const TOO_SLOW = 'the Claude login check did not answer within 20 s'
 const API_KEY_HINT = 'run a session to check an API-key profile'
-const LOGGED_OUT = /login|auth|credential|unauthorized|unauthorised|401|expired/iu
+// Whole words only, so a proxy's "authorization" or a book's "author" in an unrelated failure is no login error; the SDK throws no typed error for a login
+const LOGGED_OUT =
+  /\b(?:log(?:ged)?[ -]?in|logged[ -]out|auth|authentication(?:_failed)?|unauthorized|unauthorised|401)\b/iu
 // The variables of the daemon the check passes on, the fixed ones of the kernel's allowlist; Claude Code finds a login in the macOS keychain by USER
 const PASSED: ReadonlySet<string> = new Set([
   'PATH',
