@@ -1,5 +1,5 @@
 import path from 'node:path'
-import type { AgentSession, CreateSessionRequest } from '@bytebureau/plugin-api'
+import type { AgentSession, CreateSessionRequest, ProfileRef } from '@bytebureau/plugin-api'
 import { describe, expect, it } from 'vitest'
 import type { PresetId } from './presets.js'
 import { AcpAgentProvider } from './provider.js'
@@ -105,5 +105,20 @@ describe('a start that cannot go on', () => {
     })
     await expect(session).rejects.toThrow(`the workspace ${missing} does not exist`)
     expect(run.spawned).toStrictEqual([])
+  })
+})
+
+describe('an agent that asks for the login of a login profile', () => {
+  it("is refused with the login command run in the profile's directory", async () => {
+    expect.hasAssertions()
+    const configDir = path.join(tempDir('bb-acp-home-'), 'my home')
+    const profile: ProfileRef = {
+      id: 'acp:codex/home',
+      providerId: 'acp:codex',
+      kind: 'login',
+      configDir,
+    }
+    const { session } = starting('codex', fakeAgentCommand('auth-required'), { profile })
+    await expect(session).rejects.toThrow(`; log in with: CODEX_HOME='${configDir}' codex login`)
   })
 })

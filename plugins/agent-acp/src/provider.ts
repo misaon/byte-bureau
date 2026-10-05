@@ -9,6 +9,7 @@ import type {
   ProfileRef,
 } from '@bytebureau/plugin-api'
 import { CUSTOM, presetOf } from './custom-preset.js'
+import { loginHintOf } from './login-hint.js'
 import { PRESETS, providerIdOf, type Preset, type PresetId } from './presets.js'
 import type { AcpDeps } from './process.js'
 import { AcpSession } from './session.js'
@@ -63,7 +64,7 @@ const authStatusOf = (preset: PresetId, profile: ProfileRef): AuthStatus => {
   if (builtIn !== undefined && !onPath(builtIn.command)) {
     return { state: 'unknown', hint: builtIn.installHint }
   }
-  const hint = builtIn === undefined ? CUSTOM.loginHint : builtIn.loginHint
+  const hint = loginHintOf(builtIn ?? CUSTOM, profile)
   const { kind, configDir } = profile
   const gone = kind === 'login' && configDir !== undefined && !existsSync(configDir)
   return { state: gone ? 'loggedOut' : 'unknown', hint }
@@ -93,8 +94,10 @@ export class AcpAgentProvider implements AgentProvider {
     return authStatusOf(this.preset, profile)
   }
 
+  // The hints a session tells, when its agent is missing or asks for a login, name the login of its profile
   public async createSession(request: CreateSessionRequest): Promise<AgentSession> {
-    const preset = presetOf(this.preset, request.providerConfig)
+    const configured = presetOf(this.preset, request.providerConfig)
+    const preset = { ...configured, loginHint: loginHintOf(configured, request.profile) }
     const setup = { request, preset, deps: this.deps, providerId: this.id, keyEnv: this.apiKeyEnv }
     const session = await AcpSession.start(setup)
     return session

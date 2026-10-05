@@ -31,6 +31,13 @@ const onPath = (...commands: readonly string[]): void => {
   })
 }
 
+// A directory of that name, made under a temporary one
+const madeDir = (name: string): string => {
+  const dir = path.join(tempDir('bb-acp-p-'), name)
+  mkdirSync(dir)
+  return dir
+}
+
 const workspaceOf = (): string => {
   const workspace = path.join(tempDir('bb-acp-ws-'), 'ws')
   mkdirSync(workspace)
@@ -139,6 +146,42 @@ describe('the login status of an ACP agent', () => {
       hint: 'the login command of that agent',
     })
     expect(spawned).toStrictEqual([])
+  })
+})
+
+describe('the login hint of a login profile', () => {
+  it('names its directory in the variable the preset hands the agent, quoted when it holds a space', async () => {
+    expect.hasAssertions()
+    const { deps, spawned } = harness()
+    const provider = new AcpAgentProvider('codex', deps)
+    onPath('codex-acp')
+    const [home, spaced] = ['home', 'my home'].map((name) => madeDir(name))
+    const gone = path.join(tempDir('bb-acp-p-'), 'gone')
+    const statuses = [
+      await provider.authStatus({ ...LOGIN, configDir: home }),
+      await provider.authStatus({ ...LOGIN, configDir: spaced }),
+      await provider.authStatus({ ...LOGIN, configDir: gone }),
+    ]
+    expect(statuses).toStrictEqual([
+      { state: 'unknown', hint: `CODEX_HOME=${home} codex login` },
+      { state: 'unknown', hint: `CODEX_HOME='${spaced}' codex login` },
+      { state: 'loggedOut', hint: `CODEX_HOME=${gone} codex login` },
+    ])
+    expect(spawned).toStrictEqual([])
+  })
+
+  it('names it as well when the agent of the session is not installed', async () => {
+    expect.hasAssertions()
+    const { deps } = harness()
+    const configDir = path.join(tempDir('bb-acp-p-'), 'home')
+    const request = sessionRequest({
+      workspace: { path: workspaceOf() },
+      env: { PATH: pathWith() },
+      profile: { ...LOGIN, configDir },
+    })
+    await expect(new AcpAgentProvider('codex', deps).createSession(request)).rejects.toThrow(
+      `; then log in with: CODEX_HOME=${configDir} codex login`,
+    )
   })
 })
 
