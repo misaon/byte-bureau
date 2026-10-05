@@ -50,6 +50,24 @@ The project file configures a provider under `providers`, keyed by the provider 
 
 A session reads its provider's section when its agent starts, and again at every resume, so a change to the project file applies from the next start. An unknown key, or a value of the wrong type, refuses the start, naming the section.
 
+### Trust
+
+A project's own files, `bytebureau.json` and `bytebureau.local.json`, can name commands to run: `command`, `args` and `env` of a provider section and `executable` of `providers.claude`. A repository you clone could name any program there and make it the provider of its default employee, so ByteBureau runs such a command only when the user configuration, `~/.bytebureau/config.json`, trusts the project or that exact command:
+
+```json
+{
+  "trust": {
+    "projects": ["/Users/me/code/my-app"],
+    "commands": ["bun", "/opt/codex/bin/codex-acp"]
+  }
+}
+```
+
+- `trust.projects` lists projects by their absolute path; a link to the project or a trailing slash still names it. What a trusted project configures is used as it stands.
+- `trust.commands` lists commands by the exact name or path the project writes in `command` or `executable`; a trusted command runs with the project's `args` and `env` too.
+
+Otherwise the kernel takes those keys out of the provider's section before the adapter sees it, and the daemon logs a warning that names the keys and the way to trust them, at every start of the session's agent. The custom agent is then left without a command and the run is refused with exit 4: `<repository>/bytebureau.json: providers["acp:custom"].command is not configured; the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in ~/.bytebureau/config.json (config_invalid)`. A built-in preset runs its own command instead of the project's, and Claude runs the `claude` on `PATH`. A value the defaults hold already, such as `"executable": "claude"`, needs no trust. Claude Code's project settings can run commands as well, through the hooks of a repository's `.claude/settings.json`, so in a project the user does not trust Claude Code loads the user's settings alone, `settingSources: ["user"]`, without the project's `.claude` settings, its hooks and its `CLAUDE.md`, and the daemon logs a warning saying so; add the project to `trust.projects` to load them. The user configuration is read again at every start of an agent, so a change to `trust` needs no restart of the daemon.
+
 ## Profiles
 
 A profile is a login of one provider, or one API key for it. Its id is `<provider>/<name>`, such as `claude/work` or `acp:codex/home`; the name is lower-case letters, digits and dashes, at most 32 characters, starting with a letter or a digit. Profiles are kept in the store of the home, and `bytebureau profiles` and the `profiles` group of the [API](../daemon-and-api/) manage them; the `profiles` section of the user configuration is reserved and not read.

@@ -31,8 +31,12 @@ export function tempDir(prefix: string): string {
   return dir
 }
 
-// What every test home's config.json says: daemons on a free port, secrets in a file under the home and never in the keychain of whoever runs the tests
-const TEST_CONFIG = { server: { port: 0 }, secrets: { backend: 'file' } }
+// What every test home's config.json says: daemons on a free port, secrets in a file and never in the keychain of whoever runs the tests, bun trusted for the fake ACP agent
+const TEST_CONFIG = {
+  server: { port: 0 },
+  secrets: { backend: 'file' },
+  trust: { commands: ['bun'] },
+}
 
 // The config.json of a test home: the sections given in place of those of every test home, the others as they are
 export function configureHome(

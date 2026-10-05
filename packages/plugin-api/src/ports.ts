@@ -42,13 +42,24 @@ export interface ExternalSessionRef {
   readonly ref: string
 }
 
+// What the user configuration trusts of the project a session runs in (its trust.projects and trust.commands)
+export interface ProjectTrust {
+  // The project is trusted as a whole: an adapter may load what the project configures for its agent, such as Claude Code's project settings
+  readonly project: boolean
+  // The keys of providerConfig the kernel withheld: a command, its arguments or its environment that the project names and the user does not trust
+  readonly withheld: readonly string[]
+  // How the person trusts them, for a refusal that a withheld key causes
+  readonly hint: string
+}
+
 export interface CreateSessionRequest {
   readonly sessionId: string
   readonly workspace: { readonly path: string }
   readonly employee: EmployeeSpec
   readonly profile: ProfileRef
-  // The providers.<id> section of the project's configuration, without passEnv (the kernel's); {} when there is none
+  // The providers.<id> section of the project's configuration, without passEnv (the kernel's) and without what trust withheld; {} when there is none
   readonly providerConfig: Readonly<Record<string, unknown>>
+  readonly trust: ProjectTrust
   readonly resume?: ExternalSessionRef | undefined
   readonly env: Readonly<Record<string, string>>
   readonly signal: AbortSignal

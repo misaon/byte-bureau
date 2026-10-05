@@ -11,6 +11,7 @@ export type {
   ExternalSessionRef,
   ModelInfo,
   ProfileRef,
+  ProjectTrust,
   SecretStore,
   WorkspaceHandle,
   WorkspaceIsolation,

@@ -45,6 +45,8 @@ export interface ConfigShape {
     env?: LoadRequest['env'],
   ) => Effect.Effect<readonly ConfigIssue[]>
   readonly schema: () => Record<string, unknown>
+  // Where the user configuration goes when the home holds none yet
+  readonly userFile: string
 }
 
 export class Config extends Context.Service<Config, ConfigShape>()('bb/Config') {}
@@ -170,6 +172,7 @@ const make = (home: string): ConfigShape => ({
   load: (request) => resolveConfig(home, request),
   validate: (projectPath, env = {}) => validateConfig(home, { projectPath, env }),
   schema: configJsonSchema,
+  userFile: path.join(home, 'config.json'),
 })
 
 export const ConfigLive = (home: string): Layer.Layer<Config> =>

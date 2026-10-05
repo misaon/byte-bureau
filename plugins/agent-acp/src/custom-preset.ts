@@ -1,4 +1,4 @@
-import { ProviderConfigError } from '@bytebureau/plugin-api'
+import { ProviderConfigError, type ProjectTrust } from '@bytebureau/plugin-api'
 import { z } from 'zod'
 import { PRESETS, providerIdOf, type Preset, type PresetId } from './presets.js'
 
@@ -37,11 +37,15 @@ const entryOf = (id: PresetId, providerConfig: Readonly<Record<string, unknown>>
   return parsed.data
 }
 
+const NO_COMMAND = 'providers["acp:custom"].command is not configured'
+
 // The hints a project configures win over the defaults
-const customOf = (entry: Entry): Preset => {
+// A command the kernel withheld, as the user does not trust it, is refused with the way to trust it
+const customOf = (entry: Entry, trust: ProjectTrust | undefined): Preset => {
   const { command } = entry
   if (command === undefined) {
-    throw new ProviderConfigError('providers["acp:custom"].command is not configured')
+    const withheld = trust !== undefined && trust.withheld.includes('command')
+    throw new ProviderConfigError(withheld ? `${NO_COMMAND}; ${trust.hint}` : NO_COMMAND)
   }
   return { id: 'custom', args: [], env: {}, ...CUSTOM, ...entry, command }
 }
@@ -50,7 +54,8 @@ const customOf = (entry: Entry): Preset => {
 export const presetOf = (
   id: PresetId,
   providerConfig: Readonly<Record<string, unknown>>,
+  trust?: ProjectTrust,
 ): Preset => {
   const entry = entryOf(id, providerConfig)
-  return id === 'custom' ? customOf(entry) : { ...PRESETS[id], ...entry }
+  return id === 'custom' ? customOf(entry, trust) : { ...PRESETS[id], ...entry }
 }

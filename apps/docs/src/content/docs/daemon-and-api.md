@@ -7,6 +7,8 @@ The kernel of ByteBureau runs in a daemon, one per home, and every client talks 
 
 The home is `~/.bytebureau` unless `BYTEBUREAU_HOME` names another directory; the paths below assume the default. A `BYTEBUREAU_HOME` that is set but empty, most often a variable that expanded to nothing, is refused by every command and by the daemon with exit code 2 and a line naming the variable, rather than taken for `~/.bytebureau`.
 
+The user configuration, `~/.bytebureau/config.json`, holds what the daemon and its sessions take from the user rather than from a project: `server` (the address, read at the start of the daemon), `secrets.backend` (where API keys are kept, read at the start of the daemon) and `trust` (the projects and the commands whose own commands may run, read again at every start of an agent), as [Agents and profiles](../agents-and-profiles/#trust) tells.
+
 ## The daemon
 
 `bytebureau serve` starts the daemon detached and returns once it answers, printing the URL it listens on; with `--json` it prints one record, `{"command":"serve","url":…,"pid":…,"version":…}`, and never the token. When a daemon already serves the home, `serve` names it instead of starting another.

@@ -102,6 +102,16 @@ describe('a provider section the adapter cannot run', () => {
     expect(() => presetOf('custom', { args: ['--acp'] })).toThrow(ProviderConfigError)
   })
 
+  it('says how to trust a command of the custom preset that the kernel withheld', () => {
+    const withheld = { project: false, withheld: ['command', 'args'], hint: 'trust it there' }
+    expect(() => presetOf('custom', {}, withheld)).toThrow(
+      'providers["acp:custom"].command is not configured; trust it there',
+    )
+    expect(() => presetOf('custom', {}, { ...withheld, withheld: ['env'] })).toThrow(
+      /^providers\["acp:custom"\]\.command is not configured$/u,
+    )
+  })
+
   it('refuses a section it cannot read, naming the provider and the key', () => {
     expect(() => presetOf('codex', { executable: 'x' })).toThrow(
       /^providers\["acp:codex"\]: .*executable/u,

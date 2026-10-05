@@ -49,7 +49,7 @@ const requestOf = (
     const part = yield* profilePartOf(deps, session).pipe(
       Effect.catchTag('ProfileError', (refused) => Effect.fail(authRefusal(refused))),
     )
-    const { providerConfig, configFile } = yield* providerSetupOf(deps, session)
+    const { providerConfig, trust, configFile } = yield* providerSetupOf(deps, session)
     const { extra, passEnv } = deps.live.environmentOf(session.id)
     const request = {
       sessionId: session.id,
@@ -57,6 +57,7 @@ const requestOf = (
       employee: session.employee,
       profile: part.profile,
       providerConfig,
+      trust,
       ...(session.externalRef === null ? {} : { resume: session.externalRef }),
       env: {
         ...allowlistEnv(process.env, passEnv),

@@ -4,9 +4,16 @@ import type {
   Logger,
   LogLevel,
   ProfileRef,
+  ProjectTrust,
 } from '@bytebureau/plugin-api'
 
 const SESSION_ID = '0192f0c8-7b2e-7c3d-9a4b-000000000001'
+
+export const TRUST_HINT =
+  'the project names a command the user configuration does not trust: add it to trust.commands, or the project to trust.projects, in /home/dev/.bytebureau/config.json'
+
+// A project the user trusts: its whole section reaches the adapter
+export const TRUSTED: ProjectTrust = { project: true, withheld: [], hint: TRUST_HINT }
 // A key that must never be seen anywhere but in the environment of the agent
 export const CANARY_KEY = 'sk-ant-canary-0000000000000000'
 
@@ -60,6 +67,7 @@ export const sessionRequest = (
   employee: employee(),
   profile: loginProfile,
   providerConfig: {},
+  trust: TRUSTED,
   env: { PATH: '/usr/bin', HOME: '/home/dev' },
   signal: new AbortController().signal,
   logger: recordingLogger().logger,

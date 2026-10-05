@@ -26,10 +26,14 @@ describe(childEnv, () => {
     expect(first).not.toBe(path.join(homedir(), '.bytebureau'))
   })
 
-  it('gives that home a daemon on a free port, should the CLI start one on demand, and secrets in a file', () => {
+  it('gives that home a daemon on a free port, should the CLI start one on demand, secrets in a file and bun trusted', () => {
     const file = path.join(homeOf(childEnv({})), 'config.json')
     const config: unknown = JSON.parse(readFileSync(file, 'utf8'))
-    expect(config).toStrictEqual({ server: { port: 0 }, secrets: { backend: 'file' } })
+    expect(config).toStrictEqual({
+      server: { port: 0 },
+      secrets: { backend: 'file' },
+      trust: { commands: ['bun'] },
+    })
   })
 
   it('keeps the home that a test names, and the other variables it sets', () => {

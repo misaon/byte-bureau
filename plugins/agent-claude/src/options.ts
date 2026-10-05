@@ -1,6 +1,6 @@
-import type { CanUseTool, Options } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, Options, SettingSource } from '@anthropic-ai/claude-agent-sdk'
 import type { CreateSessionRequest } from '@bytebureau/plugin-api'
-import { claudeConfigOf } from './config.js'
+import { claudeConfigOf, type ClaudeConfig } from './config.js'
 import { permissionModeOf } from './permission.js'
 
 export const CLAUDE_CONVENTIONS = [
@@ -31,6 +31,14 @@ const envOf = ({ env, profile }: CreateSessionRequest): Record<string, string> =
 export const claudeResumeOf = ({ resume }: CreateSessionRequest): string | undefined =>
   resume !== undefined && resume.providerId === 'claude' ? resume.ref : undefined
 
+const ALL_SOURCES: readonly SettingSource[] = ['user', 'project', 'local']
+
+// The project's own settings, their hooks among them, and its CLAUDE.md load only for a project the user trusts
+const settingSourcesOf = (
+  { trust }: CreateSessionRequest,
+  config: ClaudeConfig,
+): SettingSource[] => (trust.project ? [...(config.settingSources ?? ALL_SOURCES)] : ['user'])
+
 const appendOf = (systemPrompt: string): string =>
   systemPrompt === '' ? CLAUDE_CONVENTIONS : `${systemPrompt}\n\n${CLAUDE_CONVENTIONS}`
 
@@ -60,7 +68,7 @@ export const optionsOf = ({
     includePartialMessages: true,
     permissionMode: permissionModeOf(employee.permissionMode),
     env: envOf(request),
-    settingSources: config.settingSources ?? ['user', 'project', 'local'],
+    settingSources: settingSourcesOf(request, config),
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
     ...(resume === undefined ? {} : { resume }),
     abortController: abort,

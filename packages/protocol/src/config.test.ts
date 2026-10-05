@@ -69,6 +69,13 @@ describe(decodeUserConfig, () => {
     expect(() => decodeUserConfig(oauth)).toThrow(/kind/u)
   })
 
+  it('accepts the projects and the commands the user trusts, and refuses anything else there', () => {
+    const trust = { projects: ['/home/me/app'], commands: ['bun', '/opt/codex/bin/codex-acp'] }
+    expect(decodeUserConfig({ trust }).trust).toStrictEqual(trust)
+    expect(() => decodeUserConfig({ trust: { commands: 'bun' } })).toThrow(/commands/u)
+    expect(() => decodeUserConfig({ trust: { everything: true } })).toThrow(/everything/u)
+  })
+
   it('accepts the secrets backend of the user configuration and refuses an unknown one', () => {
     expect(decodeUserConfig({ secrets: { backend: 'file' } }).secrets).toStrictEqual({
       backend: 'file',

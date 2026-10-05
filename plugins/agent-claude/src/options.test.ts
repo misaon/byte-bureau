@@ -2,7 +2,7 @@ import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk'
 import { ProviderConfigError, type CreateSessionRequest } from '@bytebureau/plugin-api'
 import { describe, expect, it, vi } from 'vitest'
 import { CLAUDE_CONVENTIONS, optionsOf } from './options.js'
-import { CANARY_KEY, employee, sessionRequest } from './testing/requests.js'
+import { CANARY_KEY, employee, sessionRequest, TRUSTED } from './testing/requests.js'
 
 const canUseTool: CanUseTool = async () => {
   const denied = await Promise.resolve({ behavior: 'deny', message: 'not in this test' } as const)
@@ -108,6 +108,16 @@ describe('the provider options of a session', () => {
     expect(
       optionsFor(sessionRequest({ resume: { providerId: 'fake', ref: 'x' } })),
     ).not.toHaveProperty('resume')
+  })
+
+  it('loads the settings of the user alone for a project the user does not trust, whatever the section says', () => {
+    const untrusted = { ...TRUSTED, project: false }
+    const configured = sessionRequest({
+      trust: untrusted,
+      providerConfig: { settingSources: ['project'] },
+    })
+    expect(optionsFor(configured).settingSources).toStrictEqual(['user'])
+    expect(optionsFor(sessionRequest({ trust: untrusted })).settingSources).toStrictEqual(['user'])
   })
 
   it('reads the setting sources of providers.claude, and refuses a key it does not know', () => {

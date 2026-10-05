@@ -96,7 +96,7 @@ export class AcpAgentProvider implements AgentProvider {
 
   // The hints a session tells, when its agent is missing or asks for a login, name the login of its profile
   public async createSession(request: CreateSessionRequest): Promise<AgentSession> {
-    const configured = presetOf(this.preset, request.providerConfig)
+    const configured = presetOf(this.preset, request.providerConfig, request.trust)
     const preset = { ...configured, loginHint: loginHintOf(configured, request.profile) }
     const setup = { request, preset, deps: this.deps, providerId: this.id, keyEnv: this.apiKeyEnv }
     const session = await AcpSession.start(setup)

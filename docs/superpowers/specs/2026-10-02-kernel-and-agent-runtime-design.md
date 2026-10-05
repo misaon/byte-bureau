@@ -207,7 +207,7 @@ Project config v1 (`"$schema": "https://bytebureau.dev/schema/v1/config.json"` s
   "logging": { "level": "info" }
 }
 ```
-User config (`~/.bytebureau/config.json`): `server { host: "127.0.0.1", port: 4747 }`, `profiles` (non-secret parts), `defaults { provider, profile }`, `locale`, `logging`, `telemetry { content: "local" }` (consumed by SP8), `ui` (reserved for SP2). The user file gains `secrets { backend: 'auto' | 'keychain' | 'file' }`, read leniently at the daemon's start, its `profiles` section stays reserved as profiles are kept in the store, and a project's `providers.<id>` section, keyed by the provider id (`providers["acp:custom"]`, not `providers.acp.presets.custom`), reaches the adapter with every session, without `passEnv` (amended in Phase C).
+User config (`~/.bytebureau/config.json`): `server { host: "127.0.0.1", port: 4747 }`, `profiles` (non-secret parts), `defaults { provider, profile }`, `locale`, `logging`, `telemetry { content: "local" }` (consumed by SP8), `ui` (reserved for SP2). The user file gains `secrets { backend: 'auto' | 'keychain' | 'file' }`, read leniently at the daemon's start, its `profiles` section stays reserved as profiles are kept in the store, and a project's `providers.<id>` section, keyed by the provider id (`providers["acp:custom"]`, not `providers.acp.presets.custom`), reaches the adapter with every session, without `passEnv` (amended in Phase C). The user file gains `trust { projects, commands }`: the keys of a project's own files that name a command (`command`, `args`, `env` of a provider section, `executable` of `providers.claude`) reach the adapter only for a project the user trusts by its path or a command the user trusts by its exact name or path, and are withheld with a warning otherwise, while Claude Code loads the user's settings alone in a project the user does not trust (amended in the Phase C final wave).
 `bytebureau config init` writes a commented project file with the default employee; `bytebureau config validate` reports the errors of every layer, environment variables included (amended in the Phase A final fix wave); `bytebureau config schema` prints the JSON Schema.
 
 ## 11. API, client and CLI
@@ -246,6 +246,7 @@ The client is generated with hey-api from `packages/api/openapi.json` through `t
 - Plugins are trusted in-process code in SP1; the manifest's `capabilities` are displayed in `bytebureau plugins ls` and recorded; third-party plugin installation prints the declared capabilities and asks for confirmation.
 - `yolo` permission mode is refused on `isolation: 'none'` runtimes.
 - Policy compliance (ADR-0006): unmodified vendor binaries, user-performed logins, no credential copying between machines, no automatic account rotation, API-key mode available for every provider that supports it.
+- A command that a project's own files name, an ACP agent's `command`, `args` and `env` or Claude's `executable`, runs only for a project or a command the user configuration trusts (`trust.projects`, `trust.commands`), and the Claude Code settings of a project the user does not trust, whose hooks run commands, are not loaded (amended in the Phase C final wave).
 
 ## 14. Error handling
 

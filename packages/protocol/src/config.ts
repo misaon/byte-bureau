@@ -86,6 +86,12 @@ const UiSection = Schema.Record(Schema.String, Schema.Unknown)
 export const SecretsBackend = Schema.Literals(['auto', 'keychain', 'file'])
 const SecretsSection = Schema.Struct({ backend: Schema.optionalKey(SecretsBackend) })
 
+// What a project's own files may run: the commands of providers.<id> run for a project listed by its path, or a command listed by its exact name or path
+const TrustSection = Schema.Struct({
+  projects: Schema.optionalKey(Schema.Array(Schema.String)),
+  commands: Schema.optionalKey(Schema.Array(Schema.String)),
+})
+
 export const UserConfig = Schema.Struct({
   server: Schema.optionalKey(ServerSection),
   profiles: Schema.optionalKey(ProfilesSection),
@@ -94,6 +100,7 @@ export const UserConfig = Schema.Struct({
   logging: Schema.optionalKey(LoggingSection),
   telemetry: Schema.optionalKey(TelemetrySection),
   secrets: Schema.optionalKey(SecretsSection),
+  trust: Schema.optionalKey(TrustSection),
   ui: Schema.optionalKey(UiSection),
 }).annotate({ title: 'ByteBureau user configuration' })
 

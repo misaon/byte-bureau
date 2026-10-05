@@ -4,7 +4,7 @@ import pkg from '../package.json' with { type: 'json' }
 import { claudeAgentPlugin } from './plugin.js'
 import { ClaudeAgentProvider } from './provider.js'
 import { fakeQuery, type FakeQuery } from './testing/fake-query.js'
-import { recordingLogger, sessionRequest } from './testing/requests.js'
+import { recordingLogger, sessionRequest, TRUSTED } from './testing/requests.js'
 
 // A provider over a fake query whose claude is installed only where the test says
 const providerWith = (
@@ -98,6 +98,30 @@ describe('a configured claude that is not found', () => {
         message: 'the claude of providers.claude.executable is not found; the default one runs',
         properties: { executable: '~/bin/claude' },
       },
+    ])
+  })
+})
+
+describe('a project the user does not trust', () => {
+  it('is warned of, as Claude Code then loads the settings of the user alone', async () => {
+    expect.hasAssertions()
+    const { logger, entries } = recordingLogger()
+    const fake = fakeQuery()
+    const provider = new ClaudeAgentProvider({
+      query: fake.query,
+      logger,
+      resolveExecutable: onPath,
+    })
+    const untrusted = { ...TRUSTED, project: false }
+    const session = await provider.createSession(sessionRequest({ trust: untrusted }))
+    await session.close()
+    expect(fake.options[0]).toHaveProperty('settingSources', ['user'])
+    expect(entries.map((entry) => [entry.level, entry.message, entry.properties])).toStrictEqual([
+      [
+        'warn',
+        expect.stringMatching(/^Claude Code loads the user's settings alone, .*trust\.projects/u),
+        { sessionId: sessionRequest().sessionId },
+      ],
     ])
   })
 })

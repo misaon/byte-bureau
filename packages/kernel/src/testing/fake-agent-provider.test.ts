@@ -36,6 +36,7 @@ const openSession = async (workspace: string, given: Given = {}): Promise<AgentS
     employee,
     profile: { id: 'default', providerId: 'fake', kind: 'login' },
     providerConfig: given.providerConfig ?? {},
+    trust: { project: true, withheld: [], hint: '' },
     env: given.env ?? {},
     signal: new AbortController().signal,
     logger: kernelLogger(['bb', 'test']),

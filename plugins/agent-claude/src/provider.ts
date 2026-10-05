@@ -45,6 +45,12 @@ export class ClaudeAgentProvider implements AgentProvider {
 
   public async createSession(request: CreateSessionRequest): Promise<AgentSession> {
     await Promise.resolve()
+    if (!request.trust.project) {
+      this.deps.logger.warn(
+        "Claude Code loads the user's settings alone, not the project's .claude settings, hooks or CLAUDE.md: the user configuration does not trust the project (trust.projects)",
+        { sessionId: request.sessionId },
+      )
+    }
     return new ClaudeSession(this.deps, request, this.executableOf(request.providerConfig))
   }
 

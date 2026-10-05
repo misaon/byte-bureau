@@ -6,7 +6,14 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
 import { acpAgentPlugin } from './plugin.js'
 import { AcpAgentProvider } from './provider.js'
-import { CANARY_KEY, recordingLogger, sessionRequest, tempDir } from './testing/requests.js'
+import {
+  CANARY_KEY,
+  recordingLogger,
+  sessionRequest,
+  tempDir,
+  TRUST_HINT,
+  TRUSTED,
+} from './testing/requests.js'
 import { fakeAgentCommand } from './testing/run-fake.js'
 import { harness, started, until } from './testing/session-harness.js'
 
@@ -105,6 +112,11 @@ describe('an ACP agent that cannot be started', () => {
     const refused = new AcpAgentProvider('custom', deps).createSession(request)
     await expect(refused).rejects.toThrow('providers["acp:custom"].command is not configured')
     await expect(refused).rejects.toBeInstanceOf(ProviderConfigError)
+    const trust = { ...TRUSTED, project: false, withheld: ['command', 'args'] }
+    const untrusted = sessionRequest({ workspace: { path: workspaceOf() }, trust })
+    await expect(new AcpAgentProvider('custom', deps).createSession(untrusted)).rejects.toThrow(
+      `providers["acp:custom"].command is not configured; ${TRUST_HINT}`,
+    )
     expect(spawned).toStrictEqual([])
   })
 })
